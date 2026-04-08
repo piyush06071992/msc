@@ -497,35 +497,60 @@
             const assign = assignments.find(a => a.id === fullId) || {};
             const planner = planners.find(p => p.id === fullId);
 
+            const assignedStaff = staffList.find(s => s.email === assign.assignedTo);
+            document.getElementById('stat-staff').innerText = assignedStaff ? assignedStaff.name : 'Unassigned';
             document.getElementById('stat-target').innerText = assign.targetDate || 'Not Set';
-            document.getElementById('stat-staff').innerText = staffList.find(s => s.email === assign.assignedTo)?.name || '---';
 
             if (!planner && !isDemoMode) {
                 container.innerHTML = `<div class="p-20 text-center text-slate-400 font-black uppercase text-xs">No Syllabus Data Uploaded.</div>`;
             } else {
                 const allRows = isDemoMode ? getMockRows() : planner.syllabusData;
                 const chNames = [...new Set(allRows.map(r => r["CHAPTER NAME"]))];
+                
+                let cumulativeTargetDays = 0;
+                let subjectStartDate = assign.createdAt ? assign.createdAt.toDate() : new Date();
+                
+                const doneRowsCount = allRows.filter(r => r.isDone).length;
+                const totalRowsCount = allRows.length;
+                const progressPct = Math.round((doneRowsCount / totalRowsCount) * 100);
+                document.getElementById('stat-prog').innerText = progressPct + "% Done";
 
                 chNames.forEach(ch => {
                     const chRows = allRows.filter(r => r["CHAPTER NAME"] === ch);
                     const doneRows = chRows.filter(r => r.isDone);
                     const isFinished = doneRows.length === chRows.length;
                     
-                    const dates = doneRows.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
-                    const chStart = dates.length ? new Date(Math.min(...dates)).toLocaleDateString() : '--';
-                    const chEnd = dates.length ? new Date(Math.max(...dates)).toLocaleDateString() : '--';
+                    const chTargetDays = parseInt(chRows[0]?.['Target days for chapter']) || 0;
+                    cumulativeTargetDays += chTargetDays;
+
+                    const expectedEnd = new Date(subjectStartDate);
+                    expectedEnd.setDate(expectedEnd.getDate() + cumulativeTargetDays);
+
+                    const completionDates = doneRows.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
+                    const actualStart = completionDates.length ? new Date(Math.min(...completionDates)) : null;
+                    const actualEnd = completionDates.length ? new Date(Math.max(...completionDates)) : null;
+
+                    let chGapDisplay = "--";
+                    if (isFinished && actualEnd) {
+                        const diffTime = actualEnd - expectedEnd;
+                        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+                        chGapDisplay = diffDays > 0 ? `+${diffDays} Days Delay` : (diffDays < 0 ? `${diffDays} Days Early` : "On Track");
+                    }
 
                     let topicsHTML = chRows.map((r) => {
                         const absIdx = allRows.indexOf(r);
                         const qImgs = (r.questions || []).map(q => `<img src="${q.url}" class="q-thumb" onclick="window.open('${q.url}')">`).join('');
+                        const executor = staffList.find(s => s.email === r.tickedBy)?.name || r.tickedBy || '---';
                         
                         return `
                         <div class="flex items-center justify-between p-5 bg-white border-b last:border-0">
-                            <div class="flex gap-4 items-center">
-                                <span class="text-[10px] font-black text-slate-300 w-10">Lec ${r['LECTURE NUMBER']}</span>
+                            <div class="flex gap-6 items-center">
+                                <span class="text-[9px] font-black text-slate-300 uppercase tracking-tighter">Lec ${r['LECTURE NUMBER']}</span>
                                 <div>
-                                    <div class="text-[11px] font-black text-slate-800 uppercase">${r['SUBTOPICS']}</div>
-                                    <div class="text-[9px] font-bold text-slate-400 mt-1 italic">Executed by: ${r.tickedBy || '---'}</div>
+                                    <div class="text-[11px] font-black text-slate-800 uppercase flex items-center gap-2">
+                                        ${r['SUBTOPICS']} 
+                                        <span class="text-[8px] bg-blue-50 text-blue-500 px-2 py-0.5 rounded border border-blue-100">${executor}</span>
+                                    </div>
                                     <div class="flex gap-2 mt-3">${qImgs}</div>
                                 </div>
                             </div>
@@ -550,16 +575,26 @@
                         <div class="bg-white rounded-[2.5rem] border shadow-sm overflow-hidden border-slate-200">
                             <div class="p-6 bg-slate-50 border-b flex justify-between items-center">
                                 <h4 class="font-black text-slate-800 uppercase text-xs tracking-widest">${ch}</h4>
-                                <span class="text-[9px] font-black px-4 py-1.5 rounded-full ${isFinished ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-200 text-slate-500'}">${isFinished ? '100% COVERED' : 'IN PROGRESS'}</span>
+                                <div class="flex gap-2">
+                                    <span class="text-[9px] font-black px-3 py-1 rounded border ${isFinished ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-slate-100 text-slate-400 border-slate-200'}">${chGapDisplay}</span>
+                                    <span class="text-[9px] font-black px-4 py-1.5 rounded-full ${isFinished ? 'bg-emerald-500 text-white shadow-lg' : 'bg-slate-200 text-slate-500'}">${isFinished ? '100% DONE' : 'ONGOING'}</span>
+                                </div>
                             </div>
-                            <div class="grid grid-cols-3 bg-slate-100 text-[10px] font-black text-slate-500 text-center border-b uppercase">
-                                <div class="p-3 border-r">Start: <span class="text-slate-900">${chStart}</span></div>
-                                <div class="p-3 border-r">Finish: <span class="text-slate-900">${chEnd}</span></div>
+                            <div class="grid grid-cols-3 bg-slate-100 text-[9px] font-black text-slate-500 text-center border-b uppercase tracking-tighter">
+                                <div class="p-3 border-r">Started: <span class="text-slate-900">${actualStart ? actualStart.toLocaleDateString() : '--'}</span></div>
+                                <div class="p-3 border-r">Finished: <span class="text-slate-900">${actualEnd ? actualEnd.toLocaleDateString() : '--'}</span></div>
                                 <div class="p-3 text-rose-500">Excluded: <span>${isDemoMode ? '1 Day (Holiday)' : '0 Days'}</span></div>
                             </div>
                             <div class="divide-y divide-slate-100">${topicsHTML}</div>
                         </div>`;
                 });
+
+                if (assign.targetDate) {
+                    const overallTarget = new Date(assign.targetDate);
+                    const diffTimeTotal = new Date() - overallTarget;
+                    const diffDaysTotal = Math.ceil(diffTimeTotal / (1000 * 60 * 60 * 24));
+                    document.getElementById('stat-gap').innerText = (diffDaysTotal > 0 ? `+${diffDaysTotal}` : diffDaysTotal) + " Days Total";
+                }
             }
             document.getElementById('drill-down-modal').classList.replace('hidden', 'flex');
         }
