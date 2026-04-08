@@ -87,32 +87,16 @@
 
         window.onload = async () => {
             const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
-            
-            // 1. Initial Missing Session Check
             if (!activeStaff || !activeStaff.uid || !activeStaff.sessionId) {
                 localStorage.removeItem('minervaActiveStaff');
                 window.location.replace('staff-login.html');
                 return;
             }
 
-            // 2. HARD VERIFICATION: Check the DB immediately upon loading the portal
-            try {
-                const docSnap = await db.collection("staff_applications").doc(activeStaff.uid).get();
-                if (docSnap.exists) {
-                    const data = docSnap.data();
-                    if (data.currentSessionId && data.currentSessionId !== activeStaff.sessionId) {
-                        localStorage.removeItem('minervaActiveStaff');
-                        alert("Session Expired: You recently logged in from another device. Please log in again.");
-                        window.location.replace('staff-login.html');
-                        return; // Stop loading the page
-                    }
-                }
-            } catch(e) {
-                console.error("Verification error:", e);
-            }
-
-            // 3. REAL-TIME LISTENER: Keep listening just in case they log in on Mobile while staring at the Laptop
-            db.collection("staff_applications").doc(activeStaff.uid).onSnapshot((doc) => {
+            // CRITICAL MOBILE CACHE FIX: Ignore offline cache data that causes premature logouts.
+            db.collection("staff_applications").doc(activeStaff.uid).onSnapshot({ includeMetadataChanges: true }, (doc) => {
+                if (doc.metadata.fromCache) return; // Do not trust local mobile cache for security checks!
+                
                 if (doc.exists) {
                     const data = doc.data();
                     if (data.currentSessionId && data.currentSessionId !== activeStaff.sessionId) {
@@ -123,18 +107,9 @@
                 }
             });
 
-            // Populate Teacher Details
-            let staffName = activeStaff.email;
-            let staffDept = "General";
-            const det = activeStaff.details || {};
-            
-            for (let key in det) {
-                if (key.toLowerCase().includes('name')) staffName = det[key];
-                if (key.toLowerCase().includes('depart') || key.toLowerCase().includes('subject')) staffDept = det[key];
-            }
-
-            document.getElementById('staff-name').innerText = `"${staffName}"`;
-            document.getElementById('staff-dept').innerText = `"${staffDept}"`;
+            // Priority: Load Exact Name and Dept from Local Storage
+            document.getElementById('staff-name').innerText = `"${activeStaff.name}"`;
+            document.getElementById('staff-dept').innerText = `"${activeStaff.dept}"`;
 
             const options = { day: 'numeric', month: 'short', year: 'numeric' };
             document.getElementById('current-date').innerText = `Date: ${new Date().toLocaleDateString('en-GB', options)}`;
@@ -144,7 +119,6 @@
             if(confirm("Are you sure you want to securely log out?")) {
                 const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
                 if(activeStaff && activeStaff.uid) {
-                    // Erase the session from Firestore so it's completely dead
                     await db.collection("staff_applications").doc(activeStaff.uid).update({ currentSessionId: null });
                 }
                 localStorage.removeItem('minervaActiveStaff');
