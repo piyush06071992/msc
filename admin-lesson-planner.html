@@ -446,32 +446,56 @@
                 const allRows = isDemoMode ? getMockRows() : planner.syllabusData;
                 const chNames = [...new Set(allRows.map(r => r["CHAPTER NAME"]))];
                 
+                const chMap = new Map();
+                allRows.forEach(r => {
+                    if(!chMap.has(r['CHAPTER NAME'])) {
+                        chMap.set(r['CHAPTER NAME'], {
+                            days: parseInt(r['Target days for chapter']) || 0,
+                            mins: parseInt(r['Target Minutes For Chapter']) || 0,
+                            isStarted: false
+                        });
+                    }
+                    if (r.chapterStartDate || r.isDone) {
+                        chMap.get(r['CHAPTER NAME']).isStarted = true;
+                    }
+                });
+                
+                let startedTargetDays = 0;
+                chMap.forEach(v => { 
+                    if (v.isStarted) startedTargetDays += v.days;
+                });
+
                 const dRowsCount = allRows.filter(r => r.isDone).length;
                 document.getElementById('stat-prog').innerText = Math.round((dRowsCount / allRows.length) * 100) + "% Done";
 
-                let cumulativeT = 0, startR = assign.createdAt ? assign.createdAt.toDate() : new Date();
+                let minsUsed = allRows.filter(r => r.isDone).reduce((sum, r) => sum + (parseInt(r.completedMinutes)||0), 0);
+                let daysUsed = Math.round(minsUsed / 90); 
+                let totalGap = startedTargetDays - daysUsed;
+                
+                document.getElementById('stat-gap').innerText = totalGap > 0 ? `+${totalGap} Days` : `${totalGap} Days`;
+                document.getElementById('stat-gap').className = `text-sm font-black ${totalGap >= 0 ? 'text-emerald-600' : 'text-rose-600'}`;
 
                 chNames.forEach(ch => {
                     const rows = allRows.filter(r => r["CHAPTER NAME"] === ch);
                     const doneR = rows.filter(r => r.isDone);
                     const isF = doneR.length === rows.length;
+                    
                     const chT = parseInt(rows[0]?.['Target days for chapter']) || 0;
-                    const chM = parseInt(rows[0]?.['Target Minutes For Chapter']) || 0;
-
-                    cumulativeT += chT;
-                    const expE = new Date(startR); expE.setDate(expE.getDate() + cumulativeT);
-                    const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
-                    const chStart = compDates.length ? new Date(Math.min(...compDates)).toLocaleDateString() : '--';
-                    const actE = compDates.length ? new Date(Math.max(...compDates)) : null;
                     const actM = doneR.reduce((s, r) => s + (parseInt(r.completedMinutes)||0), 0);
+                    
+                    const chStart = rows[0]?.chapterStartDate ? new Date(rows[0].chapterStartDate).toLocaleDateString('en-GB') : '--';
+                    const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
+                    const actE = compDates.length ? new Date(Math.max(...compDates)) : null;
 
-                    let dGap = 0, mGap = actM - chM;
-                    if (actE) dGap = Math.ceil((actE - expE) / (1000 * 60 * 60 * 24));
+                    let dGap = 0;
+                    if (rows[0]?.chapterStartDate || doneR.length > 0) {
+                         dGap = chT - Math.round(actM / 90);
+                    }
 
                     let tops = rows.map((r) => {
                         const absI = allRows.indexOf(r);
                         const qImgs = (r.questions || []).map(q => `<img src="${q.url}" class="q-thumb-small" onclick="window.open('${q.url}')">`).join('');
-                        const exe = staffList.find(s => s.email === r.tickedBy)?.name || r.tickedBy || '---';
+                        const exe = r.tickedBy || '---';
                         return `
                         <div class="flex items-center justify-between p-8 bg-white border-b last:border-0 hover:bg-slate-50 transition-colors group">
                             <div class="flex gap-10 items-center">
@@ -507,26 +531,19 @@
                                 <div>
                                     <h4 class="font-black text-slate-900 uppercase text-lg tracking-tight mb-2">${ch}</h4>
                                     <div class="flex gap-4">
-                                        <span class="text-[10px] font-black px-4 py-1.5 rounded-full border ${dGap > 0 ? 'bg-rose-50 text-rose-600 border-rose-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'}">${dGap > 0 ? '+' : ''}${dGap} Days Variance</span>
-                                        <span class="text-[10px] font-black px-4 py-1.5 rounded-full border ${mGap > 0 ? 'bg-indigo-50 text-indigo-600 border-indigo-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'}">${mGap > 0 ? '+' : ''}${mGap}m Class Variance</span>
+                                        <span class="text-[10px] font-black px-4 py-1.5 rounded-full border ${dGap >= 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-600 border-rose-100'}">${dGap > 0 ? '+' : ''}${dGap} Days Variance</span>
                                     </div>
                                 </div>
-                                <span class="text-[11px] font-black px-8 py-3 rounded-full ${isF ? 'bg-emerald-500 text-white shadow-lg' : 'bg-slate-100 text-slate-400'}">${isF ? '100% COMPLETE' : 'IN PROGRESS'}</span>
+                                <span class="text-[11px] font-black px-8 py-3 rounded-full ${isF ? 'bg-emerald-500 text-white shadow-lg' : (rows[0]?.chapterStartDate || doneR.length > 0 ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400')}">${isF ? '100% COMPLETE' : (rows[0]?.chapterStartDate || doneR.length > 0 ? 'ONGOING' : 'PENDING')}</span>
                             </div>
                             <div class="grid grid-cols-3 bg-slate-50 text-[10px] font-black text-slate-500 text-center border-b uppercase tracking-tighter">
                                 <div class="p-5 border-r border-slate-200">Started: <span class="text-slate-900 ml-1">${chStart}</span></div>
-                                <div class="p-5 border-r border-slate-200">Live End: <span class="text-slate-900 ml-1">${actE ? actE.toLocaleDateString() : '--'}</span></div>
+                                <div class="p-5 border-r border-slate-200">Live End: <span class="text-slate-900 ml-1">${actE ? actE.toLocaleDateString('en-GB') : '--'}</span></div>
                                 <div class="p-5 text-rose-500">Excluded: <span class="font-bold">${isDemoMode ? '14/04 (Baisakhi)' : 'None'}</span></div>
                             </div>
                             <div class="divide-y divide-slate-100">${tops}</div>
                         </div>`;
                 });
-                
-                if (assign.targetDate) {
-                    const diffT = new Date() - new Date(assign.targetDate);
-                    const dDays = Math.ceil(diffT / (1000 * 3600 * 24));
-                    document.getElementById('stat-gap').innerText = (dDays > 0 ? `+${dDays}` : dDays) + " Days";
-                }
             }
             openModal('drill-down-modal');
         }
