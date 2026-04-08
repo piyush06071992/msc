@@ -298,16 +298,16 @@
         async function updateAssignmentSingle(id, f, v) { await db.collection("lesson_planner_assignments").doc(id).set({ [f]: v }, {merge:true}); await loadAllData(); renderSetup(); }
         async function wipeData(id) { if(confirm("Destroy syllabus data permanently?")) { await db.collection("lesson_planners").doc(id).delete(); await db.collection("lesson_planner_assignments").doc(id).update({isUploaded:false}); await showEditView(); }}
 
-        // --- MATH ENGINE & PASTE PREVIEW ---
+    // --- MATH ENGINE & PASTE PREVIEW ---
         function getChapterWiseStats(rows) {
             const chMap = new Map();
             rows.forEach(r => {
-                const dKey = Object.keys(r).find(k => k.toLowerCase().includes('days'));
-                const mKey = Object.keys(r).find(k => k.toLowerCase().includes('minutes'));
-                const chName = r['CHAPTER NAME'] || r['Chapter Name'] || r['CHAPTER'];
-                
+                const chName = r['CHAPTER NAME'] || 'Unknown';
                 if(!chMap.has(chName)) {
-                    chMap.set(chName, { days: parseInt(r[dKey]) || 0, mins: parseInt(r[mKey]) || 0 });
+                    chMap.set(chName, { 
+                        days: parseInt(r['Target days for chapter'], 10) || 0, 
+                        mins: parseInt(r['Target Minutes For Chapter'], 10) || 0 
+                    });
                 }
             });
             let td = 0, tm = 0;
@@ -327,19 +327,30 @@
             
             const lines = raw.split('\n').filter(l => l.trim().length > 0);
             const headers = lines[0].split('\t').map(h => h.trim());
-            
-            const missing = REQUIRED_HEADERS.filter(req => !headers.some(h => h.toLowerCase() === req.toLowerCase()));
-            if(missing.length) return alert("Missing Columns: " + missing.join(', '));
 
             pendingSyllabusRows = [];
             for(let i=1; i<lines.length; i++) {
-                let row = { isDone: false, completedDate: "", completedMinutes: "", questions: [], tickedBy: "" };
+                let row = { isDone: false, completedDate: "", completedMinutes: 0, questions: [], tickedBy: "" };
                 let cols = lines[i].split('\t');
+                
                 headers.forEach((h, idx) => {
-                    const stdKey = REQUIRED_HEADERS.find(req => req.toLowerCase() === h.toLowerCase()) || h;
+                    const hLow = h.toLowerCase();
+                    let stdKey = h;
+                    
+                    // Ultra-forgiving column matching
+                    if(hLow.includes('chapter')) stdKey = 'CHAPTER NAME';
+                    else if(hLow.includes('lec')) stdKey = 'LECTURE NUMBER';
+                    else if(hLow.includes('subtopic') || hLow.includes('topic')) stdKey = 'SUBTOPICS';
+                    else if(hLow.includes('day')) stdKey = 'Target days for chapter';
+                    else if(hLow.includes('min')) stdKey = 'Target Minutes For Chapter';
+                    else if(hLow.includes('duration') || hLow.includes('standard')) stdKey = 'Standard Class Duration';
+                    
                     row[stdKey] = cols[idx] ? cols[idx].trim() : '';
                 });
-                pendingSyllabusRows.push(row);
+                
+                if (row['CHAPTER NAME'] && row['SUBTOPICS']) {
+                    pendingSyllabusRows.push(row);
+                }
             }
 
             const stats = getChapterWiseStats(pendingSyllabusRows);
@@ -351,11 +362,11 @@
             
             document.getElementById('preview-body').innerHTML = pendingSyllabusRows.map(r => `
                 <tr class="hover:bg-slate-50 transition-colors">
-                    <td class="p-5 font-bold text-slate-800 border-r border-slate-100 text-xs">${r['CHAPTER NAME']}</td>
-                    <td class="p-5 text-center font-black text-slate-400 border-r border-slate-100">${r['LECTURE NUMBER']}</td>
-                    <td class="p-5 text-slate-600 font-bold border-r border-slate-100 text-xs">${r['SUBTOPICS']}</td>
-                    <td class="p-5 text-center text-slate-900 font-black border-r border-slate-100">${r['Target days for chapter']}</td>
-                    <td class="p-5 text-center text-slate-900 font-black">${r['Target Minutes For Chapter']}</td>
+                    <td class="p-5 font-bold text-slate-800 border-r border-slate-100 text-xs">${r['CHAPTER NAME'] || '--'}</td>
+                    <td class="p-5 text-center font-black text-slate-400 border-r border-slate-100">${r['LECTURE NUMBER'] || '--'}</td>
+                    <td class="p-5 text-slate-600 font-bold border-r border-slate-100 text-xs">${r['SUBTOPICS'] || '--'}</td>
+                    <td class="p-5 text-center text-slate-900 font-black border-r border-slate-100">${r['Target days for chapter'] || '0'}</td>
+                    <td class="p-5 text-center text-slate-900 font-black">${r['Target Minutes For Chapter'] || '0'}</td>
                 </tr>`).join('');
 
             closeModal('paste-modal');
@@ -363,11 +374,18 @@
         }
 
         async function confirmUploadToDatabase() {
-            await db.collection("lesson_planners").doc(currentUploadId).set({ syllabusData: pendingSyllabusRows });
-            await db.collection("lesson_planner_assignments").doc(currentUploadId).update({ isUploaded: true });
-            closeModal('preview-modal'); alert("Syllabus Engine Synced!"); await showEditView();
+            try {
+                // Using .set with merge:true prevents crashes if the document doesn't exist
+                await db.collection("lesson_planners").doc(currentUploadId).set({ syllabusData: pendingSyllabusRows });
+                await db.collection("lesson_planner_assignments").doc(currentUploadId).set({ isUploaded: true }, { merge: true });
+                closeModal('preview-modal'); 
+                alert("Syllabus Engine Synced Successfully!"); 
+                await showEditView();
+            } catch (error) {
+                alert("Database Save Error: " + error.message);
+                console.error("Upload failed:", error);
+            }
         }
-
         // --- DASHBOARD SUMMARY ---
         function toggleDemoMode(val) { isDemoMode = val; document.getElementById('demo-mode-indicator').classList.toggle('hidden', !val); renderSummary(); }
         function renderSummary() {
