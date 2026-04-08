@@ -16,8 +16,6 @@
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         .loader { border: 2px solid #f1f5f9; border-top: 2px solid #3b82f6; border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; display: inline-block; }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .pulse-bg { animation: pulseBg 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
-        @keyframes pulseBg { 0%, 100% { background-color: #f0fdf4; } 50% { background-color: #dcfce7; } }
     </style>
 </head>
 <body class="min-h-screen pb-20">
@@ -147,19 +145,17 @@
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
             if (!activeStaff) return window.location.replace('staff-login.html');
             
-            // PRIORITY: Use Name and Department prominently
+            // PRIORITY: Use Name and Department prominently everywhere
             document.getElementById('teacher-badge').innerText = `${activeStaff.name} | ${activeStaff.dept}`;
             
-            // Security Check (2 second buffer to prevent mobile localstorage race condition)
+            // Mobile cache security fix
             setTimeout(() => {
-                db.collection("staff_applications").doc(activeStaff.uid).onSnapshot((doc) => {
-                    if (doc.exists) {
-                        const dbSession = doc.data().currentSessionId;
-                        if (dbSession && dbSession !== activeStaff.sessionId) {
-                            localStorage.removeItem('minervaActiveStaff');
-                            alert("Session Expired: Logged in from another device.");
-                            window.location.replace('staff-login.html');
-                        }
+                db.collection("staff_applications").doc(activeStaff.uid).onSnapshot({ includeMetadataChanges: true }, (doc) => {
+                    if (doc.metadata.fromCache) return;
+                    if (doc.exists && doc.data().currentSessionId && doc.data().currentSessionId !== activeStaff.sessionId) {
+                        localStorage.removeItem('minervaActiveStaff');
+                        alert("Session Expired: Logged in from another device.");
+                        window.location.replace('staff-login.html');
                     }
                 });
             }, 2000);
@@ -186,14 +182,14 @@
             document.getElementById('inline-success-bar').classList.add('hidden'); // Reset feedback
         }
 
-        // --- SIMULATION (Matching exact screenshot for Management) ---
+        // --- SIMULATION ---
         function toggleDemoMode(active) {
             isDemoMode = active;
             document.getElementById('demo-mode-indicator').classList.toggle('hidden', !active);
             document.getElementById('demo-toggle-btn').classList.toggle('hidden', active);
             
             if(active) {
-                // Exact Match to User Screenshot: Two Math Sessions
+                // Exact Match to User Screenshot: Two Sessions for J1
                 mySessions = [
                     { id: 'sess1', assignmentId: 'Warrior_Batches_J1_Mathematics', className: 'Warrior Batches', section: 'J1', subject: 'Mathematics', start: '09:30 AM', end: '11:00 AM', duration: 90 },
                     { id: 'sess2', assignmentId: 'Warrior_Batches_J1_Mathematics', className: 'Warrior Batches', section: 'J1', subject: 'Mathematics', start: '01:00 PM', end: '02:00 PM', duration: 60 }
@@ -204,14 +200,34 @@
         }
 
         async function fetchTodayData() {
+            const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const todayName = days[new Date().getDay()];
+
             try {
-                // FALLBACK: When real timetable is built, replace this query with db.collection('time_table').where('teacherEmail','==',activeStaff.email)
-                const snap = await db.collection("lesson_planner_assignments").where("assignedTo", "==", activeStaff.email).get();
-                mySessions = snap.docs.map(d => ({ 
-                    id: d.id, assignmentId: d.id, className: d.data().className, section: d.data().section, 
-                    subject: d.data().subject, start: '09:00 AM', end: '10:30 AM', duration: 90 
-                }));
-                myDuties = [];
+                // Attempt to fetch from the newly structure 'time_table' collection
+                const snap = await db.collection("time_table")
+                                     .where("teacherEmail", "==", activeStaff.email)
+                                     .where("day", "==", todayName)
+                                     .get();
+                
+                if(!snap.empty) {
+                    mySessions = snap.docs.map(d => ({ 
+                        id: d.id, 
+                        assignmentId: `${d.data().className}_${d.data().section}_${d.data().subject}`.replace(/\s+/g, '_'),
+                        className: d.data().className, section: d.data().section, 
+                        subject: d.data().subject, start: d.data().startTime, end: d.data().endTime, duration: d.data().duration 
+                    }));
+                } else {
+                    // Fallback to assignments if timetable isn't built yet
+                    console.log("No timetable found for today. Showing general assigned subjects.");
+                    const assignSnap = await db.collection("lesson_planner_assignments").where("assignedTo", "==", activeStaff.email).get();
+                    mySessions = assignSnap.docs.map(d => ({ 
+                        id: d.id, assignmentId: d.id, className: d.data().className, section: d.data().section, 
+                        subject: d.data().subject, start: '09:00 AM', end: '10:30 AM', duration: 90 
+                    }));
+                }
+                
+                myDuties = []; // Duties will also be fetched from a 'duties' collection later
                 renderClassesGrid(); renderDuties();
             } catch(e) { console.error(e); }
         }
@@ -320,10 +336,10 @@
                         return `
                             <div class="flex items-center justify-between p-6 border-t border-slate-100 bg-white hover:bg-slate-50 transition-colors">
                                 <div><div class="text-sm font-black text-slate-800">${r['SUBTOPICS']}</div><div class="text-[9px] font-bold text-slate-400 uppercase mt-1 tracking-widest">Lec ${r['LECTURE NUMBER']}</div></div>
-                                <div>
+                                <div id="tick-container-${absIdx}">
                                     ${r.isDone 
                                         ? `<div class="text-right"><span class="text-emerald-500 font-black text-[11px] uppercase tracking-widest">✓ LOGGED</span><p class="text-[9px] font-bold text-slate-400 mt-1 uppercase">${r.completedDate} | ${r.completedMinutes}m</p></div>` 
-                                        : `<input type="checkbox" class="topic-cb w-6 h-6 accent-blue-600 cursor-pointer shadow-sm" data-idx="${absIdx}">`
+                                        : `<input type="checkbox" class="topic-cb w-6 h-6 accent-blue-600 cursor-pointer shadow-sm" data-idx="${absIdx}" onchange="previewTick(this, ${absIdx})">`
                                     }
                                 </div>
                             </div>`;
@@ -338,6 +354,21 @@
             });
         }
 
+        // Live Inline Ticking Logic (No Alerts)
+        function previewTick(cb, idx) {
+            if(cb.checked) {
+                const todayStr = new Date().toLocaleDateString('en-GB');
+                const container = document.getElementById(`tick-container-${idx}`);
+                container.innerHTML = `<div class="text-right"><span class="text-emerald-500 font-black text-[11px] uppercase tracking-widest">✓ PENDING SYNC</span><p class="text-[9px] font-bold text-slate-400 mt-1 uppercase">${todayStr} | ${activeSessionMins}m</p></div>`;
+                
+                // Stage data locally 
+                currentPlannerData[idx].isDone = true;
+                currentPlannerData[idx].completedDate = new Date().toISOString().split('T')[0];
+                currentPlannerData[idx].completedMinutes = activeSessionMins;
+                currentPlannerData[idx].tickedBy = activeStaff.name; 
+            }
+        }
+
         async function startChapter(chName) {
             const today = new Date().toISOString().split('T')[0];
             currentPlannerData.forEach(r => { if (r['CHAPTER NAME'] === chName) r.chapterStartDate = today; });
@@ -346,29 +377,19 @@
         }
 
         async function confirmDaySubmission() {
-            const checkboxes = document.querySelectorAll('.topic-cb:checked');
-            if(checkboxes.length === 0) return;
-
-            // Phase 3 & 4: Clubbed duration. Full session minutes assigned.
-            const today = new Date().toISOString().split('T')[0]; 
-            
-            checkboxes.forEach(cb => {
-                const idx = cb.dataset.idx;
-                currentPlannerData[idx].isDone = true;
-                currentPlannerData[idx].completedDate = today;
-                currentPlannerData[idx].completedMinutes = activeSessionMins; // FULL DURATION (Clubbed logic)
-                currentPlannerData[idx].tickedBy = activeStaff.name; 
-            });
+            // Find topics that were staged during this session (no need to alert if 0, maybe they just wanted to view)
+            const stagedTopics = currentPlannerData.filter(r => r.tickedBy === activeStaff.name && r.isDone && !r.savedToDb);
 
             if(isDemoMode) {
-                showInlineSuccess(`Topics locked. Time Logged: ${activeSessionMins}m.`);
-                renderSyllabusList(); return;
+                showInlineSuccess(`Topics locked securely. Total Session Logged: ${activeSessionMins}m.`);
+                return;
             }
 
             try {
+                // Mark them as permanently saved to DB
+                currentPlannerData.forEach(r => { if(r.tickedBy === activeStaff.name) r.savedToDb = true; });
                 await db.collection("lesson_planners").doc(activeSubjectId).update({ syllabusData: currentPlannerData });
                 showInlineSuccess("Progress Synchronized to Admin Hub!");
-                renderSyllabusList();
             } catch(e) { alert("Error saving data."); }
         }
 
