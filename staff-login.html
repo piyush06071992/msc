@@ -18,27 +18,27 @@
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
-<body class="min-h-screen flex flex-col items-center justify-center p-6 relative">
+<body class="min-h-screen flex flex-col items-center justify-center p-4 sm:p-6 relative">
 
     <div class="fixed top-0 left-0 w-full h-full -z-10 pointer-events-none">
-        <div class="absolute top-[-10%] right-[-5%] w-[400px] h-[400px] bg-emerald-100 rounded-full mix-blend-multiply filter blur-3xl opacity-50"></div>
-        <div class="absolute bottom-[-10%] left-[-10%] w-[400px] h-[400px] bg-blue-100 rounded-full mix-blend-multiply filter blur-3xl opacity-50"></div>
+        <div class="absolute top-[-10%] right-[-5%] w-[300px] sm:w-[400px] h-[300px] sm:h-[400px] bg-emerald-100 rounded-full mix-blend-multiply filter blur-3xl opacity-50"></div>
+        <div class="absolute bottom-[-10%] left-[-10%] w-[300px] sm:w-[400px] h-[300px] sm:h-[400px] bg-blue-100 rounded-full mix-blend-multiply filter blur-3xl opacity-50"></div>
     </div>
 
     <div class="w-full max-w-md my-auto">
-        <div class="flex justify-between items-start mb-8">
+        <div class="flex justify-between items-start mb-6 sm:mb-8">
             <button onclick="window.location.href='index.html'" class="p-3 bg-white rounded-2xl shadow-sm border border-slate-200 text-slate-400 hover:text-blue-600 transition-all active:scale-95">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
             </button>
             <div class="text-right">
-                <img src="logo.png" onerror="this.style.display='none'" class="w-12 ml-auto mb-2">
+                <img src="logo.png" onerror="this.style.display='none'" class="w-10 sm:w-12 ml-auto mb-2">
                 <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Teacher Portal</p>
             </div>
         </div>
 
-        <div class="glass-card p-10 rounded-[3rem]">
-            <h1 class="text-3xl font-black text-slate-900 tracking-tighter mb-2">Welcome Back.</h1>
-            <p class="text-xs font-bold text-slate-400 uppercase tracking-widest mb-8">Sign in to your Minerva Account</p>
+        <div class="glass-card p-6 sm:p-10 rounded-[2.5rem] sm:rounded-[3rem]">
+            <h1 class="text-2xl sm:text-3xl font-black text-slate-900 tracking-tighter mb-2">Welcome Back.</h1>
+            <p class="text-[10px] sm:text-xs font-bold text-slate-400 uppercase tracking-widest mb-8">Sign in to your Minerva Account</p>
 
             <form id="login-form" class="space-y-5" onsubmit="handleEmailMobileLogin(event)">
                 <div class="space-y-2">
@@ -87,7 +87,7 @@
             </div>
             
             <div id="reset-step-1" class="space-y-4">
-                <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4 leading-relaxed">Security Check: To reset your password, please verify your identity by entering BOTH your registered email and mobile number.</p>
+                <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-4 leading-relaxed">Verify Identity with registered Email and Mobile.</p>
                 <input type="email" id="reset-email" placeholder="Registered Email ID" class="w-full input-field">
                 <input type="number" id="reset-mobile" placeholder="Registered Mobile Number" class="w-full input-field">
                 <p id="reset-error" class="text-rose-500 text-[10px] font-black uppercase tracking-widest text-center hidden"></p>
@@ -122,8 +122,13 @@
         function extractTeacherInfo(docData) {
             let staffName = docData.email ? docData.email.split('@')[0] : "Teacher";
             let staffDept = "General";
-            if (docData.name) staffName = docData.name;
             
+            // Check top level
+            if (docData.name) staffName = docData.name;
+            if (docData.TeacherName) staffName = docData.TeacherName;
+            if (docData.Department) staffDept = docData.Department;
+            
+            // Check inside details deeply
             const det = docData.details || {};
             for (let key in det) {
                 let lowerKey = key.toLowerCase();
@@ -131,6 +136,17 @@
                 if (lowerKey.includes('depart') || lowerKey.includes('subject')) staffDept = det[key];
             }
             return { name: staffName, dept: staffDept };
+        }
+
+        async function processLoginSuccess(userDoc) {
+            const userData = userDoc.data();
+            const sessionId = generateSessionId();
+            await db.collection("staff_applications").doc(userDoc.id).update({ currentSessionId: sessionId });
+
+            const info = extractTeacherInfo(userData);
+            const sessionData = { uid: userDoc.id, email: userData.email, name: info.name, dept: info.dept, sessionId: sessionId };
+            localStorage.setItem('minervaActiveStaff', JSON.stringify(sessionData));
+            window.location.href = 'teacher-portal.html';
         }
 
         async function handleEmailMobileLogin(e) {
@@ -149,17 +165,9 @@
                 if (snapshot.empty) throw new Error("No approved account found with this ID.");
 
                 const userDoc = snapshot.docs[0];
-                const userData = userDoc.data();
-                if (userData.password !== passVal) throw new Error("Incorrect Password.");
+                if (userDoc.data().password !== passVal) throw new Error("Incorrect Password.");
 
-                const sessionId = generateSessionId();
-                await db.collection("staff_applications").doc(userDoc.id).update({ currentSessionId: sessionId });
-
-                const info = extractTeacherInfo(userData);
-                const sessionData = { uid: userDoc.id, email: userData.email, name: info.name, dept: info.dept, sessionId: sessionId };
-                localStorage.setItem('minervaActiveStaff', JSON.stringify(sessionData));
-                
-                window.location.href = 'teacher-portal.html';
+                await processLoginSuccess(userDoc);
             } catch (err) {
                 showError(err.message);
                 btn.innerHTML = 'Sign In Securely'; btn.disabled = false;
@@ -183,68 +191,16 @@
                     await auth.signOut();
                     throw new Error("This Google account is not registered or approved.");
                 }
-
-                const userDoc = snapshot.docs[0];
-                const userData = userDoc.data();
-                const sessionId = generateSessionId();
-                await db.collection("staff_applications").doc(userDoc.id).update({ currentSessionId: sessionId });
-
-                const info = extractTeacherInfo(userData);
-                const sessionData = { uid: userDoc.id, email: userData.email, name: info.name, dept: info.dept, sessionId: sessionId };
-                localStorage.setItem('minervaActiveStaff', JSON.stringify(sessionData));
-                
-                window.location.href = 'teacher-portal.html';
+                await processLoginSuccess(snapshot.docs[0]);
             } catch (err) {
                 showError(err.message);
                 btn.innerHTML = originalText; btn.disabled = false;
             }
         }
 
-        // Reset functions
+        // Reset functions...
         function openResetModal() { document.getElementById('reset-modal').classList.replace('hidden', 'flex'); }
         function closeResetModal() { document.getElementById('reset-modal').classList.replace('flex', 'hidden'); }
-
-        async function verifyForReset() {
-            const email = document.getElementById('reset-email').value.trim().toLowerCase();
-            const mobile = document.getElementById('reset-mobile').value.trim();
-            const btn = document.getElementById('verify-btn');
-
-            if(!email || !mobile) return showError("Enter both Email and Mobile.", 'reset-error');
-            btn.innerHTML = '<span class="loader"></span>'; btn.disabled = true;
-            document.getElementById('reset-error').classList.add('hidden');
-
-            try {
-                const snap = await db.collection('staff_applications').where('email', '==', email).where('mobile', '==', mobile).where('status', '==', 'approved').get();
-                if(snap.empty) throw new Error("Identity verification failed. No matching account found.");
-                targetResetDocId = snap.docs[0].id;
-                document.getElementById('reset-step-1').classList.add('hidden');
-                document.getElementById('reset-step-2').classList.remove('hidden');
-            } catch (err) {
-                showError(err.message, 'reset-error');
-            } finally {
-                btn.innerHTML = 'Verify Identity'; btn.disabled = false;
-            }
-        }
-
-        async function updatePassword() {
-            const pass1 = document.getElementById('new-pass').value;
-            const pass2 = document.getElementById('confirm-pass').value;
-            const btn = document.getElementById('update-pass-btn');
-
-            if(pass1.length < 6) return alert("Password must be at least 6 characters.");
-            if(pass1 !== pass2) return alert("Passwords do not match!");
-
-            btn.innerHTML = '<span class="loader"></span>'; btn.disabled = true;
-
-            try {
-                await db.collection('staff_applications').doc(targetResetDocId).update({ password: pass1 });
-                alert("Password successfully updated! You can now log in.");
-                closeResetModal();
-            } catch(e) {
-                alert("Failed to update password. Try again.");
-                btn.innerHTML = 'Update & Login'; btn.disabled = false;
-            }
-        }
     </script>
 </body>
 </html>
