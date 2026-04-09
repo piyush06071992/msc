@@ -36,7 +36,7 @@
 
     <div id="section-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] hidden items-center justify-center p-4">
         <div class="bg-white rounded-[2.5rem] p-8 max-w-md w-full shadow-2xl">
-            <h3 class="text-xl font-black text-slate-900 mb-6 uppercase tracking-tight border-b border-slate-100 pb-4">Define Section Layout</h3>
+            <h3 id="modal-title" class="text-xl font-black text-slate-900 mb-6 uppercase tracking-tight border-b border-slate-100 pb-4">Define Section Layout</h3>
             
             <div class="space-y-5">
                 <div>
@@ -78,11 +78,13 @@
             messagingSenderId: "701377739976",
             appId: "1:701377739976:web:99998220272090e56e79fd"
         };
-        firebase.initializeApp(firebaseConfig);
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
         let availableDepartments = [];
         let uniqueClasses = new Set();
+        let allSectionsData = []; // Stores flat data for easy editing
+        let editingSectionId = null; // Tracks if we are editing an existing doc
 
         // Color Palettes for different classes
         const THEMES = [
@@ -126,6 +128,7 @@
 
         function populateClassDropdown() {
             const select = document.getElementById('class-select');
+            const currentVal = select.value; // Remember selection if re-rendering during edit
             select.innerHTML = '<option value="">Select an existing class...</option>';
             
             Array.from(uniqueClasses).sort().forEach(className => {
@@ -133,6 +136,7 @@
             });
             
             select.innerHTML += '<option value="NEW" class="text-blue-600 font-black">+ Add New Class</option>';
+            if(currentVal) select.value = currentVal;
         }
 
         function toggleNewClassInput() {
@@ -153,6 +157,7 @@
             const snap = await db.collection("institute_structure").orderBy("className").get();
             
             uniqueClasses.clear();
+            allSectionsData = []; // Reset global tracking array
             
             if (snap.empty) {
                 container.innerHTML = `<div class="py-20 text-center text-slate-400 font-bold uppercase text-[10px] tracking-widest border-2 border-dashed border-slate-200 rounded-3xl">No Classes Configured Yet</div>`;
@@ -160,21 +165,22 @@
                 return;
             }
 
-            // 1. Group data by Class Name
             const groupedData = {};
             snap.forEach(doc => {
                 const data = doc.data();
                 uniqueClasses.add(data.className);
                 if (!groupedData[data.className]) groupedData[data.className] = [];
-                groupedData[data.className].push({ id: doc.id, ...data });
+                
+                const secData = { id: doc.id, ...data };
+                groupedData[data.className].push(secData);
+                allSectionsData.push(secData); // Save to flat array for easy editing
             });
 
             container.innerHTML = "";
-            
-            // 2. Render each group with a specific color theme
             let themeIndex = 0;
+            
             Object.keys(groupedData).sort().forEach(className => {
-                const theme = THEMES[themeIndex % THEMES.length]; // Cycle through colors
+                const theme = THEMES[themeIndex % THEMES.length];
                 const sections = groupedData[className];
 
                 let groupHtml = `
@@ -186,18 +192,26 @@
                         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 `;
 
-                // Render cards inside this group
                 sections.forEach(sec => {
                     const subjectsHtml = sec.subjects.map(s => `<span class="px-2 py-1 ${theme.bg} ${theme.text} rounded-md text-[9px] font-black uppercase tracking-wider">${s}</span>`).join('');
                     
                     groupHtml += `
-                        <div class="glass p-6 rounded-[2rem] border-2 border-transparent shadow-lg relative group transition-all ${theme.hover} hover:shadow-xl">
-                            <button onclick="deleteStructure('${sec.id}')" class="absolute top-6 right-6 p-2 bg-slate-50 rounded-xl text-slate-400 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-all">
-                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                            </button>
-                            <h3 class="text-3xl font-black text-slate-900 mb-4 tracking-tighter">Sec: ${sec.sectionName}</h3>
-                            <div class="flex flex-wrap gap-1.5 pt-4 border-t border-slate-100">
-                                ${subjectsHtml}
+                        <div class="glass p-6 rounded-[2rem] border-2 border-transparent shadow-lg relative group transition-all ${theme.hover} hover:shadow-xl flex flex-col justify-between min-h-[160px]">
+                            
+                            <div class="absolute top-6 right-6 flex gap-2 opacity-0 group-hover:opacity-100 transition-all">
+                                <button onclick="openEditModal('${sec.id}')" title="Edit Section" class="p-2 bg-slate-50 rounded-xl text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors">
+                                    ✏️
+                                </button>
+                                <button onclick="deleteStructure('${sec.id}')" title="Delete Section" class="p-2 bg-slate-50 rounded-xl text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors">
+                                    🗑️
+                                </button>
+                            </div>
+
+                            <div>
+                                <h3 class="text-3xl font-black text-slate-900 mb-4 tracking-tighter w-3/4 truncate">Sec: ${sec.sectionName}</h3>
+                                <div class="flex flex-wrap gap-1.5 pt-4 border-t border-slate-100">
+                                    ${subjectsHtml}
+                                </div>
                             </div>
                         </div>
                     `;
@@ -205,10 +219,45 @@
 
                 groupHtml += `</div></div>`;
                 container.innerHTML += groupHtml;
-                themeIndex++; // Move to next color for next class
+                themeIndex++; 
             });
             
             populateClassDropdown();
+        }
+
+        function openModal() { 
+            editingSectionId = null; // Ensure we are in "Create" mode
+            document.getElementById('modal-title').innerText = "Define Section Layout";
+            document.getElementById('class-select').value = '';
+            document.getElementById('new-class-input').classList.add('hidden');
+            document.getElementById('sec-name').value = '';
+            document.querySelectorAll('.cb-subject').forEach(cb => cb.checked = false);
+            document.getElementById('section-modal').classList.replace('hidden', 'flex'); 
+        }
+
+        function openEditModal(id) {
+            const sec = allSectionsData.find(s => s.id === id);
+            if(!sec) return;
+            
+            editingSectionId = id; // Set flag to "Edit" mode
+            document.getElementById('modal-title').innerText = "Edit Section Layout";
+            
+            // Populate existing fields
+            const classSelect = document.getElementById('class-select');
+            classSelect.value = sec.className;
+            document.getElementById('new-class-input').classList.add('hidden');
+            document.getElementById('sec-name').value = sec.sectionName;
+            
+            // Tick correct checkboxes
+            document.querySelectorAll('.cb-subject').forEach(cb => {
+                cb.checked = sec.subjects.includes(cb.value);
+            });
+            
+            document.getElementById('section-modal').classList.replace('hidden', 'flex');
+        }
+
+        function closeModal() { 
+            document.getElementById('section-modal').classList.replace('flex', 'hidden'); 
         }
 
         async function saveStructure() {
@@ -217,39 +266,67 @@
             const secName = document.getElementById('sec-name').value.trim();
             
             const className = (selectVal === 'NEW') ? newClassVal : selectVal;
-            
             const checkboxes = document.querySelectorAll('.cb-subject:checked');
             const subjects = Array.from(checkboxes).map(cb => cb.value);
 
             if (!className || !secName) return alert("Please provide both a Class Name and a Section Name.");
             if (subjects.length === 0) return alert("Please select at least one Required Department/Subject.");
 
-            const checkSnap = await db.collection("institute_structure")
-                .where("className", "==", className)
-                .where("sectionName", "==", secName)
-                .get();
-                
-            if (!checkSnap.empty) return alert(`Error: Section '${secName}' already exists in '${className}'.`);
-
             const btn = document.querySelector('button[onclick="saveStructure()"]');
             btn.innerText = "Saving..."; btn.disabled = true;
 
             try {
-                await db.collection("institute_structure").add({
-                    className: className,
-                    sectionName: secName,
-                    subjects: subjects,
-                    createdAt: firebase.firestore.FieldValue.serverTimestamp()
-                });
+                if (editingSectionId) {
+                    // EDIT MODE
+                    const oldSec = allSectionsData.find(s => s.id === editingSectionId);
+                    
+                    // 1. Update structure
+                    await db.collection("institute_structure").doc(editingSectionId).update({
+                        className: className,
+                        sectionName: secName,
+                        subjects: subjects
+                    });
+
+                    // 2. CASCADE UPDATE TIMETABLE: If they changed the name, we must fix existing timetables
+                    if (oldSec.className !== className || oldSec.sectionName !== secName) {
+                        const ttSnap = await db.collection("timetable")
+                            .where("className", "==", oldSec.className)
+                            .where("section", "==", oldSec.sectionName)
+                            .get();
+                        
+                        if (!ttSnap.empty) {
+                            const batch = db.batch();
+                            ttSnap.docs.forEach(doc => {
+                                batch.update(doc.ref, { className: className, section: secName });
+                            });
+                            await batch.commit();
+                        }
+                    }
+                    alert("Section updated successfully!");
+
+                } else {
+                    // CREATE MODE
+                    // Verify duplicate doesn't exist
+                    const checkSnap = await db.collection("institute_structure")
+                        .where("className", "==", className)
+                        .where("sectionName", "==", secName)
+                        .get();
+                        
+                    if (!checkSnap.empty) {
+                        btn.innerText = "Save Section"; btn.disabled = false;
+                        return alert(`Error: Section '${secName}' already exists in '${className}'.`);
+                    }
+
+                    await db.collection("institute_structure").add({
+                        className: className,
+                        sectionName: secName,
+                        subjects: subjects,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                    });
+                }
+
                 closeModal();
                 loadStructure(); 
-                
-                // Reset form
-                document.getElementById('class-select').value = '';
-                document.getElementById('new-class-input').value = '';
-                document.getElementById('new-class-input').classList.add('hidden');
-                document.getElementById('sec-name').value = '';
-                document.querySelectorAll('.cb-subject').forEach(cb => cb.checked = false);
             } catch (error) {
                 console.error("Error saving:", error);
                 alert("Failed to save. Check console.");
@@ -258,18 +335,39 @@
             }
         }
 
+        // --- NEW CASCADE DELETE FUNCTION ---
         async function deleteStructure(id) {
-            if(confirm("Remove this section entirely?")) {
-                await db.collection("institute_structure").doc(id).delete();
-                loadStructure();
+            if(confirm("🚨 DANGER: Remove this section entirely?\n\nThis will ALSO permanently delete all Timetable schedules associated with this section. Are you absolutely sure?")) {
+                
+                try {
+                    // 1. Find section details so we know what timetables to delete
+                    const secDoc = await db.collection("institute_structure").doc(id).get();
+                    if(secDoc.exists) {
+                        const className = secDoc.data().className;
+                        const sectionName = secDoc.data().sectionName;
+                        
+                        // 2. Cascade Delete all Timetable slots for this class/section
+                        const ttSnap = await db.collection("timetable")
+                            .where("className", "==", className)
+                            .where("section", "==", sectionName).get();
+                        
+                        if (!ttSnap.empty) {
+                            const batch = db.batch();
+                            ttSnap.docs.forEach(doc => { batch.delete(doc.ref); });
+                            await batch.commit();
+                        }
+                    }
+                    
+                    // 3. Delete the actual structure document
+                    await db.collection("institute_structure").doc(id).delete();
+                    
+                    alert("Section and its timetables were successfully deleted.");
+                    loadStructure();
+                } catch(e) {
+                    console.error("Error deleting:", e);
+                    alert("Error deleting: " + e.message);
+                }
             }
-        }
-
-        function openModal() { document.getElementById('section-modal').classList.replace('hidden', 'flex'); }
-        function closeModal() { 
-            document.getElementById('section-modal').classList.replace('flex', 'hidden'); 
-            document.getElementById('class-select').value = '';
-            document.getElementById('new-class-input').classList.add('hidden');
         }
 
         init();
