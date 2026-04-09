@@ -283,13 +283,24 @@
             } catch(e) { console.error(e); }
         }
 
-        function renderSyllabusExactMath() {
-            // 1. Calculate Overall Pace Math (Lines 439-450 of PDF)
+     function renderSyllabusExactMath() {
+            const getWorkingDays = (startDateStr, endDateStr) => {
+                if (!startDateStr || !endDateStr) return 0;
+                let count = 0;
+                let cur = new Date(startDateStr);
+                const finish = new Date(endDateStr);
+                if(isNaN(cur) || isNaN(finish)) return 0;
+                while (cur <= finish) {
+                    if (cur.getDay() !== 0) count++; 
+                    cur.setDate(cur.getDate() + 1);
+                }
+                return count;
+            };
+
             let totalSubtopics = currentPlannerData.length;
             let completedSubtopics = currentPlannerData.filter(r => r.isDone).length;
             let progressPct = totalSubtopics === 0 ? 0 : Math.round((completedSubtopics / totalSubtopics) * 100);
             
-          // Unique chapters to get Total Target Days/Mins and Started Targets
             const chMap = new Map();
             currentPlannerData.forEach(r => {
                 if(!chMap.has(r['CHAPTER NAME'])) {
@@ -304,52 +315,70 @@
                 }
             });
             
-            let totalTargetDays = 0, totalTargetMins = 0;
-            let startedTargetDays = 0, startedTargetMins = 0;
+            let totalTargetDaysAll = 0, totalTargetMinsAll = 0;
+            let totalActualDaysAll = 0; 
+            let totalOverallDayGap = 0, totalOverallMinGap = 0;
+
             chMap.forEach(v => { 
-                totalTargetDays += v.days; 
-                totalTargetMins += v.mins; 
-                if (v.isStarted) {
-                    startedTargetDays += v.days;
-                    startedTargetMins += v.mins;
-                }
+                totalTargetDaysAll += v.days; 
+                totalTargetMinsAll += v.mins; 
             });
 
-            // Calculate used Mins/Days based on completed topics
-            let minsUsed = currentPlannerData.filter(r => r.isDone).reduce((sum, r) => sum + (parseInt(r.completedMinutes)||0), 0);
-            let daysUsed = Math.round(minsUsed / 90); // Approximation, ideally unique dates
-            
-            // Gap is calculated ONLY on chapters that have been initiated
-            let totalGap = startedTargetDays - daysUsed;
-            let totalGapMins = startedTargetMins - minsUsed;
-            
-            let subjDaysPct = totalTargetDays > 0 ? Math.min(100, (daysUsed / totalTargetDays) * 100) : 0;
-            let subjDaysColor = daysUsed > totalTargetDays ? "#e74c3c" : "#f39c12";
-
-            // Render Overall Pace Widget
-            document.getElementById('subject-pace-widget').innerHTML = `
-                <b class='text-slate-800 text-sm'>Subject Overall Pace</b>
-                <div class='text-[10px] sm:text-[11px] mt-2 font-bold text-emerald-600'>Syllabus Completed (${completedSubtopics}/${totalSubtopics}) - ${progressPct}%</div>
-                <div class='w-full bg-slate-200 h-2 rounded-full mt-1 mb-3 overflow-hidden'><div style='width: ${progressPct}%;' class='bg-emerald-500 h-full'></div></div>
-                
-                <div class='text-[10px] sm:text-[11px] font-bold' style='color:${subjDaysColor};'>Target Consumed: ${daysUsed}/${totalTargetDays} Days (${minsUsed}/${totalTargetMins} Mins)</div>
-                <div class='w-full bg-slate-200 h-2 rounded-full mt-1 mb-4 overflow-hidden'><div style='width: ${subjDaysPct}%;' class='h-full' style='background:${subjDaysColor};'></div></div>
-                
-                <div class='flex items-center gap-3 p-2.5 rounded-lg border ${totalGap >= 0 ? "bg-emerald-50 border-emerald-500 text-emerald-600" : "bg-rose-50 border-rose-500 text-rose-600"}'>
-                    <div class='text-[10px] sm:text-xs font-bold uppercase tracking-widest'>Total Gap: ${totalGap > 0 ? "+" : ""}${totalGap} Days | ${totalGapMins > 0 ? "+" : ""}${totalGapMins} Mins (${totalGap >= 0 ? "Ahead/On Time" : "Behind Schedule"})</div>
-                </div>
-            `;
-
-            // 2. Render Chapters (Lines 461-473 of PDF)
+            // 2. Render Chapters First to calculate exact gaps
             const container = document.getElementById('chapter-accordion-container');
             container.innerHTML = '';
             
             const chNames = Array.from(chMap.keys());
             chNames.forEach(ch => {
                 const rows = currentPlannerData.filter(r => r["CHAPTER NAME"] === ch);
-                const dCount = rows.filter(r => r.isDone).length;
-                const isStarted = rows[0].chapterStartDate || dCount > 0;
-                const isCompleted = dCount === rows.length;
+                const doneR = rows.filter(r => r.isDone);
+                const isStarted = rows[0].chapterStartDate || doneR.length > 0;
+                const isCompleted = doneR.length === rows.length && rows.length > 0;
+
+                const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
+                const targetMins = parseInt(rows[0]?.['Target Minutes For Chapter']) || 0;
+
+                // 🧮 SMART MINUTES CALCULATOR FOR CHAPTER
+                let dailyMap = {};
+                let extraMins = 0;
+                doneR.forEach(r => {
+                    let d = r.completedDate; 
+                    let m = parseInt(r.completedMinutes) || 0;
+                    if(d) { if(!dailyMap[d] || m > dailyMap[d]) dailyMap[d] = m; } 
+                    else extraMins += m;
+                });
+                const actualMins = Object.values(dailyMap).reduce((a,b) => a+b, 0) + extraMins;
+
+                let chStartStr = rows[0]?.chapterStartDate;
+                let chStart = chStartStr ? new Date(chStartStr) : null;
+                const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
+                const chEnd = compDates.length ? new Date(Math.max(...compDates)) : null;
+
+                let gapHtml = "";
+                let actualDaysTaken = 0;
+
+                if (chStart && chEnd) {
+                    actualDaysTaken = getWorkingDays(chStart, chEnd);
+                    totalActualDaysAll += actualDaysTaken; // Add to overall progress bar
+                }
+
+                if (isCompleted && chStart && chEnd) {
+                    let dayGap = targetDays - actualDaysTaken; 
+                    let minGap = targetMins - actualMins;      
+
+                    totalOverallDayGap += dayGap;
+                    totalOverallMinGap += minGap;
+
+                    gapHtml = `
+                        <div class="flex flex-wrap gap-2 mt-2">
+                            <span class="text-[9px] font-black px-3 py-1 rounded-full border ${dayGap >= 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-600 border-rose-100'}">
+                                ${dayGap > 0 ? '+' : ''}${dayGap} Days Variance
+                            </span>
+                            <span class="text-[9px] font-black px-3 py-1 rounded-full border ${minGap >= 0 ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-amber-50 text-amber-600 border-amber-100'}">
+                                ${minGap > 0 ? '+' : ''}${minGap}m Class Variance
+                            </span>
+                        </div>`;
+                }
 
                 let badge = isCompleted ? `<span class="bg-emerald-500 text-white px-3 py-1 rounded-md text-[9px] font-black uppercase">✓ COMPLETED</span>` 
                           : (isStarted ? `<span class="bg-blue-100 text-blue-700 px-3 py-1 rounded-md text-[9px] font-black uppercase">ONGOING</span>` 
@@ -377,17 +406,47 @@
                     }).join('') + `</div>`;
                 }
 
+                let startHtml = `<span class="text-slate-900 ml-1 font-bold">${chStart ? chStart.toLocaleDateString('en-GB') : '--'}</span>`;
+
                 container.innerHTML += `
-                    <details ${isCompleted ? '' : 'open'} class="bg-[#f8f9fa] border border-slate-200 rounded-xl mb-4 overflow-hidden shadow-sm">
-                        <summary class="bg-${isCompleted ? 'slate-100' : 'slate-50'} text-slate-800 p-4 flex justify-between items-center cursor-pointer select-none">
-                            <span class="font-black text-sm uppercase tracking-tight">${ch} <span class="text-xs ml-2 text-slate-500">(${Math.round((dCount/rows.length)*100)}%)</span></span>
+                    <details ${isCompleted ? '' : 'open'} class="bg-[#f8f9fa] border border-slate-200 rounded-xl mb-4 overflow-hidden shadow-sm group">
+                        <summary class="bg-${isCompleted ? 'slate-100' : 'slate-50'} text-slate-800 p-4 flex justify-between items-center cursor-pointer select-none outline-none">
+                            <div>
+                                <span class="font-black text-sm uppercase tracking-tight">${ch} <span class="text-xs ml-2 text-slate-500">(${Math.round((doneR.length/rows.length)*100)}%)</span></span>
+                                <div class="flex gap-4 mt-1 text-[9px] font-bold text-slate-400 uppercase items-center">
+                                    <span>Target: ${targetDays} Days / ${targetMins}m</span>
+                                    ${gapHtml}
+                                </div>
+                            </div>
                             ${badge}
                         </summary>
+                        <div class="grid grid-cols-4 bg-white text-[9px] font-black text-slate-500 text-center border-y uppercase">
+                            <div class="p-3 border-r border-slate-100 flex items-center justify-center">Start: ${startHtml}</div>
+                            <div class="p-3 border-r border-slate-100 flex items-center justify-center">End: <span class="text-slate-900 ml-1 font-bold">${chEnd ? chEnd.toLocaleDateString('en-GB') : '--'}</span></div>
+                            <div class="p-3 border-r border-slate-100 flex items-center justify-center text-rose-500">Excluded: <span class="font-bold ml-1">None</span></div>
+                            <div class="p-3 flex items-center justify-center text-blue-600">Actual Days: <span class="font-bold ml-1 text-base">${actualDaysTaken}</span></div>
+                        </div>
                         ${contentHTML}
                     </details>`;
             });
-        }
 
+            // 3. Render Top Widget
+            let subjDaysPct = totalTargetDaysAll > 0 ? Math.min(100, (totalActualDaysAll / totalTargetDaysAll) * 100) : 0;
+            let subjDaysColor = totalActualDaysAll > totalTargetDaysAll ? "#e74c3c" : "#f39c12";
+
+            document.getElementById('subject-pace-widget').innerHTML = `
+                <b class='text-slate-800 text-sm uppercase tracking-widest'>Subject Overall Pace</b>
+                <div class='text-[10px] sm:text-[11px] mt-3 font-black text-emerald-600 uppercase tracking-widest'>Syllabus Completed (${completedSubtopics}/${totalSubtopics}) - ${progressPct}%</div>
+                <div class='w-full bg-slate-100 h-2 rounded-full mt-2 mb-4 overflow-hidden'><div style='width: ${progressPct}%;' class='bg-emerald-500 h-full'></div></div>
+                
+                <div class='flex items-center gap-3 p-3.5 rounded-xl border ${totalOverallDayGap >= 0 ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700"}'>
+                    <div class='text-[10px] sm:text-[11px] font-black uppercase tracking-widest'>
+                        Net Variance: ${totalOverallDayGap > 0 ? "+" : ""}${totalOverallDayGap} Days | ${totalOverallMinGap > 0 ? "+" : ""}${totalOverallMinGap} Mins 
+                        <span class="ml-2 opacity-70">(${totalOverallDayGap >= 0 ? "Ahead/On Time" : "Behind Schedule"})</span>
+                    </div>
+                </div>
+            `;
+        }
         // Live Inline Ticking (No popup alerts!)
         function previewTick(cb, idx) {
             if(cb.checked) {
