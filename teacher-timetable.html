@@ -87,10 +87,10 @@
 
         </div>
 
-        <div id="timetable-results-area" class="hidden mt-8">
-            <div class="flex justify-between items-center mb-6">
-                <h2 id="results-title" class="text-2xl font-black text-slate-900 uppercase tracking-tighter">Results</h2>
-                <button onclick="document.getElementById('timetable-results-area').classList.add('hidden')" class="text-[10px] font-black text-rose-500 uppercase tracking-widest bg-rose-50 px-4 py-2 rounded-lg hover:bg-rose-100 transition-colors">Clear Results</button>
+        <div id="timetable-results-area" class="hidden mt-8 bg-slate-100/50 p-6 sm:p-10 rounded-[3rem] border border-slate-200 shadow-inner">
+            <div class="flex justify-between items-center mb-8">
+                <h2 id="results-title" class="text-2xl sm:text-3xl font-black text-slate-900 uppercase tracking-tighter">Results</h2>
+                <button onclick="document.getElementById('timetable-results-area').classList.add('hidden')" class="text-[10px] font-black text-rose-500 uppercase tracking-widest bg-rose-100 px-5 py-2.5 rounded-xl hover:bg-rose-200 transition-colors shadow-sm">Clear Results</button>
             </div>
             
             <div id="results-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -105,24 +105,138 @@
         const db = firebase.firestore();
         
         let activeStaff = null;
-        let structureData = []; // To hold class/section logic
+        let structureData = []; 
+        let safeName = "";
+
+        const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
         window.onload = async () => {
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
             if (!activeStaff) return window.location.replace('staff-login.html');
             
-            const safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name : activeStaff.email;
+            safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name : activeStaff.email;
             document.getElementById('teacher-badge').innerText = `ID: ${safeName}`;
 
-            // We will load the class list in the next step
-            // await fetchStructure(); 
+            await fetchStructure(); 
         };
 
-        // Placeholder functions for next step
-        function fetchMyTimetable(span) { alert("Ready to fetch My Timetable: " + span); }
-        function fetchSpecialDuties() { alert("Ready to fetch special duties"); }
-        function populateSections() { alert("Ready to populate sections"); }
-        function fetchClassTimetable(span) { alert("Ready to fetch class timetable: " + span); }
+        // 1. Load Dropdowns
+        async function fetchStructure() {
+            try {
+                const snap = await db.collection("institute_structure").get();
+                structureData = snap.docs.map(doc => doc.data());
+                
+                const classes = [...new Set(structureData.map(s => s.className))].sort();
+                const classSelect = document.getElementById('tt-class-select');
+                classes.forEach(c => classSelect.innerHTML += `<option value="${c}">${c}</option>`);
+            } catch(e) { console.error("Error loading classes:", e); }
+        }
+
+        function populateSections() {
+            const classVal = document.getElementById('tt-class-select').value;
+            const secSelect = document.getElementById('tt-section-select');
+            secSelect.innerHTML = '<option value="">-- Choose Section --</option>';
+            
+            if(!classVal) { secSelect.disabled = true; return; }
+            
+            secSelect.disabled = false;
+            const sections = structureData.filter(s => s.className === classVal).map(s => s.sectionName).sort();
+            sections.forEach(s => secSelect.innerHTML += `<option value="${s}">${s}</option>`);
+        }
+
+        // Helper to get current day dynamically
+        function getTodayString() { return daysOfWeek[new Date().getDay()]; }
+
+        // 2. Render Cards Engine
+        function renderCards(dataList, title) {
+            const area = document.getElementById('timetable-results-area');
+            const grid = document.getElementById('results-grid');
+            document.getElementById('results-title').innerText = title;
+            area.classList.remove('hidden');
+            grid.innerHTML = '';
+
+            if(dataList.length === 0) {
+                grid.innerHTML = `<div class="col-span-full text-center py-16 text-slate-400 font-bold uppercase tracking-widest text-[11px] border-2 border-dashed border-slate-300 rounded-[2rem] bg-white">No schedules found for this selection.</div>`;
+                return;
+            }
+
+            // Sort logically by Time (AM/PM string conversion)
+            dataList.sort((a, b) => {
+                const timeA = a.timeRange ? a.timeRange.split(' - ')[0] : '12:00 AM';
+                const timeB = b.timeRange ? b.timeRange.split(' - ')[0] : '12:00 AM';
+                return new Date('1970/01/01 ' + timeA) - new Date('1970/01/01 ' + timeB);
+            });
+
+            dataList.forEach(item => {
+                // Handle different card colors based on duty vs class
+                let bgColors = item.isDuty ? 'bg-[#fffbeb] border-amber-200 hover:border-amber-400' : 'bg-white border-indigo-100 hover:border-indigo-400';
+                let titleColor = item.isDuty ? 'text-amber-900' : 'text-slate-900';
+                let tagBg = item.isDuty ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-indigo-50 text-indigo-700 border-indigo-200';
+                
+                grid.innerHTML += `
+                    <div class="${bgColors} border-2 rounded-[2rem] p-6 sm:p-8 shadow-sm hover:shadow-xl transition-all group flex flex-col justify-between">
+                        <div>
+                            <div class="flex justify-between items-start mb-6">
+                                <div>
+                                    <h3 class="text-xl font-black ${titleColor} uppercase tracking-tighter truncate w-40 sm:w-48" title="${item.subject || item.title}">${item.subject || item.title || 'Duty'}</h3>
+                                    <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">${item.className || 'Special'} ${item.section ? '| ' + item.section : ''}</p>
+                                </div>
+                                <span class="${tagBg} border px-3 py-1.5 rounded-xl text-[9px] font-black uppercase tracking-widest shadow-sm shrink-0">${item.day || 'Any'}</span>
+                            </div>
+                            
+                            <div class="flex justify-between items-center pt-5 border-t border-slate-200/60">
+                                <span class="text-[10px] font-black text-slate-700 uppercase tracking-widest bg-white/50 px-3 py-1.5 rounded-lg border border-slate-200">🕒 ${item.timeRange || '--'}</span>
+                                <span class="text-[10px] font-black ${item.duration ? 'text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-100' : 'text-slate-400'} uppercase tracking-widest">${item.duration ? item.duration + ' Mins' : '--'}</span>
+                            </div>
+                        </div>
+                        
+                        <div class="mt-6 pt-5 border-t border-slate-200/60 text-[9px] font-bold text-slate-500 uppercase tracking-widest flex justify-between items-center">
+                            <span>By: <span class="text-slate-900 font-black">${item.teacherName || '--'}</span></span>
+                            <span>Room: <span class="text-slate-900 font-black">${item.room || '--'}</span></span>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            // Auto-scroll down to results so mobile users don't miss them
+            setTimeout(() => { area.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 100);
+        }
+
+        // 3. Fetching Logic
+        async function fetchMyTimetable(span) {
+            try {
+                let query = db.collection("timetable").where("teacherName", "==", safeName);
+                if (span === 'today') query = query.where("day", "==", getTodayString());
+                
+                const snap = await query.get();
+                const data = snap.docs.map(d => d.data());
+                renderCards(data, span === 'today' ? "My Schedule Today" : "My Whole Week Schedule");
+            } catch(e) { alert("Error fetching data"); console.error(e); }
+        }
+
+        async function fetchClassTimetable(span) {
+            const cls = document.getElementById('tt-class-select').value;
+            const sec = document.getElementById('tt-section-select').value;
+            
+            if(!cls || !sec) return alert("Please select both Class and Section first.");
+
+            try {
+                let query = db.collection("timetable").where("className", "==", cls).where("section", "==", sec);
+                if (span === 'today') query = query.where("day", "==", getTodayString());
+
+                const snap = await query.get();
+                const data = snap.docs.map(d => d.data());
+                renderCards(data, `${cls} | ${sec} - ${span === 'today' ? "Today" : "Whole Week"}`);
+            } catch(e) { alert("Error fetching class data"); console.error(e); }
+        }
+
+        async function fetchSpecialDuties() {
+            try {
+                 const snap = await db.collection("timetable").where("teacherName", "==", safeName).where("isDuty", "==", true).get();
+                 const data = snap.docs.map(d => d.data());
+                 renderCards(data, "My Special Assigned Duties");
+            } catch(e) { console.error(e); }
+        }
     </script>
 </body>
 </html>
