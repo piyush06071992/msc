@@ -23,7 +23,7 @@
             <h1 class="text-xl font-black text-slate-800 tracking-tight">Registered Faculty</h1>
         </div>
         <div class="flex items-center gap-4">
-            <button onclick="checkLiveStatus()" class="bg-rose-100 text-rose-600 hover:bg-rose-200 px-4 py-2 rounded-lg font-black uppercase tracking-widest text-[10px] transition-colors flex items-center gap-2">
+            <button id="refresh-btn" onclick="checkLiveStatus()" class="bg-rose-100 text-rose-600 hover:bg-rose-200 px-4 py-2 rounded-lg font-black uppercase tracking-widest text-[10px] transition-colors flex items-center gap-2">
                 <span class="animate-pulse">🔴</span> Refresh Live Status
             </button>
             <div id="total-stats" class="hidden sm:block text-[10px] font-black text-slate-400 uppercase tracking-widest">
@@ -127,8 +127,9 @@
             const snapshot = await db.collection("staff_applications").where("status", "==", "approved").get();
             allStaff = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
             document.getElementById('staff-count').innerText = allStaff.length;
+            
+            // Render staff, but DO NOT run the heavy live status check automatically.
             renderStaff(allStaff);
-            checkLiveStatus(); // Instantly check if they are in class right now
         }
 
         function applyFilters() {
@@ -146,8 +147,9 @@
                 });
                 return matchesSearch && matchesFilters;
             });
+            
+            // Re-render, reset status labels
             renderStaff(filtered);
-            checkLiveStatus(); 
         }
 
         function renderStaff(data) {
@@ -184,7 +186,7 @@
                     <p class="text-blue-600 font-black text-xs mb-4">${s.mobile}</p>
 
                     <div id="live-status-${s.id}" class="mb-4 text-center">
-                        <span class="inline-block px-3 py-1 bg-slate-100 text-slate-500 text-[9px] font-black uppercase tracking-widest rounded-lg border border-slate-200 animate-pulse">Checking Status...</span>
+                        <span class="inline-block px-3 py-1 bg-slate-100 text-slate-400 text-[9px] font-black uppercase tracking-widest rounded-lg border border-slate-200">Status Paused - Click Refresh</span>
                     </div>
 
                     <div class="flex gap-2 mb-6">
@@ -214,7 +216,7 @@
             `}).join('');
         }
 
-        // --- FEATURE 1: LIVE STATUS ENGINE --- //
+        // --- OPTIMIZED SINGLE-QUERY LIVE STATUS ENGINE --- //
         function parseTimeToMinutes(timeStr) {
             if (!timeStr) return 0;
             const [time, modifier] = timeStr.split(' ');
@@ -225,32 +227,39 @@
         }
 
         async function checkLiveStatus() {
+            const btn = document.getElementById('refresh-btn');
+            const originalHTML = btn.innerHTML;
+            btn.innerHTML = `<span class="animate-spin">⏳</span> Syncing...`;
+            btn.disabled = true;
+
             const todayStr = daysOfWeek[new Date().getDay()];
             const now = new Date();
             const currentMins = now.getHours() * 60 + now.getMinutes();
 
-            for (let staff of allStaff) {
-                const nameKey = Object.keys(staff.details).find(key => key.toLowerCase().includes('name'));
-                const staffName = nameKey ? staff.details[nameKey] : staff.email;
-                const statusDiv = document.getElementById(`live-status-${staff.id}`);
-                if (!statusDiv) continue;
+            try {
+                // THE OPTIMIZATION: We fetch today's timetable EXACTLY ONE TIME. (Costs 1 Read instead of 50 reads!)
+                const snap = await db.collection("timetable").where("day", "==", todayStr).get();
+                const allTodaysClasses = snap.docs.map(d => d.data());
 
-                try {
-                    // Fetch today's schedule for this specific teacher
-                    const snap = await db.collection("timetable").where("teacherName", "==", staffName).where("day", "==", todayStr).get();
-                    const schedule = snap.docs.map(d => d.data());
+                for (let staff of allStaff) {
+                    const nameKey = Object.keys(staff.details).find(key => key.toLowerCase().includes('name'));
+                    const staffName = nameKey ? staff.details[nameKey] : staff.email;
+                    const statusDiv = document.getElementById(`live-status-${staff.id}`);
+                    if (!statusDiv) continue;
+
+                    // Filter locally from our single query
+                    const teacherClasses = allTodaysClasses.filter(c => c.teacherName === staffName);
                     
                     let isBusy = false;
                     let busyText = "";
 
-                    for (let cls of schedule) {
+                    for (let cls of teacherClasses) {
                         if (!cls.timeRange) continue;
                         
                         const [startStr, endStr] = cls.timeRange.split(' - ');
                         const startMins = parseTimeToMinutes(startStr);
                         const endMins = parseTimeToMinutes(endStr);
 
-                        // If current time falls inside the class period
                         if (currentMins >= startMins && currentMins <= endMins) {
                             isBusy = true;
                             busyText = `IN CLASS: ${cls.className} ${cls.section ? '| '+cls.section : ''} <br> <span class="text-rose-300">Room ${cls.room || '--'} (${cls.timeRange})</span>`;
@@ -263,10 +272,13 @@
                     } else {
                         statusDiv.innerHTML = `<span class="inline-block px-3 py-1 bg-emerald-50 text-emerald-600 text-[9px] font-black uppercase tracking-widest rounded-lg border border-emerald-100">Currently Free</span>`;
                     }
-
-                } catch(e) {
-                    statusDiv.innerHTML = `<span class="text-[9px] text-slate-400">Status Error</span>`;
                 }
+            } catch(e) {
+                console.error("Error fetching live status:", e);
+                alert("Failed to sync live status.");
+            } finally {
+                btn.innerHTML = originalHTML;
+                btn.disabled = false;
             }
         }
 
@@ -277,7 +289,6 @@
             const area = document.getElementById('edit-form-area');
             area.innerHTML = '';
 
-            // Inject core fields (Mobile)
             area.innerHTML += `
                 <div>
                     <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Mobile Number</label>
@@ -286,12 +297,10 @@
                 <div class="w-full h-px bg-slate-200 my-4"></div>
             `;
 
-            // Inject dynamic details based on form config
             Object.entries(staff.details).forEach(([key, value]) => {
                 const fieldConfig = formConfig.fields.find(f => f.label === key);
                 
                 if (fieldConfig && fieldConfig.type === 'select') {
-                    // Dropdown edit
                     let options = `<option value="">Select...</option>`;
                     fieldConfig.options.split(',').forEach(opt => {
                         let selected = value === opt.trim() ? 'selected' : '';
@@ -304,7 +313,6 @@
                         </div>
                     `;
                 } else {
-                    // Text edit
                     area.innerHTML += `
                         <div>
                             <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">${key}</label>
@@ -339,7 +347,7 @@
                 });
                 alert("Profile Updated Successfully!");
                 closeEditModal();
-                fetchStaff(); // Refresh the grid
+                fetchStaff(); 
             } catch (e) {
                 console.error(e);
                 alert("Error saving changes.");
@@ -362,7 +370,6 @@
                     return;
                 }
 
-                // Sort by day then time
                 dataList.sort((a, b) => {
                     if (daysOfWeek.indexOf(a.day) !== daysOfWeek.indexOf(b.day)) return daysOfWeek.indexOf(a.day) - daysOfWeek.indexOf(b.day);
                     const timeA = a.timeRange ? a.timeRange.split(' - ')[0] : '12:00 AM';
@@ -396,7 +403,6 @@
             document.getElementById('tt-modal').classList.add('hidden');
         }
 
-        // Keep existing revoke logic
         async function revokeStaff(id) {
             if(confirm("Revoke this staff member's access? They will move back to Pending list.")) {
                 await db.collection("staff_applications").doc(id).update({ status: 'pending' });
