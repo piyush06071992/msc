@@ -396,23 +396,17 @@
         }
         // --- DASHBOARD SUMMARY ---
         function toggleDemoMode(val) { isDemoMode = val; document.getElementById('demo-mode-indicator').classList.toggle('hidden', !val); renderSummary(); }
-    function renderSummary() {
+  function renderSummary() {
             const container = document.getElementById('summary-accordion-container');
             if(!container) return;
             container.innerHTML = '';
             const list = isDemoMode ? [{className:"Sample Data", sectionName:"Warrior Batch", subjects:["Mathematics", "Physics"]}] : structureData;
 
-            // Helper to calculate working days (excluding Sundays)
             const getWorkingDays = (startDateStr, endDateStr) => {
                 if (!startDateStr || !endDateStr) return 0;
-                let count = 0;
-                let cur = new Date(startDateStr);
-                const finish = new Date(endDateStr);
+                let count = 0; let cur = new Date(startDateStr); const finish = new Date(endDateStr);
                 if(isNaN(cur) || isNaN(finish)) return 0;
-                while (cur <= finish) {
-                    if (cur.getDay() !== 0) count++;
-                    cur.setDate(cur.getDate() + 1);
-                }
+                while (cur <= finish) { if (cur.getDay() !== 0) count++; cur.setDate(cur.getDate() + 1); }
                 return count;
             };
 
@@ -435,8 +429,8 @@
                         const chNames = [...new Set(rows.map(r => r["CHAPTER NAME"]))];
                         chTotal = chNames.length;
                         
-                        let totalTargetDaysAll = 0;
-                        let totalActualDaysAll = 0; // For the visual clock progress bar
+                        let totalTargetDaysAll = 0, totalActualDaysAll = 0;
+                        let coveredDates = new Set();
 
                         chNames.forEach(ch => {
                             const chRows = rows.filter(r => r["CHAPTER NAME"] === ch);
@@ -445,63 +439,73 @@
                             
                             const tDays = parseInt(chRows[0]?.['Target days for chapter']) || 0;
                             const tMins = parseInt(chRows[0]?.['Target Minutes For Chapter']) || 0;
-                            
                             totalTargetDaysAll += tDays;
 
-                            let chStartStr = chRows[0]?.chapterStartDate;
-                            let chStart = chStartStr ? new Date(chStartStr) : null;
+                            let chStart = chRows[0]?.chapterStartDate ? new Date(chRows[0].chapterStartDate) : null;
                             const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
                             const chEnd = compDates.length ? new Date(Math.max(...compDates)) : null;
 
-                            // Calculate days for the Clock Progress Bar (even if ongoing)
                             if (chStart && chEnd) {
-                                let actDays = getWorkingDays(chStart, chEnd);
-                                totalActualDaysAll += actDays;
+                                let cur = new Date(chStart); let finish = new Date(chEnd);
+                                while(cur <= finish) {
+                                    if(cur.getDay() !== 0) coveredDates.add(cur.toISOString().split('T')[0]);
+                                    cur.setDate(cur.getDate() + 1);
+                                }
                             }
 
-                            // 🧮 STRICT MATH: Only add to the Gap if the Chapter is 100% DONE
                             if (isF && chStart && chEnd) {
-                                hasCompletedChapters = true;
-                                chDone++;
-                                
+                                hasCompletedChapters = true; chDone++;
                                 let actDays = getWorkingDays(chStart, chEnd);
                                 
-                                // Group Minutes Smartly
-                                let dailyMap = {};
-                                let extraMins = 0;
+                                let dailyMap = {}; let extraMins = 0;
                                 doneR.forEach(r => {
-                                    let d = r.completedDate; 
-                                    let m = parseInt(r.completedMinutes) || 0;
-                                    if(d) { if(!dailyMap[d] || m > dailyMap[d]) dailyMap[d] = m; } 
-                                    else extraMins += m;
+                                    let d = r.completedDate; let m = parseInt(r.completedMinutes) || 0;
+                                    if(d) { if(!dailyMap[d] || m > dailyMap[d]) dailyMap[d] = m; } else extraMins += m;
                                 });
                                 let actMins = Object.values(dailyMap).reduce((a,b) => a+b, 0) + extraMins;
                                 
-                                // Combine Gaps (+ and - will perfectly offset each other)
                                 totalDayGap += (tDays - actDays);
                                 totalMinGap += (tMins - actMins);
                             }
                         });
 
+                        totalActualDaysAll = coveredDates.size;
+
+                        // 🎯 INTEGRATE ACTIVITY LOGS
+                        let activityLogs = planner.activityLogs || [];
+                        let extraActivityDays = 0; let activityMinsTotal = 0;
+                        
+                        activityLogs.forEach(log => {
+                            activityMinsTotal += (parseInt(log.minutes) || 0);
+                            let logD = new Date(log.date); let dStr = logD.toISOString().split('T')[0];
+                            if (logD.getDay() !== 0 && !coveredDates.has(dStr)) {
+                                extraActivityDays++; coveredDates.add(dStr);
+                            }
+                        });
+
+                        totalActualDaysAll += extraActivityDays;
+                        
+                        if(hasCompletedChapters || activityLogs.length > 0) {
+                            totalDayGap -= extraActivityDays; 
+                            totalMinGap -= activityMinsTotal;
+                            hasCompletedChapters = true; // Force UI to show gap if there are logs
+                        }
+
                         tPct = totalTargetDaysAll > 0 ? Math.min(100, Math.round((totalActualDaysAll / totalTargetDaysAll) * 100)) : 0;
                     }
 
-                    // Dynamic UI: Show PENDING if no chapters are done yet
                     let gapDisplayHtml = `<span class="text-[10px] font-black text-slate-300 tracking-widest">PENDING</span>`;
                     if (hasCompletedChapters) {
                         gapDisplayHtml = `
                             <div class="flex flex-col gap-1 items-center">
                                 <span class="px-3 py-1 rounded-full text-[9px] font-black ${totalDayGap >= 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-600 border-rose-100'} border w-full text-center">${totalDayGap > 0 ? '+' : ''}${totalDayGap} Days</span>
                                 <span class="px-3 py-1 rounded-full text-[9px] font-black ${totalMinGap >= 0 ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-amber-50 text-amber-600 border-amber-100'} border w-full text-center">${totalMinGap > 0 ? '+' : ''}${totalMinGap} Mins</span>
-                            </div>
-                        `;
+                            </div>`;
                     }
 
                     rowsHtml += `
                         <div class="flex items-center justify-between p-5 border-b border-slate-100 last:border-0 hover:bg-slate-50 cursor-pointer transition-colors" onclick="openDrillDown('${st.className}','${st.sectionName}','${sub}', '${id}')">
-                            <div class="w-1/4 pl-2">
-                                <div class="text-[11px] font-black text-blue-600 uppercase tracking-widest">${sub}</div>
-                            </div>
+                            <div class="w-1/4 pl-2"><div class="text-[11px] font-black text-blue-600 uppercase tracking-widest">${sub}</div></div>
                             <div class="w-1/6 font-black text-slate-900 text-sm">${chDone} / ${chTotal} <span class="text-[8px] text-slate-400 block uppercase">Chapters</span></div>
                             <div class="w-1/3 pr-8">
                                 <div class="flex justify-between text-[9px] font-black uppercase text-blue-600 mb-1"><span>SYLLABUS</span><span>${sPct}%</span></div>
@@ -518,20 +522,12 @@
                     container.innerHTML += `
                         <details class="bg-white rounded-[2rem] border border-slate-200 shadow-sm overflow-hidden group">
                             <summary class="p-6 bg-white font-black text-slate-800 uppercase tracking-widest cursor-pointer outline-none flex justify-between items-center select-none hover:bg-slate-50 transition-colors">
-                                <div class="flex items-center gap-4">
-                                    <span class="text-xl tracking-tight">${st.className}</span>
-                                    <span class="text-slate-300">|</span>
-                                    <span class="text-blue-600">${st.sectionName}</span>
-                                </div>
+                                <div class="flex items-center gap-4"><span class="text-xl tracking-tight">${st.className}</span><span class="text-slate-300">|</span><span class="text-blue-600">${st.sectionName}</span></div>
                                 <span class="text-[10px] text-blue-600 bg-blue-50 border border-blue-100 px-4 py-2 rounded-full shadow-sm group-open:bg-slate-100 group-open:text-slate-500 group-open:border-slate-200 transition-colors">Toggle Subjects ➔</span>
                             </summary>
                             <div class="bg-white border-t border-slate-100">
                                 <div class="flex text-[9px] font-black text-slate-400 uppercase tracking-widest p-4 bg-slate-50 border-b border-slate-100 items-center">
-                                    <div class="w-1/4 pl-2">Subject</div>
-                                    <div class="w-1/6">Status</div>
-                                    <div class="w-1/3">Timeline Progress</div>
-                                    <div class="w-1/6 text-center">Net Variance</div>
-                                    <div class="w-12"></div>
+                                    <div class="w-1/4 pl-2">Subject</div><div class="w-1/6">Status</div><div class="w-1/3">Timeline Progress</div><div class="w-1/6 text-center">Net Variance</div><div class="w-12"></div>
                                 </div>
                                 ${rowsHtml}
                             </div>
@@ -539,17 +535,8 @@
                 }
             });
         }
-        // --- DRILL DOWN ENGINE (OPEN DETAILS) ---
-        function toggleDrillEditMode() {
-            isDrillEditMode = !isDrillEditMode;
-            const btn = document.getElementById('edit-toggle-btn');
-            btn.innerHTML = isDrillEditMode ? `🔓 Overrides Active` : `🔒 Protected View`;
-            btn.className = isDrillEditMode ? `px-8 py-3.5 bg-blue-600 text-white rounded-full text-[11px] font-black uppercase tracking-widest shadow-xl` : `px-8 py-3.5 bg-slate-100 text-slate-900 rounded-full text-[11px] font-black uppercase tracking-widest border border-slate-300 hover:bg-slate-200 transition-all`;
-            document.getElementById('drill-save-bar').classList.toggle('hidden', !isDrillEditMode);
-            openDrillDown(lastDrillParams.cls, lastDrillParams.sec, lastDrillParams.sub, currentUploadId);
-        }
 
-function openDrillDown(cls, sec, sub, fullId) {
+        function openDrillDown(cls, sec, sub, fullId) {
             lastDrillParams = {cls, sec, sub}; currentUploadId = fullId;
             document.getElementById('drill-title').innerText = sub;
             document.getElementById('drill-subtitle').innerText = `${cls} | ${sec}`;
@@ -558,26 +545,11 @@ function openDrillDown(cls, sec, sub, fullId) {
             const assign = assignments.find(a => a.id === fullId) || {};
             const planner = planners.find(p => p.id === fullId);
 
-            const getWorkingDays = (startDateStr, endDateStr) => {
-                if (!startDateStr || !endDateStr) return 0;
-                let count = 0;
-                let cur = new Date(startDateStr);
-                const finish = new Date(endDateStr);
-                if(isNaN(cur) || isNaN(finish)) return 0;
-                
-                while (cur <= finish) {
-                    if (cur.getDay() !== 0) count++; // 0 is Sunday, so we only count 1-6
-                    cur.setDate(cur.getDate() + 1);
-                }
-                return count;
-            };
-
             document.getElementById('stat-target').innerText = assign.targetDate ? new Date(assign.targetDate).toLocaleDateString('en-GB') : 'Not Set';
 
             if ((!planner || !planner.syllabusData || planner.syllabusData.length === 0) && !isDemoMode) {
                 container.innerHTML = `<div class="p-32 text-center text-slate-300 font-black uppercase text-sm tracking-[0.5em]">No Data Defined</div>`;
-                document.getElementById('stat-prog').innerText = "--";
-                document.getElementById('stat-gap').innerText = "--";
+                document.getElementById('stat-prog').innerText = "--"; document.getElementById('stat-gap').innerText = "--";
                 return;
             } 
             
@@ -587,8 +559,9 @@ function openDrillDown(cls, sec, sub, fullId) {
             const dRowsCount = allRows.filter(r => r.isDone).length;
             document.getElementById('stat-prog').innerText = allRows.length > 0 ? Math.round((dRowsCount / allRows.length) * 100) + "% Done" : "0% Done";
 
-            let completedTargetDays = 0;
-            let completedActualDays = 0;
+            let completedTargetDays = 0, completedActualDays = 0;
+            let completedTargetMins = 0, completedActualMins = 0;
+            let coveredDates = new Set();
             let htmlContent = "";
 
             chNames.forEach(ch => {
@@ -599,52 +572,47 @@ function openDrillDown(cls, sec, sub, fullId) {
                 const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
                 const targetMins = parseInt(rows[0]?.['Target Minutes For Chapter']) || 0;
                 
-                // 🧮 SMART MINUTES CALCULATOR FOR CHAPTER
-                let dailyMap = {};
-                let extraMins = 0;
+                let dailyMap = {}; let extraMins = 0;
                 doneR.forEach(r => {
-                    let d = r.completedDate; 
-                    let m = parseInt(r.completedMinutes) || 0;
-                    if(d) { if(!dailyMap[d] || m > dailyMap[d]) dailyMap[d] = m; } 
-                    else extraMins += m;
+                    let d = r.completedDate; let m = parseInt(r.completedMinutes) || 0;
+                    if(d) { if(!dailyMap[d] || m > dailyMap[d]) dailyMap[d] = m; } else extraMins += m;
                 });
                 const actualMins = Object.values(dailyMap).reduce((a,b) => a+b, 0) + extraMins;
                 
-                let chStartStr = rows[0]?.chapterStartDate;
-                let chStart = chStartStr ? new Date(chStartStr) : null;
-                
+                let chStartStr = rows[0]?.chapterStartDate; let chStart = chStartStr ? new Date(chStartStr) : null;
                 const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
                 const chEnd = compDates.length ? new Date(Math.max(...compDates)) : null;
 
-                let gapHtml = "";
-                let actualDaysTaken = 0;
-                let dayGap = 0;
-                let minGap = 0;
+                let gapHtml = "", actualDaysTaken = 0, dayGap = 0, minGap = 0;
+
+                if (chStart && chEnd) {
+                    let cur = new Date(chStart); let finish = new Date(chEnd);
+                    while(cur <= finish) {
+                        if(cur.getDay() !== 0) {
+                            actualDaysTaken++;
+                            coveredDates.add(cur.toISOString().split('T')[0]);
+                        }
+                        cur.setDate(cur.getDate() + 1);
+                    }
+                }
 
                 if (isF && chStart && chEnd) {
-                    actualDaysTaken = getWorkingDays(chStart, chEnd);
-                    
                     dayGap = targetDays - actualDaysTaken; 
                     minGap = targetMins - actualMins;      
 
-                    completedTargetDays += targetDays;
-                    completedActualDays += actualDaysTaken;
+                    completedTargetDays += targetDays; completedTargetMins += targetMins;
+                    completedActualDays += actualDaysTaken; completedActualMins += actualMins;
 
                     gapHtml = `
                         <div class="flex flex-wrap gap-2 mt-2">
-                            <span class="text-[9px] font-black px-3 py-1 rounded-full border ${dayGap >= 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-600 border-rose-100'}">
-                                ${dayGap > 0 ? '+' : ''}${dayGap} Days Variance
-                            </span>
-                            <span class="text-[9px] font-black px-3 py-1 rounded-full border ${minGap >= 0 ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-amber-50 text-amber-600 border-amber-100'}">
-                                ${minGap > 0 ? '+' : ''}${minGap}m Class Variance
-                            </span>
+                            <span class="text-[9px] font-black px-3 py-1 rounded-full border ${dayGap >= 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-600 border-rose-100'}">${dayGap > 0 ? '+' : ''}${dayGap} Days Variance</span>
+                            <span class="text-[9px] font-black px-3 py-1 rounded-full border ${minGap >= 0 ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-amber-50 text-amber-600 border-amber-100'}">${minGap > 0 ? '+' : ''}${minGap}m Class Variance</span>
                         </div>`;
                 }
 
                 let startHtml = `<span class="text-slate-900 ml-1 font-bold">${chStart ? chStart.toLocaleDateString('en-GB') : '--'}</span>`;
                 if (isDrillEditMode && rows[0]?.chapterStartDate) {
-                    startHtml = `<input type="date" class="ch-start-input text-[10px] border px-1 py-0.5 ml-1" data-ch="${ch}" value="${rows[0].chapterStartDate}"> 
-                                 <button onclick="clearChapterStart('${ch}')" class="text-rose-500 ml-2 hover:underline font-bold text-[10px] uppercase">Clear</button>`;
+                    startHtml = `<input type="date" class="ch-start-input text-[10px] border px-1 py-0.5 ml-1" data-ch="${ch}" value="${rows[0].chapterStartDate}"> <button onclick="clearChapterStart('${ch}')" class="text-rose-500 ml-2 hover:underline font-bold text-[10px] uppercase">Clear</button>`;
                 }
 
                 let tops = rows.map((r) => {
@@ -670,11 +638,7 @@ function openDrillDown(cls, sec, sub, fullId) {
                                     <input type="date" id="dd-date-${absI}" class="dd-date text-[10px] p-1.5 border rounded-lg outline-none" data-idx="${absI}" value="${r.completedDate || ''}">
                                     <input type="number" id="dd-min-${absI}" class="dd-min w-16 text-[10px] p-1.5 border rounded-lg outline-none text-center" data-idx="${absI}" value="${r.completedMinutes || ''}" placeholder="Mins">
                                 </div>
-                            ` : `
-                                <div class="text-right">
-                                    <span class="text-[9px] font-black px-4 py-1.5 rounded-full ${r.isDone ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-slate-100 text-slate-400'}">${r.isDone ? '✅ LOGGED' : '⏳ AWAITING'}</span>
-                                </div>
-                            `}
+                            ` : `<div class="text-right"><span class="text-[9px] font-black px-4 py-1.5 rounded-full ${r.isDone ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' : 'bg-slate-100 text-slate-400'}">${r.isDone ? '✅ LOGGED' : '⏳ AWAITING'}</span></div>`}
                         </div>
                     </div>`;
                 }).join('');
@@ -685,14 +649,11 @@ function openDrillDown(cls, sec, sub, fullId) {
                             <div>
                                 <h4 class="font-black text-slate-900 uppercase text-lg tracking-tight">${ch}</h4>
                                 <div class="flex gap-4 mt-1 text-[10px] font-bold text-slate-400 uppercase items-center">
-                                    <span>Target: ${targetDays} Days / ${targetMins}m</span>
-                                    ${gapHtml}
+                                    <span>Target: ${targetDays} Days / ${targetMins}m</span>${gapHtml}
                                     <span class="text-[9px] text-blue-500 uppercase tracking-widest group-open:hidden ml-2">Click to View Topics ➔</span>
                                 </div>
                             </div>
-                            <span class="text-[11px] font-black px-8 py-3 rounded-full ${isF ? 'bg-emerald-500 text-white shadow-lg' : (chStart ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400')}">
-                                ${isF ? '100% COMPLETE' : (chStart ? 'ONGOING' : 'PENDING')}
-                            </span>
+                            <span class="text-[11px] font-black px-8 py-3 rounded-full ${isF ? 'bg-emerald-500 text-white shadow-lg' : (chStart ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-400')}">${isF ? '100% COMPLETE' : (chStart ? 'ONGOING' : 'PENDING')}</span>
                         </summary>
                         <div class="grid grid-cols-4 bg-slate-50 text-[9px] font-black text-slate-500 text-center border-b uppercase">
                             <div class="p-4 border-r border-slate-200 flex items-center justify-center">Start: ${startHtml}</div>
@@ -704,16 +665,60 @@ function openDrillDown(cls, sec, sub, fullId) {
                     </details>`;
             });
 
-            let totalOverallGap = completedTargetDays - completedActualDays;
-            if (completedTargetDays > 0) {
-                document.getElementById('stat-gap').innerText = totalOverallGap > 0 ? `+${totalOverallGap} Days` : `${totalOverallGap} Days`;
-                document.getElementById('stat-gap').className = `text-sm font-black ${totalOverallGap >= 0 ? 'text-emerald-600' : 'text-rose-600'}`;
+            // 🎯 PROCESS ACTIVITY LOGS FOR DRILL DOWN
+            let activityLogs = planner.activityLogs || [];
+            let extraActivityDays = 0; let activityMinsTotal = 0;
+            let activityHtml = "";
+
+            if (activityLogs.length > 0) {
+                activityLogs.forEach(log => {
+                    activityMinsTotal += (parseInt(log.minutes) || 0);
+                    let logD = new Date(log.date); let dStr = logD.toISOString().split('T')[0];
+                    if (logD.getDay() !== 0 && !coveredDates.has(dStr)) {
+                        extraActivityDays++; coveredDates.add(dStr);
+                    }
+                });
+
+                let logRows = activityLogs.map(log => `
+                    <div class="flex justify-between items-center p-6 bg-white border-b border-amber-50 last:border-0 hover:bg-amber-50/50 transition-colors">
+                        <div class="flex gap-6 items-center">
+                            <span class="text-[10px] font-black text-amber-500 bg-amber-100 px-3 py-1.5 rounded-lg uppercase tracking-widest">${new Date(log.date).toLocaleDateString('en-GB')}</span>
+                            <div>
+                                <div class="text-[11px] font-bold text-slate-800 uppercase">${log.reason}</div>
+                                <div class="text-[9px] text-slate-400 mt-1 uppercase font-bold">By: ${log.loggedBy}</div>
+                            </div>
+                        </div>
+                        <div class="text-[11px] font-black text-amber-600 bg-amber-50 border border-amber-100 px-4 py-2 rounded-xl">${log.minutes} Mins</div>
+                    </div>`).join('');
+                
+                activityHtml = `
+                    <details class="bg-[#fffbeb] border border-amber-200 rounded-[2.5rem] overflow-hidden mb-8 shadow-sm group">
+                        <summary class="p-8 bg-[#fffbeb] border-b border-amber-100 flex justify-between items-center cursor-pointer select-none outline-none">
+                            <div class="flex items-center gap-4"><span class="text-xl text-2xl mb-1">🎯</span>
+                                <div><h4 class="font-black text-amber-900 uppercase text-lg tracking-tight">Revision & Activity Logs</h4><div class="text-[10px] font-bold text-amber-600 uppercase mt-1">Independent Sessions Logged</div></div>
+                            </div>
+                            <span class="text-[11px] font-black px-8 py-3 rounded-full bg-amber-200 text-amber-800 shadow-sm">${activityLogs.length} LOGS</span>
+                        </summary>
+                        <div class="divide-y divide-amber-100/50">${logRows}</div>
+                    </details>`;
+            }
+
+            // OVERALL SUBJECT GAP CALCULATION (Including Logs)
+            let totalOverallDayGap = completedTargetDays - (completedActualDays + extraActivityDays);
+            let totalOverallMinGap = completedTargetMins - (completedActualMins + activityMinsTotal);
+
+            if (completedTargetDays > 0 || activityLogs.length > 0) {
+                document.getElementById('stat-gap').innerHTML = `
+                    <span class="text-sm font-black ${totalOverallDayGap >= 0 ? 'text-emerald-600' : 'text-rose-600'}">${totalOverallDayGap > 0 ? '+' : ''}${totalOverallDayGap} Days</span>
+                    <span class="text-sm font-black mx-1">|</span>
+                    <span class="text-sm font-black ${totalOverallMinGap >= 0 ? 'text-blue-600' : 'text-amber-600'}">${totalOverallMinGap > 0 ? '+' : ''}${totalOverallMinGap} Mins</span>
+                `;
             } else {
                 document.getElementById('stat-gap').innerText = "PENDING COMPLETIONS";
                 document.getElementById('stat-gap').className = `text-[11px] font-black text-slate-400 mt-1`;
             }
 
-            container.innerHTML = htmlContent;
+            container.innerHTML = htmlContent + activityHtml;
             openModal('drill-down-modal');
         }
         function handleAdminUntick(cb, idx) {
