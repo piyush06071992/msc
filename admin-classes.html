@@ -83,10 +83,9 @@
 
         let availableDepartments = [];
         let uniqueClasses = new Set();
-        let allSectionsData = []; // Stores flat data for easy editing
-        let editingSectionId = null; // Tracks if we are editing an existing doc
+        let allSectionsData = []; 
+        let editingSectionId = null; 
 
-        // Color Palettes for different classes
         const THEMES = [
             { text: 'text-blue-600', bg: 'bg-blue-50', hover: 'hover:border-blue-300' },
             { text: 'text-emerald-600', bg: 'bg-emerald-50', hover: 'hover:border-emerald-300' },
@@ -128,7 +127,7 @@
 
         function populateClassDropdown() {
             const select = document.getElementById('class-select');
-            const currentVal = select.value; // Remember selection if re-rendering during edit
+            const currentVal = select.value; 
             select.innerHTML = '<option value="">Select an existing class...</option>';
             
             Array.from(uniqueClasses).sort().forEach(className => {
@@ -157,7 +156,7 @@
             const snap = await db.collection("institute_structure").orderBy("className").get();
             
             uniqueClasses.clear();
-            allSectionsData = []; // Reset global tracking array
+            allSectionsData = []; 
             
             if (snap.empty) {
                 container.innerHTML = `<div class="py-20 text-center text-slate-400 font-bold uppercase text-[10px] tracking-widest border-2 border-dashed border-slate-200 rounded-3xl">No Classes Configured Yet</div>`;
@@ -173,7 +172,7 @@
                 
                 const secData = { id: doc.id, ...data };
                 groupedData[data.className].push(secData);
-                allSectionsData.push(secData); // Save to flat array for easy editing
+                allSectionsData.push(secData); 
             });
 
             container.innerHTML = "";
@@ -198,7 +197,7 @@
                     groupHtml += `
                         <div class="glass p-6 rounded-[2rem] border-2 border-transparent shadow-lg relative group transition-all ${theme.hover} hover:shadow-xl flex flex-col justify-between min-h-[160px]">
                             
-                            <div class="absolute top-6 right-6 flex gap-2 opacity-0 group-hover:opacity-100 transition-all">
+                            <div class="absolute top-6 right-6 flex gap-2 opacity-0 group-hover:opacity-100 transition-all z-10">
                                 <button onclick="openEditModal('${sec.id}')" title="Edit Section" class="p-2 bg-slate-50 rounded-xl text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors">
                                     ✏️
                                 </button>
@@ -208,7 +207,7 @@
                             </div>
 
                             <div>
-                                <h3 class="text-3xl font-black text-slate-900 mb-4 tracking-tighter w-3/4 truncate">Sec: ${sec.sectionName}</h3>
+                                <h3 class="text-2xl font-black text-slate-900 mb-3 tracking-tighter pr-16 leading-tight break-words">Sec: ${sec.sectionName}</h3>
                                 <div class="flex flex-wrap gap-1.5 pt-4 border-t border-slate-100">
                                     ${subjectsHtml}
                                 </div>
@@ -226,7 +225,7 @@
         }
 
         function openModal() { 
-            editingSectionId = null; // Ensure we are in "Create" mode
+            editingSectionId = null; 
             document.getElementById('modal-title').innerText = "Define Section Layout";
             document.getElementById('class-select').value = '';
             document.getElementById('new-class-input').classList.add('hidden');
@@ -239,16 +238,14 @@
             const sec = allSectionsData.find(s => s.id === id);
             if(!sec) return;
             
-            editingSectionId = id; // Set flag to "Edit" mode
+            editingSectionId = id; 
             document.getElementById('modal-title').innerText = "Edit Section Layout";
             
-            // Populate existing fields
             const classSelect = document.getElementById('class-select');
             classSelect.value = sec.className;
             document.getElementById('new-class-input').classList.add('hidden');
             document.getElementById('sec-name').value = sec.sectionName;
             
-            // Tick correct checkboxes
             document.querySelectorAll('.cb-subject').forEach(cb => {
                 cb.checked = sec.subjects.includes(cb.value);
             });
@@ -277,17 +274,14 @@
 
             try {
                 if (editingSectionId) {
-                    // EDIT MODE
                     const oldSec = allSectionsData.find(s => s.id === editingSectionId);
                     
-                    // 1. Update structure
                     await db.collection("institute_structure").doc(editingSectionId).update({
                         className: className,
                         sectionName: secName,
                         subjects: subjects
                     });
 
-                    // 2. CASCADE UPDATE TIMETABLE: If they changed the name, we must fix existing timetables
                     if (oldSec.className !== className || oldSec.sectionName !== secName) {
                         const ttSnap = await db.collection("timetable")
                             .where("className", "==", oldSec.className)
@@ -305,8 +299,6 @@
                     alert("Section updated successfully!");
 
                 } else {
-                    // CREATE MODE
-                    // Verify duplicate doesn't exist
                     const checkSnap = await db.collection("institute_structure")
                         .where("className", "==", className)
                         .where("sectionName", "==", secName)
@@ -335,9 +327,9 @@
             }
         }
 
-        // --- NEW CASCADE DELETE FUNCTION ---
+        // --- NEW CASCADE DELETE FUNCTION (Timetables + Lesson Planners) ---
         async function deleteStructure(id) {
-            if(confirm("🚨 DANGER: Remove this section entirely?\n\nThis will ALSO permanently delete all Timetable schedules associated with this section. Are you absolutely sure?")) {
+            if(confirm("🚨 DANGER: Remove this section entirely?\n\nThis will ALSO permanently delete all Timetable schedules AND Lesson Planners associated with this section. Are you absolutely sure?")) {
                 
                 try {
                     // 1. Find section details so we know what timetables to delete
@@ -356,12 +348,23 @@
                             ttSnap.docs.forEach(doc => { batch.delete(doc.ref); });
                             await batch.commit();
                         }
+
+                        // 3. Cascade Delete all Lesson Planners for this class/section
+                        const lpSnap = await db.collection("lesson_planners")
+                            .where("className", "==", className)
+                            .where("section", "==", sectionName).get();
+                        
+                        if (!lpSnap.empty) {
+                            const batch = db.batch();
+                            lpSnap.docs.forEach(doc => { batch.delete(doc.ref); });
+                            await batch.commit();
+                        }
                     }
                     
-                    // 3. Delete the actual structure document
+                    // 4. Delete the actual structure document
                     await db.collection("institute_structure").doc(id).delete();
                     
-                    alert("Section and its timetables were successfully deleted.");
+                    alert("Section, Timetables, and Lesson Planners were successfully deleted.");
                     loadStructure();
                 } catch(e) {
                     console.error("Error deleting:", e);
