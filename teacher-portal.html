@@ -103,7 +103,81 @@
 
             const options = { day: 'numeric', month: 'short', year: 'numeric' };
             document.getElementById('current-date').innerText = `Date: ${new Date().toLocaleDateString('en-GB', options)}`;
+            
+            // Trigger the background alert timer using the teacher's name
+            await loadTodaysScheduleForAlerts(safeName);
         };
+
+        // --- NEW LIVE TICKER LOGIC --- //
+        let todaysSchedule = [];
+        const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+        function getTodayString() { return daysOfWeek[new Date().getDay()]; }
+
+        function parseTimeToMinutes(timeStr) {
+            if (!timeStr) return 0;
+            const [time, modifier] = timeStr.split(' ');
+            let [hours, minutes] = time.split(':').map(Number);
+            if (hours === 12) hours = 0;
+            if (modifier === 'PM') hours += 12;
+            return hours * 60 + minutes;
+        }
+
+        async function loadTodaysScheduleForAlerts(teacherName) {
+            try {
+                // Fetch ONLY today's classes for this specific teacher
+                const snap = await db.collection("timetable")
+                    .where("teacherName", "==", teacherName)
+                    .where("day", "==", getTodayString())
+                    .get();
+                todaysSchedule = snap.docs.map(d => d.data());
+                
+                // Check immediately, then check again every 60 seconds
+                checkUpcomingClasses(); 
+                setInterval(checkUpcomingClasses, 60000); 
+            } catch(e) { console.error("Error loading schedule for alerts:", e); }
+        }
+
+        function checkUpcomingClasses() {
+            if (todaysSchedule.length === 0) return;
+
+            const now = new Date();
+            const currentMins = now.getHours() * 60 + now.getMinutes();
+            let activeAlert = null;
+
+            for (let cls of todaysSchedule) {
+                if (!cls.timeRange) continue;
+                
+                // Extract just the start time (e.g., "11:00 AM" from "11:00 AM - 12:30 PM")
+                const startTimeStr = cls.timeRange.split(' - ')[0];
+                const startMins = parseTimeToMinutes(startTimeStr);
+                
+                // Show alert IF current time is between (Start - 10 mins) and (Start + 5 mins)
+                if (currentMins >= startMins - 10 && currentMins <= startMins + 5) {
+                    let diff = startMins - currentMins;
+                    let timeMsg = "";
+                    
+                    if (diff > 0) timeMsg = `starting in ${diff} mins`;
+                    else if (diff === 0) timeMsg = `starting NOW`;
+                    else timeMsg = `started ${Math.abs(diff)} mins ago`;
+
+                    const roomText = cls.room ? `in Room ${cls.room}` : '';
+                    activeAlert = `Class Alert: ${cls.className} | ${cls.section} (${cls.subject || 'Duty'}) is ${timeMsg} ${roomText}`;
+                    break; // We found the imminent class, stop checking others
+                }
+            }
+
+            const alertBox = document.getElementById('urgent-class-alert');
+            const alertText = document.getElementById('urgent-class-text');
+
+            if (activeAlert) {
+                alertText.innerText = activeAlert;
+                alertBox.classList.remove('hidden');
+            } else {
+                alertBox.classList.add('hidden'); // Auto-hides when outside the window
+            }
+        }
+        // --- END LIVE TICKER LOGIC --- //
 
         async function logout() {
             if(confirm("Are you sure you want to securely log out?")) {
