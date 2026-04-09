@@ -26,12 +26,23 @@
         
         /* NOTICEBOARD MATRIX PRINT SETTINGS */
         @media print {
-            @page { size: A4 landscape; margin: 10mm; }
+            @page { size: A4 landscape; margin: 8mm; }
             body * { visibility: hidden; }
             #print-render-area, #print-render-area * { visibility: visible; }
-            #print-render-area { position: absolute; left: 0; top: 0; width: 100%; font-family: sans-serif; background: white; }
+            #print-render-area { position: absolute; left: 0; top: 0; width: 100%; font-family: 'Arial', sans-serif; background: white; }
             .no-print { display: none !important; }
             .page-break { page-break-after: always; }
+            
+            /* Clean Matrix Styling matching your reference images */
+            .matrix-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+            .matrix-table th, .matrix-table td { border: 2px solid #1e293b; padding: 6px; text-align: center; }
+            .matrix-time-header { background-color: #fef08a !important; color: #000 !important; font-size: 12px; font-weight: 900; -webkit-print-color-adjust: exact; }
+            .matrix-section-cell { font-weight: 900; font-size: 16px; text-transform: uppercase; color: white !important; -webkit-print-color-adjust: exact; }
+            .matrix-content-cell { vertical-align: top; background-color: white !important; -webkit-print-color-adjust: exact; }
+            .matrix-subject { font-size: 13px; font-weight: 900; text-transform: uppercase; margin-bottom: 2px; }
+            .matrix-teacher { font-size: 11px; font-weight: bold; color: #0f172a; margin-top: 4px; }
+            .matrix-remark { font-size: 10px; font-style: italic; color: #475569; font-weight: bold; }
+            .matrix-room { font-size: 10px; font-weight: bold; color: #64748b; margin-top: 2px; }
         }
     </style>
 </head>
@@ -141,8 +152,8 @@
                 <div>
                     <label class="block text-[10px] font-black text-slate-400 uppercase mb-2">Timeframe</label>
                     <select id="p-timeframe" class="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold outline-none cursor-pointer text-blue-700">
-                        <option value="DAY">Noticeboard: One Day (Matrix)</option>
-                        <option value="WEEK">Noticeboard: Whole Week (Matrix)</option>
+                        <option value="DAY">Noticeboard: Daily Matrix</option>
+                        <option value="WEEK">Noticeboard: Weekly Matrix</option>
                     </select>
                 </div>
             </div>
@@ -172,6 +183,9 @@
         let currentEditClass = "";
         let currentEditSection = "";
         const SPECIAL_SUBJECTS = ['BREAK', 'ASSEMBLY', 'EXAM', 'EVENT'];
+        
+        // Matrix colors for section rows (Matching your uploaded screenshots)
+        const MATRIX_COLORS = ['#65a30d', '#dc2626', '#d97706', '#0284c7', '#7c3aed', '#059669', '#be123c', '#0f766e'];
 
         async function init() {
             await Promise.all([fetchStructure(), fetchTeachers(), fetchTemplatesDropdown()]);
@@ -284,7 +298,9 @@
             });
         }
 
-        // --- NEW MATRIX PRINT ENGINE ---
+        // --- NEW BULLETPROOF MATRIX PRINT ENGINE ---
+        function openPrintModal() { document.getElementById('print-modal').classList.replace('hidden', 'flex'); }
+
         async function executeAdvancedPrint() {
             const scope = document.getElementById('p-scope').value;
             const timeframe = document.getElementById('p-timeframe').value;
@@ -298,16 +314,20 @@
                 const snap = await db.collection("timetable").get();
                 const allData = snap.docs.map(d => d.data());
 
-                // Helper to extract and sort unique time ranges across selected data
-                const sortTimeRanges = (ranges) => [...new Set(ranges)].sort((a,b) => {
-                    const timeA = a.split(' - ')[0]; const timeB = b.split(' - ')[0];
-                    return new Date('1970/01/01 ' + timeA) - new Date('1970/01/01 ' + timeB);
-                });
+                // IRONCLAD SORTER: Automatically filters out ghost data with missing times
+                const sortTimeRanges = (ranges) => {
+                    const cleanRanges = ranges.filter(r => r && typeof r === 'string' && r.includes(' - '));
+                    return [...new Set(cleanRanges)].sort((a,b) => {
+                        const timeA = a.split(' - ')[0]; 
+                        const timeB = b.split(' - ')[0];
+                        return new Date('1970/01/01 ' + timeA) - new Date('1970/01/01 ' + timeB);
+                    });
+                };
 
                 let printHtml = "";
 
                 if (timeframe === "DAY") {
-                    // MATRIX FORMAT 1: ROWS = SECTIONS, COLS = TIMESLOTS
+                    // MATRIX FORMAT 1: Daily Noticeboard (Rows = Sections, Cols = Timeslots)
                     const selectedDay = document.getElementById('day-selector').value;
                     const targetClasses = scope === "ALL" ? [...new Set(structureData.map(s => s.className))] : [scope.split('|')[1]];
                     
@@ -316,44 +336,60 @@
                         if (scope.startsWith("SEC|")) targetSections = [scope.split('|')[2]];
                         
                         const classSlots = allData.filter(t => t.className === cName && targetSections.includes(t.section) && t.day === selectedDay);
-                        if(classSlots.length === 0) return; // Skip empty classes
+                        if(classSlots.length === 0) return; // Skip if empty
                         
                         const uniqueRanges = sortTimeRanges(classSlots.map(s => s.timeRange));
+                        if(uniqueRanges.length === 0) return;
                         
+                        let colorIdx = 0;
+
                         printHtml += `
                             <div class="page-break" style="padding: 10px;">
-                                <h2 style="text-align: center; font-size: 18px; font-weight: 900; text-transform: uppercase; margin-bottom: 10px; background: #e2e8f0; padding: 6px; border: 2px solid #000;">
-                                    ${cName} - ${selectedDay}
+                                <h2 style="text-align: center; font-size: 22px; font-weight: 900; text-transform: uppercase; margin-bottom: 10px; background: #ea580c; color: white; padding: 8px; border: 2px solid #000; -webkit-print-color-adjust: exact;">
+                                    TIME TABLE ${cName} - ${selectedDay}
                                 </h2>
-                                <table style="width: 100%; border-collapse: collapse; table-layout: fixed;">
+                                <table class="matrix-table">
                                     <thead>
                                         <tr>
-                                            <th style="border: 2px solid #000; padding: 4px; background-color: #0f172a; color: white; width: 90px; font-size:12px;">SECTION</th>
-                                            ${uniqueRanges.map(r => `<th style="border: 2px solid #000; padding: 4px; background-color: #1e3a8a; color: white; font-size:10px;">${r}</th>`).join('')}
+                                            <th style="background-color: #ea580c; color: white; width: 110px;">SECTION</th>
+                                            ${uniqueRanges.map(r => `<th class="matrix-time-header">${r}</th>`).join('')}
                                         </tr>
                                     </thead>
                                     <tbody>`;
                         
                         targetSections.sort().forEach(sec => {
                             const secSlots = classSlots.filter(s => s.section === sec);
-                            if(secSlots.length === 0) return; // Skip sections with no data
+                            if(secSlots.length === 0) return; 
                             
+                            const rowColor = MATRIX_COLORS[colorIdx % MATRIX_COLORS.length];
+                            colorIdx++;
+
                             printHtml += `<tr>
-                                <td style="border: 2px solid #000; padding: 4px; font-weight: 900; text-align: center; background-color: #f1f5f9; font-size:13px;">${sec}</td>`;
+                                <td class="matrix-section-cell" style="background-color: ${rowColor};">${sec}</td>`;
                             
                             uniqueRanges.forEach(range => {
                                 const slotsHere = secSlots.filter(s => s.timeRange === range);
-                                printHtml += `<td style="border: 2px solid #000; padding: 4px; text-align: center; vertical-align: top;">`;
-                                slotsHere.forEach(slot => {
-                                    let subColor = '#e11d48';
-                                    if(['BREAK','ASSEMBLY','EXAM','EVENT'].includes(slot.subject)) subColor = '#0f172a';
-                                    printHtml += `
-                                        <strong style="display:block; color:${subColor}; font-size:11px; font-weight:900; text-transform:uppercase;">${slot.subject}</strong>
-                                        ${slot.remark ? `<div style="font-size:9px; font-style:italic; color:#64748b; font-weight:bold; margin-top:2px;">(${slot.remark})</div>` : ''}
-                                        ${slot.teacher !== 'NONE' ? `<div style="font-size:10px; color:#059669; font-weight:bold; margin-top:3px;">${slot.teacher}</div>` : ''}
-                                        ${slot.room ? `<div style="font-size:9px; color:#475569; font-weight:bold; margin-top:1px;">RM: ${slot.room}</div>` : ''}
-                                    `;
-                                });
+                                printHtml += `<td class="matrix-content-cell">`;
+                                
+                                if(slotsHere.some(s => SPECIAL_SUBJECTS.includes(s.subject))) {
+                                    const spSlot = slotsHere.find(s => SPECIAL_SUBJECTS.includes(s.subject));
+                                    printHtml += `<div style="font-weight:900; font-size:14px; color:#0f172a; text-transform:uppercase;">${spSlot.subject}</div>`;
+                                } else {
+                                    slotsHere.forEach(slot => {
+                                        // Auto-color code specific common subjects
+                                        let subColor = '#000';
+                                        if (slot.subject.toUpperCase().includes('CHEMISTRY')) subColor = '#dc2626';
+                                        if (slot.subject.toUpperCase().includes('PHYSICS')) subColor = '#2563eb';
+                                        if (slot.subject.toUpperCase().includes('MATH')) subColor = '#000';
+
+                                        printHtml += `
+                                            <div class="matrix-subject" style="color: ${subColor};">${slot.subject}</div>
+                                            ${slot.remark ? `<div class="matrix-remark">(${slot.remark})</div>` : ''}
+                                            ${slot.teacher !== 'NONE' ? `<div class="matrix-teacher">${slot.teacher}</div>` : ''}
+                                            ${slot.room ? `<div class="matrix-room">RM: ${slot.room}</div>` : ''}
+                                        `;
+                                    });
+                                }
                                 printHtml += `</td>`;
                             });
                             printHtml += `</tr>`;
@@ -362,7 +398,7 @@
                     });
 
                 } else {
-                    // MATRIX FORMAT 2: ROWS = DAYS, COLS = TIMESLOTS (Weekly View for a Section)
+                    // MATRIX FORMAT 2: Weekly Noticeboard (Rows = Days, Cols = Timeslots)
                     const daysOrder = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                     let targetStructures = structureData;
                     if(scope.startsWith("CLASS|")) targetStructures = structureData.filter(s => s.className === scope.split('|')[1]);
@@ -375,41 +411,54 @@
                         if(secSlots.length === 0) return;
                         
                         const uniqueRanges = sortTimeRanges(secSlots.map(s => s.timeRange));
-                        
+                        if(uniqueRanges.length === 0) return;
+
                         printHtml += `
                             <div class="page-break" style="padding: 10px;">
-                                <h2 style="text-align: center; font-size: 18px; font-weight: 900; text-transform: uppercase; margin-bottom: 10px; background: #e2e8f0; padding: 6px; border: 2px solid #000;">
-                                    ${struct.className} - SEC: ${struct.sectionName} (WEEKLY)
+                                <h2 style="text-align: center; font-size: 22px; font-weight: 900; text-transform: uppercase; margin-bottom: 10px; background: #2563eb; color: white; padding: 8px; border: 2px solid #000; -webkit-print-color-adjust: exact;">
+                                    TIME TABLE ${struct.className} - SEC: ${struct.sectionName}
                                 </h2>
-                                <table style="width: 100%; border-collapse: collapse; table-layout: fixed;">
+                                <table class="matrix-table">
                                     <thead>
                                         <tr>
-                                            <th style="border: 2px solid #000; padding: 4px; background-color: #0f172a; color: white; width: 90px; font-size:12px;">DAY</th>
-                                            ${uniqueRanges.map(r => `<th style="border: 2px solid #000; padding: 4px; background-color: #1e3a8a; color: white; font-size:10px;">${r}</th>`).join('')}
+                                            <th style="background-color: #2563eb; color: white; width: 110px; font-size:14px;">DAY</th>
+                                            ${uniqueRanges.map(r => `<th class="matrix-time-header">${r}</th>`).join('')}
                                         </tr>
                                     </thead>
                                     <tbody>`;
                         
+                        let colorIdx = 0;
                         daysOrder.forEach(day => {
                             const daySlots = secSlots.filter(s => s.day === day);
                             if(daySlots.length === 0) return;
                             
+                            const rowColor = MATRIX_COLORS[colorIdx % MATRIX_COLORS.length];
+                            colorIdx++;
+
                             printHtml += `<tr>
-                                <td style="border: 2px solid #000; padding: 4px; font-weight: 900; text-align: center; background-color: #f1f5f9; font-size:12px; text-transform:uppercase;">${day}</td>`;
+                                <td class="matrix-section-cell" style="background-color: ${rowColor}; font-size: 14px;">${day}</td>`;
                             
                             uniqueRanges.forEach(range => {
                                 const slotsHere = daySlots.filter(s => s.timeRange === range);
-                                printHtml += `<td style="border: 2px solid #000; padding: 4px; text-align: center; vertical-align: top;">`;
-                                slotsHere.forEach(slot => {
-                                    let subColor = '#e11d48';
-                                    if(['BREAK','ASSEMBLY','EXAM','EVENT'].includes(slot.subject)) subColor = '#0f172a';
-                                    printHtml += `
-                                        <strong style="display:block; color:${subColor}; font-size:11px; font-weight:900; text-transform:uppercase;">${slot.subject}</strong>
-                                        ${slot.remark ? `<div style="font-size:9px; font-style:italic; color:#64748b; font-weight:bold; margin-top:2px;">(${slot.remark})</div>` : ''}
-                                        ${slot.teacher !== 'NONE' ? `<div style="font-size:10px; color:#059669; font-weight:bold; margin-top:3px;">${slot.teacher}</div>` : ''}
-                                        ${slot.room ? `<div style="font-size:9px; color:#475569; font-weight:bold; margin-top:1px;">RM: ${slot.room}</div>` : ''}
-                                    `;
-                                });
+                                printHtml += `<td class="matrix-content-cell">`;
+                                
+                                if(slotsHere.some(s => SPECIAL_SUBJECTS.includes(s.subject))) {
+                                    const spSlot = slotsHere.find(s => SPECIAL_SUBJECTS.includes(s.subject));
+                                    printHtml += `<div style="font-weight:900; font-size:14px; color:#0f172a; text-transform:uppercase;">${spSlot.subject}</div>`;
+                                } else {
+                                    slotsHere.forEach(slot => {
+                                        let subColor = '#000';
+                                        if (slot.subject.toUpperCase().includes('CHEMISTRY')) subColor = '#dc2626';
+                                        if (slot.subject.toUpperCase().includes('PHYSICS')) subColor = '#2563eb';
+                                        
+                                        printHtml += `
+                                            <div class="matrix-subject" style="color: ${subColor};">${slot.subject}</div>
+                                            ${slot.remark ? `<div class="matrix-remark">(${slot.remark})</div>` : ''}
+                                            ${slot.teacher !== 'NONE' ? `<div class="matrix-teacher">${slot.teacher}</div>` : ''}
+                                            ${slot.room ? `<div class="matrix-room">RM: ${slot.room}</div>` : ''}
+                                        `;
+                                    });
+                                }
                                 printHtml += `</td>`;
                             });
                             printHtml += `</tr>`;
@@ -418,7 +467,9 @@
                     });
                 }
 
-                if (!printHtml) printHtml = "<h2 style='text-align:center; margin-top:50px;'>No schedule data found for the selected options.</h2>";
+                if (!printHtml) {
+                    printHtml = "<h2 style='text-align:center; margin-top:50px; font-family:sans-serif;'>No schedule data found for the selected options.</h2>";
+                }
 
                 printArea.innerHTML = printHtml;
                 document.getElementById('print-modal').classList.replace('flex', 'hidden');
@@ -428,8 +479,12 @@
                     printArea.innerHTML = ""; 
                 }, 500);
 
-            } catch(e) { alert("Error formatting print view: " + e.message); } 
-            finally { btn.innerText = "Generate Print"; btn.disabled = false; }
+            } catch(e) { 
+                console.error(e);
+                alert("Error formatting print view: " + e.message); 
+            } finally { 
+                btn.innerText = "Generate Print"; btn.disabled = false; 
+            }
         }
 
         // --- DRAWER EDITOR ---
@@ -471,7 +526,6 @@
             validSubjects.forEach(s => { subOptions += `<option value="${s}" ${s === subject ? 'selected' : ''}>${s}</option>`; });
             if (subject && !validSubjects.includes(subject) && !SPECIAL_SUBJECTS.includes(subject)) subOptions += `<option value="${subject}" selected>${subject}</option>`;
 
-            // STRICT CSS GRID LAYOUT TO PREVENT SQUISHING
             div.innerHTML = `
                 <div class="grid grid-cols-12 gap-2 w-full">
                     <div class="col-span-4 flex items-center border border-slate-200 rounded-lg overflow-hidden focus-within:border-blue-400 bg-white">
