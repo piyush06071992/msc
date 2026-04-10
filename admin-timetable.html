@@ -96,6 +96,12 @@
             <h3 class="font-black text-slate-900 text-xl uppercase mb-6 border-b pb-4">Export Options</h3>
             <div class="space-y-4 mb-8">
                 <div>
+                    <label class="block text-[10px] font-black text-slate-400 uppercase mb-2">Scope</label>
+                    <select id="p-scope" class="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold outline-none cursor-pointer">
+                        <option value="ALL">Entire Institute</option>
+                    </select>
+                </div>
+                <div>
                     <label class="block text-[10px] font-black text-slate-400 uppercase mb-2">Matrix Layout</label>
                     <select id="p-timeframe" class="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl font-bold outline-none cursor-pointer text-blue-700">
                         <option value="WEEK">Weekly Matrix (Columns = Days)</option>
@@ -152,6 +158,24 @@
         async function fetchStructure() {
             const snap = await db.collection("institute_structure").orderBy("className").get();
             structureData = snap.docs.map(d => d.data());
+            
+            // Populate the newly restored Print Scope Dropdown
+            const pScope = document.getElementById('p-scope');
+            if(pScope) {
+                pScope.innerHTML = '<option value="ALL">Entire Institute</option>';
+                const grouped = {};
+                structureData.forEach(s => {
+                    if(!grouped[s.className]) grouped[s.className] = [];
+                    grouped[s.className].push(s.sectionName);
+                });
+                Object.keys(grouped).forEach(c => {
+                    let optGroup = `<optgroup label="${c}">`;
+                    optGroup += `<option value="CLASS|${c}">Entire ${c}</option>`;
+                    grouped[c].sort().forEach(sec => { optGroup += `<option value="SEC|${c}|${sec}">Section ${sec} Only</option>`; });
+                    optGroup += `</optgroup>`;
+                    pScope.innerHTML += optGroup;
+                });
+            }
         }
 
         async function fetchTeachers() {
@@ -224,7 +248,6 @@
                         const tKey = `${slot.start24}-${slot.end24}`;
                         if(!timeContainers[tKey]) timeContainers[tKey] = { start24: slot.start24, end24: slot.end24, entries: [] };
                         
-                        // Check if we already have this exact Subject/Teacher in this container
                         let existingEntry = timeContainers[tKey].entries.find(e => e.subject === slot.subject && e.teacher === slot.teacher && e.room === slot.room);
                         if(existingEntry) {
                             if(!existingEntry.days.includes(slot.day)) existingEntry.days.push(slot.day);
@@ -239,13 +262,16 @@
                     });
                 });
             });
+            
+            // Run a global clash check on load to populate the read-only card warnings
+            checkGlobalClash();
         }
 
         function addSmartBlock(className, sectionName, secId) {
             injectSmartBlock(className, sectionName, secId, {
                 start24: "", end24: "",
                 entries: [{ id: Math.random().toString(36).substr(2,9), subject: "BREAK", teacher: "NONE", room: "", remark: "", days: DAYS_OF_WEEK }]
-            }, true); // Pass true to open in edit mode immediately
+            }, true); 
             sortSectionBlocks(secId);
         }
 
@@ -288,7 +314,6 @@
             const addBtn = document.getElementById('add-btn-' + secId);
             grid.insertBefore(div, addBtn);
             
-            // Populate the edit entries
             blockData.entries.forEach(ent => {
                 addEntryToBlock(blockId, className, sectionName, ent);
             });
@@ -331,10 +356,12 @@
             });
             
             html += `</div>`;
+            // Add a placeholder for Read-Only Clash Warnings
+            html += `<div class="read-warn hidden bg-red-600 text-white text-[9px] font-black py-1 px-2 text-center animate-pulse tracking-widest uppercase"></div>`;
+            
             return html;
         }
 
-        // Adds an editable entry row inside the Edit Mode of a container
         function addEntryToBlock(blockId, className, sectionName, entryData = null) {
             const wrapper = document.querySelector(`#${blockId} .entries-wrapper`);
             const entId = 'ent_' + Math.random().toString(36).substr(2, 9);
@@ -411,7 +438,6 @@
             checkGlobalClash();
         }
 
-        // Toggles between Read-Only Card and Edit Form
         function toggleEditMode(blockId, isEditing) {
             const block = document.getElementById(blockId);
             const readView = block.querySelector('.read-view');
@@ -422,7 +448,6 @@
                 readView.classList.add('hidden');
                 editView.classList.remove('hidden');
             } else {
-                // Done clicked. Extract data from edit form and update the read view HTML!
                 const s24 = block.querySelector('.tb-s24').value;
                 const e24 = block.querySelector('.tb-e24').value;
                 
@@ -439,22 +464,18 @@
                     days: Array.from(r.querySelectorAll('.ent-day:checked')).map(cb => cb.value)
                 }));
                 
-                // Update internal data attribute for sorting
                 block.setAttribute('data-s24', s24);
-                
-                // Regenerate the visual card
                 readView.innerHTML = generateReadHTML({ start24: s24, end24: e24, entries });
                 
                 editView.classList.add('hidden');
                 readView.classList.remove('hidden');
                 
-                sortSectionBlocks(secId); // Auto-align chronologically
-                checkGlobalClash();
+                sortSectionBlocks(secId); 
+                checkGlobalClash(); // Run clash to update the newly generated read-view warning bar
             }
         }
 
         function updateBlockData(blockId) {
-            // Triggered when time inputs change to force resort and clash check
             const block = document.getElementById(blockId);
             block.setAttribute('data-s24', block.querySelector('.tb-s24').value);
             checkGlobalClash();
@@ -485,7 +506,6 @@
         // === GLOBAL VIRTUAL CLASH DETECTOR                                        ===
         // ============================================================================
         function checkGlobalClash() {
-            // Because edits aren't saved to DB yet, we scrape the entire screen to build a virtual timetable
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             const virtualDb = [];
             
@@ -504,7 +524,6 @@
                     const tea = ent.querySelector('.ent-tea').value;
                     const days = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
                     
-                    // CRITICAL FIX: Ignore NONE and Break
                     if(tea !== "NONE") {
                         days.forEach(d => {
                             virtualDb.push({ blockId: b.id, entId: ent.id, day: d, teacher: tea, className: bCls, section: bSec, sMins, eMins });
@@ -513,30 +532,31 @@
                 });
             });
 
-            // 2. Check for Overlaps and apply warnings
+            // 2. Check Overlaps and apply warnings to BOTH edit-view and read-view
             allBlocks.forEach(b => {
+                const readWarn = b.querySelector('.read-warn');
+                if(readWarn) { readWarn.classList.add('hidden'); readWarn.innerText = ""; }
+                
+                let blockClashes = [];
+                
                 const entries = Array.from(b.querySelectorAll('.ent-row'));
                 entries.forEach(ent => {
                     const warnLbl = ent.querySelector('.ent-warn');
                     warnLbl.classList.add('hidden'); warnLbl.innerText = "";
                     
                     const tea = ent.querySelector('.ent-tea').value;
-                    if(tea === "NONE") return; // Skip checks for BREAK/ASSEMBLY
+                    if(tea === "NONE") return; 
                     
-                    // Get virtual entries for THIS specific row
                     const myVirtuals = virtualDb.filter(v => v.entId === ent.id);
                     if(myVirtuals.length === 0) return;
                     
                     let clashes = [];
                     myVirtuals.forEach(myV => {
                         const overlaps = virtualDb.filter(otherV => {
-                            if(otherV.entId === myV.entId) return false; // Ignore self
-                            if(otherV.day !== myV.day) return false; // Must be same day
-                            if(otherV.teacher !== myV.teacher) return false; // Must be same teacher
-                            // Allow overlap if it's the exact same section (e.g., Split classes usually don't have same teacher, but if they do, it's allowed in same section)
+                            if(otherV.entId === myV.entId) return false;
+                            if(otherV.day !== myV.day) return false; 
+                            if(otherV.teacher !== myV.teacher) return false; 
                             if(otherV.section === myV.section) return false; 
-                            
-                            // Time overlap logic
                             return (myV.sMins < otherV.eMins && myV.eMins > otherV.sMins);
                         });
                         clashes.push(...overlaps);
@@ -546,8 +566,16 @@
                         const clashSecs = [...new Set(clashes.map(c => c.section))].join(', ');
                         warnLbl.innerText = `🚨 CLASH: ${clashSecs}`;
                         warnLbl.classList.remove('hidden');
+                        blockClashes.push(...clashes); // Store for the read-view summary
                     }
                 });
+                
+                // Show summary on the Read-Only card
+                if(blockClashes.length > 0 && readWarn) {
+                    const clashSecs = [...new Set(blockClashes.map(c => c.section))].join(', ');
+                    readWarn.innerText = `🚨 CLASH: ${clashSecs}`;
+                    readWarn.classList.remove('hidden');
+                }
             });
         }
 
@@ -561,7 +589,6 @@
         // === SAVE ENGINE & EMAIL NOTIFICATION                                     ===
         // ============================================================================
         async function saveAllChanges() {
-            // Scrape data from all blocks
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             let newSlots = []; 
             let conflictMsg = "";
@@ -569,8 +596,6 @@
             for (let b of allBlocks) {
                 const className = b.getAttribute('data-class');
                 const sectionName = b.getAttribute('data-section');
-                
-                // Always pull from the hidden edit inputs to ensure we get the latest data
                 const s24 = b.querySelector('.tb-s24').value; 
                 const e24 = b.querySelector('.tb-e24').value;
                 const entries = Array.from(b.querySelectorAll('.ent-row'));
@@ -668,7 +693,7 @@
         }
 
         // ==========================================
-        // === EXPORT ENGINE (REMAINS UNCHANGED)  ===
+        // === EXPORT ENGINE                      ===
         // ==========================================
         function openPrintModal() { document.getElementById('print-modal').classList.replace('hidden', 'flex'); }
 
