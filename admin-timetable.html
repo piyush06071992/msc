@@ -797,22 +797,46 @@ function cancelEditMode(blockId) {
 
            try {
                 const teachersToNotify = detectTeacherChanges(oldTimetableState, newSlots);
-
-                // BYPASS FIREBASE 500 BATCH LIMIT USING PARALLEL PROMISES
                 const snap = await db.collection("timetable").get();
                 
-                // 1. Delete all old data safely in parallel
-                const deletePromises = snap.docs.map(doc => doc.ref.delete());
-                await Promise.all(deletePromises);
-                
-                // 2. Add all new data safely in parallel
-                const addPromises = newSlots.map(slot => {
-                    const { sMins, eMins, ...cleanSlot } = slot;
-                    return db.collection("timetable").add(cleanSlot);
-                });
-                await Promise.all(addPromises);
+                // HIGH-SPEED CHUNKED BATCHING (Safely bypasses the 500 limit)
+                const CHUNK_SIZE = 400;
+                let currentBatch = db.batch();
+                let operationCount = 0;
+                const batchPromises = [];
 
-                sessionStorage.removeItem('minerva_timetable'); // CLEAR THE MEMORY
+                function commitAndResetIfNeeded() {
+                    if (operationCount >= CHUNK_SIZE) {
+                        batchPromises.push(currentBatch.commit());
+                        currentBatch = db.batch(); // Create a fresh batch
+                        operationCount = 0;
+                    }
+                }
+
+                // 1. Pack Deletions
+                snap.docs.forEach(doc => {
+                    currentBatch.delete(doc.ref);
+                    operationCount++;
+                    commitAndResetIfNeeded();
+                });
+                
+                // 2. Pack New Additions
+                newSlots.forEach(slot => {
+                    const { sMins, eMins, ...cleanSlot } = slot;
+                    currentBatch.set(db.collection("timetable").doc(), cleanSlot);
+                    operationCount++;
+                    commitAndResetIfNeeded();
+                });
+
+                // 3. Ship any remaining items in the final box
+                if (operationCount > 0) {
+                    batchPromises.push(currentBatch.commit());
+                }
+
+                // Wait for all boxes to deliver concurrently at max speed
+                await Promise.all(batchPromises);
+
+                sessionStorage.removeItem('minerva_timetable'); // CLEAR MEMORY
                 await fetchTimetable();
 
                 if (teachersToNotify.length > 0) {
