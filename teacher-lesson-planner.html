@@ -215,13 +215,24 @@
             } else { fetchTodayData(); }
         }
 
-      async function fetchTodayData() {
+     async function fetchTodayData() {
             const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const todayName = days[new Date().getDay()];
             const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
 
+            // 1. CHECK MEMORY FIRST (Saves your Firebase Reads!)
+            const cacheKey = "minerva_tt_" + todayName + "_" + safeName;
+            const cachedData = sessionStorage.getItem(cacheKey);
+            
+            if (cachedData) {
+                const parsed = JSON.parse(cachedData);
+                mySessions = parsed.mySessions;
+                myDuties = parsed.myDuties;
+                renderClassesGrid(); renderDuties();
+                return; // STOP here. Do not ask Firebase for data.
+            }
+
             try {
-                // FIXED: Looking at correct "timetable" collection to match Admin Portal
                 const snap = await db.collection("timetable")
                                      .where("teacherName", "==", safeName)
                                      .where("day", "==", todayName)
@@ -230,7 +241,6 @@
                 if(!snap.empty) {
                     mySessions = snap.docs.map(d => {
                         const data = d.data();
-                        // Extracting Start and End Time perfectly from the saved timeRange
                         const times = data.timeRange ? data.timeRange.split(' - ') : ['00:00 AM', '00:00 AM'];
                         return { 
                             id: d.id, 
@@ -240,7 +250,6 @@
                         };
                     });
                 } else {
-                    // Normal Fallback if the admin truly hasn't made a timetable for today yet
                     const assignSnap = await db.collection("lesson_planner_assignments").where("assignedTo", "==", activeStaff.email).get();
                     mySessions = assignSnap.docs.map(d => ({ 
                         id: d.id, assignmentId: d.id, className: d.data().className, section: d.data().section, 
@@ -248,10 +257,13 @@
                     }));
                 }
                 myDuties = [];
+                
+                // 2. SAVE TO MEMORY FOR THE REST OF THE DAY
+                sessionStorage.setItem(cacheKey, JSON.stringify({ mySessions: mySessions, myDuties: myDuties }));
+                
                 renderClassesGrid(); renderDuties();
             } catch(e) { console.error(e); }
         }
-
         function renderClassesGrid() {
             const grid = document.getElementById('classes-grid');
             grid.innerHTML = '';
