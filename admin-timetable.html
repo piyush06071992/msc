@@ -578,10 +578,14 @@ function cancelEditMode(blockId) {
         // ============================================================================
         // === GLOBAL VIRTUAL CLASH DETECTOR                                        ===
         // ============================================================================
+       // ============================================================================
+        // === GLOBAL VIRTUAL CLASH DETECTOR                                        ===
+        // ============================================================================
         function checkGlobalClash() {
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             const virtualDb = [];
             
+            // Build virtual DB
             allBlocks.forEach(b => {
                 const s24 = b.querySelector('.tb-s24').value; const e24 = b.querySelector('.tb-e24').value;
                 if(!s24 || !e24) return;
@@ -607,14 +611,16 @@ function cancelEditMode(blockId) {
 
             allBlocks.forEach(b => {
                 const readWarn = b.querySelector('.read-warn');
-                if(readWarn) { readWarn.classList.add('hidden'); readWarn.innerText = ""; }
+                if(readWarn) { readWarn.classList.add('hidden'); readWarn.innerHTML = ""; }
                 
-                let blockClashes = [];
+                let blockHasClash = false;
                 
                 const entries = Array.from(b.querySelectorAll('.ent-row'));
                 entries.forEach(ent => {
                     const warnLbl = ent.querySelector('.ent-warn');
-                    warnLbl.classList.add('hidden'); warnLbl.innerText = "";
+                    warnLbl.classList.add('hidden'); warnLbl.innerHTML = "";
+                    // Clean up default padding/bg so our new clickable buttons look clean
+                    warnLbl.classList.remove('bg-red-600', 'p-1'); 
                     
                     const tea = ent.querySelector('.ent-tea').value;
                     if(tea === "NONE" || tea === "") return; 
@@ -634,24 +640,76 @@ function cancelEditMode(blockId) {
                             if (otherV.room !== "" && myV.room !== "" && otherV.room.toLowerCase() === myV.room.toLowerCase()) return false;
 
                             return (myV.sMins < otherV.eMins && myV.eMins > otherV.sMins);
+                        }).map(otherV => {
+                            // CALCULATE EXACT OVERLAP WINDOW & DURATION
+                            const oStart = Math.max(myV.sMins, otherV.sMins);
+                            const oEnd = Math.min(myV.eMins, otherV.eMins);
+                            const oDur = oEnd - oStart;
+                            
+                            const sh = Math.floor(oStart/60).toString().padStart(2,'0');
+                            const sm = (oStart%60).toString().padStart(2,'0');
+                            const eh = Math.floor(oEnd/60).toString().padStart(2,'0');
+                            const em = (oEnd%60).toString().padStart(2,'0');
+                            
+                            const timeStr = `${format12Hour(sh+':'+sm)} - ${format12Hour(eh+':'+em)}`;
+                            
+                            return {
+                                section: otherV.section,
+                                blockId: otherV.blockId,
+                                timeStr: timeStr,
+                                duration: oDur
+                            };
                         });
                         clashes.push(...overlaps);
                     });
                     
                     if(clashes.length > 0) {
-                        const clashSecs = [...new Set(clashes.map(c => c.section))].join(', ');
-                        warnLbl.innerText = `🚨 CLASH: ${clashSecs}`;
+                        // Remove duplicates in case a teacher clashes on multiple identical days at once
+                        const uniqueClashes = Array.from(new Set(clashes.map(c => JSON.stringify(c)))).map(s => JSON.parse(s));
+                        
+                        let clashHtml = uniqueClashes.map(c => `
+                            <div class="cursor-pointer hover:bg-red-800 bg-red-600 p-2 rounded mb-1 border border-red-400 transition-all shadow-md active:scale-95" onclick="highlightClash('${c.blockId}')" title="Click to jump to this class">
+                                🚨 SEC: ${c.section} <br>
+                                <span class="text-[7px] text-red-100 uppercase tracking-widest">${c.timeStr} (${c.duration}m)</span>
+                            </div>
+                        `).join('');
+                        
+                        warnLbl.innerHTML = clashHtml;
                         warnLbl.classList.remove('hidden');
-                        blockClashes.push(...clashes); 
+                        blockHasClash = true;
                     }
                 });
                 
-                if(blockClashes.length > 0 && readWarn) {
-                    const clashSecs = [...new Set(blockClashes.map(c => c.section))].join(', ');
-                    readWarn.innerText = `🚨 CLASH: ${clashSecs}`;
+                if(blockHasClash && readWarn) {
+                    readWarn.innerHTML = `🚨 CLASH <br><span class="text-[7px]">Click Edit to resolve</span>`;
                     readWarn.classList.remove('hidden');
                 }
             });
+        }
+
+        // ADDED: The Navigation and Highlight Animation function
+        function highlightClash(targetBlockId) {
+            const targetBlock = document.getElementById(targetBlockId);
+            if(!targetBlock) return;
+            
+            // 1. If it's inside a closed class folder, open the folder!
+            const detailsEl = targetBlock.closest('details');
+            if(detailsEl) detailsEl.open = true;
+            
+            // 2. Scroll smoothly to the exact block
+            targetBlock.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            
+            // 3. Make it flash red and pop out so your eye catches it instantly
+            const origBorder = targetBlock.style.borderColor;
+            targetBlock.style.borderColor = '#ef4444'; // Red Border
+            targetBlock.style.boxShadow = '0 0 20px rgba(239, 68, 68, 0.8)';
+            targetBlock.style.transform = 'scale(1.05)';
+            
+            setTimeout(() => {
+                targetBlock.style.borderColor = origBorder;
+                targetBlock.style.boxShadow = '';
+                targetBlock.style.transform = 'scale(1)';
+            }, 1500); // Animation clears after 1.5 seconds
         }
 
         function format12Hour(time24) {
