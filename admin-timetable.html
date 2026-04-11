@@ -795,20 +795,24 @@ function cancelEditMode(blockId) {
             const originalText = btn.innerHTML;
             btn.innerHTML = "Saving..."; btn.disabled = true;
 
-            try {
+           try {
                 const teachersToNotify = detectTeacherChanges(oldTimetableState, newSlots);
-                const batch = db.batch();
 
+                // BYPASS FIREBASE 500 BATCH LIMIT USING PARALLEL PROMISES
                 const snap = await db.collection("timetable").get();
-                snap.docs.forEach(doc => { batch.delete(doc.ref); });
                 
-                newSlots.forEach(slot => {
+                // 1. Delete all old data safely in parallel
+                const deletePromises = snap.docs.map(doc => doc.ref.delete());
+                await Promise.all(deletePromises);
+                
+                // 2. Add all new data safely in parallel
+                const addPromises = newSlots.map(slot => {
                     const { sMins, eMins, ...cleanSlot } = slot;
-                    batch.set(db.collection("timetable").doc(), cleanSlot);
+                    return db.collection("timetable").add(cleanSlot);
                 });
+                await Promise.all(addPromises);
 
-               await batch.commit(); 
-                sessionStorage.removeItem('minerva_timetable'); // <--- THIS CLEARS THE MEMORY
+                sessionStorage.removeItem('minerva_timetable'); // CLEAR THE MEMORY
                 await fetchTimetable();
 
                 if (teachersToNotify.length > 0) {
