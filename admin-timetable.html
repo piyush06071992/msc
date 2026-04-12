@@ -1021,7 +1021,7 @@ function peekTeacher(btn) {
         // ============================================================================
         // === SAVE ENGINE & EMAIL NOTIFICATION                                     ===
         // ============================================================================
-        async function saveAllChanges() {
+       async function saveAllChanges() {
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             let newSlots = []; 
             let conflictMsg = "";
@@ -1057,29 +1057,25 @@ function peekTeacher(btn) {
                             const tObj = allTeachers.find(t => t.name === teacher);
                             if (tObj) teacherEmail = tObj.email || ""; 
                         }
-                        newSlots.push({ 
-                            day: day, className: className, section: sectionName, 
-                            start24: s24, end24: e24, timeRange, duration: dur, 
-                            subject: sub, teacher, teacherName: teacher, teacherEmail: teacherEmail, 
-                            room, remark, sMins, eMins 
-                        });
+                        newSlots.push({ day: day, className: className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail: teacherEmail, room, remark, sMins, eMins });
                     });
                 }
                 if(conflictMsg) break;
             }
 
             if (conflictMsg) return alert(conflictMsg);
-            if(!confirm("You are about to save the entire school's timetable. Proceed?")) return;
+            if(!confirm("You are about to permanently update the Live Master Schedule. Proceed?")) return;
 
-            const btn = document.getElementById('save-btn'); 
-            const originalText = btn.innerHTML;
-            btn.innerHTML = "Saving..."; btn.disabled = true;
+            // FIXED THE BUTTON CRASH
+            const btn = document.getElementById('main-action-btn'); 
+            const originalHTML = btn.innerHTML;
+            btn.innerHTML = "⌛ Saving..."; btn.disabled = true;
 
            try {
                 const teachersToNotify = detectTeacherChanges(oldTimetableState, newSlots);
                 const snap = await db.collection("timetable").get();
                 
-                // HIGH-SPEED CHUNKED BATCHING (Safely bypasses the 500 limit)
+                // HIGH-SPEED CHUNKED BATCHING
                 const CHUNK_SIZE = 400;
                 let currentBatch = db.batch();
                 let operationCount = 0;
@@ -1113,11 +1109,18 @@ function peekTeacher(btn) {
                     batchPromises.push(currentBatch.commit());
                 }
 
-            // Wait for all boxes to deliver concurrently at max speed
                 await Promise.all(batchPromises);
 
+                // 4. --- NEW: SAVE TODAY'S SNAPSHOT IN HISTORY ---
+                const todayIso = new Date().toISOString().split('T')[0];
+                await db.collection("timetable_history").doc(todayIso).set({
+                    date: todayIso,
+                    lastUpdated: Date.now(),
+                    schedule: newSlots,
+                    type: "LIVE_MASTER_UPDATE"
+                });
+
                 // --- LIVE UPDATE TRIGGER ---
-                // Tell all teacher devices that a new timetable is ready!
                 await db.collection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
 
                 sessionStorage.removeItem('minerva_timetable'); // CLEAR MEMORY
@@ -1126,14 +1129,14 @@ function peekTeacher(btn) {
                 if (teachersToNotify.length > 0) {
                     sendEmailNotification(teachersToNotify);
                 } else {
-                    alert("Timetable Saved Successfully! No teacher schedules were changed.");
+                    alert("✅ Timetable Saved Successfully! No teacher schedules were changed.");
                 }
 
                 renderDirectDashboard(); 
             } catch (err) { 
                 alert("Error saving: " + err.message); 
             } finally { 
-                btn.innerHTML = originalText; btn.disabled = false; 
+                btn.innerHTML = originalHTML; btn.disabled = false; 
             }
         }
 
