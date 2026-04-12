@@ -1486,16 +1486,71 @@ function setContext(mode) {
             modal.classList.replace('hidden', 'flex');
         }
 
-        async function executeCloneStamp() {
-            const selected = Array.from(document.querySelectorAll('input[name="clone-target"]:checked')).map(cb => cb.value);
-            if(selected.length === 0) return alert("Please select at least one future date.");
+       async function executeCloneStamp() {
+            const selectedDates = Array.from(document.querySelectorAll('input[name="clone-target"]:checked')).map(cb => cb.value);
+            if(selectedDates.length === 0) return alert("Please select at least one future date.");
             
-            if(!confirm(`This will apply the historical schedule from ${currentContextDate} to ${selected.length} future dates. Existing overrides on those dates will be replaced. Proceed?`)) return;
-            
-            alert("Perfect! The UI is ready. In the final step, we will write the Firebase 'Batch Write' function to officially duplicate the data.");
-            document.getElementById('clone-modal').classList.replace('flex', 'hidden');
-        }
+            if(!confirm(`You are about to clone this schedule to ${selectedDates.length} dates. This will overwrite any existing special schedules on those days. Proceed?`)) return;
 
+            const modal = document.getElementById('clone-modal');
+            const btn = modal.querySelector('button[onclick="executeCloneStamp()"]');
+            const originalText = btn.innerText;
+            
+            btn.disabled = true;
+            btn.innerText = "⌛ Stamping Data...";
+
+            try {
+                // 1. SCRAPE DATA FROM SCREEN: Collect all class blocks currently visible
+                const allBlocks = Array.from(document.querySelectorAll('.time-block'));
+                const recordsToClone = [];
+
+                allBlocks.forEach(b => {
+                    const s24 = b.querySelector('.tb-s24').value;
+                    const e24 = b.querySelector('.tb-e24').value;
+                    const entries = Array.from(b.querySelectorAll('.ent-row'));
+                    
+                    entries.forEach(ent => {
+                        const days = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
+                        recordsToClone.push({
+                            className: b.getAttribute('data-class'),
+                            section: b.getAttribute('data-section'),
+                            start24: s24,
+                            end24: e24,
+                            subject: ent.querySelector('.ent-sub').value,
+                            teacher: ent.querySelector('.ent-tea').value,
+                            room: ent.querySelector('.ent-room').value.trim(),
+                            remark: ent.querySelector('.ent-rem').value.trim(),
+                            activeDays: days // We keep the weekly logic inside the date override
+                        });
+                    });
+                });
+
+                // 2. FIREBASE BATCH: Stamp the records onto each selected date
+                const batch = db.batch();
+                
+                for (const dateIso of selectedDates) {
+                    // We store overrides in a separate collection to keep the Master clean
+                    const overrideRef = db.collection("timetable_overrides").doc(dateIso);
+                    batch.set(overrideRef, {
+                        date: dateIso,
+                        lastUpdated: Date.now(),
+                        schedule: recordsToClone
+                    });
+                }
+
+                await batch.commit();
+                
+                alert(`✅ Success! Timetable successfully stamped onto ${selectedDates.length} dates.`);
+                modal.classList.replace('flex', 'hidden');
+                
+            } catch (error) {
+                console.error("Cloning failed:", error);
+                alert("Critical Error: Could not stamp data. " + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerText = originalText;
+            }
+        }
         init();
     </script>
 </body>
