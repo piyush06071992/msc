@@ -1569,18 +1569,63 @@ function handlePrimaryAction() {
             btn.disabled = true; btn.innerText = "⌛ Writing to Database...";
 
             try {
+                // 1. Scrape the current screen to capture your actual edits
+                const allBlocks = Array.from(document.querySelectorAll('.time-block'));
+                let newSlots = []; 
+                for (let b of allBlocks) {
+                    const className = b.getAttribute('data-class');
+                    const sectionName = b.getAttribute('data-section');
+                    const s24 = b.querySelector('.tb-s24').value; 
+                    const e24 = b.querySelector('.tb-e24').value;
+                    const entries = Array.from(b.querySelectorAll('.ent-row'));
+                    if (!s24 || !e24) continue;
+                    const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
+                    const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
+                    const dur = `${eMins - sMins} MINS`;
+                    const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
+
+                    for(let ent of entries) {
+                        const sub = ent.querySelector('.ent-sub').value;
+                        const teacher = ent.querySelector('.ent-tea').value || "NONE"; 
+                        const room = ent.querySelector('.ent-room').value.trim();
+                        const remark = ent.querySelector('.ent-rem').value.trim();
+                        const activeDays = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
+
+                        activeDays.forEach(day => {
+                            let teacherEmail = "";
+                            if (teacher !== "NONE") {
+                                const tObj = allTeachers.find(t => t.name === teacher);
+                                if (tObj) teacherEmail = tObj.email || ""; 
+                            }
+                            newSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark, sMins, eMins });
+                        });
+                    }
+                }
+
+                // 2. Check who got affected
+                const teachersToNotify = detectTeacherChanges(oldTimetableState, newSlots);
+
+                // 3. Save to Firebase using a Batch (Safely saves multiple dates instantly)
                 const batch = db.batch();
                 selectedDates.forEach(dateIso => {
                     const docRef = db.collection("timetable_history").doc(dateIso);
                     batch.set(docRef, {
                         date: dateIso,
                         lastUpdated: Date.now(),
-                        schedule: globalTimetable, // Snapshot of what's on screen
-                        type: pendingActionType
+                        schedule: newSlots, // Saves exactly what you edited on the screen!
+                        type: pendingActionType // Cloned or Specific_Dates
                     });
                 });
                 await batch.commit();
-                alert(`✅ Success! Stamped onto ${selectedDates.length} dates.`);
+
+                // 4. Send the Emails!
+                if (teachersToNotify.length > 0) {
+                    // Send email notification silently runs the alert() when done
+                    sendEmailNotification(teachersToNotify);
+                } else {
+                    alert(`✅ Success! Stamped onto ${selectedDates.length} dates. No teacher schedules were changed.`);
+                }
+                
                 document.getElementById('multi-date-modal').classList.replace('flex', 'hidden');
             } catch (error) {
                 alert("Save failed: " + error.message);
@@ -1588,7 +1633,6 @@ function handlePrimaryAction() {
                 btn.disabled = false; btn.innerText = "Confirm Selected Dates";
             }
         }
-
         init();
     </script>
 </body>
