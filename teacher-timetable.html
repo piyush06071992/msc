@@ -162,15 +162,35 @@
 
         async function loadAllData() {
             const cacheKey = `minerva_timetable_cache_full`;
-            const cached = localStorage.getItem(cacheKey); // Swapped to localStorage for persistence
+            const timeKey = `minerva_tt_last_update`;
             
-            if (cached) {
-                allTimetableData = JSON.parse(cached);
-                return;
+            try {
+                // Costs exactly 1 Firebase Read to check if Admin pushed an update!
+                const metaSnap = await db.collection("system_metadata").doc("timetable").get();
+                const serverTime = metaSnap.exists ? metaSnap.data().lastUpdated : 0;
+                const localTime = localStorage.getItem(timeKey) || 0;
+
+                const cached = localStorage.getItem(cacheKey);
+                
+                // If we have cache AND the Admin hasn't saved a newer version... use memory!
+                if (cached && parseInt(localTime) >= serverTime) {
+                    allTimetableData = JSON.parse(cached);
+                    return;
+                }
+
+                // If Admin updated it (or it's the teacher's first time), download fresh data
+                const snap = await db.collection("timetable").get();
+                allTimetableData = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                
+                // Save the new data AND the new timestamp to memory
+                localStorage.setItem(cacheKey, JSON.stringify(allTimetableData));
+                localStorage.setItem(timeKey, serverTime.toString());
+            } catch(e) {
+                console.error("Error loading timetable:", e);
+                // Safe offline fallback
+                const cached = localStorage.getItem(cacheKey);
+                if(cached) allTimetableData = JSON.parse(cached);
             }
-            const snap = await db.collection("timetable").get();
-            allTimetableData = snap.docs.map(d => ({id: d.id, ...d.data()}));
-            localStorage.setItem(cacheKey, JSON.stringify(allTimetableData));
         }
 
         async function switchView(mode) {
