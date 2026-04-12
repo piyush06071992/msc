@@ -1492,13 +1492,80 @@ function setContext(mode) {
 
         function handlePrimaryAction() {
             if (currentContextMode === 'LIVE') {
-                // Open the Publishing Options menu instead of saving instantly
                 document.getElementById('publish-modal').classList.replace('hidden', 'flex');
             } else if (currentContextMode === 'HISTORY') {
                 openCloneModal();
             } else {
-                // This covers Overrides and Future Masters
-                alert("Temporal save logic is being processed for: " + currentContextMode);
+                // Now calling the real save logic for Overrides and Future Masters
+                saveTemporalChanges();
+            }
+        }
+
+        async function saveTemporalChanges() {
+            const btn = document.getElementById('save-btn');
+            const originalText = btn.innerHTML;
+            
+            if(!confirm(`Are you sure you want to save this as a ${currentContextMode}?`)) return;
+            
+            btn.disabled = true;
+            btn.innerHTML = "⌛ Processing...";
+
+            try {
+                // 1. SCRAPE GRID: Get all data currently on your screen
+                const allBlocks = Array.from(document.querySelectorAll('.time-block'));
+                const scrapedSchedule = [];
+
+                allBlocks.forEach(b => {
+                    const s24 = b.querySelector('.tb-s24').value;
+                    const e24 = b.querySelector('.tb-e24').value;
+                    const entries = Array.from(b.querySelectorAll('.ent-row'));
+                    
+                    entries.forEach(ent => {
+                        const days = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
+                        scrapedSchedule.push({
+                            className: b.getAttribute('data-class'),
+                            section: b.getAttribute('data-section'),
+                            start24: s24, end24: e24,
+                            subject: ent.querySelector('.ent-sub').value,
+                            teacher: ent.querySelector('.ent-tea').value,
+                            room: ent.querySelector('.ent-room').value.trim(),
+                            remark: ent.querySelector('.ent-rem').value.trim(),
+                            activeDays: days
+                        });
+                    });
+                });
+
+                // 2. ROUTE TO FIREBASE: Save based on the active mode
+                if (currentContextMode === 'OVERRIDE') {
+                    // Save as a specific-date patch
+                    await db.collection("timetable_overrides").doc(currentContextDate).set({
+                        date: currentContextDate,
+                        lastUpdated: Date.now(),
+                        schedule: scrapedSchedule,
+                        type: "OT_OVERRIDE"
+                    });
+                    alert(`✅ OT Override for ${currentContextDate} saved successfully!`);
+                } 
+                else if (currentContextMode === 'FUTURE_MASTER') {
+                    // Save as a new version that becomes live on the start date
+                    await db.collection("timetable_versions").doc(currentContextDate).set({
+                        effectiveDate: currentContextDate,
+                        lastUpdated: Date.now(),
+                        schedule: scrapedSchedule,
+                        status: "pending"
+                    });
+                    alert(`✅ Future Master (Effective ${currentContextDate}) has been scheduled!`);
+                }
+
+                // Return to Live view after saving
+                setContext('LIVE');
+
+            } catch (error) {
+                console.error("Temporal Save Failed:", error);
+                alert("Error: " + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalText;
             }
         }
 
