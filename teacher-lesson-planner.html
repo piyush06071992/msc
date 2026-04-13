@@ -218,14 +218,13 @@
             } else { fetchTodayData(); }
         }
 
-  async function fetchTodayData() {
+        async function fetchTodayData() {
             const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const todayName = days[new Date().getDay()];
             const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
             
-            // 1. CHECK MEMORY FIRST (Saves your Firebase Reads!)
-            // Forced v5 to apply the Case-Sensitivity Subject spelling fix
-            const cacheKey = "minerva_tt_v5_" + todayName + "_" + safeName;
+            // Forced v6 for extreme normalization
+            const cacheKey = "minerva_tt_v6_" + todayName + "_" + safeName;
             const cachedData = sessionStorage.getItem(cacheKey);
             
             if (cachedData) {
@@ -233,7 +232,7 @@
                 mySessions = parsed.mySessions;
                 myDuties = parsed.myDuties;
                 renderClassesGrid(); renderDuties();
-                return; // STOP here. Do not ask Firebase for data.
+                return; 
             }
 
             try {
@@ -243,7 +242,6 @@
                                      .get();
                                      
                 if(!snap.empty) {
-                    // Fetch structure data briefly to map the timetable names to the new immutable IDs
                     const structSnap = await db.collection("institute_structure").get();
                     const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
 
@@ -251,19 +249,22 @@
                         const data = d.data();
                         const times = data.timeRange ? data.timeRange.split(' - ') : ['00:00 AM', '00:00 AM'];
                         
-                        // Find the immutable ID for this specific class & section combo (Bulletproof matching)
+                        // EXTREME NORMALIZATION: Ignores all spaces, hyphens, parens, etc.
+                        const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+                        // Try to match the timetable class string (e.g. "12") against the structure class
+                        // And the timetable section string (e.g. "S-29 (+2-JEE)") against the structure section
                         const structMatch = structures.find(s => 
-                            (s.className || "").trim().toLowerCase() === (data.className || "").trim().toLowerCase() && 
-                            (s.sectionName || "").trim().toLowerCase() === (data.section || "").trim().toLowerCase()
+                            norm(s.className) === norm(data.className) && 
+                            norm(s.sectionName) === norm(data.section)
                         );
-                        const structId = structMatch ? structMatch.id : `${data.className}_${data.section}`; // Fallback just in case
                         
-                        // NEW: Fix the UPPERCASE vs Title Case mismatch
+                        const structId = structMatch ? structMatch.id : `MATCH_FAILED_${data.className}_${data.section}`; 
+                        
                         let exactSubjectCasing = data.subject;
                         if (structMatch && structMatch.subjects) {
-                            // Find the subject in the structure array that matches the timetable subject, ignoring case
-                            const matchedSub = structMatch.subjects.find(s => s.toUpperCase() === data.subject.toUpperCase());
-                            if (matchedSub) exactSubjectCasing = matchedSub; // Use the original casing (e.g. "Mathematics")
+                            const matchedSub = structMatch.subjects.find(s => norm(s) === norm(data.subject));
+                            if (matchedSub) exactSubjectCasing = matchedSub; 
                         }
                         
                         return { 
@@ -282,12 +283,11 @@
                 }
                 myDuties = [];
                 
-                // 2. SAVE TO MEMORY FOR THE REST OF THE DAY
                 sessionStorage.setItem(cacheKey, JSON.stringify({ mySessions: mySessions, myDuties: myDuties }));
-                
                 renderClassesGrid(); renderDuties();
             } catch(e) { console.error(e); }
         }
+
         function renderClassesGrid() {
             const grid = document.getElementById('classes-grid');
             grid.innerHTML = '';
@@ -376,7 +376,7 @@
         }
 
         // --- EXACT HTML RECONSTRUCTION OF PDF LOGIC ---
-      async function openSyllabusChecklist() {
+        async function openSyllabusChecklist() {
             closeModal('mode-modal');
             document.getElementById('syll-class-title').innerText = document.getElementById('mode-class-title').innerText;
             document.getElementById('syll-session-badge').innerText = `Allocating Timetable Session: ${activeSessionMins} Mins`;
@@ -392,19 +392,26 @@
                 return; 
             }
 
-           try {
+            try {
                 const doc = await db.collection("lesson_planners").doc(activeSubjectId).get();
+                
                 if(!doc.exists || !doc.data().syllabusData) {
                     document.getElementById('subject-pace-widget').innerHTML = '';
-                    return container.innerHTML = `<div class="text-center py-20 text-rose-500 font-black uppercase text-xs tracking-widest">Syllabus Not Defined by Admin</div>`;
+                    // TRACKER ADDED HERE:
+                    return container.innerHTML = `
+                        <div class="text-center py-20 text-rose-500 font-black uppercase text-xs tracking-widest">
+                            Syllabus Not Defined by Admin
+                            <br><br>
+                            <span class="text-[9px] text-slate-400 normal-case tracking-normal">Debug ID: ${activeSubjectId}</span>
+                        </div>`;
                 }
+                
                 const docData = doc.data();
                 currentPlannerData = docData.syllabusData;
                 window.currentActivityLogs = docData.activityLogs || []; 
                 window.isSubjectUnlocked = docData.isUnlocked === true;
                 window.unlockRequested = docData.unlockRequested === true;
                 
-                // Smart Button Status
                 const reqBtn = document.getElementById('request-unlock-btn');
                 if(window.isSubjectUnlocked) {
                     reqBtn.innerText = "🔓 Unlocked! You can now make corrections.";
@@ -687,7 +694,7 @@
                 { "CHAPTER NAME": "Logarithms", "LECTURE NUMBER": "3", "SUBTOPICS": "Properties of Logs", "isDone": true, "completedMinutes": "90", "completedDate": "2026-04-04", "Target days for chapter": "3", "Target Minutes For Chapter": "270" },
                 { "CHAPTER NAME": "Quadratic Equations", "LECTURE NUMBER": "1", "SUBTOPICS": "Roots & Discriminants", "isDone": false, "chapterStartDate": "2026-04-05", "Target days for chapter": "4", "Target Minutes For Chapter": "360" },
                 { "CHAPTER NAME": "Quadratic Equations", "LECTURE NUMBER": "2", "SUBTOPICS": "Nature of Roots", "isDone": false, "Target days for chapter": "4", "Target Minutes For Chapter": "360" },
-                { "CHAPTER NAME": "Sequence & Series", "LECTURE NUMBER": "1", "SUBTOPICS": "Arithmetic Progression", "isDone": false, "Target days for chapter": "5", "Target Minutes For Chapter": "450" }
+                { "CHAPTER NAME": "Sequence & Series", "LECTURE NUMBER": "1", "SUBTOPICS": "Arithmetic Progression", "is, Done": false, "Target days for chapter": "5", "Target Minutes For Chapter": "450" }
             ];
         }
     </script>
