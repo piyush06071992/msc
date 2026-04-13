@@ -408,23 +408,72 @@
                 
                 const docData = doc.data();
                 currentPlannerData = docData.syllabusData;
-                window.currentActivityLogs = docData.activityLogs || []; 
+               window.currentActivityLogs = docData.activityLogs || []; 
                 window.isSubjectUnlocked = docData.isUnlocked === true;
                 window.unlockRequested = docData.unlockRequested === true;
                 
+                // --- COMPLIANCE ENGINE: DAILY BLOCK LOGIC ---
+                const today = new Date();
+                let lwd = new Date(today);
+                if (today.getDay() === 1) lwd.setDate(today.getDate() - 2); // Monday looks at Saturday
+                else if (today.getDay() === 0) lwd.setDate(today.getDate() - 1); // Sunday looks at Saturday
+                else lwd.setDate(today.getDate() - 1); // Others look at yesterday
+                
+                const daysStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                const lwdName = daysStr[lwd.getDay()];
+                const lwdDateStr = lwd.toISOString().split('T')[0];
+                const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
+
+                // Did they have this exact class on Last Working Day?
+                const lwdSnap = await db.collection("timetable").where("teacherName", "==", safeName).where("day", "==", lwdName).get();
+                let hadClassLWD = false;
+                const currSession = mySessions.find(s => s.assignmentId === activeSubjectId);
+                
+                if (!lwdSnap.empty && currSession) {
+                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                    lwdSnap.forEach(d => {
+                        const t = d.data();
+                        if (norm(t.className) === norm(currSession.className) && norm(t.section) === norm(currSession.section) && norm(t.subject) === norm(currSession.subject)) {
+                            hadClassLWD = true;
+                        }
+                    });
+                }
+
+                // Did they log anything on that day?
+                let loggedOnLWD = false;
+                if (hadClassLWD) {
+                    const tickedTopic = currentPlannerData.find(r => r.completedDate === lwdDateStr);
+                    const loggedActivity = window.currentActivityLogs.find(l => l.date === lwdDateStr);
+                    if (tickedTopic || loggedActivity) loggedOnLWD = true;
+                }
+
+                window.complianceLocked = (hadClassLWD && !loggedOnLWD);
+                window.lwdDateStr = lwdDateStr;
+                // --- END COMPLIANCE ENGINE ---
+
                 const reqBtn = document.getElementById('request-unlock-btn');
-                if(window.isSubjectUnlocked) {
-                    reqBtn.innerText = "🔓 Unlocked! You can now make corrections.";
+                const confBtn = document.getElementById('confirm-day-btn');
+                
+                if (window.isSubjectUnlocked || !globalAutoLock) {
+                    reqBtn.innerText = "🔓 Unlocked! You can make corrections.";
                     reqBtn.className = "w-full bg-emerald-50 text-emerald-600 font-black py-3 rounded-2xl uppercase tracking-widest text-[10px] border border-emerald-200 cursor-default";
                     reqBtn.disabled = true;
-                } else if(window.unlockRequested) {
+                    if(confBtn) confBtn.style.display = 'block';
+                } else if (window.complianceLocked) {
+                    reqBtn.innerText = "⚠️ Missing Log (" + window.lwdDateStr + ") - Request Unlock";
+                    reqBtn.className = "w-full bg-rose-600 text-white font-black py-3 rounded-2xl uppercase tracking-widest text-[10px] shadow-lg hover:bg-rose-700 transition-all animate-pulse";
+                    reqBtn.disabled = false;
+                    if(confBtn) confBtn.style.display = 'none'; // Hide confirm button
+                } else if (window.unlockRequested) {
                     reqBtn.innerText = "Unlock Requested ⏳";
                     reqBtn.className = "w-full bg-amber-50 text-amber-600 font-black py-3 rounded-2xl uppercase tracking-widest text-[10px] border border-amber-200 cursor-not-allowed";
                     reqBtn.disabled = true;
+                    if(confBtn) confBtn.style.display = 'none';
                 } else {
                     reqBtn.innerText = "Made a Mistake? Request Admin Unlock";
                     reqBtn.className = "w-full bg-rose-50 text-rose-600 font-black py-3 rounded-2xl uppercase tracking-widest text-[10px] border border-rose-200 hover:bg-rose-100 transition-all";
                     reqBtn.disabled = false;
+                    if(confBtn) confBtn.style.display = 'block';
                 }
                 
                 renderSyllabusExactMath();
