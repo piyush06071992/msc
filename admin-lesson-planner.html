@@ -969,49 +969,150 @@ function toggleDrillEditMode() {
             // Re-render the modal to show/hide the checkboxes and dates
             openDrillDown(lastDrillParams.cls, lastDrillParams.sec, lastDrillParams.sub, currentUploadId);
         }
-       function exportToExcel() {
+       async function exportToExcel() {
             if (planners.length === 0) return alert("Please wait for data to load or check if data exists.");
-            
-            let csvContent = "data:text/csv;charset=utf-8,";
-            // Create headers
-            csvContent += "Class,Section,Subject,Chapter,Lecture,Subtopic,Target Days,Target Mins,Status,Completed Date,Completed Mins,Logged By\n";
 
-            // Loop through all structure data
-            structureData.forEach(st => {
-                st.subjects.filter(s => !['BREAK','EVENT','EXAM','ASSEMBLY'].includes(s.toUpperCase())).forEach(sub => {
-                    const id = `${st.id}_${sub}`.replace(/\s+/g, '_');
-                    const planner = planners.find(p => p.id === id);
+            const btn = event.target;
+            const originalText = btn.innerText;
+            btn.innerText = "⏳ Generating..."; btn.disabled = true;
 
-                    if (planner && planner.syllabusData) {
-                        planner.syllabusData.forEach(r => {
-                            let row = [
-                                `"${st.className}"`,
-                                `"${st.sectionName}"`,
-                                `"${sub}"`,
-                                `"${r['CHAPTER NAME'] || ''}"`,
-                                `"${r['LECTURE NUMBER'] || ''}"`,
-                                `"${r['SUBTOPICS'] || ''}"`,
-                                `"${r['Target days for chapter'] || ''}"`,
-                                `"${r['Target Minutes For Chapter'] || ''}"`,
-                                r.isDone ? "Completed" : "Pending",
-                                `"${r.completedDate || ''}"`,
-                                `"${r.completedMinutes || '0'}"`,
-                                `"${r.tickedBy || ''}"`
-                            ];
-                            csvContent += row.join(",") + "\n";
-                        });
-                    }
+            try {
+                const workbook = new ExcelJS.Workbook();
+                
+                // --- 1. MASTER DASHBOARD TAB ---
+                const masterSheet = workbook.addWorksheet('📊 Master Dashboard');
+                masterSheet.columns = [
+                    { header: 'Class', key: 'class', width: 15 },
+                    { header: 'Section', key: 'sec', width: 15 },
+                    { header: 'Subject', key: 'sub', width: 20 },
+                    { header: 'Total Chapters', key: 'tc', width: 15 },
+                    { header: 'Completed', key: 'cc', width: 15 },
+                    { header: 'Progress %', key: 'prog', width: 15 },
+                    { header: 'Days Variance', key: 'dv', width: 18 },
+                    { header: 'Mins Variance', key: 'mv', width: 18 }
+                ];
+
+                // Style Master Header
+                masterSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+                masterSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E1B4B' } }; // Indigo-900
+
+                let subjectDataMap = {}; // To store data for individual subject tabs
+
+                structureData.forEach(st => {
+                    st.subjects.filter(s => !['BREAK','EVENT','EXAM','ASSEMBLY'].includes(s.toUpperCase())).forEach(sub => {
+                        const id = `${st.id}_${sub}`.replace(/\s+/g, '_');
+                        const planner = planners.find(p => p.id === id);
+                        
+                        if (!subjectDataMap[sub]) subjectDataMap[sub] = []; // Initialize subject array
+
+                        if (planner && planner.syllabusData && planner.syllabusData.length > 0) {
+                            const rows = planner.syllabusData;
+                            const chNames = [...new Set(rows.map(r => r["CHAPTER NAME"]))];
+                            
+                            let chDoneCalc = 0; let totalDayGap = 0; let totalMinGap = 0;
+                            
+                            chNames.forEach(ch => {
+                                const chRows = rows.filter(r => r["CHAPTER NAME"] === ch);
+                                const doneR = chRows.filter(r => r.isDone);
+                                const isF = doneR.length === chRows.length;
+                                
+                                if (isF) {
+                                    chDoneCalc++;
+                                    const targetDays = parseInt(chRows[0]?.['Target days for chapter']) || 0;
+                                    const targetMins = parseInt(chRows[0]?.['Target Minutes For Chapter']) || 0;
+                                    
+                                    let chStart = chRows[0]?.chapterStartDate ? new Date(chRows[0].chapterStartDate) : null;
+                                    const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
+                                    const chEnd = compDates.length ? new Date(Math.max(...compDates)) : null;
+                                    
+                                    let actDays = 0;
+                                    if (chStart && chEnd) {
+                                        let cur = new Date(chStart); let finish = new Date(chEnd);
+                                        while(cur <= finish) { if(cur.getDay() !== 0) actDays++; cur.setDate(cur.getDate() + 1); }
+                                    }
+                                    
+                                    let actMins = doneR.reduce((sum, r) => sum + (parseInt(r.completedMinutes)||0), 0); 
+                                    
+                                    totalDayGap += (targetDays - actDays);
+                                    totalMinGap += (targetMins - actMins);
+                                }
+
+                                // Push to Subject Tabs
+                                chRows.forEach(r => {
+                                    subjectDataMap[sub].push({
+                                        cls: st.className, sec: st.sectionName,
+                                        ch: ch, lec: r['LECTURE NUMBER'], topic: r['SUBTOPICS'],
+                                        td: r['Target days for chapter'], tm: r['Target Minutes For Chapter'],
+                                        status: r.isDone ? 'Completed' : 'Pending',
+                                        cDate: r.completedDate ? new Date(r.completedDate).toLocaleDateString('en-GB') : '', 
+                                        cMins: r.completedMinutes || '',
+                                        exe: r.tickedBy || ''
+                                    });
+                                });
+                            });
+
+                            let progPct = Math.round((chDoneCalc / chNames.length) * 100);
+                            
+                            // Add to Master Tab
+                            let mRow = masterSheet.addRow({
+                                class: st.className, sec: st.sectionName, sub: sub,
+                                tc: chNames.length, cc: chDoneCalc, prog: `${progPct}%`,
+                                dv: totalDayGap > 0 ? `Ahead (+${totalDayGap})` : (totalDayGap < 0 ? `Late (${totalDayGap})` : 'On Track'), 
+                                mv: totalMinGap > 0 ? `Saved (+${totalMinGap})` : (totalMinGap < 0 ? `Extra (${totalMinGap})` : 'Exact')
+                            });
+
+                            // Colorize Master row based on Progress/Variance
+                            if (progPct === 100) mRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD1FAE5' } }; // Green
+                            else if (totalDayGap < 0) mRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE4E6' } }; // Red
+                        }
+                    });
                 });
-            });
 
-            // Trigger the download
-            const encodedUri = encodeURI(csvContent);
-            const link = document.createElement("a");
-            link.setAttribute("href", encodedUri);
-            link.setAttribute("download", `Minerva_Syllabus_Report.csv`);
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+                // --- 2. INDIVIDUAL SUBJECT TABS ---
+                Object.keys(subjectDataMap).forEach(sub => {
+                    if(subjectDataMap[sub].length === 0) return; // Skip empty subjects
+
+                    let sSheet = workbook.addWorksheet(sub.substring(0, 31).replace(/[\*\?\/\\\[\]]/g, '')); // Max 31 chars, no special chars
+                    sSheet.columns = [
+                        { header: 'Class', key: 'cls', width: 12 },
+                        { header: 'Section', key: 'sec', width: 15 },
+                        { header: 'Chapter', key: 'ch', width: 25 },
+                        { header: 'Lec', key: 'lec', width: 8 },
+                        { header: 'Subtopic', key: 'topic', width: 45 },
+                        { header: 'Target Days', key: 'td', width: 12 },
+                        { header: 'Target Mins', key: 'tm', width: 12 },
+                        { header: 'Status', key: 'status', width: 15 },
+                        { header: 'Completed On', key: 'cDate', width: 15 },
+                        { header: 'Used Mins', key: 'cMins', width: 12 },
+                        { header: 'Logged By', key: 'exe', width: 30 }
+                    ];
+
+                    // Style Subject Header
+                    sSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+                    sSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } }; // Blue-600
+
+                    subjectDataMap[sub].forEach(row => {
+                        let r = sSheet.addRow(row);
+                        if (row.status === 'Completed') {
+                            r.getCell('status').font = { color: { argb: 'FF059669' }, bold: true }; // Emerald Green Text
+                            r.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0FDF4' } }; // Light Green Background
+                        } else {
+                            r.getCell('status').font = { color: { argb: 'FFD97706' }, bold: true }; // Amber Orange Text
+                        }
+                    });
+                });
+
+                // Generate and Download
+                const buffer = await workbook.xlsx.writeBuffer();
+                const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                saveAs(blob, `Minerva_Analytics_${new Date().toISOString().split('T')[0]}.xlsx`);
+
+            } catch (err) {
+                console.error("Export failed", err);
+                alert("Export Failed: " + err.message);
+            } finally {
+                btn.innerText = "📥 Export Report"; btn.disabled = false;
+            }
         }
 
         window.onload = async () => {
