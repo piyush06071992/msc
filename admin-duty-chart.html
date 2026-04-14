@@ -200,7 +200,7 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        let structureData = [], staffData = [], timetableData = [];
+        let structureData = [], staffData = [], timetableData = [], holidaysData = [];
         let weeklyRoster = {}; 
         let currentEditParams = null;
         
@@ -232,7 +232,6 @@
             }
         };
 
-        // HELPER: Extract unique departments safely
         function getUniqueDepartments() {
             let depts = new Set();
             staffData.forEach(s => {
@@ -249,13 +248,15 @@
 
         async function preloadData() {
             try {
-                const [structSnap, staffSnap, ttSnap] = await Promise.all([
+                const [structSnap, staffSnap, ttSnap, holSnap] = await Promise.all([
                     db.collection("institute_structure").get(),
                     db.collection("staff_applications").where("status", "==", "approved").get(),
-                    db.collection("timetable").get()
+                    db.collection("timetable").get(),
+                    db.collection("school_holidays").get()
                 ]);
 
                 structureData = structSnap.docs.map(d => d.data()).sort((a,b)=>a.className.localeCompare(b.className));
+                holidaysData = holSnap.docs.map(d => d.data());
                 
                 staffData = staffSnap.docs.map(doc => {
                     const d = doc.data();
@@ -266,7 +267,6 @@
                     const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject') || k.toLowerCase().includes('dept') || k.toLowerCase().includes('branch'));
                     let rawDept = deptKey ? det[deptKey] : 'General';
                     
-                    // CRITICAL FIX: Ensure array data correctly becomes string format
                     if (rawDept === undefined || rawDept === null) rawDept = 'General';
                     rawDept = rawDept.toString(); 
 
@@ -278,7 +278,6 @@
             } catch(e) { console.error("Error loading data:", e); }
         }
 
-        // --- LOCAL DELEGATION LOGIC --- //
         function openAuthModal() {
             document.getElementById('auth-modal').classList.replace('hidden', 'flex');
             const depts = getUniqueDepartments();
@@ -340,7 +339,6 @@
             `).join('');
         }
 
-        // --- SETUP & ALGORITHM --- //
         function renderSelectors() {
             document.getElementById('class-list').innerHTML = structureData.map(s => `
                 <label class="flex items-center gap-3 p-2 bg-slate-50 hover:bg-blue-50 rounded-xl cursor-pointer border border-transparent transition-all">
@@ -401,7 +399,7 @@
             if(!document.getElementById('lunch-duty-view').classList.contains('hidden')) {
                 document.getElementById('lunch-duty-view').classList.add('hidden');
                 document.getElementById('module-selection').classList.remove('hidden');
-                document.getElementById('sub-header-text').innerText = "Assign & Track Faculty Responsibilities";
+                document.getElementById('sub-header-text').innerText = "Algorithmic Allocation Hub";
             } else window.location.href = 'admin.html';
         }
 
@@ -435,6 +433,20 @@
             if(targetClasses.length === 0) return alert("Please select at least one Target Class.");
 
             const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            
+            // Map the generic days to the ACTUAL dates of the current week to check for holidays
+            const today = new Date();
+            const currentDayOfWeek = today.getDay(); 
+            const diffToMonday = today.getDate() - currentDayOfWeek + (currentDayOfWeek === 0 ? -6 : 1);
+            const mondayDate = new Date(today.setDate(diffToMonday));
+            
+            const weekDates = {};
+            days.forEach((day, idx) => {
+                const d = new Date(mondayDate);
+                d.setDate(mondayDate.getDate() + idx);
+                weekDates[day] = d;
+            });
+
             weeklyRoster = {};
 
             targetClasses.forEach(clsKey => {
@@ -443,6 +455,7 @@
             });
 
             days.forEach(day => {
+                const dayDate = weekDates[day];
                 const todayTt = timetableData.filter(t => t.day === day);
                 let assignedStaffToday = new Set();
 
@@ -457,6 +470,39 @@
                     });
                     
                     if(!classBreak) return weeklyRoster[clsKey].days[day] = { status: 'NO LUNCH BREAK' };
+
+                    // --- HOLIDAY CHECK ---
+                    let isHol = false; let hReason = "";
+                    for (let h of holidaysData) {
+                        if (!h.startDate) continue;
+                        const hStart = new Date(h.startDate); hStart.setHours(0,0,0,0);
+                        const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23,59,59,999);
+                        const cDate = new Date(dayDate); cDate.setHours(0,0,0,0);
+                        
+                        if (cDate >= hStart && cDate <= hEnd) {
+                            const targetCls = `${cName}|${sName}`;
+                            const tClasses = h.targetClasses || [];
+                            if (tClasses.includes('ALL') || tClasses.includes(targetCls)) {
+                                if (h.isFullDay) { isHol = true; hReason = h.reason; break; }
+                                
+                                if (h.startTime && h.endTime && classBreak && classBreak.timeRange) {
+                                    const bStart = timeToMins(classBreak.timeRange.split(' - ')[0]);
+                                    const bEnd = timeToMins(classBreak.timeRange.split(' - ')[1]);
+                                    const hStartMins = timeToMins(h.startTime);
+                                    const hEndMins = timeToMins(h.endTime);
+                                    if (bStart < hEndMins && bEnd > hStartMins) {
+                                        isHol = true; hReason = h.reason; break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (isHol) {
+                        weeklyRoster[clsKey].days[day] = { status: 'HOLIDAY', reason: hReason };
+                        return; // Skip finding a teacher for this class on this day
+                    }
+                    // --- END HOLIDAY CHECK ---
 
                     const bStart = timeToMins(classBreak.timeRange.split(' - ')[0]);
                     const bEnd = timeToMins(classBreak.timeRange.split(' - ')[1]);
@@ -531,6 +577,13 @@
                         return `<td class="p-3 bg-slate-50 border-r border-slate-100 text-center text-[8px] font-black text-slate-300 uppercase">--</td>`;
                     }
                     
+                    if (data.status === 'HOLIDAY') {
+                        return `<td class="p-3 bg-emerald-50 border-r border-emerald-100 text-center">
+                            <div class="text-[10px] font-black text-emerald-600 uppercase tracking-widest">🌴 OFF</div>
+                            <div class="text-[8px] font-bold text-emerald-500 mt-1 uppercase truncate w-[120px] mx-auto" title="${data.reason}">${data.reason}</div>
+                        </td>`;
+                    }
+                    
                     let bg = data.status === 'ASSIGNED' ? 'bg-white hover:bg-indigo-50' : 'bg-rose-50 hover:bg-rose-100';
                     let content = '';
 
@@ -573,6 +626,10 @@
             
             currentEditParams = { clsKey, day };
             const data = weeklyRoster[clsKey].days[day];
+            
+            if(data && data.status === 'HOLIDAY') {
+                return alert("This day is a designated holiday. You cannot assign staff.");
+            }
             
             document.getElementById('edit-modal-subtitle').innerText = `${weeklyRoster[clsKey].cName} - ${weeklyRoster[clsKey].sName} | ${day} (${data.timing || 'No Break Info'})`;
             
@@ -700,18 +757,34 @@
         async function saveCurrentRoster() {
             if(!window.hasDutyRights) return alert("You don't have authorization to save the duty chart.");
             const btn = event.target;
+            const originalText = btn.innerText;
             btn.innerText = "Saving...";
+            
             try {
-                const weekId = "week_" + Math.ceil(new Date().getDate() / 7) + "_" + new Date().getMonth();
+                // Generate a reliable week ID based on the current Monday
+                const today = new Date();
+                const day = today.getDay();
+                const diffToMonday = today.getDate() - day + (day === 0 ? -6 : 1);
+                const monday = new Date(today.setDate(diffToMonday));
+                const weekId = "week_starting_" + monday.toISOString().split('T')[0];
+
+                // CRITICAL FIX: Deep Clone removes any undefined variables or custom prototypes that crash Firebase
+                const safeRosterData = JSON.parse(JSON.stringify(weeklyRoster));
+
                 await db.collection("duty_rosters").doc(weekId).set({
                     type: "LUNCH",
-                    rosterData: weeklyRoster,
+                    rosterData: safeRosterData,
                     timestamp: Date.now(),
                     dayGenerated: new Date().toLocaleDateString('en-GB')
                 });
+                
                 alert("Weekly Roster saved successfully to Database!");
                 btn.innerText = "💾 Finalize & Save Week";
-            } catch(e) { alert("Error saving."); }
+            } catch(e) { 
+                console.error("Save error:", e);
+                alert("Database Error: " + e.message); 
+                btn.innerText = originalText;
+            }
         }
     </script>
 </body>
