@@ -490,6 +490,108 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
             sessionStorage.setItem('minerva_timetable', JSON.stringify(globalTimetable));
         }
 
+        // --- HOLIDAY OVERLAY ENGINE ---
+        async function fetchHolidays() {
+            try {
+                const snap = await db.collection("school_holidays").get();
+                holidaysData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            } catch(e) { console.error("Holiday Fetch Error:", e); }
+        }
+
+        function openHolidayModal() {
+            document.getElementById('holiday-modal').classList.replace('hidden', 'flex');
+            
+            // Populate classes list for specific exclusion
+            const classList = document.getElementById('hol-class-list');
+            classList.innerHTML = structureData.map(s => `
+                <label class="flex items-center gap-2 p-1.5 hover:bg-slate-50 rounded cursor-pointer transition-colors">
+                    <input type="checkbox" class="hol-class-cb w-3 h-3 accent-rose-600" value="${s.className}|${s.sectionName}" checked>
+                    <span class="text-[10px] font-bold text-slate-700 uppercase">${s.className} - ${s.sectionName}</span>
+                </label>`).join('');
+                
+            renderActiveHolidays();
+        }
+
+        async function saveHoliday() {
+            const startDate = document.getElementById('hol-start-date').value;
+            const endDate = document.getElementById('hol-end-date').value || startDate; // defaults to start if single day
+            const reason = document.getElementById('hol-reason').value.trim();
+            const isFullDay = document.getElementById('hol-full-day').checked;
+            const sTime = document.getElementById('hol-start-time').value;
+            const eTime = document.getElementById('hol-end-time').value;
+            
+            if(!startDate || !reason) return alert("Start Date and Reason are mandatory!");
+            if(!isFullDay && (!sTime || !eTime)) return alert("For half-days, you must specify Start and End times.");
+            
+            const isAllClasses = document.getElementById('hol-all-classes').checked;
+            const targetClasses = isAllClasses ? ['ALL'] : Array.from(document.querySelectorAll('.hol-class-cb:checked')).map(cb => cb.value);
+            
+            if(targetClasses.length === 0) return alert("Select at least one target class.");
+            
+            const btn = event.target; btn.innerText = "Saving..."; btn.disabled = true;
+            
+            try {
+                const data = {
+                    startDate, endDate, reason, isFullDay,
+                    startTime: isFullDay ? null : sTime,
+                    endTime: isFullDay ? null : eTime,
+                    targetClasses,
+                    timestamp: Date.now()
+                };
+                await db.collection("school_holidays").add(data);
+                alert("Holiday Rule Saved!");
+                
+                // Reset form
+                document.getElementById('hol-start-date').value = '';
+                document.getElementById('hol-end-date').value = '';
+                document.getElementById('hol-reason').value = '';
+                
+                await fetchHolidays();
+                renderActiveHolidays();
+                renderDirectDashboard(); // Re-draw timetable
+            } catch(e) { alert("Error saving holiday."); }
+            finally { btn.innerText = "➕ Add Holiday"; btn.disabled = false; }
+        }
+
+        function renderActiveHolidays() {
+            const list = document.getElementById('active-holidays-list');
+            if (holidaysData.length === 0) {
+                list.innerHTML = '<p class="text-xs text-slate-400 font-bold italic">No active holidays.</p>';
+                return;
+            }
+
+            const sorted = [...holidaysData].sort((a,b) => new Date(b.startDate) - new Date(a.startDate));
+            
+            list.innerHTML = sorted.map(h => {
+                const dateStr = h.startDate === h.endDate ? new Date(h.startDate).toLocaleDateString('en-GB') : `${new Date(h.startDate).toLocaleDateString('en-GB')} to ${new Date(h.endDate).toLocaleDateString('en-GB')}`;
+                const timeStr = h.isFullDay ? "Full Day" : `${format12Hour(h.startTime)} - ${format12Hour(h.endTime)}`;
+                const classStr = h.targetClasses.includes('ALL') ? "Entire Institute" : `${h.targetClasses.length} Sections`;
+                
+                return `
+                <div class="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-100 shadow-sm">
+                    <div>
+                        <div class="text-[11px] font-black text-rose-600 tracking-widest">${dateStr}</div>
+                        <div class="text-sm font-black text-slate-800 mt-0.5">${h.reason}</div>
+                        <div class="text-[9px] font-bold text-slate-500 mt-1 uppercase flex gap-3">
+                            <span class="bg-rose-50 px-2 py-0.5 rounded text-rose-600 border border-rose-100">${timeStr}</span>
+                            <span class="bg-slate-100 px-2 py-0.5 rounded">${classStr}</span>
+                        </div>
+                    </div>
+                    <button onclick="deleteHoliday('${h.id}')" class="text-rose-400 hover:text-rose-600 font-black p-3 hover:bg-rose-50 rounded-xl transition-colors text-lg" title="Remove Holiday">✕</button>
+                </div>`;
+            }).join('');
+        }
+
+        async function deleteHoliday(id) {
+            if(!confirm("Remove this holiday? The original timetable will be restored immediately.")) return;
+            try {
+                await db.collection("school_holidays").doc(id).delete();
+                await fetchHolidays();
+                renderActiveHolidays();
+                renderDirectDashboard();
+            } catch(e) { alert("Error removing."); }
+        }
+
         // ============================================================================
         // === SMART CONTAINER UI RENDERER                                          ===
         // ============================================================================
