@@ -202,6 +202,7 @@
 
         let structureData = [], staffData = [], timetableData = [], holidaysData = [];
         let weeklyRoster = {}; 
+        let oldRosterState = {}; // Holds the previous state for smart email comparison
         let currentEditParams = null;
         
         window.hasDutyRights = false;
@@ -411,7 +412,6 @@
             document.getElementById('lunch-duty-view').classList.remove('hidden');
             document.getElementById('sub-header-text').innerText = "Lunch Duty Algorithmic Engine";
             
-            // --- FIX: AUTO-LOAD THE EXISTING SAVED ROSTER FOR THIS WEEK ---
             const today = new Date();
             const day = today.getDay();
             const diffToMonday = today.getDate() - day + (day === 0 ? -6 : 1);
@@ -422,7 +422,10 @@
                 const doc = await db.collection("duty_rosters").doc(weekId).get();
                 if(doc.exists) {
                     weeklyRoster = doc.data().rosterData;
+                    oldRosterState = JSON.parse(JSON.stringify(weeklyRoster)); // Deep copy for future comparison
                     renderGrid();
+                } else {
+                    oldRosterState = {};
                 }
             } catch(e) {
                 console.log("No saved roster found for this week.");
@@ -454,7 +457,6 @@
 
             const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             
-            // Map the generic days to the ACTUAL dates of the current week to check for holidays
             const today = new Date();
             const currentDayOfWeek = today.getDay(); 
             const diffToMonday = today.getDate() - currentDayOfWeek + (currentDayOfWeek === 0 ? -6 : 1);
@@ -491,7 +493,6 @@
                     
                     if(!classBreak) return weeklyRoster[clsKey].days[day] = { status: 'NO LUNCH BREAK' };
 
-                    // --- HOLIDAY CHECK ---
                     let isHol = false; let hReason = "";
                     for (let h of holidaysData) {
                         if (!h.startDate) continue;
@@ -520,9 +521,8 @@
 
                     if (isHol) {
                         weeklyRoster[clsKey].days[day] = { status: 'HOLIDAY', reason: hReason };
-                        return; // Skip finding a teacher for this class on this day
+                        return;
                     }
-                    // --- END HOLIDAY CHECK ---
 
                     const bStart = timeToMins(classBreak.timeRange.split(' - ')[0]);
                     const bEnd = timeToMins(classBreak.timeRange.split(' - ')[1]);
@@ -698,15 +698,32 @@
                 const load = getTeacherLoad(s.name, day);
                 const sTt = timetableData.filter(t => t.day === day && t.teacherName === s.name);
                 
-                const isBusy = sTt.some(cls => {
+                // 1. Check if they have a class overlapping with this break
+                const isBusyInClass = sTt.some(cls => {
                     if(!cls.timeRange) return false;
                     const sS = timeToMins(cls.timeRange.split(' - ')[0]);
                     const sE = timeToMins(cls.timeRange.split(' - ')[1]);
                     return (bStart < sE && bEnd > sS);
                 });
 
-                const optionHtml = `<option value="${s.email}">${s.name} (L:${load.classes} | M:${load.mins})</option>`;
-                if (isBusy) busyGroup += optionHtml;
+                // 2. NEW: Check if they are already assigned to ANOTHER class's duty on this day
+                let alreadyOnDuty = false;
+                Object.keys(weeklyRoster).forEach(otherClsKey => {
+                    if (otherClsKey !== currentEditParams.clsKey) {
+                        const otherDuty = weeklyRoster[otherClsKey].days[day];
+                        if (otherDuty && otherDuty.status === 'ASSIGNED' && otherDuty.staff && otherDuty.staff.email === s.email) {
+                            alreadyOnDuty = true;
+                        }
+                    }
+                });
+
+                let reason = "";
+                if (isBusyInClass) reason = " (In Class)";
+                else if (alreadyOnDuty) reason = " (On Duty)";
+
+                const optionHtml = `<option value="${s.email}">${s.name}${reason} (L:${load.classes} | M:${load.mins})</option>`;
+                
+                if (isBusyInClass || alreadyOnDuty) busyGroup += optionHtml;
                 else availableGroup += optionHtml;
             });
 
@@ -774,6 +791,48 @@
             currentEditParams = null;
         }
 
+        // --- NEW: SMART EMAIL COMPARATOR ---
+        function detectDutyChanges(oldRoster, newRoster) {
+            let affected = new Map();
+            const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+            // 1. Check all classes in the new roster against the old one
+            Object.keys(newRoster).forEach(clsKey => {
+                days.forEach(d => {
+                    const newVal = newRoster[clsKey].days[d];
+                    const oldVal = (oldRoster[clsKey] && oldRoster[clsKey].days[d]) ? oldRoster[clsKey].days[d] : null;
+
+                    const newEmail = (newVal && newVal.status === 'ASSIGNED' && newVal.staff) ? newVal.staff.email : null;
+                    const oldEmail = (oldVal && oldVal.status === 'ASSIGNED' && oldVal.staff) ? oldVal.staff.email : null;
+
+                    // If the teacher assigned to this specific slot changed
+                    if (newEmail !== oldEmail) {
+                        if (newEmail) affected.set(newEmail, newVal.staff.name); // Notify new teacher
+                        if (oldEmail) affected.set(oldEmail, oldVal.staff.name); // Notify old teacher (they were removed)
+                    } 
+                    // If it's the exact same teacher, but the duty timing/location shifted
+                    else if (newEmail && oldEmail && newEmail === oldEmail) {
+                        if (newVal.timing !== oldVal.timing) {
+                            affected.set(newEmail, newVal.staff.name);
+                        }
+                    }
+                });
+            });
+
+            // 2. Catch edge case: An entire class was removed from the target list
+            Object.keys(oldRoster).forEach(clsKey => {
+                if (!newRoster[clsKey]) {
+                    days.forEach(d => {
+                        const oldVal = oldRoster[clsKey].days[d];
+                        const oldEmail = (oldVal && oldVal.status === 'ASSIGNED' && oldVal.staff) ? oldVal.staff.email : null;
+                        if (oldEmail) affected.set(oldEmail, oldVal.staff.name); // Notify they were removed
+                    });
+                }
+            });
+
+            return Array.from(affected, ([email, name]) => ({ name, email }));
+        }
+
         async function saveCurrentRoster() {
             if(!window.hasDutyRights) return alert("You don't have authorization to save the duty chart.");
             const btn = document.querySelector('button[onclick="saveCurrentRoster()"]');
@@ -781,14 +840,12 @@
             btn.innerText = "Saving...";
             
             try {
-                // Generate a reliable week ID based on the current Monday
                 const today = new Date();
                 const day = today.getDay();
                 const diffToMonday = today.getDate() - day + (day === 0 ? -6 : 1);
                 const monday = new Date(today.setDate(diffToMonday));
                 const weekId = "week_starting_" + monday.toISOString().split('T')[0];
 
-                // CRITICAL FIX: Deep Clone removes any undefined variables or custom prototypes that crash Firebase
                 const safeRosterData = JSON.parse(JSON.stringify(weeklyRoster));
 
                 await db.collection("duty_rosters").doc(weekId).set({
@@ -798,23 +855,11 @@
                     dayGenerated: new Date().toLocaleDateString('en-GB')
                 });
                 
-                // Collect assigned teachers to notify via email
-                let assignedSet = new Map();
-                Object.keys(weeklyRoster).forEach(clsKey => {
-                    const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                    days.forEach(d => {
-                        const data = weeklyRoster[clsKey].days[d];
-                        if (data && data.status === 'ASSIGNED' && data.staff) {
-                            assignedSet.set(data.staff.email, data.staff.name);
-                        }
-                    });
-                });
-                
-                const teachersToNotify = Array.from(assignedSet, ([email, name]) => ({ name, email }));
+                // Compare the newly saved roster against the snapshot taken when the page loaded
+                const teachersToNotify = detectDutyChanges(oldRosterState, weeklyRoster);
 
                 if (teachersToNotify.length > 0) {
-                    // FIX: Changed secret code to GLOBAL_TIMETABLE_UPDATE so the existing Google Apps Script catches it!
-                    const payload = { type: "GLOBAL_TIMETABLE_UPDATE", teachersAffected: teachersToNotify };
+                    const payload = { type: "DUTY_CHART_UPDATE", teachersAffected: teachersToNotify };
                     const scriptURL = "https://script.google.com/macros/s/AKfycbyWUqGV1jd73NK_3zOU2Sy6wXCwcrjCG0ErqyRHM41f7qzcsNwxwjXfUlk2ZjFVeUmcdQ/exec";
                     
                     fetch(scriptURL, {
@@ -823,9 +868,12 @@
                         body: JSON.stringify(payload)
                     }).catch(e => console.error("Email trigger failed:", e));
                     
-                    alert(`✅ Weekly Roster saved successfully!\n\nAutomated emails have been sent to the assigned staff:\n${teachersToNotify.map(t=>t.name).join(', ')}`);
+                    alert(`✅ Weekly Roster saved successfully!\n\nAutomated emails have been sent to the affected staff:\n${teachersToNotify.map(t=>t.name).join(', ')}`);
+                    
+                    // Update our snapshot memory so clicking save again won't re-send the emails
+                    oldRosterState = JSON.parse(JSON.stringify(weeklyRoster));
                 } else {
-                    alert("✅ Weekly Roster saved successfully to Database! (No staff were assigned)");
+                    alert("✅ Weekly Roster saved successfully to Database! (No teacher assignments were changed, so 0 emails were sent.)");
                 }
                 
                 btn.innerText = "💾 Finalize & Save Week";
