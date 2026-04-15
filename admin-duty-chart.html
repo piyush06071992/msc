@@ -98,15 +98,34 @@
                 </div>
 
                 <div class="xl:col-span-3">
+                    
+                    <details id="prev-roster-accordion" class="hidden mb-6 bg-slate-50/50 rounded-[2rem] sm:rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden group">
+                        <summary class="p-4 sm:p-6 font-black text-slate-500 uppercase tracking-widest cursor-pointer select-none flex justify-between items-center hover:bg-slate-100 transition-colors outline-none">
+                            <div class="flex items-center gap-3">
+                                <span class="text-xl sm:text-2xl">🕰️</span> <span class="text-xs sm:text-sm">Previous Week's Chart</span>
+                            </div>
+                            <span class="text-[9px] sm:text-[10px] text-slate-400 bg-white border border-slate-200 px-3 py-1.5 rounded-full shadow-sm group-open:hidden">Click to Expand ➔</span>
+                        </summary>
+                        <div class="overflow-auto custom-scroll border-t border-slate-200 bg-white/50 max-h-[400px]">
+                            <table class="w-full text-left text-xs opacity-70">
+                                <thead id="prev-roster-head" class="bg-slate-100 text-[9px] sm:text-[10px] font-black uppercase tracking-widest text-slate-400"></thead>
+                                <tbody id="prev-roster-body" class="divide-y divide-slate-100"></tbody>
+                            </table>
+                        </div>
+                    </details>
+
                     <div id="results-placeholder" class="h-full min-h-[400px] border-2 border-dashed border-slate-200 rounded-[3rem] flex flex-col items-center justify-center text-slate-400 p-8 text-center bg-white/50">
                         <div class="text-5xl sm:text-6xl mb-4">🤖</div>
                         <p class="font-bold uppercase tracking-widest text-[10px] sm:text-xs leading-relaxed">Configure parameters and click generate.<br>The AI will map the entire week.</p>
                     </div>
 
                     <div id="results-area" class="hidden glass-card rounded-[2rem] sm:rounded-[2.5rem] overflow-hidden shadow-2xl border border-slate-200 flex flex-col h-[70vh] sm:h-[800px]">
-                        <div class="p-4 sm:p-6 bg-white border-b flex justify-between items-center shrink-0">
+                        <div class="p-4 sm:p-6 bg-white border-b flex flex-col sm:flex-row justify-between items-start sm:items-center shrink-0 gap-3">
                             <h3 class="text-lg sm:text-xl font-black text-slate-900 uppercase tracking-tighter">Weekly Duty Chart</h3>
-                            <button onclick="saveCurrentRoster()" class="text-[9px] sm:text-[10px] font-black bg-emerald-100 text-emerald-700 px-4 sm:px-5 py-2 sm:py-2.5 rounded-full border border-emerald-200 hover:bg-emerald-200 shadow-sm transition-all">💾 Save Week</button>
+                            <div class="flex gap-2 w-full sm:w-auto">
+                                <button onclick="notifyStaff()" class="flex-1 sm:flex-none text-[9px] sm:text-[10px] font-black bg-blue-100 text-blue-700 px-4 sm:px-5 py-2 sm:py-2.5 rounded-full border border-blue-200 hover:bg-blue-200 shadow-sm transition-all text-center">📢 Notify Staff</button>
+                                <button onclick="saveCurrentRoster()" class="flex-1 sm:flex-none text-[9px] sm:text-[10px] font-black bg-emerald-100 text-emerald-700 px-4 sm:px-5 py-2 sm:py-2.5 rounded-full border border-emerald-200 hover:bg-emerald-200 shadow-sm transition-all text-center">💾 Save Week</button>
+                            </div>
                         </div>
                         <div class="overflow-auto custom-scroll flex-1 bg-white">
                             <table class="w-full text-left text-xs">
@@ -203,6 +222,7 @@
 
         let structureData = [], staffData = [], timetableData = [], holidaysData = [];
         let weeklyRoster = {}; 
+        let prevWeeklyRoster = null; 
         let oldRosterState = {}; 
         let currentEditParams = null;
         
@@ -416,8 +436,8 @@
             }
         }
 
-        // --- LAZY TRIGGER INJECTION ---
-      async function initLunchDuty() {
+        // --- LAZY TRIGGER & PREV WEEK LOADER ---
+        async function initLunchDuty() {
             document.getElementById('module-selection').classList.add('hidden');
             document.getElementById('lunch-duty-view').classList.remove('hidden');
             document.getElementById('sub-header-text').innerText = "Lunch Duty Algorithmic Engine";
@@ -428,14 +448,28 @@
             const monday = new Date(new Date().setDate(diffToMonday));
             const weekId = "week_starting_" + monday.toISOString().split('T')[0];
 
+            // 1. Fetch Previous Week Data (For accordion and algorithm fatigue)
+            const prevMonday = new Date(monday); prevMonday.setDate(prevMonday.getDate() - 7);
+            const prevWeekId = "week_starting_" + prevMonday.toISOString().split('T')[0];
+            try {
+                const pDoc = await db.collection("duty_rosters").doc(prevWeekId).get();
+                if(pDoc.exists) {
+                    prevWeeklyRoster = pDoc.data().rosterData;
+                    renderPrevGrid();
+                    document.getElementById('prev-roster-accordion').classList.remove('hidden');
+                } else {
+                    document.getElementById('prev-roster-accordion').classList.add('hidden');
+                }
+            } catch(e) { console.log("No previous week data."); }
+
+            // 2. Fetch Current Week Data
             try {
                 const doc = await db.collection("duty_rosters").doc(weekId).get();
                 if(doc.exists) {
                     weeklyRoster = doc.data().rosterData;
                     oldRosterState = JSON.parse(JSON.stringify(weeklyRoster));
                     
-                    // --- NEW: SILENT AUTO-PATCHER ---
-                    // Automatically fixes mid-week holiday additions or cancellations
+                    // Auto-Patcher for Mid-Week Holiday Adds
                     await applyLiveHolidaysToRoster(monday);
                     
                     renderGrid();
@@ -450,7 +484,7 @@
             }
         }
 
-        // --- NEW: HELPER FUNCTION FOR THE AUTO-PATCHER ---
+        // --- AUTO-PATCHER FOR HOLIDAYS ---
         async function applyLiveHolidaysToRoster(mondayDate) {
             const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             let rosterWasPatched = false;
@@ -481,12 +515,12 @@
 
                     const currentStatus = weeklyRoster[clsKey].days[day].status;
                     
-                    // 1. If Admin added a holiday mid-week, auto-wipe the duty
+                    // Add Holiday
                     if (isHol && currentStatus !== 'HOLIDAY') {
                         weeklyRoster[clsKey].days[day] = { status: 'HOLIDAY', reason: hReason };
                         rosterWasPatched = true;
                     } 
-                    // 2. If Admin cancelled a holiday mid-week, clear the cell so it can be re-assigned
+                    // Remove Holiday
                     else if (!isHol && currentStatus === 'HOLIDAY') {
                         weeklyRoster[clsKey].days[day] = { status: 'NO LUNCH BREAK' }; 
                         rosterWasPatched = true;
@@ -494,9 +528,8 @@
                 });
             });
 
-            // If changes were made, silently save to the database in the background!
             if (rosterWasPatched) {
-                console.log("Mid-week holiday change detected! Auto-patching database...");
+                console.log("Mid-week holiday change detected! Auto-patching...");
                 await saveCurrentRoster(true); 
             }
         }
@@ -518,19 +551,15 @@
             return { classes: sTt.length, mins };
         }
 
-        // --- FAIR ROTATION ENGINE INCLUDED HERE ---
+        // --- FAIR ROTATION ENGINE (2-WEEK MEMORY) ---
         async function runLunchAlgorithm(isAutoTrigger = false) {
             const targetClasses = Array.from(document.querySelectorAll('.class-cb:checked')).map(i => i.value);
             const exempted = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value);
             
             if(targetClasses.length === 0) return alert("Please select at least one Target Class.");
 
-            // UI Feedback
             const genBtn = document.querySelector('button[onclick="runLunchAlgorithm()"]');
-            if(genBtn) {
-                genBtn.innerText = "⚡ Generating...";
-                genBtn.disabled = true;
-            }
+            if(genBtn) { genBtn.innerText = "⚡ Generating..."; genBtn.disabled = true; }
 
             const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             
@@ -539,23 +568,35 @@
             const diffToMonday = today.getDate() - currentDayOfWeek + (currentDayOfWeek === 0 ? -6 : 1);
             const mondayDate = new Date(new Date().setDate(diffToMonday));
             
-            // --- 1. BUILD FATIGUE MAP FROM PREVIOUS WEEK ---
-            const prevMonday = new Date(mondayDate);
-            prevMonday.setDate(prevMonday.getDate() - 7);
-            const prevWeekId = "week_starting_" + prevMonday.toISOString().split('T')[0];
+            // --- BUILD 2-WEEK FATIGUE MAP ---
+            let fatigueMap = new Map(); // Store email -> penalty score
             
-            let fatigueMap = new Set();
+            // Week -1 (Last Week) = High Penalty
+            if(prevWeeklyRoster) {
+                Object.values(prevWeeklyRoster).forEach(cls => {
+                    Object.values(cls.days).forEach(d => {
+                        if(d.status === 'ASSIGNED' && d.staff) fatigueMap.set(d.staff.email, 10000);
+                    });
+                });
+            }
+
+            // Week -2 (Two Weeks Ago) = Medium Penalty
+            const prevPrevMonday = new Date(mondayDate); prevPrevMonday.setDate(prevPrevMonday.getDate() - 14);
+            const prevPrevWeekId = "week_starting_" + prevPrevMonday.toISOString().split('T')[0];
             try {
-                const prevDoc = await db.collection("duty_rosters").doc(prevWeekId).get();
-                if(prevDoc.exists) {
-                    const pRoster = prevDoc.data().rosterData;
-                    Object.values(pRoster).forEach(cls => {
+                const ppDoc = await db.collection("duty_rosters").doc(prevPrevWeekId).get();
+                if(ppDoc.exists) {
+                    const ppRoster = ppDoc.data().rosterData;
+                    Object.values(ppRoster).forEach(cls => {
                         Object.values(cls.days).forEach(d => {
-                            if(d.status === 'ASSIGNED' && d.staff) fatigueMap.add(d.staff.email);
+                            if(d.status === 'ASSIGNED' && d.staff) {
+                                // Only add 5000 if they don't already have 10000 from last week
+                                if(!fatigueMap.has(d.staff.email)) fatigueMap.set(d.staff.email, 5000);
+                            }
                         });
                     });
                 }
-            } catch(e) { console.log("No previous week data for fatigue mapping."); }
+            } catch(e) { console.log("No 2-week history found."); }
 
             const weekDates = {};
             days.forEach((day, idx) => {
@@ -655,9 +696,8 @@
                             if (!hasSelfLunch && (840 - Math.max(lastE, 720)) >= 45) hasSelfLunch = true;
                         }
 
-                        // --- 2. APPLY FAIR ROTATION PENALTY ---
-                        const isFatigued = fatigueMap.has(staff.email);
-                        const penalty = isFatigued ? 10000 : 0; 
+                        // Apply Penalty
+                        const penalty = fatigueMap.get(staff.email) || 0;
 
                         return { ...staff, load, valid: (!conflict && hasSelfLunch), score: load.mins + penalty };
                     }).filter(c => c.valid).sort((a,b) => a.score - b.score); 
@@ -674,15 +714,94 @@
 
             renderGrid();
 
-            if(genBtn) {
-                genBtn.innerText = "⚡ Generate Roster";
-                genBtn.disabled = false;
-            }
+            if(genBtn) { genBtn.innerText = "⚡ Generate Roster"; genBtn.disabled = false; }
 
-            // If it was auto-triggered (Lazy Load), save it immediately without showing the alert
-            if(isAutoTrigger === true) {
-                await saveCurrentRoster(true); 
-            }
+            if(isAutoTrigger === true) { await saveCurrentRoster(true); }
+        }
+
+        // --- NOTIFY STAFF VIA WHATSAPP ---
+        function notifyStaff() {
+            if (Object.keys(weeklyRoster).length === 0) return alert("Generate a roster first.");
+            
+            let message = "🚨 *Minerva Duty Chart Updated* 🚨\n\n";
+            message += "The lunch duty roster for this week has been finalized. Please check your portals.\n\n";
+            
+            // Build a very quick summary to paste
+            const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            let hasDuties = false;
+
+            Object.keys(weeklyRoster).forEach(clsKey => {
+                let clsLine = `*${clsKey.replace('|', ' Sec ')}:* `;
+                let staffList = [];
+                days.forEach(d => {
+                    const data = weeklyRoster[clsKey].days[d];
+                    if (data && data.status === 'ASSIGNED' && data.staff) {
+                        if(!staffList.includes(data.staff.name)) staffList.push(data.staff.name);
+                        hasDuties = true;
+                    }
+                });
+                if (staffList.length > 0) {
+                    message += clsLine + staffList.join(', ') + "\n";
+                }
+            });
+
+            if(!hasDuties) message += "No duties assigned for this week.\n";
+            
+            message += "\n🔗 Login here: https://minervaacademy.web.app";
+
+            // Copy to clipboard and open WhatsApp
+            navigator.clipboard.writeText(message).then(() => {
+                alert("✅ Message Copied to Clipboard!\n\nRedirecting to WhatsApp... Just hold down and click 'Paste' in the group chat.");
+                window.open("https://chat.whatsapp.com/E7gFYd4iDPwIz4mS57HKbx", "_blank");
+            }).catch(err => {
+                alert("Could not copy automatically. Please notify the group manually.");
+                console.error(err);
+            });
+        }
+
+        function renderPrevGrid() {
+            if(!prevWeeklyRoster) return;
+            const head = document.getElementById('prev-roster-head');
+            const body = document.getElementById('prev-roster-body');
+            const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+            head.innerHTML = `<tr>
+                <th class="p-2 sm:p-3 sticky-col bg-slate-100">Class / Sect</th>
+                ${days.map(d => `<th class="p-2 sm:p-3 text-center min-w-[120px] bg-slate-100">${d.substring(0,3)}</th>`).join('')}
+            </tr>`;
+
+            body.innerHTML = Object.keys(prevWeeklyRoster).map(clsKey => {
+                const row = prevWeeklyRoster[clsKey];
+                
+                let cells = days.map(day => {
+                    const data = row.days[day];
+                    
+                    if (!data || data.status === 'NO LUNCH BREAK' || data.status === 'NO BREAK DEFINED') {
+                        return `<td class="p-2 border-r border-slate-200 bg-slate-50"><div class="text-[8px] font-black text-slate-300 uppercase text-center leading-tight">NO BREAK</div></td>`;
+                    }
+                    if (data.status === 'HOLIDAY') {
+                        return `<td class="p-2 bg-emerald-50 border-r border-emerald-100 text-center"><div class="text-[9px] font-black text-emerald-600 uppercase tracking-widest">🌴 OFF</div></td>`;
+                    }
+                    
+                    if (data.status === 'ASSIGNED') {
+                        return `
+                        <td class="p-2 border-r border-slate-200 bg-white">
+                            <div class="font-black text-[9px] text-slate-700 uppercase leading-tight truncate max-w-[100px]" title="${data.staff.name}">${data.staff.name}</div>
+                            <div class="text-[8px] font-bold text-slate-400 mt-1 tracking-tight">🕒 ${data.timing}</div>
+                        </td>`;
+                    } else {
+                        return `<td class="p-2 border-r border-slate-200 bg-rose-50"><div class="font-black text-[8px] text-rose-500 uppercase">⚠️ NONE</div></td>`;
+                    }
+                }).join('');
+
+                return `<tr>
+                    <td class="p-2 sticky-col bg-white">
+                        <div class="font-black text-[9px] sm:text-[10px] text-slate-600 uppercase tracking-tighter truncate max-w-[100px]">${row.cName}</div>
+                        <div class="text-[8px] sm:text-[9px] font-bold text-slate-400 truncate max-w-[100px]">${row.sName}</div>
+                    </td>
+                    ${cells}
+                </tr>`;
+            }).join('');
         }
 
         function renderGrid() {
