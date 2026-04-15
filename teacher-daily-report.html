@@ -41,7 +41,7 @@
                 <span class="text-2xl">👨‍🏫</span>
                 <div class="text-left">
                     <div id="teacher-name-display" class="text-sm font-black uppercase tracking-widest text-indigo-50">Loading...</div>
-                    <div class="text-xs text-indigo-400 font-bold uppercase">Staff ID</div>
+                    <div id="teacher-dept-display" class="text-xs text-indigo-400 font-bold uppercase">Loading Dept...</div>
                 </div>
             </div>
         </div>
@@ -113,6 +113,18 @@
         let myDuties = [];
         let mySyllabusLogs = [];
 
+        // Helper for Time Math
+        function timeToMins(tStr) {
+            if(!tStr) return 0;
+            try {
+                const [time, modifier] = tStr.split(' ');
+                let [hours, minutes] = time.split(':').map(Number);
+                if (hours === 12) hours = 0;
+                if (modifier === 'PM') hours += 12;
+                return hours * 60 + minutes;
+            } catch(e) { return 0; }
+        }
+
         window.onload = async () => {
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
             if (!activeStaff) {
@@ -122,6 +134,25 @@
 
             const safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name : activeStaff.email;
             document.getElementById('teacher-name-display').innerText = safeName;
+
+            // Fetch the Department cleanly for the header
+            try {
+                const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                let deptText = "Staff Member";
+                if (!staffSnap.empty) {
+                    const staffData = staffSnap.docs[0].data();
+                    const det = staffData.details || {};
+                    const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject') || k.toLowerCase().includes('branch'));
+                    if (deptKey && det[deptKey]) {
+                        deptText = det[deptKey];
+                        // If multiple departments, show only the primary one
+                        if (deptText.includes(',')) deptText = deptText.split(',')[0].trim();
+                    }
+                }
+                document.getElementById('teacher-dept-display').innerText = deptText;
+            } catch(e) {
+                document.getElementById('teacher-dept-display').innerText = "Staff Member";
+            }
 
             const today = new Date();
             todayDateStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
@@ -148,14 +179,54 @@
                     .where("day", "==", todayDayName)
                     .get();
                 
-                myClasses = ttSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+                let rawClasses = ttSnap.docs.map(d => ({ id: d.id, ...d.data() }))
                                          .sort((a,b) => (a.timeRange || "").localeCompare(b.timeRange || ""));
 
-                // 2. Fetch Structure to map to Lesson Planners
+                // 2. Fetch Holidays & Filter Out Classes that fall on a holiday
+                const holSnap = await db.collection("school_holidays").get();
+                const holidaysData = holSnap.docs.map(d => d.data());
+                
+                const todayDateObj = new Date();
+                todayDateObj.setHours(0,0,0,0);
+
+                myClasses = rawClasses.filter(cls => {
+                    let isHoliday = false;
+                    for (let h of holidaysData) {
+                        if (!h.startDate) continue;
+                        const hStart = new Date(h.startDate); hStart.setHours(0,0,0,0);
+                        const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23,59,59,999);
+                        
+                        // Check if today falls in the holiday date range
+                        if (todayDateObj >= hStart && todayDateObj <= hEnd) {
+                            const targetCls = `${cls.className}|${cls.section}`;
+                            const tClasses = h.targetClasses || [];
+                            
+                            // Check if this specific class is included in the holiday
+                            if (tClasses.includes('ALL') || tClasses.includes(targetCls)) {
+                                if (h.isFullDay) {
+                                    isHoliday = true; break;
+                                } else if (h.startTime && h.endTime && cls.timeRange) {
+                                    // Partial day math (checks for overlap)
+                                    const bStart = timeToMins(cls.timeRange.split(' - ')[0]);
+                                    const bEnd = timeToMins(cls.timeRange.split(' - ')[1]);
+                                    const hStartMins = timeToMins(h.startTime);
+                                    const hEndMins = timeToMins(h.endTime);
+                                    
+                                    if (bStart < hEndMins && bEnd > hStartMins) {
+                                        isHoliday = true; break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return !isHoliday; // We ONLY keep it if it is NOT a holiday
+                });
+
+                // 3. Fetch Structure to map to Lesson Planners
                 const structSnap = await db.collection("institute_structure").get();
                 const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
 
-                // 3. Fetch Lesson Planners & Match Logs
+                // 4. Fetch Lesson Planners & Match Logs
                 mySyllabusLogs = [];
                 for (let cls of myClasses) {
                     const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
@@ -186,7 +257,7 @@
                     }
                 }
 
-                // 4. Fetch Duty Roster for this week
+                // 5. Fetch Duty Roster for this week
                 const todayObj = new Date();
                 const dayInt = todayObj.getDay();
                 const diffToMonday = todayObj.getDate() - dayInt + (dayInt === 0 ? -6 : 1);
@@ -200,6 +271,7 @@
                     const rosterData = rosterDoc.data().rosterData;
                     Object.keys(rosterData).forEach(clsKey => {
                         const dayData = rosterData[clsKey].days[todayDayName];
+                        // Double check the duty cell doesn't say 'HOLIDAY' before assigning
                         if (dayData && dayData.status === 'ASSIGNED' && dayData.staff && dayData.staff.email === activeStaff.email) {
                             myDuties.push({
                                 type: "Lunch Duty",
@@ -211,7 +283,7 @@
                     });
                 }
 
-                // 5. Check if report is already submitted today
+                // 6. Check if report is already submitted today
                 const reportId = `${todayDateStr}_${activeStaff.email}`;
                 const reportDoc = await db.collection("daily_reports").doc(reportId).get();
                 if (reportDoc.exists) {
@@ -241,7 +313,8 @@
             // Render Classes
             const classContainer = document.getElementById('classes-list');
             if (myClasses.length === 0) {
-                classContainer.innerHTML = `<div class="bg-slate-50 border-2 border-dashed border-slate-200 p-8 rounded-[2rem] text-center shadow-inner"><p class="text-sm font-black text-slate-400 uppercase tracking-widest">No classes in timetable today.</p></div>`;
+                // Modified empty state to acknowledge holidays explicitly if needed
+                classContainer.innerHTML = `<div class="bg-slate-50 border-2 border-dashed border-slate-200 p-8 rounded-[2rem] text-center shadow-inner"><p class="text-sm font-black text-slate-400 uppercase tracking-widest">No classes scheduled today or classes are suspended for a holiday.</p></div>`;
             } else {
                 classContainer.innerHTML = myClasses.map(cls => {
                     const logs = mySyllabusLogs.find(l => l.classId === cls.id);
