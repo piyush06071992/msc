@@ -417,7 +417,7 @@
         }
 
         // --- LAZY TRIGGER INJECTION ---
-        async function initLunchDuty() {
+      async function initLunchDuty() {
             document.getElementById('module-selection').classList.add('hidden');
             document.getElementById('lunch-duty-view').classList.remove('hidden');
             document.getElementById('sub-header-text').innerText = "Lunch Duty Algorithmic Engine";
@@ -425,7 +425,7 @@
             const today = new Date();
             const day = today.getDay();
             const diffToMonday = today.getDate() - day + (day === 0 ? -6 : 1);
-            const monday = new Date(today.setDate(diffToMonday));
+            const monday = new Date(new Date().setDate(diffToMonday));
             const weekId = "week_starting_" + monday.toISOString().split('T')[0];
 
             try {
@@ -433,17 +433,71 @@
                 if(doc.exists) {
                     weeklyRoster = doc.data().rosterData;
                     oldRosterState = JSON.parse(JSON.stringify(weeklyRoster));
+                    
+                    // --- NEW: SILENT AUTO-PATCHER ---
+                    // Automatically fixes mid-week holiday additions or cancellations
+                    await applyLiveHolidaysToRoster(monday);
+                    
                     renderGrid();
                 } else {
-                    // OPTION 2: LAZY TRIGGER FIRES!
                     oldRosterState = {};
                     console.log("No roster found. Auto-generating...");
-                    toggleAll('.class-cb', true); // Auto-check all classes
-                    // We don't auto-check exemptions. By default, no one is exempt.
-                    await runLunchAlgorithm(true); // true = autoSave flag
+                    toggleAll('.class-cb', true); 
+                    await runLunchAlgorithm(true); 
                 }
             } catch(e) {
                 console.log("Error loading roster:", e);
+            }
+        }
+
+        // --- NEW: HELPER FUNCTION FOR THE AUTO-PATCHER ---
+        async function applyLiveHolidaysToRoster(mondayDate) {
+            const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            let rosterWasPatched = false;
+
+            Object.keys(weeklyRoster).forEach(clsKey => {
+                const [cName, sName] = clsKey.split('|');
+                
+                days.forEach((day, idx) => {
+                    const dayDate = new Date(mondayDate);
+                    dayDate.setDate(mondayDate.getDate() + idx);
+                    
+                    let isHol = false; let hReason = "";
+                    
+                    for (let h of holidaysData) {
+                        if (!h.startDate) continue;
+                        const hStart = new Date(h.startDate); hStart.setHours(0,0,0,0);
+                        const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23,59,59,999);
+                        const cDate = new Date(dayDate); cDate.setHours(0,0,0,0);
+                        
+                        if (cDate >= hStart && cDate <= hEnd) {
+                            const targetCls = `${cName}|${sName}`;
+                            const tClasses = h.targetClasses || [];
+                            if (tClasses.includes('ALL') || tClasses.includes(targetCls)) {
+                                isHol = true; hReason = h.reason; break;
+                            }
+                        }
+                    }
+
+                    const currentStatus = weeklyRoster[clsKey].days[day].status;
+                    
+                    // 1. If Admin added a holiday mid-week, auto-wipe the duty
+                    if (isHol && currentStatus !== 'HOLIDAY') {
+                        weeklyRoster[clsKey].days[day] = { status: 'HOLIDAY', reason: hReason };
+                        rosterWasPatched = true;
+                    } 
+                    // 2. If Admin cancelled a holiday mid-week, clear the cell so it can be re-assigned
+                    else if (!isHol && currentStatus === 'HOLIDAY') {
+                        weeklyRoster[clsKey].days[day] = { status: 'NO LUNCH BREAK' }; 
+                        rosterWasPatched = true;
+                    }
+                });
+            });
+
+            // If changes were made, silently save to the database in the background!
+            if (rosterWasPatched) {
+                console.log("Mid-week holiday change detected! Auto-patching database...");
+                await saveCurrentRoster(true); 
             }
         }
 
