@@ -7,12 +7,14 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-messaging-compat.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; }
         .dash-btn { transition: all 0.2s ease-in-out; }
         .dash-btn:hover { transform: translateY(-4px); filter: brightness(1.05); }
         .dash-btn:active { transform: translateY(0px); }
+        .glass-card { background: rgba(255, 255, 255, 0.95); border: 1px solid rgba(255, 255, 255, 0.5); box-shadow: 0 4px 15px -3px rgba(0,0,0,0.07); }
     </style>
 </head>
 <body class="min-h-screen">
@@ -35,6 +37,19 @@
                 <span class="text-slate-300 mx-2">|</span> 
                 Dept: <span id="staff-dept" class="font-black not-italic text-indigo-700">Loading...</span> 
             </p>
+        </div>
+
+        <div id="notif-card" class="hidden glass-card p-5 rounded-2xl border-2 border-indigo-100 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div class="flex items-center gap-4 text-center sm:text-left">
+                <span class="text-3xl">🔔</span>
+                <div>
+                    <h4 class="font-black text-slate-800 text-sm uppercase tracking-tight">Stay Updated</h4>
+                    <p class="text-[10px] font-bold text-slate-500 leading-tight">Enable push notifications for instant duty and report alerts.</p>
+                </div>
+            </div>
+            <button id="subscribe-btn" onclick="requestNotifPermission()" class="w-full sm:w-auto bg-indigo-600 text-white px-6 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-md hover:bg-indigo-500 transition-all active:scale-95">
+                Enable Alerts
+            </button>
         </div>
 
         <div id="urgent-class-alert" class="hidden bg-rose-600 border border-rose-700 rounded-xl p-4 shadow-lg shadow-rose-600/30 flex items-center justify-center animate-pulse mb-6 mt-6">
@@ -86,6 +101,8 @@
         const firebaseConfig = { apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", authDomain: "shop-portal-bbbbb.firebaseapp.com", projectId: "shop-portal-bbbbb", storageBucket: "shop-portal-bbbbb.firebasestorage.app", messagingSenderId: "701377739976", appId: "1:701377739976:web:99998220272090e56e79fd" };
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
+        const messaging = firebase.messaging();
+        const VAPID_KEY = "BBqlzydtIB7shCwllAhRhyv9Yr8sg9fllwbVJ4M_S-hwdLCKFUN3b_Hhr4ohdCYLvMyyrjwselyTCTONjGtlZLk";
 
         window.onload = async () => {
             const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
@@ -100,6 +117,10 @@
             document.getElementById('staff-name').innerText = `"${safeName}"`;
             document.getElementById('staff-dept').innerText = `"${safeDept}"`;
 
+            // Notification Status Check
+            checkNotifStatus();
+
+            // Session Checker
             setTimeout(() => {
                 db.collection("staff_applications").doc(activeStaff.uid).onSnapshot({ includeMetadataChanges: true }, (doc) => {
                     if (doc.metadata.fromCache) return;
@@ -117,6 +138,54 @@
             await loadTodaysScheduleForAlerts(safeName);
         };
 
+        // --- NOTIFICATION PERMISSION ENGINE ---
+        async function checkNotifStatus() {
+            if (Notification.permission === 'default') {
+                document.getElementById('notif-card').classList.remove('hidden');
+            }
+        }
+
+        async function requestNotifPermission() {
+            const btn = document.getElementById('subscribe-btn');
+            btn.innerText = "Syncing...";
+            btn.disabled = true;
+
+            try {
+                const permission = await Notification.requestPermission();
+                if (permission === 'granted') {
+                    const token = await messaging.getToken({ vapidKey: VAPID_KEY });
+                    if (token) {
+                        await saveTokenToFirestore(token);
+                        alert("✅ Notifications successfully linked to your device!");
+                        document.getElementById('notif-card').classList.add('hidden');
+                    }
+                } else {
+                    alert("Notifications were blocked. Please enable them in browser settings if you wish to receive alerts.");
+                }
+            } catch (error) {
+                console.error("Subscription error:", error);
+                alert("Subscription failed. If you are on iPhone, please ensure you have clicked 'Add to Home Screen' and are using the App version.");
+            } finally {
+                btn.innerText = "Enable Alerts";
+                btn.disabled = false;
+            }
+        }
+
+        async function saveTokenToFirestore(token) {
+            const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+            if (!activeStaff || !activeStaff.uid) return;
+
+            try {
+                await db.collection("staff_applications").doc(activeStaff.uid).update({
+                    fcmToken: token,
+                    tokenUpdatedAt: Date.now()
+                });
+            } catch (e) {
+                console.error("Token Save Error:", e);
+            }
+        }
+
+        // --- URGENT ALERT ENGINE (Preserved) ---
         let todaysSchedule = [];
         const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -146,25 +215,17 @@
 
         function checkUpcomingClasses() {
             if (todaysSchedule.length === 0) return;
-
             const now = new Date();
             const currentMins = now.getHours() * 60 + now.getMinutes();
             let activeAlert = null;
 
             for (let cls of todaysSchedule) {
                 if (!cls.timeRange) continue;
-                
                 const startTimeStr = cls.timeRange.split(' - ')[0];
                 const startMins = parseTimeToMinutes(startTimeStr);
-                
                 if (currentMins >= startMins - 10 && currentMins <= startMins + 5) {
                     let diff = startMins - currentMins;
-                    let timeMsg = "";
-                    
-                    if (diff > 0) timeMsg = `starting in ${diff} mins`;
-                    else if (diff === 0) timeMsg = `starting NOW`;
-                    else timeMsg = `started ${Math.abs(diff)} mins ago`;
-
+                    let timeMsg = diff > 0 ? `starting in ${diff} mins` : (diff === 0 ? `starting NOW` : `started ${Math.abs(diff)} mins ago`);
                     const roomText = cls.room ? `in Room ${cls.room}` : '';
                     activeAlert = `Class Alert: ${cls.className} | ${cls.section} (${cls.subject || 'Duty'}) is ${timeMsg} ${roomText}`;
                     break; 
@@ -173,7 +234,6 @@
 
             const alertBox = document.getElementById('urgent-class-alert');
             const alertText = document.getElementById('urgent-class-text');
-
             if (activeAlert) {
                 alertText.innerText = activeAlert;
                 alertBox.classList.remove('hidden');
