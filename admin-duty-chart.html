@@ -379,11 +379,11 @@
             }).join('');
         }
 
-        function toggleAll(selector) {
+        function toggleAll(selector, forceState = null) {
             const cbs = document.querySelectorAll(selector);
-            const anyUnchecked = Array.from(cbs).some(c => !c.checked);
+            const targetState = forceState !== null ? forceState : Array.from(cbs).some(c => !c.checked);
             cbs.forEach(c => {
-                c.checked = anyUnchecked;
+                c.checked = targetState;
                 if (c.classList.contains('dept-master-cb')) c.onchange(); 
             });
         }
@@ -399,26 +399,24 @@
             if (masterCb) masterCb.checked = allChecked;
         }
 
-function handleBack() {
+        function handleBack() {
             const lunchView = document.getElementById('lunch-duty-view');
             
-            // 1. If we are looking at a chart, go back to module selection
             if (lunchView && !lunchView.classList.contains('hidden')) {
                 lunchView.classList.add('hidden');
                 document.getElementById('module-selection').classList.remove('hidden');
                 document.getElementById('sub-header-text').innerText = "Algorithmic Allocation Hub";
             } else {
-                // 2. We are on the main module screen. Exit the page.
                 const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
                 if (isAdmin) {
                     window.location.href = 'admin.html';
                 } else {
-                    // Force redirect to the teacher portal duties page
                     window.location.href = 'teacher-duties.html';
                 }
             }
         }
 
+        // --- LAZY TRIGGER INJECTION ---
         async function initLunchDuty() {
             document.getElementById('module-selection').classList.add('hidden');
             document.getElementById('lunch-duty-view').classList.remove('hidden');
@@ -437,10 +435,15 @@ function handleBack() {
                     oldRosterState = JSON.parse(JSON.stringify(weeklyRoster));
                     renderGrid();
                 } else {
+                    // OPTION 2: LAZY TRIGGER FIRES!
                     oldRosterState = {};
+                    console.log("No roster found. Auto-generating...");
+                    toggleAll('.class-cb', true); // Auto-check all classes
+                    // We don't auto-check exemptions. By default, no one is exempt.
+                    await runLunchAlgorithm(true); // true = autoSave flag
                 }
             } catch(e) {
-                console.log("No saved roster found for this week.");
+                console.log("Error loading roster:", e);
             }
         }
 
@@ -461,19 +464,45 @@ function handleBack() {
             return { classes: sTt.length, mins };
         }
 
-        function runLunchAlgorithm() {
+        // --- FAIR ROTATION ENGINE INCLUDED HERE ---
+        async function runLunchAlgorithm(isAutoTrigger = false) {
             const targetClasses = Array.from(document.querySelectorAll('.class-cb:checked')).map(i => i.value);
             const exempted = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value);
             
             if(targetClasses.length === 0) return alert("Please select at least one Target Class.");
+
+            // UI Feedback
+            const genBtn = document.querySelector('button[onclick="runLunchAlgorithm()"]');
+            if(genBtn) {
+                genBtn.innerText = "⚡ Generating...";
+                genBtn.disabled = true;
+            }
 
             const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             
             const today = new Date();
             const currentDayOfWeek = today.getDay(); 
             const diffToMonday = today.getDate() - currentDayOfWeek + (currentDayOfWeek === 0 ? -6 : 1);
-            const mondayDate = new Date(today.setDate(diffToMonday));
+            const mondayDate = new Date(new Date().setDate(diffToMonday));
             
+            // --- 1. BUILD FATIGUE MAP FROM PREVIOUS WEEK ---
+            const prevMonday = new Date(mondayDate);
+            prevMonday.setDate(prevMonday.getDate() - 7);
+            const prevWeekId = "week_starting_" + prevMonday.toISOString().split('T')[0];
+            
+            let fatigueMap = new Set();
+            try {
+                const prevDoc = await db.collection("duty_rosters").doc(prevWeekId).get();
+                if(prevDoc.exists) {
+                    const pRoster = prevDoc.data().rosterData;
+                    Object.values(pRoster).forEach(cls => {
+                        Object.values(cls.days).forEach(d => {
+                            if(d.status === 'ASSIGNED' && d.staff) fatigueMap.add(d.staff.email);
+                        });
+                    });
+                }
+            } catch(e) { console.log("No previous week data for fatigue mapping."); }
+
             const weekDates = {};
             days.forEach((day, idx) => {
                 const d = new Date(mondayDate);
@@ -483,7 +512,6 @@ function handleBack() {
 
             weeklyRoster = {};
 
-            // 1. Initialize EVERYTHING so no cells are ever "undefined" or dead
             targetClasses.forEach(clsKey => {
                 const [cName, sName] = clsKey.split('|');
                 weeklyRoster[clsKey] = { cName, sName, days: {} };
@@ -504,10 +532,9 @@ function handleBack() {
                         if (t.className !== cName || t.section !== sName || t.subject.toUpperCase() !== "BREAK") return false;
                         if (!t.timeRange) return false;
                         const startMins = timeToMins(t.timeRange.split(' - ')[0]);
-                        return startMins >= 720 && startMins < 840; // Looks for a break between 12:00 PM and 2:00 PM
+                        return startMins >= 720 && startMins < 840;
                     });
                     
-                    // If no break found in the timetable, leave it as 'NO BREAK DEFINED' so it stays clickable
                     if(!classBreak) return;
 
                     let isHol = false; let hReason = "";
@@ -574,8 +601,12 @@ function handleBack() {
                             if (!hasSelfLunch && (840 - Math.max(lastE, 720)) >= 45) hasSelfLunch = true;
                         }
 
-                        return { ...staff, load, valid: (!conflict && hasSelfLunch) };
-                    }).filter(c => c.valid).sort((a,b) => a.load.mins - b.load.mins); 
+                        // --- 2. APPLY FAIR ROTATION PENALTY ---
+                        const isFatigued = fatigueMap.has(staff.email);
+                        const penalty = isFatigued ? 10000 : 0; 
+
+                        return { ...staff, load, valid: (!conflict && hasSelfLunch), score: load.mins + penalty };
+                    }).filter(c => c.valid).sort((a,b) => a.score - b.score); 
 
                     if (candidates.length > 0) {
                         const assigned = candidates[0];
@@ -588,6 +619,16 @@ function handleBack() {
             });
 
             renderGrid();
+
+            if(genBtn) {
+                genBtn.innerText = "⚡ Generate Roster";
+                genBtn.disabled = false;
+            }
+
+            // If it was auto-triggered (Lazy Load), save it immediately without showing the alert
+            if(isAutoTrigger === true) {
+                await saveCurrentRoster(true); 
+            }
         }
 
         function renderGrid() {
@@ -609,7 +650,6 @@ function handleBack() {
                 let cells = days.map(day => {
                     const data = row.days[day];
                     
-                    // NEW FIX: Make "No Break Defined" cells clickable so you can manually override them
                     if (!data || data.status === 'NO LUNCH BREAK' || data.status === 'NO BREAK DEFINED') {
                         return `
                         <td class="p-2 sm:p-3 border-r border-slate-100 transition-colors cursor-pointer bg-slate-50 hover:bg-slate-100 group" onclick="openEditModal('${clsKey}', '${day}')">
@@ -672,7 +712,6 @@ function handleBack() {
             currentEditParams = { clsKey, day };
             const data = weeklyRoster[clsKey].days[day];
             
-            // Allow manual override even if it's a holiday, just give a warning instead of a hard block
             if(data && data.status === 'HOLIDAY') {
                 if(!confirm("Warning: This day is a designated holiday. Do you want to manually assign someone anyway?")) return;
             }
@@ -810,7 +849,6 @@ function handleBack() {
         }
 
         function clearDutyCell() {
-            // Revert back to NO LUNCH BREAK so it shows as completely empty and clear
             weeklyRoster[currentEditParams.clsKey].days[currentEditParams.day].status = 'NO LUNCH BREAK';
             weeklyRoster[currentEditParams.clsKey].days[currentEditParams.day].staff = null;
             renderGrid();
@@ -860,11 +898,12 @@ function handleBack() {
             return Array.from(affected, ([email, name]) => ({ name, email }));
         }
 
-        async function saveCurrentRoster() {
-            if(!window.hasDutyRights) return alert("You don't have authorization to save the duty chart.");
+        async function saveCurrentRoster(isSilent = false) {
+            if(!window.hasDutyRights) return; 
+            
             const btn = document.querySelector('button[onclick="saveCurrentRoster()"]');
-            const originalText = btn.innerText;
-            btn.innerText = "Saving...";
+            const originalText = btn ? btn.innerText : "";
+            if(btn) btn.innerText = "Saving...";
             
             try {
                 const today = new Date();
@@ -894,18 +933,18 @@ function handleBack() {
                         body: JSON.stringify(payload)
                     }).catch(e => console.error("Email trigger failed:", e));
                     
-                    alert(`✅ Weekly Roster saved successfully!\n\nAutomated emails have been sent to the affected staff:\n${teachersToNotify.map(t=>t.name).join(', ')}`);
+                    if(!isSilent) alert(`✅ Weekly Roster saved successfully!\n\nAutomated emails have been sent to the affected staff:\n${teachersToNotify.map(t=>t.name).join(', ')}`);
                     
                     oldRosterState = JSON.parse(JSON.stringify(weeklyRoster));
                 } else {
-                    alert("✅ Weekly Roster saved successfully to Database! (No teacher assignments were changed, so 0 emails were sent.)");
+                    if(!isSilent) alert("✅ Weekly Roster saved successfully to Database! (No teacher assignments were changed, so 0 emails were sent.)");
                 }
                 
-                btn.innerText = "💾 Finalize & Save Week";
+                if(btn) btn.innerText = "💾 Save Week";
             } catch(e) { 
                 console.error("Save error:", e);
-                alert("Database Error: " + e.message); 
-                btn.innerText = originalText;
+                if(!isSilent) alert("Database Error: " + e.message); 
+                if(btn) btn.innerText = originalText;
             }
         }
     </script>
