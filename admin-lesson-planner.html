@@ -567,25 +567,26 @@
                                 }
                             });
 
-                           let activityLogs = planner.activityLogs || [];
+                          let activityLogs = planner.activityLogs || [];
                             let extraActivityDays = 0; 
                             let activityMinsTotal = 0;
                             let independentRevisionDates = new Set();
+                            let dailyLogSums = {}; // Track sums per day
                             
                             activityLogs.forEach(log => {
                                 let logD = new Date(log.date);
-                                logD.setHours(12, 0, 0, 0); // Safe mid-day check
+                                logD.setHours(12, 0, 0, 0); 
                                 let dStr = logD.toISOString().split('T')[0];
                                 
-                                // Is this revision happening DURING an active or finished chapter?
                                 let isInsideChapter = chapterRanges.some(range => {
                                     return logD >= range.start && logD <= range.end;
                                 });
 
-                                // If NOT inside any chapter range, it is an independent "Between Chapters" revision
                                 if (!isInsideChapter) {
-                                    activityMinsTotal += (parseFloat(log.minutes) || 0);
                                     if (isTimetableWorkingDay(logD, st.className, st.sectionName, sub)) {
+                                        let mins = parseFloat(log.minutes) || 0;
+                                        dailyLogSums[dStr] = (dailyLogSums[dStr] || 0) + mins;
+                                        
                                         if (!independentRevisionDates.has(dStr)) {
                                             extraActivityDays++; 
                                             independentRevisionDates.add(dStr);
@@ -594,9 +595,25 @@
                                 }
                             });
 
+                            // Apply Timetable Cap to Clubbed Sessions
+                            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                            Object.keys(dailyLogSums).forEach(dStr => {
+                                let logD = new Date(dStr);
+                                let dayName = daysArr[logD.getDay()];
+                                let ttMins = 0;
+                                timetableData.forEach(t => {
+                                    if(t.day === dayName && t.className === st.className && t.section === st.sectionName && t.subject === sub) {
+                                        ttMins += (parseInt(t.duration) || 0);
+                                    }
+                                });
+                                if(isDemoMode) ttMins = 90; 
+                                
+                                // Cap the daily sum to the timetable's actual scheduled minutes
+                                activityMinsTotal += Math.min(dailyLogSums[dStr], ttMins > 0 ? ttMins : dailyLogSums[dStr]);
+                            });
+
                             totalActualDaysAll += extraActivityDays;
                             
-                            // Only update overall variance if at least 1 chapter is done OR independent revisions exist
                             if(chDone > 0 || independentRevisionDates.size > 0) {
                                 totalDayGap -= extraActivityDays; 
                                 totalMinGap -= Math.floor(activityMinsTotal);
