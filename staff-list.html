@@ -671,12 +671,14 @@ async function fetchAndRenderReports() {
             feed.innerHTML = `<div class="text-center py-32"><span class="loader mb-4 border-slate-300 border-t-blue-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Compiling Cross-Database Analytics...</span></div>`;
             
             try {
-                // Fetch planners to generate synthetic reports directly from teacher's actions
+                // Fetch required databases
                 const plannerSnap = await db.collection("lesson_planners").get();
                 const assignSnap = await db.collection("lesson_planner_assignments").get();
+                const structSnap = await db.collection("institute_structure").get(); // Needed for new architecture ID resolution
                 
                 const planners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const assignments = assignSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 
                 let groupedReports = {}; 
 
@@ -695,16 +697,38 @@ async function fetchAndRenderReports() {
 
                 planners.forEach(p => {
                     const assign = assignments.find(a => a.id === p.id) || {};
-                    const clsName = assign.className || 'Unknown Class';
-                    const secName = assign.section || 'Unknown Section';
-                    const subName = assign.subject || 'Unknown Subject';
+                    
+                    let clsName = assign.className || 'Unknown Class';
+                    let secName = assign.section || 'Unknown Section';
+                    let subName = assign.subject || 'Unknown Subject';
+
+                    // Architecture Upgrade Fix: Resolve Missing Names using institute_structure
+                    if (clsName === 'Unknown Class' || secName === 'Unknown Section') {
+                        const lastUnderscore = p.id.lastIndexOf('_');
+                        if (lastUnderscore !== -1) {
+                            const structId = p.id.substring(0, lastUnderscore);
+                            const extractedSub = p.id.substring(lastUnderscore + 1);
+                            const struct = structures.find(s => s.id === structId);
+                            if (struct) {
+                                clsName = struct.className;
+                                secName = struct.sectionName;
+                                subName = extractedSub.replace(/_/g, ' ');
+                            }
+                        } else {
+                            // Legacy fallback Class_Section_Subject
+                            const parts = p.id.split('_');
+                            if(parts.length >= 3) {
+                                clsName = parts[0]; secName = parts[1]; subName = parts[2];
+                            }
+                        }
+                    }
 
                     if (p.syllabusData) {
                         p.syllabusData.forEach(topic => {
                             if (topic.isDone && topic.completedDate) {
                                 const tDate = topic.completedDate;
                                 const tStaff = teacherLookup(topic.tickedBy || assign.assignedTo);
-                                if (!tStaff.email) return;
+                                if (!tStaff.email || tStaff.email === 'unknown@example.com') return;
 
                                 const key = `${tStaff.email}_${tDate}`;
                                 if (!groupedReports[key]) {
@@ -713,8 +737,13 @@ async function fetchAndRenderReports() {
                                 
                                 let clsEntry = groupedReports[key].classesConducted.find(c => c.className === clsName && c.section === secName && c.subject === subName);
                                 if (!clsEntry) {
-                                    clsEntry = { className: clsName, section: secName, subject: subName, time: `${topic.completedMinutes}m` };
+                                    clsEntry = { className: clsName, section: secName, subject: subName, time: `${topic.completedMinutes || 0}m` };
                                     groupedReports[key].classesConducted.push(clsEntry);
+                                } else {
+                                    // If multiple topics are ticked in the same session, only show the max time logged for that session
+                                    let currentMax = parseInt(clsEntry.time) || 0;
+                                    let newMin = parseInt(topic.completedMinutes) || 0;
+                                    if(newMin > currentMax) clsEntry.time = `${newMin}m`;
                                 }
 
                                 groupedReports[key].syllabusProgress.push({ className: clsName, section: secName, subject: subName, chapter: topic['CHAPTER NAME'], subtopic: topic['SUBTOPICS'] });
@@ -726,7 +755,7 @@ async function fetchAndRenderReports() {
                         p.activityLogs.forEach(log => {
                             const tDate = log.date;
                             const tStaff = teacherLookup(log.loggedBy || assign.assignedTo);
-                            if (!tStaff.email) return;
+                            if (!tStaff.email || tStaff.email === 'unknown@example.com') return;
 
                             const key = `${tStaff.email}_${tDate}`;
                             if (!groupedReports[key]) {
@@ -747,7 +776,6 @@ async function fetchAndRenderReports() {
                     } else {
                         if(data.hodRemark) groupedReports[key].hodRemark = data.hodRemark;
                         if(data.adminRemark) groupedReports[key].adminRemark = data.adminRemark;
-                        groupedReports[key].id = d.id; 
                     }
                 });
 
@@ -778,6 +806,7 @@ async function fetchAndRenderReports() {
                 feed.innerHTML = `<div class="text-center py-32 text-rose-500 font-black uppercase tracking-widest text-sm">Error compiling cross-database analytics.</div>`; 
             }
         }
+
 
        function renderReportsList() {
             const feed = document.getElementById('rm-feed');
