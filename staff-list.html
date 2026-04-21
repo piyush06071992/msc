@@ -351,7 +351,7 @@
                     return nameA.localeCompare(nameB);
                 });
 
-               let cardsHtml = staffList.map(s => {
+                let cardsHtml = staffList.map(s => {
                     const nameKey = Object.keys(s.details).find(key => key.toLowerCase().includes('name'));
                     const staffName = nameKey ? s.details[nameKey] : s.email;
                     const cleanMobile = s.mobile.replace(/\D/g, ''); 
@@ -419,7 +419,7 @@
                     </details>
                     `;
                 }).join('');
-                // Note: removed "open" attribute so it starts closed (Clubbed)
+
                 container.innerHTML += `
                     <details class="bg-indigo-50/40 rounded-[2rem] sm:rounded-[3rem] border-2 border-indigo-100 shadow-md overflow-hidden mb-8 group/dept">
                         <summary class="p-6 sm:p-8 bg-white border-b border-indigo-100 font-black text-indigo-900 text-xl sm:text-3xl uppercase tracking-tighter cursor-pointer select-none flex justify-between items-center hover:bg-indigo-50/50 transition-colors outline-none">
@@ -549,7 +549,7 @@
             }
         }
 
-        // --- HOD DELEGATION ENGINE (Preserved) ---
+        // --- HOD DELEGATION ENGINE ---
         function openAuthModal() {
             if (currentUserRole !== 'ADMIN') return;
             document.getElementById('auth-modal').classList.remove('hidden');
@@ -632,7 +632,7 @@
             `}).join('');
         }
 
-        // --- WORK REPORTS ENGINE (Preserved) ---
+        // --- WORK REPORTS ENGINE ---
         function openDateWiseReports() {
             reportModalMode = 'DATE_WISE';
             const todayIso = new Date().toISOString().split('T')[0];
@@ -674,15 +674,14 @@
             document.getElementById('rm-stats').innerText = "";
         }
 
-async function fetchAndRenderReports() {
+        async function fetchAndRenderReports() {
             const feed = document.getElementById('rm-feed');
             feed.innerHTML = `<div class="text-center py-32"><span class="loader mb-4 border-slate-300 border-t-blue-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Compiling Cross-Database Analytics...</span></div>`;
             
             try {
-                // Fetch required databases
                 const plannerSnap = await db.collection("lesson_planners").get();
                 const assignSnap = await db.collection("lesson_planner_assignments").get();
-                const structSnap = await db.collection("institute_structure").get(); // Needed for new architecture ID resolution
+                const structSnap = await db.collection("institute_structure").get(); 
                 
                 const planners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const assignments = assignSnap.docs.map(d => ({id: d.id, ...d.data()}));
@@ -690,8 +689,12 @@ async function fetchAndRenderReports() {
                 
                 let groupedReports = {}; 
 
+                // HOD Security Check: If HOD, gather allowed emails. 
+                const allowedEmails = currentUserRole === 'HOD' ? allStaff.map(s => s.email) : null;
+
                 const teacherLookup = (nameOrEmail) => {
                     if(!nameOrEmail) return { name: 'Unknown', email: 'unknown@example.com' };
+                    // We search in allStaff which is already securely filtered by HOD department
                     const s = allStaff.find(st => {
                         let nKey = Object.keys(st.details).find(k=>k.toLowerCase().includes('name'));
                         return st.email === nameOrEmail || (nKey && st.details[nKey] === nameOrEmail);
@@ -710,7 +713,6 @@ async function fetchAndRenderReports() {
                     let secName = assign.section || 'Unknown Section';
                     let subName = assign.subject || 'Unknown Subject';
 
-                    // Architecture Upgrade Fix: Resolve Missing Names using institute_structure
                     if (clsName === 'Unknown Class' || secName === 'Unknown Section') {
                         const lastUnderscore = p.id.lastIndexOf('_');
                         if (lastUnderscore !== -1) {
@@ -723,7 +725,6 @@ async function fetchAndRenderReports() {
                                 subName = extractedSub.replace(/_/g, ' ');
                             }
                         } else {
-                            // Legacy fallback Class_Section_Subject
                             const parts = p.id.split('_');
                             if(parts.length >= 3) {
                                 clsName = parts[0]; secName = parts[1]; subName = parts[2];
@@ -736,7 +737,10 @@ async function fetchAndRenderReports() {
                             if (topic.isDone && topic.completedDate) {
                                 const tDate = topic.completedDate;
                                 const tStaff = teacherLookup(topic.tickedBy || assign.assignedTo);
+                                
+                                // STRICT HOD BOUNDARY: Ignore anything logged by a teacher not in this HOD's department
                                 if (!tStaff.email || tStaff.email === 'unknown@example.com') return;
+                                if (currentUserRole === 'HOD' && !allowedEmails.includes(tStaff.email)) return;
 
                                 const key = `${tStaff.email}_${tDate}`;
                                 if (!groupedReports[key]) {
@@ -748,7 +752,6 @@ async function fetchAndRenderReports() {
                                     clsEntry = { className: clsName, section: secName, subject: subName, time: `${topic.completedMinutes || 0}m` };
                                     groupedReports[key].classesConducted.push(clsEntry);
                                 } else {
-                                    // If multiple topics are ticked in the same session, only show the max time logged for that session
                                     let currentMax = parseInt(clsEntry.time) || 0;
                                     let newMin = parseInt(topic.completedMinutes) || 0;
                                     if(newMin > currentMax) clsEntry.time = `${newMin}m`;
@@ -763,7 +766,10 @@ async function fetchAndRenderReports() {
                         p.activityLogs.forEach(log => {
                             const tDate = log.date;
                             const tStaff = teacherLookup(log.loggedBy || assign.assignedTo);
+                            
+                            // STRICT HOD BOUNDARY
                             if (!tStaff.email || tStaff.email === 'unknown@example.com') return;
+                            if (currentUserRole === 'HOD' && !allowedEmails.includes(tStaff.email)) return;
 
                             const key = `${tStaff.email}_${tDate}`;
                             if (!groupedReports[key]) {
@@ -774,16 +780,20 @@ async function fetchAndRenderReports() {
                     }
                 });
 
-                // Attach legacy remarks from daily_reports database if they exist
                 const dailySnap = await db.collection("daily_reports").get();
                 dailySnap.docs.forEach(d => {
                     const data = d.data();
+                    
+                    // STRICT HOD BOUNDARY
+                    if (currentUserRole === 'HOD' && !allowedEmails.includes(data.teacherEmail)) return;
+
                     const key = `${data.teacherEmail}_${data.date}`;
                     if (!groupedReports[key]) {
                         groupedReports[key] = { id: d.id, ...data };
                     } else {
                         if(data.hodRemark) groupedReports[key].hodRemark = data.hodRemark;
                         if(data.adminRemark) groupedReports[key].adminRemark = data.adminRemark;
+                        groupedReports[key].id = d.id;
                     }
                 });
 
@@ -799,11 +809,6 @@ async function fetchAndRenderReports() {
                     if(!fromDate || !toDate) return alert("Select date range.");
                     rawReports = rawReports.filter(r => r.teacherEmail === selectedStaffForReport && r.date >= fromDate && r.date <= toDate);
                 }
-
-                if (currentUserRole === 'HOD') {
-                    const deptEmails = allStaff.map(s => s.email); 
-                    rawReports = rawReports.filter(r => deptEmails.includes(r.teacherEmail));
-                }
                 
                 rawReports.sort((a,b) => new Date(b.date) - new Date(a.date));
                 currentReportsData = rawReports;
@@ -815,8 +820,7 @@ async function fetchAndRenderReports() {
             }
         }
 
-
-       function renderReportsList() {
+        function renderReportsList() {
             const feed = document.getElementById('rm-feed');
             const remarksOnly = document.getElementById('rm-remarks-only').checked;
             if (currentReportsData.length === 0) {
@@ -971,7 +975,6 @@ async function fetchAndRenderReports() {
             if (currentUserRole === 'HOD' && hodEl && !hodEl.disabled) updateData.hodRemark = hodEl.value.trim();
             if (currentUserRole === 'ADMIN' && adminEl && !adminEl.disabled) updateData.adminRemark = adminEl.value.trim();
 
-            // Grab the core data so Firebase knows who the report belongs to if it's creating it for the first time
             const rep = currentReportsData.find(r => r.id === reportId);
             if(rep) {
                 updateData.teacherEmail = rep.teacherEmail;
@@ -980,7 +983,6 @@ async function fetchAndRenderReports() {
             }
 
             try {
-                // Use .set() with merge: true because synthetic reports from the planner don't exist in the daily_reports DB yet!
                 await db.collection("daily_reports").doc(reportId).set(updateData, { merge: true });
                 
                 if(rep) {
@@ -1088,7 +1090,7 @@ async function fetchAndRenderReports() {
             }
         }
 
-        // --- EDIT PROFILE (Preserved) ---
+        // --- EDIT PROFILE ---
         function openEditModal(staffId) {
             editingStaffId = staffId;
             const staff = allStaff.find(s => s.id === staffId);
@@ -1142,7 +1144,7 @@ async function fetchAndRenderReports() {
             } catch (e) { alert("Error saving changes."); }
         }
 
-        // --- UPGRADED DAY-BY-DAY TIMETABLE MODAL ---
+        // --- TIMETABLE MODAL ---
         async function viewTimetable(staffId, staffName) {
             document.getElementById('tt-modal-name').innerText = staffName;
             const grid = document.getElementById('tt-modal-grid');
