@@ -657,33 +657,102 @@
             document.getElementById('rm-stats').innerText = "";
         }
 
-       async function fetchAndRenderReports() {
+async function fetchAndRenderReports() {
             const feed = document.getElementById('rm-feed');
-            feed.innerHTML = `<div class="text-center py-32"><span class="loader mb-4 border-slate-300 border-t-blue-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Querying Database...</span></div>`;
-            
-            let query = db.collection("daily_reports");
-            
-            if (reportModalMode === 'DATE_WISE') {
-                const dateVal = document.getElementById('rm-single-date').value;
-                if(!dateVal) return alert("Select a date.");
-                query = query.where("date", "==", dateVal);
-            } else {
-                const fromDate = document.getElementById('rm-from-date').value;
-                const toDate = document.getElementById('rm-to-date').value;
-                if(!fromDate || !toDate) return alert("Select date range.");
-                // FIX: Only query by email to prevent Firebase Missing Index Error
-                query = query.where("teacherEmail", "==", selectedStaffForReport); 
-            }
+            feed.innerHTML = `<div class="text-center py-32"><span class="loader mb-4 border-slate-300 border-t-blue-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Compiling Cross-Database Analytics...</span></div>`;
             
             try {
-                const snap = await query.get();
-                let rawReports = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                // Fetch planners to generate synthetic reports directly from teacher's actions
+                const plannerSnap = await db.collection("lesson_planners").get();
+                const assignSnap = await db.collection("lesson_planner_assignments").get();
+                
+                const planners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const assignments = assignSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                
+                let groupedReports = {}; 
 
-                // FIX: Manually filter the dates for Individual Reports to bypass Firebase limitations
-                if (reportModalMode === 'INDIVIDUAL') {
+                const teacherLookup = (nameOrEmail) => {
+                    if(!nameOrEmail) return { name: 'Unknown', email: 'unknown@example.com' };
+                    const s = allStaff.find(st => {
+                        let nKey = Object.keys(st.details).find(k=>k.toLowerCase().includes('name'));
+                        return st.email === nameOrEmail || (nKey && st.details[nKey] === nameOrEmail);
+                    });
+                    if (s) {
+                        let nKey = Object.keys(s.details).find(k=>k.toLowerCase().includes('name'));
+                        return { name: nKey ? s.details[nKey] : s.email, email: s.email };
+                    }
+                    return { name: nameOrEmail, email: nameOrEmail };
+                };
+
+                planners.forEach(p => {
+                    const assign = assignments.find(a => a.id === p.id) || {};
+                    const clsName = assign.className || 'Unknown Class';
+                    const secName = assign.section || 'Unknown Section';
+                    const subName = assign.subject || 'Unknown Subject';
+
+                    if (p.syllabusData) {
+                        p.syllabusData.forEach(topic => {
+                            if (topic.isDone && topic.completedDate) {
+                                const tDate = topic.completedDate;
+                                const tStaff = teacherLookup(topic.tickedBy || assign.assignedTo);
+                                if (!tStaff.email) return;
+
+                                const key = `${tStaff.email}_${tDate}`;
+                                if (!groupedReports[key]) {
+                                    groupedReports[key] = { id: key, date: tDate, teacherEmail: tStaff.email, teacherName: tStaff.name, classesConducted: [], dutiesCompleted: [], additionalWork: "", syllabusProgress: [] };
+                                }
+                                
+                                let clsEntry = groupedReports[key].classesConducted.find(c => c.className === clsName && c.section === secName && c.subject === subName);
+                                if (!clsEntry) {
+                                    clsEntry = { className: clsName, section: secName, subject: subName, time: `${topic.completedMinutes}m` };
+                                    groupedReports[key].classesConducted.push(clsEntry);
+                                }
+
+                                groupedReports[key].syllabusProgress.push({ className: clsName, section: secName, subject: subName, chapter: topic['CHAPTER NAME'], subtopic: topic['SUBTOPICS'] });
+                            }
+                        });
+                    }
+
+                    if (p.activityLogs) {
+                        p.activityLogs.forEach(log => {
+                            const tDate = log.date;
+                            const tStaff = teacherLookup(log.loggedBy || assign.assignedTo);
+                            if (!tStaff.email) return;
+
+                            const key = `${tStaff.email}_${tDate}`;
+                            if (!groupedReports[key]) {
+                                groupedReports[key] = { id: key, date: tDate, teacherEmail: tStaff.email, teacherName: tStaff.name, classesConducted: [], dutiesCompleted: [], additionalWork: "", syllabusProgress: [] };
+                            }
+                            groupedReports[key].additionalWork += `[${clsName} ${secName} - ${subName}] ${log.reason} (${Math.floor(log.minutes)}m)\n`;
+                        });
+                    }
+                });
+
+                // Attach legacy remarks from daily_reports database if they exist
+                const dailySnap = await db.collection("daily_reports").get();
+                dailySnap.docs.forEach(d => {
+                    const data = d.data();
+                    const key = `${data.teacherEmail}_${data.date}`;
+                    if (!groupedReports[key]) {
+                        groupedReports[key] = { id: d.id, ...data };
+                    } else {
+                        if(data.hodRemark) groupedReports[key].hodRemark = data.hodRemark;
+                        if(data.adminRemark) groupedReports[key].adminRemark = data.adminRemark;
+                        groupedReports[key].id = d.id; 
+                    }
+                });
+
+                let rawReports = Object.values(groupedReports);
+
+                if (reportModalMode === 'DATE_WISE') {
+                    const dateVal = document.getElementById('rm-single-date').value;
+                    if(!dateVal) return alert("Select a date.");
+                    rawReports = rawReports.filter(r => r.date === dateVal);
+                } else {
                     const fromDate = document.getElementById('rm-from-date').value;
                     const toDate = document.getElementById('rm-to-date').value;
-                    rawReports = rawReports.filter(r => r.date >= fromDate && r.date <= toDate);
+                    if(!fromDate || !toDate) return alert("Select date range.");
+                    rawReports = rawReports.filter(r => r.teacherEmail === selectedStaffForReport && r.date >= fromDate && r.date <= toDate);
                 }
 
                 if (currentUserRole === 'HOD') {
@@ -693,11 +762,11 @@
                 
                 rawReports.sort((a,b) => new Date(b.date) - new Date(a.date));
                 currentReportsData = rawReports;
-                document.getElementById('rm-stats').innerText = `${currentReportsData.length} Reports Found`;
+                document.getElementById('rm-stats').innerText = `${currentReportsData.length} Reports Compiled`;
                 renderReportsList();
             } catch(e) { 
                 console.error(e);
-                feed.innerHTML = `<div class="text-center py-32 text-rose-500 font-black uppercase tracking-widest text-sm">Error fetching reports.</div>`; 
+                feed.innerHTML = `<div class="text-center py-32 text-rose-500 font-black uppercase tracking-widest text-sm">Error compiling cross-database analytics.</div>`; 
             }
         }
 
