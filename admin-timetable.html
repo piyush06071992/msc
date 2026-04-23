@@ -1861,7 +1861,7 @@ async function confirmDateContext() {
         const prettyDate = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
         document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
-        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Architecting Synced Exam Schedule...</div>`;
+        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Syncing Master Slots & Scaling Splits...</div>`;
 
         try {
             const historySnap = await db.collection("timetable_history").doc(dateVal).get();
@@ -1888,84 +1888,107 @@ async function confirmDateContext() {
 
             config.sections.forEach(sec => {
                 const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                const classMaster = masterDayData.filter(m => norm(m.className) === norm(sec.className) && norm(m.section) === norm(sec.sectionName));
-
-                // 1. Add Exam Block
+                const selectedSubList = (sec.postExamSubjects || []).map(ps => norm(ps.subject));
+                
+                // A. THE EXAM BLOCK
                 transformedSchedule.push({
                     day: dayName, className: sec.className, section: sec.sectionName,
                     start24: sec.prepStart, end24: sec.examEnd,
                     subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: config.examTitle, room: "SHUFFLED"
                 });
 
-                // 2. Locate Master Lunch Break (The Anchor)
-                const normalBreak = classMaster.find(m => m.subject.toUpperCase() === "BREAK");
-                let bStart = normalBreak ? universalTimeToMins(normalBreak.start24) : 780; 
-                let bEnd = normalBreak ? universalTimeToMins(normalBreak.end24) : 810;
-                
-                // Force break into 12-2 PM window if it's way off
-                if (bStart < 700 || bStart > 860) { bStart = 780; bEnd = 810; }
-
-                // 3. Categorize Post-Exam Subjects (Pre-Lunch vs Post-Lunch)
                 const examEndMins = universalTimeToMins(sec.examEnd);
-                let preLunchList = [];
-                let postLunchList = [];
 
-                sec.postExamSubjects.forEach(ps => {
-                    const mMatch = classMaster.find(m => norm(m.subject) === norm(ps.subject));
-                    const normalStart = mMatch ? universalTimeToMins(mMatch.start24) : 0;
-                    const normalDur = mMatch ? (universalTimeToMins(mMatch.end24) - universalTimeToMins(mMatch.start24)) : 45;
-                    
-                    const item = { ...ps, normalDur, teacher: mMatch ? (mMatch.teacherName || mMatch.teacher) : "TBD", email: mMatch ? mMatch.teacherEmail : "" };
-                    
-                    // If it was normally before lunch, keep it there
-                    if (normalStart < bStart) preLunchList.push(item);
-                    else postLunchList.push(item);
+                // B. GET MASTER SLOTS FOR THIS SECTION
+                const sectionMaster = masterDayData.filter(m => norm(m.className) === norm(sec.className) && norm(m.section) === norm(sec.sectionName));
+                
+                // Group Master entries into unique Time Containers (Handling SPLITS)
+                const timeContainers = {};
+                sectionMaster.forEach(m => {
+                    if (m.subject.toUpperCase() === "ASSEMBLY") return; // Skip assembly, exam replaces it
+                    const tKey = `${m.start24}-${m.end24}`;
+                    if (!timeContainers[tKey]) {
+                        timeContainers[tKey] = { 
+                            start24: m.start24, 
+                            end24: m.end24, 
+                            sMins: universalTimeToMins(m.start24),
+                            eMins: universalTimeToMins(m.end24),
+                            entries: [] 
+                        };
+                    }
+                    timeContainers[tKey].entries.push(m);
                 });
 
-                // 4. Fill Morning Slot (Exam End -> Break Start)
-                const morningGap = bStart - examEndMins;
-                if (morningGap > 0 && preLunchList.length > 0) {
-                    const totalPreNormal = preLunchList.reduce((acc, curr) => acc + curr.normalDur, 0);
-                    const preRatio = morningGap / totalPreNormal;
-                    let cursor = examEndMins;
-                    preLunchList.forEach((sub, idx) => {
-                        let duration = Math.floor(sub.normalDur * preRatio);
-                        let end = (idx === preLunchList.length - 1) ? bStart : cursor + duration;
-                        transformedSchedule.push({
-                            day: dayName, className: sec.className, section: sec.sectionName,
-                            start24: minsTo24(cursor), end24: minsTo24(end),
-                            subject: sub.subject, teacher: sub.teacher, teacherEmail: sub.email, remark: "Exam Day Schedule", room: ""
-                        });
-                        cursor = end;
-                    });
-                } else if (morningGap > 0) {
-                    // If no pre-lunch subjects, extend exam or add a gap? Let's just start lunch at bStart.
-                }
+                // C. FILTER SLOTS: Only keep slots containing subjects selected in Exam Creator
+                const activeSlots = Object.values(timeContainers)
+                    .filter(tc => tc.entries.some(ent => selectedSubList.includes(norm(ent.subject)) || ent.subject.toUpperCase() === "BREAK"))
+                    .sort((a,b) => a.sMins - b.sMins);
 
-                // 5. Add Synced Lunch Break
+                // D. PROPORTIONAL CALCULATION
+                const normalBreak = activeSlots.find(tc => tc.entries.some(e => e.subject.toUpperCase() === "BREAK"));
+                let bStart = normalBreak ? normalBreak.sMins : 780;
+                let bEnd = normalBreak ? normalBreak.eMins : 810;
+                if (bStart < 700 || bStart > 860) { bStart = 780; bEnd = 810; } // Safety for 12-2 PM window
+                const breakDur = bEnd - bStart;
+
+                const preLunchSlots = activeSlots.filter(tc => tc.sMins < bStart && !tc.entries.some(e => e.subject.toUpperCase() === "BREAK"));
+                const postLunchSlots = activeSlots.filter(tc => tc.sMins >= bStart && !tc.entries.some(e => e.subject.toUpperCase() === "BREAK"));
+
+                const totalPreNormal = preLunchSlots.reduce((acc, curr) => acc + (curr.eMins - curr.sMins), 0);
+                const totalPostNormal = postLunchSlots.reduce((acc, curr) => acc + (curr.eMins - curr.sMins), 0);
+
+                const morningGap = bStart - examEndMins;
+                const afternoonGap = schoolEndMins - bEnd;
+
+                const preRatio = morningGap / totalPreNormal;
+                const postRatio = afternoonGap / totalPostNormal;
+
+                // E. RENDER MORNING SLOTS
+                let cursor = examEndMins;
+                preLunchSlots.forEach((tc, idx) => {
+                    const normalDur = tc.eMins - tc.sMins;
+                    const scaledDur = Math.floor(normalDur * preRatio);
+                    const end = (idx === preLunchSlots.length - 1) ? bStart : cursor + scaledDur;
+                    
+                    tc.entries.forEach(ent => {
+                        if (selectedSubList.includes(norm(ent.subject))) {
+                            transformedSchedule.push({
+                                day: dayName, className: sec.className, section: sec.sectionName,
+                                start24: minsTo24(cursor), end24: minsTo24(end),
+                                subject: ent.subject, teacher: ent.teacherName || ent.teacher, 
+                                teacherEmail: ent.teacherEmail, remark: "Exam Day Schedule", room: ent.room
+                            });
+                        }
+                    });
+                    cursor = end;
+                });
+
+                // F. RENDER SYNCED LUNCH
                 transformedSchedule.push({
                     day: dayName, className: sec.className, section: sec.sectionName,
                     start24: minsTo24(bStart), end24: minsTo24(bEnd),
                     subject: "BREAK", teacher: "NONE", remark: "Synced Lunch", room: ""
                 });
 
-                // 6. Fill Afternoon Slot (Break End -> School End)
-                const afternoonGap = schoolEndMins - bEnd;
-                if (afternoonGap > 0 && postLunchList.length > 0) {
-                    const totalPostNormal = postLunchList.reduce((acc, curr) => acc + curr.normalDur, 0);
-                    const postRatio = afternoonGap / totalPostNormal;
-                    let cursor = bEnd;
-                    postLunchList.forEach((sub, idx) => {
-                        let duration = Math.floor(sub.normalDur * postRatio);
-                        let end = (idx === postLunchList.length - 1) ? schoolEndMins : cursor + duration;
-                        transformedSchedule.push({
-                            day: dayName, className: sec.className, section: sec.sectionName,
-                            start24: minsTo24(cursor), end24: minsTo24(end),
-                            subject: sub.subject, teacher: sub.teacher, teacherEmail: sub.email, remark: "Exam Day Schedule", room: ""
-                        });
-                        cursor = end;
+                // G. RENDER AFTERNOON SLOTS
+                cursor = bEnd;
+                postLunchSlots.forEach((tc, idx) => {
+                    const normalDur = tc.eMins - tc.sMins;
+                    const scaledDur = Math.floor(normalDur * postRatio);
+                    const end = (idx === postLunchSlots.length - 1) ? schoolEndMins : cursor + scaledDur;
+
+                    tc.entries.forEach(ent => {
+                        if (selectedSubList.includes(norm(ent.subject))) {
+                            transformedSchedule.push({
+                                day: dayName, className: sec.className, section: sec.sectionName,
+                                start24: minsTo24(cursor), end24: minsTo24(end),
+                                subject: ent.subject, teacher: ent.teacherName || ent.teacher, 
+                                teacherEmail: ent.teacherEmail, remark: "Exam Day Schedule", room: ent.room
+                            });
+                        }
                     });
-                }
+                    cursor = end;
+                });
             });
 
             globalTimetable = transformedSchedule;
