@@ -490,7 +490,7 @@
 
         function triggerTimetableRecalc() { renderPostExamBuilder(); }
 
-     function renderPostExamBuilder() {
+  function renderPostExamBuilder() {
             const container = document.getElementById('post-exam-container');
             if (selectedSections.length === 0) {
                 container.innerHTML = `<div class="text-center py-8 text-slate-400 font-bold text-xs uppercase tracking-widest">Select classes in Step 2 to build schedule.</div>`;
@@ -498,8 +498,6 @@
             }
 
             const schoolEndMins = timeToMins(document.getElementById('school-end').value);
-
-            // Group sections by Class for collapsible UI
             const groupedPE = {};
             selectedSections.forEach(sec => {
                 if(!groupedPE[sec.cls]) groupedPE[sec.cls] = [];
@@ -508,19 +506,20 @@
 
             container.innerHTML = Object.keys(groupedPE).sort().map(className => {
                 const sectionsHtml = groupedPE[className].map(sec => {
-                    // Pull all potential subjects from the structure data directly
-                    const struct = structureData.find(st => st.id === sec.id);
-                    let uniqueSubjects = struct && struct.subjects ? [...struct.subjects] : [];
+                    // SMART FILTER: Get unique subjects from the actual timetable for THIS day
+                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                    const todaySubjects = timetableData.filter(t => norm(t.className) === norm(sec.cls) && norm(t.section) === norm(sec.sec));
+                    
+                    const uniqueSubjects = [];
+                    const map = new Map();
+                    const SPECIAL_SUBJECTS = ['BREAK', 'ASSEMBLY', 'EXAM', 'EVENT'];
 
-                    // Fallback to timetable just in case structure data is empty
-                    if (uniqueSubjects.length === 0) {
-                        const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                        let todaySubjects = timetableData.filter(t => norm(t.className) === norm(sec.cls) && norm(t.section) === norm(sec.sec));
-                        let map = new Map();
-                        todaySubjects.forEach(t => {
-                            if(!map.has(t.subject)) { map.set(t.subject, true); uniqueSubjects.push(t.subject); }
-                        });
-                    }
+                    todaySubjects.forEach(t => {
+                        if(t.subject && !SPECIAL_SUBJECTS.includes(t.subject.toUpperCase()) && !map.has(t.subject)) { 
+                            map.set(t.subject, true); 
+                            uniqueSubjects.push(t.subject); 
+                        }
+                    });
 
                     const examEndMins = timeToMins(sec.examEnd);
                     let remainingMins = schoolEndMins - examEndMins;
@@ -528,16 +527,16 @@
 
                     let subHtml = "";
                     if(uniqueSubjects.length === 0) {
-                        subHtml = `<div class="text-[10px] font-bold text-slate-400 uppercase py-2">No subjects found for this class.</div>`;
+                        subHtml = `<div class="text-[10px] font-bold text-rose-400 uppercase py-2 bg-rose-50 rounded-xl px-3 border border-rose-100">No normal classes found for this day.</div>`;
                     } else {
                         subHtml = uniqueSubjects.map((subName, idx) => `
-                            <div class="flex items-center justify-between p-2 sm:p-3 bg-white border border-slate-200 rounded-xl mb-2">
+                            <div class="flex items-center justify-between p-2 sm:p-3 bg-white border border-slate-200 rounded-xl mb-2 hover:border-blue-300 transition-colors">
                                 <label class="flex items-center gap-3 cursor-pointer flex-1">
-                                    <input type="checkbox" class="post-sub-cb w-4 h-4 accent-rose-500 cursor-pointer" data-secid="${sec.id}" value="${subName}" onchange="recalcCompression('${sec.id}')">
-                                    <span class="text-[11px] sm:text-xs font-black text-slate-700 uppercase tracking-widest">${subName}</span>
+                                    <input type="checkbox" class="post-sub-cb w-5 h-5 accent-blue-600 cursor-pointer" data-secid="${sec.id}" value="${subName}" onchange="recalcCompression('${sec.id}')">
+                                    <span class="text-xs font-black text-slate-700 uppercase tracking-widest">${subName}</span>
                                 </label>
                                 <div class="flex items-center gap-2">
-                                    <input type="number" id="dur-${sec.id}-${idx}" class="post-dur-input input-field text-xs p-1.5 w-16 text-center border-slate-300" placeholder="Mins" data-secid="${sec.id}" oninput="validateMath('${sec.id}')" disabled>
+                                    <input type="number" class="post-dur-input input-field text-xs p-1.5 w-16 text-center border-slate-300" placeholder="Mins" data-secid="${sec.id}" data-subname="${subName}" oninput="validateMath('${sec.id}')" disabled>
                                     <span class="text-[9px] font-bold text-slate-400 uppercase">Mins</span>
                                 </div>
                             </div>
@@ -545,42 +544,38 @@
                     }
 
                     return `
-                        <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4 sm:p-5 shadow-sm mb-4" id="pe-card-${sec.id}" data-remain="${remainingMins}">
-                            <div class="flex justify-between items-end border-b border-slate-200 pb-3 mb-3">
+                        <div class="bg-white border border-slate-200 rounded-3xl p-4 sm:p-6 shadow-sm mb-6" id="pe-card-${sec.id}" data-remain="${remainingMins}">
+                            <div class="flex justify-between items-start border-b border-slate-100 pb-4 mb-4">
                                 <div>
-                                    <h3 class="font-black text-slate-800 uppercase tracking-widest text-sm">Sec ${sec.sec}</h3>
-                                    <p class="text-[9px] font-bold text-rose-500 uppercase tracking-widest mt-1">Exam Ends: ${sec.examEnd}</p>
+                                    <h3 class="font-black text-slate-900 uppercase tracking-tighter text-lg">Section ${sec.sec}</h3>
+                                    <span class="text-[10px] font-black bg-slate-100 text-slate-500 px-2 py-1 rounded uppercase mt-1 inline-block">Budget: ${remainingMins} Mins</span>
                                 </div>
-                                <div class="text-right">
-                                    <span class="text-[10px] font-black uppercase text-slate-500 block mb-1">Time Budget</span>
-                                    <span id="budget-${sec.id}" class="bg-slate-200 text-slate-700 px-3 py-1 rounded-lg text-xs font-black shadow-inner">${remainingMins} Mins</span>
+                                <div class="flex gap-2">
+                                    <button onclick="selectAllPostSubjects('${sec.id}')" class="text-[9px] font-black bg-slate-100 hover:bg-slate-200 border border-slate-200 px-3 py-2 rounded-xl uppercase transition-all shadow-sm">Select All</button>
+                                    <button onclick="applyPostExamToClass('${className}', '${sec.id}')" class="text-[9px] font-black bg-amber-100 hover:bg-amber-200 text-amber-700 border border-amber-200 px-3 py-2 rounded-xl uppercase transition-all shadow-sm">⚡ Apply to Class</button>
                                 </div>
                             </div>
-                            <div class="mb-3">
-                                <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Select Classes to run post-exam:</p>
+                            <div class="space-y-1">
                                 ${subHtml}
                             </div>
-                            <div class="flex justify-between items-center bg-rose-50 border border-rose-100 p-3 rounded-xl">
-                                <span class="text-[10px] font-black text-rose-800 uppercase tracking-widest">Time Remaining:</span>
-                                <span id="rem-tracker-${sec.id}" class="text-sm font-black text-rose-600">${remainingMins}</span>
+                            <div class="flex justify-between items-center bg-blue-50 border border-blue-100 p-4 rounded-2xl mt-4 shadow-inner">
+                                <span class="text-[10px] font-black text-blue-800 uppercase tracking-widest">Unallocated:</span>
+                                <span id="rem-tracker-${sec.id}" class="text-lg font-black text-blue-600">${remainingMins}</span>
                             </div>
                         </div>
                     `;
                 }).join('');
 
                 return `
-                    <details class="bg-white border border-slate-200 rounded-[2rem] shadow-sm overflow-hidden mb-4 group">
-                        <summary class="p-5 sm:p-6 bg-slate-100/50 cursor-pointer outline-none flex justify-between items-center hover:bg-slate-100 transition-colors">
+                    <details class="bg-slate-50 border-2 border-slate-200 rounded-[2.5rem] shadow-md overflow-hidden mb-8 group" open>
+                        <summary class="p-6 sm:p-8 bg-white border-b border-slate-200 cursor-pointer outline-none flex justify-between items-center hover:bg-slate-50 transition-colors">
                             <div class="flex items-center gap-4">
-                                <span class="bg-white p-2 rounded-xl border border-slate-200 shadow-sm text-lg">🏫</span>
-                                <span class="font-black text-slate-800 uppercase tracking-widest text-lg">Class ${className}</span>
+                                <span class="bg-indigo-600 text-white p-3 rounded-2xl shadow-lg text-xl">🏢</span>
+                                <span class="font-black text-slate-900 uppercase tracking-tighter text-2xl">Class ${className}</span>
                             </div>
-                            <div class="flex items-center gap-3">
-                                <span class="text-[10px] font-bold bg-slate-200 text-slate-600 px-3 py-1.5 rounded-lg uppercase tracking-widest">${groupedPE[className].length} Sections</span>
-                                <span class="text-slate-400 font-bold text-xl group-open:rotate-180 transition-transform">▼</span>
-                            </div>
+                            <span class="text-slate-400 group-open:rotate-180 transition-transform text-2xl">▼</span>
                         </summary>
-                        <div class="p-5 sm:p-6 border-t border-slate-200">
+                        <div class="p-4 sm:p-8">
                             ${sectionsHtml}
                         </div>
                     </details>
