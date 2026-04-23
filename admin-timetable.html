@@ -1851,41 +1851,103 @@ function forceSync() {
             document.getElementById('date-picker-modal').classList.replace('hidden', 'flex');
         }
 
-    async function confirmDateContext() {
-            const dateVal = document.getElementById('context-date-input').value;
-            if(!dateVal) return alert("Please select a date.");
+  async function confirmDateContext() {
+        const dateVal = document.getElementById('context-date-input').value;
+        if(!dateVal) return alert("Please select a date.");
+        
+        currentContextDate = dateVal;
+        const prettyDate = new Date(dateVal).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+        document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
+        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Generating Intelligent Schedule for ${prettyDate}...</div>`;
+
+        try {
+            // 1. Check for Exam Configuration first
+            const examSnap = await db.collection("exam_configurations").doc(dateVal).get();
             
-            currentContextDate = dateVal;
-            const selectedDate = new Date(dateVal);
-            const prettyDate = selectedDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            if (examSnap.exists) {
+                const config = examSnap.data();
+                const transformedSchedule = [];
 
-            // 1. HIDE the modal (Fixes the "doesn't disappear" issue)
-            document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
+                config.sections.forEach(sec => {
+                    // A. Create the Exam Block
+                    transformedSchedule.push({
+                        day: new Date(dateVal).toLocaleDateString('en-US', { weekday: 'long' }),
+                        className: sec.className,
+                        section: sec.sectionName,
+                        start24: sec.prepStart,
+                        end24: sec.examEnd,
+                        subject: "EXAM",
+                        teacher: "ASSIGN IN DUTY HUB",
+                        remark: config.examTitle,
+                        room: "SHUFFLED"
+                    });
 
-            // 2. SHOW loading message on the grid
-            document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Accessing ${prettyDate} Records...</div>`;
+                    // B. Create Post-Exam Classes
+                    let currentTimeMins = universalTimeToMins(sec.examEnd);
+                    
+                    // Add a 30-minute Section Break (Lunch) after the exam
+                    const lunchEndMins = currentTimeMins + 30;
+                    transformedSchedule.push({
+                        day: new Date(dateVal).toLocaleDateString('en-US', { weekday: 'long' }),
+                        className: sec.className,
+                        section: sec.sectionName,
+                        start24: minsTo24(currentTimeMins),
+                        end24: minsTo24(lunchEndMins),
+                        subject: "BREAK",
+                        teacher: "NONE",
+                        remark: "Post-Exam Lunch",
+                        room: ""
+                    });
+                    currentTimeMins = lunchEndMins;
 
-            // 3. FETCH data for that date
-            try {
-                // Check if a specific history record exists for this date
-                const historySnap = await db.collection("timetable_history").doc(dateVal).get();
+                    // C. Add compressed subjects
+                    sec.postExamSubjects.forEach(sub => {
+                        const endMins = currentTimeMins + parseInt(sub.duration);
+                        transformedSchedule.push({
+                            day: new Date(dateVal).toLocaleDateString('en-US', { weekday: 'long' }),
+                            className: sec.className,
+                            section: sec.sectionName,
+                            start24: minsTo24(currentTimeMins),
+                            end24: minsTo24(endMins),
+                            subject: sub.subject,
+                            teacher: "FETCHING...", 
+                            remark: "Compressed",
+                            room: ""
+                        });
+                        currentTimeMins = endMins;
+                    });
+                });
+
+                globalTimetable = transformedSchedule;
+                document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE:</span> ${config.examTitle}`;
                 
+            } else {
+                // 2. Normal Flow: Check History or Live Master
+                const historySnap = await db.collection("timetable_history").doc(dateVal).get();
                 if (historySnap.exists) {
                     globalTimetable = historySnap.data().schedule;
                 } else {
-                    // If no history found (like for yesterday), show the Live Master as a reference
                     const masterSnap = await db.collection("timetable").get();
                     globalTimetable = masterSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 }
-                
-                // Refresh the screen with the found data
-                renderDirectDashboard();
-                alert(`Viewing schedule for ${prettyDate}`);
-                
-            } catch (e) {
-                alert("Error loading date: " + e.message);
+                document.getElementById('view-label').innerText = `Showing: Records for ${prettyDate}`;
             }
+            
+            renderDirectDashboard();
+            
+        } catch (e) {
+            console.error(e);
+            alert("Error: " + e.message);
         }
+    }
+
+    // Helper to convert minutes back to 24hr string for the UI
+    function minsTo24(totalMinutes) {
+        const h = Math.floor(totalMinutes / 60) % 24;
+        const m = totalMinutes % 60;
+        return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+    }
 function handlePrimaryAction() {
             const isHistory = document.body.classList.contains('is-history');
             if (isHistory) {
