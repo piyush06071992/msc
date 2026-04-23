@@ -1861,7 +1861,7 @@ async function confirmDateContext() {
         const prettyDate = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
         document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
-        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Architecting Proportional Exam Schedule...</div>`;
+        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Architecting Synced Exam Schedule...</div>`;
 
         try {
             const historySnap = await db.collection("timetable_history").doc(dateVal).get();
@@ -1897,69 +1897,82 @@ async function confirmDateContext() {
                     subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: config.examTitle, room: "SHUFFLED"
                 });
 
-                // 2. Identify Lunch Break (Force between 12-2 PM)
+                // 2. Locate Master Lunch Break (The Anchor)
                 const normalBreak = classMaster.find(m => m.subject.toUpperCase() === "BREAK");
-                let bStart = normalBreak ? universalTimeToMins(normalBreak.start24) : 780; // Default 1 PM
-                let bEnd = normalBreak ? universalTimeToMins(normalBreak.end24) : 810;     // Default 1:30 PM
+                let bStart = normalBreak ? universalTimeToMins(normalBreak.start24) : 780; 
+                let bEnd = normalBreak ? universalTimeToMins(normalBreak.end24) : 810;
                 
-                // Safety: If normal break is outside 12-2 PM window, force it to 1:00 PM
-                if (bStart < 720 || bStart > 840) { bStart = 780; bEnd = 810; }
-                const breakDur = bEnd - bStart;
+                // Force break into 12-2 PM window if it's way off
+                if (bStart < 700 || bStart > 860) { bStart = 780; bEnd = 810; }
 
-                // 3. Proportional Math
+                // 3. Categorize Post-Exam Subjects (Pre-Lunch vs Post-Lunch)
                 const examEndMins = universalTimeToMins(sec.examEnd);
-                const totalAvailableMins = schoolEndMins - examEndMins - breakDur;
-                
-                // Get total "Normal" duration of selected subjects to calculate ratio
-                let totalNormalMins = 0;
+                let preLunchList = [];
+                let postLunchList = [];
+
                 sec.postExamSubjects.forEach(ps => {
-                    const match = classMaster.find(m => norm(m.subject) === norm(ps.subject));
-                    totalNormalMins += match ? (universalTimeToMins(match.end24) - universalTimeToMins(match.start24)) : 45;
+                    const mMatch = classMaster.find(m => norm(m.subject) === norm(ps.subject));
+                    const normalStart = mMatch ? universalTimeToMins(mMatch.start24) : 0;
+                    const normalDur = mMatch ? (universalTimeToMins(mMatch.end24) - universalTimeToMins(mMatch.start24)) : 45;
+                    
+                    const item = { ...ps, normalDur, teacher: mMatch ? (mMatch.teacherName || mMatch.teacher) : "TBD", email: mMatch ? mMatch.teacherEmail : "" };
+                    
+                    // If it was normally before lunch, keep it there
+                    if (normalStart < bStart) preLunchList.push(item);
+                    else postLunchList.push(item);
                 });
 
-                const scaleRatio = totalAvailableMins / totalNormalMins;
-
-                // 4. Distribute Classes
-                let timeCursor = examEndMins;
-                let breakInserted = false;
-
-                sec.postExamSubjects.forEach((ps, idx) => {
-                    const match = classMaster.find(m => norm(m.subject) === norm(ps.subject));
-                    const normalDur = match ? (universalTimeToMins(match.end24) - universalTimeToMins(match.start24)) : 45;
-                    const scaledDur = Math.floor(normalDur * scaleRatio);
-
-                    // Insert Lunch Break if cursor hits the 12-2 PM window
-                    if (!breakInserted && (timeCursor + (scaledDur/2) >= bStart)) {
+                // 4. Fill Morning Slot (Exam End -> Break Start)
+                const morningGap = bStart - examEndMins;
+                if (morningGap > 0 && preLunchList.length > 0) {
+                    const totalPreNormal = preLunchList.reduce((acc, curr) => acc + curr.normalDur, 0);
+                    const preRatio = morningGap / totalPreNormal;
+                    let cursor = examEndMins;
+                    preLunchList.forEach((sub, idx) => {
+                        let duration = Math.floor(sub.normalDur * preRatio);
+                        let end = (idx === preLunchList.length - 1) ? bStart : cursor + duration;
                         transformedSchedule.push({
                             day: dayName, className: sec.className, section: sec.sectionName,
-                            start24: minsTo24(bStart), end24: minsTo24(bEnd),
-                            subject: "BREAK", teacher: "NONE", remark: "Staff/Student Lunch", room: ""
+                            start24: minsTo24(cursor), end24: minsTo24(end),
+                            subject: sub.subject, teacher: sub.teacher, teacherEmail: sub.email, remark: "Exam Day Schedule", room: ""
                         });
-                        timeCursor = bEnd;
-                        breakInserted = true;
-                    }
-
-                    // Handle Last Class rounding to ensure it hits exactly 3:45 PM
-                    let currentEnd = timeCursor + scaledDur;
-                    if (idx === sec.postExamSubjects.length - 1 && breakInserted) currentEnd = schoolEndMins;
-
-                    transformedSchedule.push({
-                        day: dayName, className: sec.className, section: sec.sectionName,
-                        start24: minsTo24(timeCursor), end24: minsTo24(currentEnd),
-                        subject: ps.subject, 
-                        teacher: match ? (match.teacherName || match.teacher) : "TBD",
-                        teacherEmail: match ? match.teacherEmail : "",
-                        remark: "Exam Day Schedule", room: ""
+                        cursor = end;
                     });
-                    timeCursor = currentEnd;
+                } else if (morningGap > 0) {
+                    // If no pre-lunch subjects, extend exam or add a gap? Let's just start lunch at bStart.
+                }
+
+                // 5. Add Synced Lunch Break
+                transformedSchedule.push({
+                    day: dayName, className: sec.className, section: sec.sectionName,
+                    start24: minsTo24(bStart), end24: minsTo24(bEnd),
+                    subject: "BREAK", teacher: "NONE", remark: "Synced Lunch", room: ""
                 });
+
+                // 6. Fill Afternoon Slot (Break End -> School End)
+                const afternoonGap = schoolEndMins - bEnd;
+                if (afternoonGap > 0 && postLunchList.length > 0) {
+                    const totalPostNormal = postLunchList.reduce((acc, curr) => acc + curr.normalDur, 0);
+                    const postRatio = afternoonGap / totalPostNormal;
+                    let cursor = bEnd;
+                    postLunchList.forEach((sub, idx) => {
+                        let duration = Math.floor(sub.normalDur * postRatio);
+                        let end = (idx === postLunchList.length - 1) ? schoolEndMins : cursor + duration;
+                        transformedSchedule.push({
+                            day: dayName, className: sec.className, section: sec.sectionName,
+                            start24: minsTo24(cursor), end24: minsTo24(end),
+                            subject: sub.subject, teacher: sub.teacher, teacherEmail: sub.email, remark: "Exam Day Schedule", room: ""
+                        });
+                        cursor = end;
+                    });
+                }
             });
 
             globalTimetable = transformedSchedule;
             document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE:</span> ${config.examTitle}`;
             renderDirectDashboard();
 
-        } catch (e) { alert("Math Error: " + e.message); }
+        } catch (e) { alert("Logic Error: " + e.message); console.error(e); }
     }
     // Helper to convert minutes back to 24hr string for the UI
     function minsTo24(totalMinutes) {
