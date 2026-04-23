@@ -1851,97 +1851,106 @@ function forceSync() {
             document.getElementById('date-picker-modal').classList.replace('hidden', 'flex');
         }
 
-  async function confirmDateContext() {
+async function confirmDateContext() {
         const dateVal = document.getElementById('context-date-input').value;
-        if(!dateVal) return alert("Please select a date.");
-        
+        if (!dateVal) return alert("Please select a date.");
+
         currentContextDate = dateVal;
-        const prettyDate = new Date(dateVal).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        const dateObj = new Date(dateVal);
+        const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
+        const prettyDate = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
         document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
-        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Generating Intelligent Schedule for ${prettyDate}...</div>`;
+        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Architecting Exam Day Schedule...</div>`;
 
         try {
-            // 1. Check for Exam Configuration first
+            // 1. Check for existing history first (if you already edited/saved this exam day before)
+            const historySnap = await db.collection("timetable_history").doc(dateVal).get();
+            if (historySnap.exists) {
+                globalTimetable = historySnap.data().schedule;
+                document.getElementById('view-label').innerText = `Showing: Records for ${prettyDate}`;
+                renderDirectDashboard();
+                return;
+            }
+
+            // 2. Fetch Exam Configuration
             const examSnap = await db.collection("exam_configurations").doc(dateVal).get();
-            
-            if (examSnap.exists) {
-                const config = examSnap.data();
-                const transformedSchedule = [];
+            if (!examSnap.exists) {
+                const masterSnap = await db.collection("timetable").get();
+                globalTimetable = masterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                document.getElementById('view-label').innerText = `Showing: Live Master Schedule`;
+                renderDirectDashboard();
+                return;
+            }
 
-                config.sections.forEach(sec => {
-                    // A. Create the Exam Block
-                    transformedSchedule.push({
-                        day: new Date(dateVal).toLocaleDateString('en-US', { weekday: 'long' }),
-                        className: sec.className,
-                        section: sec.sectionName,
-                        start24: sec.prepStart,
-                        end24: sec.examEnd,
-                        subject: "EXAM",
-                        teacher: "ASSIGN IN DUTY HUB",
-                        remark: config.examTitle,
-                        room: "SHUFFLED"
-                    });
+            const config = examSnap.data();
+            const transformedSchedule = [];
 
-                    // B. Create Post-Exam Classes
-                    let currentTimeMins = universalTimeToMins(sec.examEnd);
-                    
-                    // Add a 30-minute Section Break (Lunch) after the exam
-                    const lunchEndMins = currentTimeMins + 30;
-                    transformedSchedule.push({
-                        day: new Date(dateVal).toLocaleDateString('en-US', { weekday: 'long' }),
-                        className: sec.className,
-                        section: sec.sectionName,
-                        start24: minsTo24(currentTimeMins),
-                        end24: minsTo24(lunchEndMins),
-                        subject: "BREAK",
-                        teacher: "NONE",
-                        remark: "Post-Exam Lunch",
-                        room: ""
-                    });
-                    currentTimeMins = lunchEndMins;
+            // 3. Load master timetable for teacher/break lookup
+            const masterSnap = await db.collection("timetable").where("day", "==", dayName).get();
+            const masterDayData = masterSnap.docs.map(d => d.data());
 
-                    // C. Add compressed subjects
-                    sec.postExamSubjects.forEach(sub => {
-                        const endMins = currentTimeMins + parseInt(sub.duration);
-                        transformedSchedule.push({
-                            day: new Date(dateVal).toLocaleDateString('en-US', { weekday: 'long' }),
-                            className: sec.className,
-                            section: sec.sectionName,
-                            start24: minsTo24(currentTimeMins),
-                            end24: minsTo24(endMins),
-                            subject: sub.subject,
-                            teacher: "FETCHING...", 
-                            remark: "Compressed",
-                            room: ""
-                        });
-                        currentTimeMins = endMins;
-                    });
+            config.sections.forEach(sec => {
+                const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const classMaster = masterDayData.filter(m => norm(m.className) === norm(sec.className) && norm(m.section) === norm(sec.sectionName));
+
+                // A. The Exam Block
+                transformedSchedule.push({
+                    day: dayName, className: sec.className, section: sec.sectionName,
+                    start24: sec.prepStart, end24: sec.examEnd,
+                    subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: config.examTitle, room: "SHUFFLED"
                 });
 
-                globalTimetable = transformedSchedule;
-                document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE:</span> ${config.examTitle}`;
-                
-            } else {
-                // 2. Normal Flow: Check History or Live Master
-                const historySnap = await db.collection("timetable_history").doc(dateVal).get();
-                if (historySnap.exists) {
-                    globalTimetable = historySnap.data().schedule;
-                } else {
-                    const masterSnap = await db.collection("timetable").get();
-                    globalTimetable = masterSnap.docs.map(d => ({id: d.id, ...d.data()}));
-                }
-                document.getElementById('view-label').innerText = `Showing: Records for ${prettyDate}`;
-            }
-            
-            renderDirectDashboard();
-            
-        } catch (e) {
-            console.error(e);
-            alert("Error: " + e.message);
-        }
-    }
+                // B. Find Normal Lunch Break from Master
+                const normalBreak = classMaster.find(m => m.subject.toUpperCase() === "BREAK");
+                const bStart = normalBreak ? universalTimeToMins(normalBreak.start24) : 780; // 1:00 PM
+                const bEnd = normalBreak ? universalTimeToMins(normalBreak.end24) : 810;   // 1:30 PM
 
+                // C. Schedule Post-Exam Classes
+                let timeCursor = universalTimeToMins(sec.examEnd);
+                let breakInserted = false;
+
+                sec.postExamSubjects.forEach(ps => {
+                    // Lookup normal teacher
+                    const mMatch = classMaster.find(m => norm(m.subject) === norm(ps.subject));
+                    const teacher = mMatch ? (mMatch.teacherName || mMatch.teacher) : "NONE";
+                    const email = mMatch ? mMatch.teacherEmail : "";
+
+                    // If we hit the lunch time, insert break first
+                    if (!breakInserted && (timeCursor + ps.duration > bStart)) {
+                        transformedSchedule.push({
+                            day: dayName, className: sec.className, section: sec.sectionName,
+                            start24: minsTo24(bStart), end24: minsTo24(bEnd),
+                            subject: "BREAK", teacher: "NONE", remark: "Synced Lunch", room: ""
+                        });
+                        timeCursor = bEnd;
+                        breakInserted = true;
+                    }
+
+                    transformedSchedule.push({
+                        day: dayName, className: sec.className, section: sec.sectionName,
+                        start24: minsTo24(timeCursor), end24: minsTo24(timeCursor + ps.duration),
+                        subject: ps.subject, teacher: teacher, teacherEmail: email, remark: "Compressed", room: ""
+                    });
+                    timeCursor += ps.duration;
+                });
+
+                // Safety: Add break if it hasn't appeared yet
+                if (!breakInserted) {
+                    transformedSchedule.push({
+                        day: dayName, className: sec.className, section: sec.sectionName,
+                        start24: minsTo24(bStart), end24: minsTo24(bEnd),
+                        subject: "BREAK", teacher: "NONE", remark: "Synced Lunch", room: ""
+                    });
+                }
+            });
+
+            globalTimetable = transformedSchedule;
+            document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE:</span> ${config.examTitle}`;
+            renderDirectDashboard();
+
+        } catch (e) { alert("Error: " + e.message); }
+    }
     // Helper to convert minutes back to 24hr string for the UI
     function minsTo24(totalMinutes) {
         const h = Math.floor(totalMinutes / 60) % 24;
