@@ -1861,32 +1861,28 @@ async function confirmDateContext() {
         const prettyDate = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
         document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
-        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Architecting Exam Day Schedule...</div>`;
+        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Architecting Proportional Exam Schedule...</div>`;
 
         try {
-            // 1. Check for existing history first (if you already edited/saved this exam day before)
             const historySnap = await db.collection("timetable_history").doc(dateVal).get();
             if (historySnap.exists) {
                 globalTimetable = historySnap.data().schedule;
-                document.getElementById('view-label').innerText = `Showing: Records for ${prettyDate}`;
                 renderDirectDashboard();
                 return;
             }
 
-            // 2. Fetch Exam Configuration
             const examSnap = await db.collection("exam_configurations").doc(dateVal).get();
             if (!examSnap.exists) {
                 const masterSnap = await db.collection("timetable").get();
                 globalTimetable = masterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                document.getElementById('view-label').innerText = `Showing: Live Master Schedule`;
                 renderDirectDashboard();
                 return;
             }
 
             const config = examSnap.data();
+            const schoolEndMins = universalTimeToMins(config.schoolEndTime || "15:45");
             const transformedSchedule = [];
 
-            // 3. Load master timetable for teacher/break lookup
             const masterSnap = await db.collection("timetable").where("day", "==", dayName).get();
             const masterDayData = masterSnap.docs.map(d => d.data());
 
@@ -1894,62 +1890,76 @@ async function confirmDateContext() {
                 const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
                 const classMaster = masterDayData.filter(m => norm(m.className) === norm(sec.className) && norm(m.section) === norm(sec.sectionName));
 
-                // A. The Exam Block
+                // 1. Add Exam Block
                 transformedSchedule.push({
                     day: dayName, className: sec.className, section: sec.sectionName,
                     start24: sec.prepStart, end24: sec.examEnd,
                     subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: config.examTitle, room: "SHUFFLED"
                 });
 
-                // B. Find Normal Lunch Break from Master
+                // 2. Identify Lunch Break (Force between 12-2 PM)
                 const normalBreak = classMaster.find(m => m.subject.toUpperCase() === "BREAK");
-                const bStart = normalBreak ? universalTimeToMins(normalBreak.start24) : 780; // 1:00 PM
-                const bEnd = normalBreak ? universalTimeToMins(normalBreak.end24) : 810;   // 1:30 PM
+                let bStart = normalBreak ? universalTimeToMins(normalBreak.start24) : 780; // Default 1 PM
+                let bEnd = normalBreak ? universalTimeToMins(normalBreak.end24) : 810;     // Default 1:30 PM
+                
+                // Safety: If normal break is outside 12-2 PM window, force it to 1:00 PM
+                if (bStart < 720 || bStart > 840) { bStart = 780; bEnd = 810; }
+                const breakDur = bEnd - bStart;
 
-                // C. Schedule Post-Exam Classes
-                let timeCursor = universalTimeToMins(sec.examEnd);
+                // 3. Proportional Math
+                const examEndMins = universalTimeToMins(sec.examEnd);
+                const totalAvailableMins = schoolEndMins - examEndMins - breakDur;
+                
+                // Get total "Normal" duration of selected subjects to calculate ratio
+                let totalNormalMins = 0;
+                sec.postExamSubjects.forEach(ps => {
+                    const match = classMaster.find(m => norm(m.subject) === norm(ps.subject));
+                    totalNormalMins += match ? (universalTimeToMins(match.end24) - universalTimeToMins(match.start24)) : 45;
+                });
+
+                const scaleRatio = totalAvailableMins / totalNormalMins;
+
+                // 4. Distribute Classes
+                let timeCursor = examEndMins;
                 let breakInserted = false;
 
-                sec.postExamSubjects.forEach(ps => {
-                    // Lookup normal teacher
-                    const mMatch = classMaster.find(m => norm(m.subject) === norm(ps.subject));
-                    const teacher = mMatch ? (mMatch.teacherName || mMatch.teacher) : "NONE";
-                    const email = mMatch ? mMatch.teacherEmail : "";
+                sec.postExamSubjects.forEach((ps, idx) => {
+                    const match = classMaster.find(m => norm(m.subject) === norm(ps.subject));
+                    const normalDur = match ? (universalTimeToMins(match.end24) - universalTimeToMins(match.start24)) : 45;
+                    const scaledDur = Math.floor(normalDur * scaleRatio);
 
-                    // If we hit the lunch time, insert break first
-                    if (!breakInserted && (timeCursor + ps.duration > bStart)) {
+                    // Insert Lunch Break if cursor hits the 12-2 PM window
+                    if (!breakInserted && (timeCursor + (scaledDur/2) >= bStart)) {
                         transformedSchedule.push({
                             day: dayName, className: sec.className, section: sec.sectionName,
                             start24: minsTo24(bStart), end24: minsTo24(bEnd),
-                            subject: "BREAK", teacher: "NONE", remark: "Synced Lunch", room: ""
+                            subject: "BREAK", teacher: "NONE", remark: "Staff/Student Lunch", room: ""
                         });
                         timeCursor = bEnd;
                         breakInserted = true;
                     }
 
-                    transformedSchedule.push({
-                        day: dayName, className: sec.className, section: sec.sectionName,
-                        start24: minsTo24(timeCursor), end24: minsTo24(timeCursor + ps.duration),
-                        subject: ps.subject, teacher: teacher, teacherEmail: email, remark: "Compressed", room: ""
-                    });
-                    timeCursor += ps.duration;
-                });
+                    // Handle Last Class rounding to ensure it hits exactly 3:45 PM
+                    let currentEnd = timeCursor + scaledDur;
+                    if (idx === sec.postExamSubjects.length - 1 && breakInserted) currentEnd = schoolEndMins;
 
-                // Safety: Add break if it hasn't appeared yet
-                if (!breakInserted) {
                     transformedSchedule.push({
                         day: dayName, className: sec.className, section: sec.sectionName,
-                        start24: minsTo24(bStart), end24: minsTo24(bEnd),
-                        subject: "BREAK", teacher: "NONE", remark: "Synced Lunch", room: ""
+                        start24: minsTo24(timeCursor), end24: minsTo24(currentEnd),
+                        subject: ps.subject, 
+                        teacher: match ? (match.teacherName || match.teacher) : "TBD",
+                        teacherEmail: match ? match.teacherEmail : "",
+                        remark: "Exam Day Schedule", room: ""
                     });
-                }
+                    timeCursor = currentEnd;
+                });
             });
 
             globalTimetable = transformedSchedule;
             document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE:</span> ${config.examTitle}`;
             renderDirectDashboard();
 
-        } catch (e) { alert("Error: " + e.message); }
+        } catch (e) { alert("Math Error: " + e.message); }
     }
     // Helper to convert minutes back to 24hr string for the UI
     function minsTo24(totalMinutes) {
