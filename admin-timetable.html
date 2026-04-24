@@ -2018,12 +2018,80 @@ async function confirmDateContext() {
     }
 function handlePrimaryAction() {
             const isHistory = document.body.classList.contains('is-history');
+            
             if (isHistory) {
-                // If looking at the past, open the Clone menu (we will build this UI next)
                 alert("Opening Clone Menu... (Coming in Step 2)");
+            } else if (currentContextDate) {
+                // If we are currently viewing an Exam Day or specific date override
+                saveOverrideForSpecificDate();
             } else {
-                // If editing Live/Future, open the new Save Options menu
+                // Normal Live Master editing
                 document.getElementById('save-options-modal').classList.replace('hidden', 'flex');
+            }
+        }
+
+        async function saveOverrideForSpecificDate() {
+            if (!confirm(`Save these specific changes for ${currentContextDate}? This will NOT alter your normal weekly master schedule.`)) return;
+
+            const btn = document.getElementById('main-action-btn'); 
+            const originalHTML = btn.innerHTML;
+            btn.innerHTML = "⌛ Saving..."; btn.disabled = true;
+
+            try {
+                // 1. Scrape the exact layout currently on your screen
+                const allBlocks = Array.from(document.querySelectorAll('.time-block'));
+                let newSlots = []; 
+                let conflictMsg = "";
+
+                for (let b of allBlocks) {
+                    const className = b.getAttribute('data-class');
+                    const sectionName = b.getAttribute('data-section');
+                    const s24 = b.querySelector('.tb-s24').value; 
+                    const e24 = b.querySelector('.tb-e24').value;
+                    const entries = Array.from(b.querySelectorAll('.ent-row'));
+                    
+                    if (!s24 || !e24) { conflictMsg = `A block in ${sectionName} is missing a time.`; break; }
+                    const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
+                    const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
+                    const dur = `${eMins - sMins} MINS`;
+                    const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
+
+                    for(let ent of entries) {
+                        const sub = ent.querySelector('.ent-sub').value;
+                        const teacher = ent.querySelector('.ent-tea').value || "NONE"; 
+                        const room = ent.querySelector('.ent-room').value.trim();
+                        const remark = ent.querySelector('.ent-rem').value.trim();
+                        const activeDays = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
+
+                        activeDays.forEach(day => {
+                            let teacherEmail = "";
+                            if (teacher !== "NONE") {
+                                const tObj = allTeachers.find(t => t.name === teacher);
+                                if (tObj) teacherEmail = tObj.email || ""; 
+                            }
+                            newSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark, sMins, eMins });
+                        });
+                    }
+                }
+                if (conflictMsg) throw new Error(conflictMsg);
+
+                // 2. Save exactly to timetable_history for this ONE date
+                await db.collection("timetable_history").doc(currentContextDate).set({
+                    date: currentContextDate,
+                    lastUpdated: Date.now(),
+                    schedule: newSlots,
+                    type: "EXAM_OVERRIDE"
+                });
+
+                alert(`✅ Schedule saved successfully for ${currentContextDate}!\n\nTeacher portals will now automatically display this override.`);
+                
+                // Update UI Label to show it is successfully locked in
+                document.getElementById('view-label').innerHTML = `<span class="text-rose-500">🔴 EXAM MODE (SAVED):</span> ${currentContextDate}`;
+
+            } catch (err) {
+                alert("Save failed: " + err.message);
+            } finally {
+                btn.innerHTML = originalHTML; btn.disabled = false;
             }
         }
 
