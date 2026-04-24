@@ -1864,6 +1864,7 @@ async function confirmDateContext() {
         document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Syncing Master Slots & Scaling Splits...</div>`;
 
         try {
+            // 1. Check if we already saved this date
             const historySnap = await db.collection("timetable_history").doc(dateVal).get();
             if (historySnap.exists) {
                 globalTimetable = historySnap.data().schedule;
@@ -1871,6 +1872,7 @@ async function confirmDateContext() {
                 return;
             }
 
+            // 2. Check if an Exam is scheduled
             const examSnap = await db.collection("exam_configurations").doc(dateVal).get();
             if (!examSnap.exists) {
                 const masterSnap = await db.collection("timetable").get();
@@ -1883,11 +1885,25 @@ async function confirmDateContext() {
             const schoolEndMins = universalTimeToMins(config.schoolEndTime || "15:45");
             const transformedSchedule = [];
 
+            // 3. Load the Master Timetable for today
             const masterSnap = await db.collection("timetable").where("day", "==", dayName).get();
             const masterDayData = masterSnap.docs.map(d => d.data());
 
+            // --- THE FIX: KEEP THE REST OF THE SCHOOL NORMAL ---
+            const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const examSectionKeys = config.sections.map(s => `${norm(s.className)}_${norm(s.sectionName)}`);
+
+            masterDayData.forEach(m => {
+                const key = `${norm(m.className)}_${norm(m.section)}`;
+                // If this class is NOT taking the exam, push its normal schedule!
+                if (!examSectionKeys.includes(key)) {
+                    transformedSchedule.push(m);
+                }
+            });
+            // -------------------------------------------------
+
+            // 4. Calculate the special schedule for Exam Sections
             config.sections.forEach(sec => {
-                const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
                 const selectedSubList = (sec.postExamSubjects || []).map(ps => norm(ps.subject));
                 
                 // A. THE EXAM BLOCK
@@ -1902,10 +1918,9 @@ async function confirmDateContext() {
                 // B. GET MASTER SLOTS FOR THIS SECTION
                 const sectionMaster = masterDayData.filter(m => norm(m.className) === norm(sec.className) && norm(m.section) === norm(sec.sectionName));
                 
-                // Group Master entries into unique Time Containers (Handling SPLITS)
                 const timeContainers = {};
                 sectionMaster.forEach(m => {
-                    if (m.subject.toUpperCase() === "ASSEMBLY") return; // Skip assembly, exam replaces it
+                    if (m.subject.toUpperCase() === "ASSEMBLY") return; 
                     const tKey = `${m.start24}-${m.end24}`;
                     if (!timeContainers[tKey]) {
                         timeContainers[tKey] = { 
@@ -1919,16 +1934,14 @@ async function confirmDateContext() {
                     timeContainers[tKey].entries.push(m);
                 });
 
-                // C. FILTER SLOTS: Only keep slots containing subjects selected in Exam Creator
                 const activeSlots = Object.values(timeContainers)
                     .filter(tc => tc.entries.some(ent => selectedSubList.includes(norm(ent.subject)) || ent.subject.toUpperCase() === "BREAK"))
                     .sort((a,b) => a.sMins - b.sMins);
 
-                // D. PROPORTIONAL CALCULATION
                 const normalBreak = activeSlots.find(tc => tc.entries.some(e => e.subject.toUpperCase() === "BREAK"));
                 let bStart = normalBreak ? normalBreak.sMins : 780;
                 let bEnd = normalBreak ? normalBreak.eMins : 810;
-                if (bStart < 700 || bStart > 860) { bStart = 780; bEnd = 810; } // Safety for 12-2 PM window
+                if (bStart < 700 || bStart > 860) { bStart = 780; bEnd = 810; } 
                 const breakDur = bEnd - bStart;
 
                 const preLunchSlots = activeSlots.filter(tc => tc.sMins < bStart && !tc.entries.some(e => e.subject.toUpperCase() === "BREAK"));
@@ -1943,7 +1956,6 @@ async function confirmDateContext() {
                 const preRatio = morningGap / totalPreNormal;
                 const postRatio = afternoonGap / totalPostNormal;
 
-                // E. RENDER MORNING SLOTS
                 let cursor = examEndMins;
                 preLunchSlots.forEach((tc, idx) => {
                     const normalDur = tc.eMins - tc.sMins;
@@ -1963,14 +1975,12 @@ async function confirmDateContext() {
                     cursor = end;
                 });
 
-                // F. RENDER SYNCED LUNCH
                 transformedSchedule.push({
                     day: dayName, className: sec.className, section: sec.sectionName,
                     start24: minsTo24(bStart), end24: minsTo24(bEnd),
                     subject: "BREAK", teacher: "NONE", remark: "Synced Lunch", room: ""
                 });
 
-                // G. RENDER AFTERNOON SLOTS
                 cursor = bEnd;
                 postLunchSlots.forEach((tc, idx) => {
                     const normalDur = tc.eMins - tc.sMins;
