@@ -232,7 +232,9 @@
        let holidaysData = [];
 
         async function loadAllData() {
-            const cacheKey = `minerva_timetable_cache_full`;
+            // Use today's date in the cache key so it automatically resets tomorrow
+            const todayIso = new Date().toISOString().split('T')[0];
+            const cacheKey = `minerva_timetable_cache_${todayIso}`; 
             const timeKey = `minerva_tt_last_update`;
             
             try {
@@ -253,11 +255,32 @@
                     return;
                 }
 
-                // If Admin updated it (or it's the teacher's first time), download fresh data
+                // 1. Fetch Normal Master Timetable
                 const snap = await db.collection("timetable").get();
-                allTimetableData = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                let masterData = snap.docs.map(d => ({id: d.id, ...d.data()}));
                 
-                // Save the new data AND the new timestamp to memory
+                // 2. FETCH TODAY'S EXAM/OVERRIDE
+                const historySnap = await db.collection("timetable_history").doc(todayIso).get();
+                if (historySnap.exists) {
+                    const overrideData = historySnap.data().schedule;
+                    
+                    // Remove the normal classes for today
+                    masterData = masterData.filter(t => t.day !== TODAY_FULL);
+                    
+                    // Inject the Exam/Override classes
+                    masterData = masterData.concat(overrideData);
+                    
+                    // Update the UI Badge to alert the teacher
+                    const badge = document.getElementById('today-badge');
+                    if(badge) {
+                        badge.className = "bg-rose-100 text-rose-800 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-widest shadow-sm border border-rose-200 animate-pulse";
+                        badge.innerText = `🚨 EXAM DAY: ${TODAY_FULL.toUpperCase()}`;
+                    }
+                }
+
+                allTimetableData = masterData;
+                
+                // Save the merged data AND the new timestamp to memory
                 localStorage.setItem(cacheKey, JSON.stringify(allTimetableData));
                 localStorage.setItem(timeKey, serverTime.toString());
             } catch(e) {
