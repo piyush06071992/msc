@@ -1864,49 +1864,57 @@ async function confirmDateContext() {
         document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Syncing Master Slots & Scaling Splits...</div>`;
 
         try {
-            // 1. Check if we already saved this date
+            // Fetch both History and Exam Config
             const historySnap = await db.collection("timetable_history").doc(dateVal).get();
-            if (historySnap.exists) {
+            const examSnap = await db.collection("exam_configurations").doc(dateVal).get();
+
+            // 1. REGENERATION CHECK: If both exist, ask the Admin what to do
+            if (historySnap.exists && examSnap.exists) {
+                const wantSaved = confirm(`A schedule is already saved for ${prettyDate}.\n\nClick OK to load the SAVED version.\nClick CANCEL to REGENERATE a fresh layout from the Exam Plan.`);
+                if (wantSaved) {
+                    globalTimetable = historySnap.data().schedule;
+                    document.getElementById('view-label').innerHTML = `<span class="text-rose-500">🔴 EXAM MODE (SAVED):</span> ${prettyDate}`;
+                    renderDirectDashboard();
+                    return;
+                }
+            } else if (historySnap.exists) {
                 globalTimetable = historySnap.data().schedule;
+                document.getElementById('view-label').innerText = `Showing: Records for ${prettyDate}`;
                 renderDirectDashboard();
                 return;
             }
 
-            // 2. Check if an Exam is scheduled
-            const examSnap = await db.collection("exam_configurations").doc(dateVal).get();
             if (!examSnap.exists) {
                 const masterSnap = await db.collection("timetable").get();
                 globalTimetable = masterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                document.getElementById('view-label').innerText = `Showing: Live Master Schedule`;
                 renderDirectDashboard();
                 return;
             }
 
+            // 2. EXAM GENERATION LOGIC
             const config = examSnap.data();
             const schoolEndMins = universalTimeToMins(config.schoolEndTime || "15:45");
             const transformedSchedule = [];
 
-            // 3. Load the Master Timetable for today
             const masterSnap = await db.collection("timetable").where("day", "==", dayName).get();
             const masterDayData = masterSnap.docs.map(d => d.data());
 
-            // --- THE FIX: KEEP THE REST OF THE SCHOOL NORMAL ---
+            // --- INJECT THE REST OF THE SCHOOL NORMAL CLASSES ---
             const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
             const examSectionKeys = config.sections.map(s => `${norm(s.className)}_${norm(s.sectionName)}`);
 
             masterDayData.forEach(m => {
                 const key = `${norm(m.className)}_${norm(m.section)}`;
-                // If this class is NOT taking the exam, push its normal schedule!
                 if (!examSectionKeys.includes(key)) {
                     transformedSchedule.push(m);
                 }
             });
-            // -------------------------------------------------
+            // ----------------------------------------------------
 
-            // 4. Calculate the special schedule for Exam Sections
             config.sections.forEach(sec => {
                 const selectedSubList = (sec.postExamSubjects || []).map(ps => norm(ps.subject));
                 
-                // A. THE EXAM BLOCK
                 transformedSchedule.push({
                     day: dayName, className: sec.className, section: sec.sectionName,
                     start24: sec.prepStart, end24: sec.examEnd,
@@ -1914,8 +1922,6 @@ async function confirmDateContext() {
                 });
 
                 const examEndMins = universalTimeToMins(sec.examEnd);
-
-                // B. GET MASTER SLOTS FOR THIS SECTION
                 const sectionMaster = masterDayData.filter(m => norm(m.className) === norm(sec.className) && norm(m.section) === norm(sec.sectionName));
                 
                 const timeContainers = {};
@@ -1924,10 +1930,8 @@ async function confirmDateContext() {
                     const tKey = `${m.start24}-${m.end24}`;
                     if (!timeContainers[tKey]) {
                         timeContainers[tKey] = { 
-                            start24: m.start24, 
-                            end24: m.end24, 
-                            sMins: universalTimeToMins(m.start24),
-                            eMins: universalTimeToMins(m.end24),
+                            start24: m.start24, end24: m.end24, 
+                            sMins: universalTimeToMins(m.start24), eMins: universalTimeToMins(m.end24),
                             entries: [] 
                         };
                     }
@@ -1942,7 +1946,6 @@ async function confirmDateContext() {
                 let bStart = normalBreak ? normalBreak.sMins : 780;
                 let bEnd = normalBreak ? normalBreak.eMins : 810;
                 if (bStart < 700 || bStart > 860) { bStart = 780; bEnd = 810; } 
-                const breakDur = bEnd - bStart;
 
                 const preLunchSlots = activeSlots.filter(tc => tc.sMins < bStart && !tc.entries.some(e => e.subject.toUpperCase() === "BREAK"));
                 const postLunchSlots = activeSlots.filter(tc => tc.sMins >= bStart && !tc.entries.some(e => e.subject.toUpperCase() === "BREAK"));
@@ -2002,7 +2005,7 @@ async function confirmDateContext() {
             });
 
             globalTimetable = transformedSchedule;
-            document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE:</span> ${config.examTitle}`;
+            document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE (UNSAVED DRAFT):</span> ${config.examTitle}`;
             renderDirectDashboard();
 
         } catch (e) { alert("Logic Error: " + e.message); console.error(e); }
