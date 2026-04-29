@@ -2667,15 +2667,13 @@ function handlePrimaryAction() {
             }
         }
 
-    async function generateExamSchedule() {
+   async function generateExamSchedule() {
             const date = document.getElementById('ed-date').value;
             const type = document.getElementById('ed-type').value;
             
-            // Capture Section-Specific Data & Lunch Groups
             const targetClassesData = Array.from(document.querySelectorAll('.ed-class-cb:checked')).map(cb => {
                 const [cName, sName] = cb.value.split('|');
                 const groupSelect = document.getElementById(`lg_${cName}_${sName}`);
-                // Pulls the specific subjects checked for THIS specific section
                 const sectionSubs = Array.from(document.querySelectorAll(`.ed-section-sub-cb[data-cls="${cName}"][data-sec="${sName}"]:checked`)).map(scb => scb.value.toUpperCase());
                 return { className: cName, sectionName: sName, lunchGroup: groupSelect ? parseInt(groupSelect.value) : 1, testedSubjects: sectionSubs };
             });
@@ -2685,10 +2683,9 @@ function handlePrimaryAction() {
 
             const btn = document.getElementById('ed-generate-btn');
             const origBtnText = btn.innerHTML;
-            btn.innerHTML = "⏳ Snapping to 5m Grid..."; btn.disabled = true;
+            btn.innerHTML = "⏳ Calibrating Grid..."; btn.disabled = true;
 
             try {
-                // 1. Fetch Bell Config
                 const bellDoc = await db.collection("configs").doc("bell_schedules").get();
                 if (!bellDoc.exists) throw new Error("Bell Schedules not configured.");
                 const bellRules = bellDoc.data()[type.toLowerCase()];
@@ -2705,7 +2702,6 @@ function handlePrimaryAction() {
                 let transformedSchedule = [];
                 const targetKeys = targetClassesData.map(t => `${t.className}|${t.sectionName}`);
                 
-                // Keep other sections normal
                 masterDayData.forEach(m => {
                     if (!targetKeys.includes(`${m.className}|${m.section}`)) transformedSchedule.push(m);
                 });
@@ -2715,59 +2711,70 @@ function handlePrimaryAction() {
                     const classMaster = masterDayData.filter(m => m.className === cName && m.section === sName);
                     if (classMaster.length === 0) return;
 
-                    // Calculate Staggered Lunch
                     let lStart = winStart + ((lunchGroup - 1) * lunchDur);
                     let lEnd = lStart + lunchDur;
 
-                    // Get School Day End boundary
                     let schoolEnd = 0;
                     let originalSubs = [];
+                    let seenSubs = new Set();
+
                     classMaster.forEach(m => {
                         const em = universalTimeToMins(m.end24);
                         if (em > schoolEnd) schoolEnd = em;
-                        if (!['BREAK', 'ASSEMBLY'].includes(m.subject.toUpperCase())) originalSubs.push(m);
+                        
+                        const subName = m.subject.toUpperCase();
+                        if (!['BREAK', 'ASSEMBLY', 'EVENT'].includes(subName)) {
+                            // Rule: For OT, deduplicate subjects
+                            if (type === 'OT') {
+                                if (!seenSubs.has(subName)) {
+                                    originalSubs.push(m);
+                                    seenSubs.add(subName);
+                                }
+                            } else {
+                                originalSubs.push(m);
+                            }
+                        }
                     });
                     originalSubs.sort((a,b) => universalTimeToMins(a.start24) - universalTimeToMins(b.start24));
 
-                    // Add EXAM Block
-                    transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(examStart), end24: minsTo24(examEnd), subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: `${type} Examination`, room: "SHUFFLED" });
-                    // Add LUNCH Block
+                    transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(examStart), end24: minsTo24(examEnd), subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: `${type} Day`, room: "SHUFFLED" });
                     transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(lStart), end24: minsTo24(lEnd), subject: "BREAK", teacher: "NONE", remark: `Group ${lunchGroup} Lunch`, room: "" });
 
-                    // Grid Processor: Snaps times and adds small transition breaks
                     const processBlock = (blockStart, blockEnd, subjects) => {
                         if (subjects.length === 0 || blockEnd <= blockStart) return;
                         
-                        let totalMins = blockEnd - blockStart;
-                        let rawDur = totalMins / subjects.length;
-                        let cleanDur = Math.floor(rawDur / 5) * 5; 
-                        if (cleanDur < 15) cleanDur = 15;
-
-                        let gapPool = totalMins - (cleanDur * subjects.length);
-                        let gap = (subjects.length > 1) ? Math.floor(gapPool / (subjects.length - 1)) : 0;
-                        if (gap > 10) gap = 10; // Max 10 min break
-
                         let cursor = blockStart;
                         subjects.forEach((s, idx) => {
-                            let end = cursor + cleanDur;
-                            if (idx === subjects.length - 1) end = blockEnd; // Force snap to end
+                            const isPD = s.subject.toUpperCase().includes("PERSONALITY");
+                            // Strict Duration Rule
+                            let duration = isPD ? 25 : 40;
+                            if (cursor + duration > blockEnd) duration = isPD ? 20 : 35;
+                            if (cursor + duration > blockEnd) duration = blockEnd - cursor;
+
+                            let end = cursor + duration;
 
                             transformedSchedule.push({
                                 day: dayName, className: cName, section: sName,
                                 start24: minsTo24(cursor), end24: minsTo24(end),
                                 subject: s.subject, teacher: s.teacher, room: s.room,
-                                remark: (type === 'OT') ? "[OT EXAM - DOUBT SESSION]" : "Exam Day Grid"
+                                remark: (type === 'OT') ? "Doubt Session" : "Rescaled Class"
                             });
-                            cursor = end + gap;
+
+                            // Break Rule: 5 minutes, but skip if touching the end of the block (lunch or school off)
+                            if (idx < subjects.length - 1) {
+                                let nextStart = end + 5;
+                                if (nextStart > blockEnd) nextStart = end;
+                                cursor = nextStart;
+                            } else {
+                                cursor = end;
+                            }
                         });
                     };
 
                     if (type === 'OT') {
-                        // OT logic: Show ONLY tested subjects after lunch
                         const doubtSubs = originalSubs.filter(s => testedSubjects.includes(s.subject.toUpperCase()));
                         processBlock(lEnd, schoolEnd, doubtSubs);
                     } else {
-                        // UT logic: Rescale all morning and afternoon classes
                         const morningSubs = originalSubs.filter(s => universalTimeToMins(s.start24) < lStart);
                         const afternoonSubs = originalSubs.filter(s => universalTimeToMins(s.start24) >= lStart);
                         processBlock(examEnd, lStart, morningSubs);
@@ -2780,20 +2787,14 @@ function handlePrimaryAction() {
                 currentContextMode = 'OVERRIDE';
                 
                 const prettyDate = new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-             document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE (UNSAVED DRAFT):</span> ${prettyDate}`;
-if(document.getElementById('replicate-btn')) document.getElementById('replicate-btn').classList.remove('hidden');
+                document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE (UNSAVED DRAFT):</span> ${prettyDate}`;
                 
+                if(document.getElementById('replicate-btn')) document.getElementById('replicate-btn').classList.remove('hidden');
                 closeExamDispatcher();
                 renderDirectDashboard();
-                alert("✅ Generated with 5-minute snapping and smart transition breaks!");
 
-            } catch (e) {
-                alert("Engine Error: " + e.message);
-            } finally {
-                btn.innerHTML = origBtnText; btn.disabled = false;
-            }
+            } catch (e) { alert("Error: " + e.message); } finally { btn.innerHTML = origBtnText; btn.disabled = false; }
         }
-
         // --- BELL SCHEDULE MASTER ENGINE (MODAL UI & DATA) ---
         function openBellConfig() {
             document.getElementById('bell-config-modal').classList.replace('hidden', 'flex');
