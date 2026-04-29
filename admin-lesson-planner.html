@@ -1167,7 +1167,81 @@ let activityLogs = planner.activityLogs || [];
                 btn.disabled = false;
             }
         }
+// --- GLOBAL UNLOCK ENGINE ---
+        let globalUnlockRequests = [];
 
+        async function fetchGlobalUnlockRequests() {
+            if (!window.hasUnlockRights) return;
+            
+            try {
+                const snap = await db.collection("lesson_planners").where("unlockRequested", "==", true).get();
+                globalUnlockRequests = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                
+                const badge = document.getElementById('global-unlock-badge');
+                if (globalUnlockRequests.length > 0) {
+                    badge.classList.remove('hidden');
+                    badge.innerText = `🚨 ${globalUnlockRequests.length} Unlocks Pending`;
+                } else {
+                    badge.classList.add('hidden');
+                }
+            } catch(e) {
+                console.error("Failed to fetch unlock requests:", e);
+            }
+        }
+
+        function openGlobalUnlockModal() {
+            const listContainer = document.getElementById('global-unlock-list');
+            listContainer.innerHTML = '';
+            
+            if (globalUnlockRequests.length === 0) {
+                listContainer.innerHTML = `<div class="text-center py-20 font-black text-slate-300 uppercase tracking-widest text-sm">No Pending Requests</div>`;
+            } else {
+                globalUnlockRequests.forEach(req => {
+                    const parts = req.id.split('_');
+                    const subject = parts.pop(); 
+                    const classSec = parts.join(' '); 
+
+                    listContainer.innerHTML += `
+                        <div class="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl flex flex-col sm:flex-row justify-between sm:items-center gap-3">
+                            <div>
+                                <h4 class="font-black text-slate-800 uppercase text-sm">${subject}</h4>
+                                <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">${classSec.replace(/_/g, ' ')}</p>
+                            </div>
+                            <span class="text-[10px] bg-rose-100 text-rose-600 font-black px-3 py-1.5 rounded-lg border border-rose-200 w-fit">WAITING</span>
+                        </div>
+                    `;
+                });
+            }
+            openModal('global-unlock-modal');
+        }
+
+        async function approveAllGlobalUnlocks() {
+            if (globalUnlockRequests.length === 0) return;
+            if (!confirm(`Are you sure you want to instantly approve all ${globalUnlockRequests.length} requests?`)) return;
+            
+            const btn = document.getElementById('bulk-approve-btn');
+            const origText = btn.innerText;
+            btn.innerText = "Processing Batch..."; btn.disabled = true;
+
+            try {
+                const batch = db.batch();
+                globalUnlockRequests.forEach(req => {
+                    const ref = db.collection("lesson_planners").doc(req.id);
+                    batch.update(ref, { unlockRequested: false, isUnlocked: true });
+                });
+                
+                await batch.commit(); 
+                alert("All requests approved successfully!");
+                closeModal('global-unlock-modal');
+                fetchGlobalUnlockRequests(); 
+                renderSummary(); // Refresh dashboard colors
+            } catch (e) {
+                alert("Error during batch approval: " + e.message);
+            } finally {
+                btn.innerText = origText;
+                btn.disabled = false;
+            }
+        }
         async function saveAdminOverrides() {
             const planner = planners.find(p => p.id === currentUploadId); if(!planner) return;
             let upd = [...planner.syllabusData];
