@@ -2606,14 +2606,21 @@ function handlePrimaryAction() {
 
                 return `
                 <div class="bg-white border border-slate-200 rounded-2xl p-3 shadow-sm hover:shadow-md transition-all flex flex-col gap-2">
-                    <div class="flex justify-between items-center gap-2">
+                    <div class="flex justify-between items-center gap-2 border-b border-slate-100 pb-2">
                         <label class="flex items-center gap-2 cursor-pointer flex-1">
                             <input type="checkbox" class="ed-class-cb w-4 h-4 accent-fuchsia-600" value="${s.className}|${s.sectionName}" checked>
                             <span class="text-[11px] font-black text-slate-800 uppercase tracking-tighter">${s.className}-${s.sectionName}</span>
                         </label>
-                        <select class="bg-slate-100 rounded text-[9px] font-black text-slate-500 px-1 py-0.5 outline-none border-0" id="lg_${s.className}_${s.sectionName}" title="Lunch Group">
-                            <option value="1">G1</option><option value="2">G2</option><option value="3">G3</option>
-                        </select>
+                        <div class="flex gap-1 shrink-0">
+                            <select class="bg-amber-50 text-amber-700 rounded text-[9px] font-black px-1 py-0.5 outline-none border-0" id="bm_${s.className}_${s.sectionName}" title="Break Style">
+                                <option value="SPREAD">5m Gaps</option>
+                                <option value="FRUIT">Fruit Break</option>
+                                <option value="NONE">No Gaps</option>
+                            </select>
+                            <select class="bg-slate-100 rounded text-[9px] font-black text-slate-500 px-1 py-0.5 outline-none border-0" id="lg_${s.className}_${s.sectionName}" title="Lunch Group">
+                                <option value="1">L-G 1</option><option value="2">L-G 2</option><option value="3">L-G 3</option>
+                            </select>
+                        </div>
                     </div>
                     
                     <div class="flex gap-2">
@@ -2626,6 +2633,8 @@ function handlePrimaryAction() {
                             <input type="time" class="w-full bg-slate-50 border border-slate-200 rounded text-[10px] font-black text-slate-700 p-1 outline-none focus:border-blue-400" id="ee_${s.className}_${s.sectionName}">
                         </div>
                     </div>
+
+                    <div id="sel_${s.className}_${s.sectionName}" class="flex flex-wrap gap-1 mt-1 empty:hidden"></div>
 
                     <details class="group/sub relative mt-1">
                         <summary class="flex items-center justify-between bg-slate-50 px-3 py-2 rounded-xl cursor-pointer list-none border border-slate-100">
@@ -2645,7 +2654,6 @@ function handlePrimaryAction() {
             document.getElementById('ed-type').value = "UT";
             
             updateDispatcherTimeDefaults();
-            
             document.getElementById('exam-dispatch-modal').classList.replace('hidden', 'flex');
         }
 
@@ -2665,9 +2673,17 @@ function handlePrimaryAction() {
         }
 
         function updateSelectedCount(cls, sec) {
-            const count = document.querySelectorAll(`.ed-section-sub-cb[data-cls="${cls}"][data-sec="${sec}"]:checked`).length;
+            const checkboxes = document.querySelectorAll(`.ed-section-sub-cb[data-cls="${cls}"][data-sec="${sec}"]:checked`);
             const lbl = document.getElementById(`count_${cls}_${sec}`);
-            if(lbl) lbl.innerText = `(${count})`;
+            if(lbl) lbl.innerText = `(${checkboxes.length})`;
+
+            // Draw visual chips outside the dropdown so user can see selections!
+            const selDiv = document.getElementById(`sel_${cls}_${sec}`);
+            if(selDiv) {
+                selDiv.innerHTML = Array.from(checkboxes).map(cb => 
+                    `<span class="bg-fuchsia-100 text-fuchsia-800 border border-fuchsia-200 text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-widest shadow-sm">${cb.value}</span>`
+                ).join('');
+            }
         }
 
         function replicateSubsToAll(sourceCls, sourceSec) {
@@ -2708,6 +2724,7 @@ function handlePrimaryAction() {
             const targetClassesData = Array.from(document.querySelectorAll('.ed-class-cb:checked')).map(cb => {
                 const [cName, sName] = cb.value.split('|');
                 const groupSelect = document.getElementById(`lg_${cName}_${sName}`);
+                const breakModeSelect = document.getElementById(`bm_${cName}_${sName}`);
                 const eStart = document.getElementById(`es_${cName}_${sName}`).value;
                 const eEnd = document.getElementById(`ee_${cName}_${sName}`).value;
                 const sectionSubs = Array.from(document.querySelectorAll(`.ed-section-sub-cb[data-cls="${cName}"][data-sec="${sName}"]:checked`)).map(scb => scb.value.toUpperCase());
@@ -2715,6 +2732,7 @@ function handlePrimaryAction() {
                 return { 
                     className: cName, sectionName: sName, 
                     lunchGroup: groupSelect ? parseInt(groupSelect.value) : 1, 
+                    breakMode: breakModeSelect ? breakModeSelect.value : 'SPREAD',
                     testedSubjects: sectionSubs,
                     examStart: eStart, examEnd: eEnd
                 };
@@ -2747,7 +2765,7 @@ function handlePrimaryAction() {
                 });
 
                 targetClassesData.forEach(target => {
-                    const { className: cName, sectionName: sName, lunchGroup, testedSubjects, examStart, examEnd } = target;
+                    const { className: cName, sectionName: sName, lunchGroup, breakMode, testedSubjects, examStart, examEnd } = target;
                     const classMaster = masterDayData.filter(m => m.className === cName && m.section === sName);
                     if (classMaster.length === 0) return;
 
@@ -2757,6 +2775,7 @@ function handlePrimaryAction() {
                     let lStart = winStart + ((lunchGroup - 1) * lunchDur);
                     let lEnd = lStart + lunchDur;
 
+                    // Absolute limit based on the actual school end time for this specific section
                     let schoolEnd = 0;
                     let originalSubs = [];
                     let seenSubs = new Set();
@@ -2767,6 +2786,7 @@ function handlePrimaryAction() {
                         
                         const subName = m.subject.toUpperCase();
                         if (!['BREAK', 'ASSEMBLY', 'EVENT'].includes(subName)) {
+                            // OT Deduplication Rule
                             if (type === 'OT') {
                                 if (!seenSubs.has(subName)) {
                                     originalSubs.push(m);
@@ -2782,14 +2802,35 @@ function handlePrimaryAction() {
                     transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(eStartMins), end24: minsTo24(eEndMins), subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: `${type} Day`, room: "SHUFFLED" });
                     transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(lStart), end24: minsTo24(lEnd), subject: "BREAK", teacher: "NONE", remark: `Group ${lunchGroup} Lunch`, room: "" });
 
-                    const processBlock = (blockStart, blockEnd, subjects) => {
+                    const processBlock = (blockStart, blockEnd, subjects, isMorningBlock) => {
                         if (subjects.length === 0 || blockEnd <= blockStart) return;
                         
+                        let totalMins = blockEnd - blockStart;
+                        let expectedMins = subjects.reduce((sum, s) => sum + (s.subject.toUpperCase().includes("PERSONALITY") ? 25 : 35), 0);
+                        let gapPool = totalMins - expectedMins;
+                        
+                        let gap = 0;
+                        let fruitBreakMins = 0;
+                        let fruitBreakIndex = -1;
+
+                        if (gapPool > 0) {
+                            if (breakMode === 'SPREAD') {
+                                gap = Math.floor(gapPool / (subjects.length - 1));
+                                if (gap > 10) gap = 10;
+                            } else if (breakMode === 'FRUIT' && isMorningBlock) {
+                                fruitBreakMins = gapPool > 20 ? 20 : gapPool;
+                                fruitBreakIndex = Math.max(0, subjects.length - 2); // Put fruit break right before last morning class
+                            }
+                        }
+
                         let cursor = blockStart;
                         subjects.forEach((s, idx) => {
+                            if (cursor >= blockEnd) return; // Strict safety check
+
                             const isPD = s.subject.toUpperCase().includes("PERSONALITY");
                             let duration = isPD ? 25 : 40;
                             
+                            // Scale down if strict time doesn't fit
                             if (cursor + duration > blockEnd) duration = isPD ? 20 : 35;
                             if (cursor + duration > blockEnd) duration = blockEnd - cursor;
 
@@ -2802,24 +2843,39 @@ function handlePrimaryAction() {
                                 remark: (type === 'OT') ? "Doubt Session" : "Rescaled Class"
                             });
 
+                            cursor = end;
+
+                            // Apply Transition/Fruit Breaks
                             if (idx < subjects.length - 1) {
-                                let nextStart = end + 5;
-                                if (nextStart > blockEnd) nextStart = end;
-                                cursor = nextStart;
-                            } else {
-                                cursor = end;
+                                if (breakMode === 'SPREAD') {
+                                    let nextStart = cursor + gap;
+                                    if (nextStart > blockEnd) nextStart = cursor;
+                                    cursor = nextStart;
+                                } else if (breakMode === 'FRUIT' && idx === fruitBreakIndex) {
+                                    let fEnd = cursor + fruitBreakMins;
+                                    if (fEnd > blockEnd) fEnd = blockEnd;
+                                    if (fEnd > cursor) {
+                                        transformedSchedule.push({
+                                            day: dayName, className: cName, section: sName,
+                                            start24: minsTo24(cursor), end24: minsTo24(fEnd),
+                                            subject: "BREAK", teacher: "NONE", room: "",
+                                            remark: "Fruit Break"
+                                        });
+                                        cursor = fEnd;
+                                    }
+                                }
                             }
                         });
                     };
 
                     if (type === 'OT') {
                         const doubtSubs = originalSubs.filter(s => testedSubjects.includes(s.subject.toUpperCase()));
-                        processBlock(lEnd, schoolEnd, doubtSubs);
+                        processBlock(lEnd, schoolEnd, doubtSubs, false);
                     } else {
                         const morningSubs = originalSubs.filter(s => universalTimeToMins(s.start24) < lStart);
                         const afternoonSubs = originalSubs.filter(s => universalTimeToMins(s.start24) >= lStart);
-                        processBlock(eEndMins, lStart, morningSubs);
-                        processBlock(lEnd, schoolEnd, afternoonSubs);
+                        processBlock(eEndMins, lStart, morningSubs, true); // true = allow fruit breaks
+                        processBlock(lEnd, schoolEnd, afternoonSubs, false);
                     }
                 });
 
