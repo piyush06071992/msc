@@ -2715,7 +2715,7 @@ function handlePrimaryAction() {
             updateDispatcherTimeDefaults();
         }
 
-       async function generateExamSchedule() {
+     async function generateExamSchedule() {
             const date = document.getElementById('ed-date').value;
             const type = document.getElementById('ed-type').value;
             
@@ -2773,7 +2773,6 @@ function handlePrimaryAction() {
                     let lStart = winStart + ((lunchGroup - 1) * lunchDur);
                     let lEnd = lStart + lunchDur;
 
-                    // Fetch Exact School End Time for this section
                     let schoolEnd = 0;
                     let originalSubs = [];
                     let seenSubs = new Set();
@@ -2784,7 +2783,6 @@ function handlePrimaryAction() {
                         
                         const subName = m.subject.toUpperCase();
                         if (!['BREAK', 'ASSEMBLY', 'EVENT'].includes(subName)) {
-                            // Deduplicate subjects on OT days
                             if (type === 'OT') {
                                 if (!seenSubs.has(subName)) {
                                     originalSubs.push(m);
@@ -2803,47 +2801,60 @@ function handlePrimaryAction() {
                     const processBlock = (blockStart, blockEnd, subjects, isMorningBlock) => {
                         if (subjects.length === 0 || blockEnd <= blockStart) return;
                         
-                        let totalAvailable = blockEnd - blockStart;
+                        let totalMins = blockEnd - blockStart;
                         
-                        // Setup gaps based on mode
-                        let gapSize = 0;
-                        let fruitBreakMins = 0;
-                        let fruitBreakIdx = -1;
+                        // 1. Initialize with minimum base times (Snapped to 5)
+                        let durations = subjects.map(s => s.subject.toUpperCase().includes("PERSONALITY") ? 20 : 35);
+                        let gaps = new Array(subjects.length > 0 ? subjects.length - 1 : 0).fill(0);
 
-                        if (breakMode === 'FRUIT' && isMorningBlock && subjects.length > 1 && totalAvailable > 15) {
-                            fruitBreakMins = 15;
-                            fruitBreakIdx = subjects.length - 2; // Right before last morning class
+                        // 2. Assign Breaks based on Dropdown
+                        if (breakMode === 'FRUIT' && isMorningBlock && subjects.length > 1) {
+                            let fruitIdx = Math.max(0, subjects.length - 2);
+                            gaps[fruitIdx] = 15;
                         } else if (breakMode === 'SPREAD' && subjects.length > 1) {
-                            gapSize = 5;
+                            gaps.fill(5);
                         }
 
-                        let totalGaps = (breakMode === 'SPREAD') ? gapSize * (subjects.length - 1) : 0;
-                        let totalNonTeaching = totalGaps + fruitBreakMins;
-
-                        // Ensure we don't overflow with gaps
-                        if (totalNonTeaching >= totalAvailable) {
-                            totalNonTeaching = 0; gapSize = 0; fruitBreakMins = 0;
+                        // 3. Fallback: If minimums + breaks are ALREADY too big, shrink proportionally
+                        let totalAllocated = durations.reduce((a,b)=>a+b,0) + gaps.reduce((a,b)=>a+b,0);
+                        if (totalAllocated > totalMins) {
+                            let scale = totalMins / totalAllocated;
+                            durations = durations.map(d => Math.floor(d * scale));
+                            gaps = gaps.map(g => Math.floor(g * scale));
+                            totalAllocated = durations.reduce((a,b)=>a+b,0) + gaps.reduce((a,b)=>a+b,0);
                         }
 
-                        // Proportionally stretch/shrink teaching time to EXACTLY hit the school bell
-                        let totalTeachingAvailable = totalAvailable - totalNonTeaching;
-                        let durations = subjects.map(s => s.subject.toUpperCase().includes("PERSONALITY") ? 25 : 40);
-                        let baseTeachingTotal = durations.reduce((a, b) => a + b, 0);
-                        
-                        let scale = totalTeachingAvailable / baseTeachingTotal;
-                        durations = durations.map(d => Math.floor(d * scale));
+                        // 4. Smart 5-Minute Distributor (35 -> 40 -> 45)
+                        let i = 0;
+                        let loopCount = 0; 
+                        while (totalAllocated + 5 <= totalMins && loopCount < 100) {
+                            let targetIdx = i % subjects.length;
+                            let isPD = subjects[targetIdx].subject.toUpperCase().includes("PERSONALITY");
+                            
+                            let maxAllowed = isPD ? 25 : 45;
+                            // If everything hit max, keep scaling up by 5 so no leftover gap is created
+                            let allMaxed = durations.every((d, idx) => d >= (subjects[idx].subject.toUpperCase().includes("PERSONALITY") ? 25 : 45));
+                            if (allMaxed) maxAllowed = 999; 
 
-                        // Dump any rounding remainder into the final class to ensure exact match
-                        let currentTotal = durations.reduce((a, b) => a + b, 0);
-                        durations[durations.length - 1] += (totalTeachingAvailable - currentTotal);
+                            if (durations[targetIdx] < maxAllowed) {
+                                durations[targetIdx] += 5;
+                                totalAllocated += 5;
+                            }
+                            i++; loopCount++;
+                        }
 
+                        // 5. Exact Anchor to Bell (Absorb remaining odd minutes into final class)
+                        let remainder = totalMins - totalAllocated;
+                        if (remainder !== 0) {
+                            durations[durations.length - 1] += remainder; 
+                        }
+
+                        // 6. Build Schedule Array
                         let cursor = blockStart;
                         subjects.forEach((s, idx) => {
-                            if (cursor >= blockEnd) return; 
-
                             let dur = durations[idx];
                             let end = cursor + dur;
-                            if (end > blockEnd) end = blockEnd; // Hard limit
+                            if (end > blockEnd) end = blockEnd; 
 
                             transformedSchedule.push({
                                 day: dayName, className: cName, section: sName,
@@ -2854,21 +2865,22 @@ function handlePrimaryAction() {
 
                             cursor = end;
 
-                            // Apply Transitions and Fruit Breaks
+                            // Apply Gap / Fruit Break
                             if (idx < subjects.length - 1) {
-                                if (breakMode === 'FRUIT' && idx === fruitBreakIdx) {
-                                    let fEnd = cursor + fruitBreakMins;
-                                    if (fEnd > blockEnd) fEnd = blockEnd;
-                                    if (fEnd > cursor) {
+                                let currentGap = gaps[idx];
+                                if (currentGap > 0) {
+                                    let gEnd = cursor + currentGap;
+                                    if (gEnd > blockEnd) gEnd = blockEnd;
+                                    
+                                    // Visual block only for fruit break. 5m gaps are invisible transitions.
+                                    if (breakMode === 'FRUIT' && currentGap >= 10) {
                                         transformedSchedule.push({
                                             day: dayName, className: cName, section: sName,
-                                            start24: minsTo24(cursor), end24: minsTo24(fEnd),
+                                            start24: minsTo24(cursor), end24: minsTo24(gEnd),
                                             subject: "BREAK", teacher: "NONE", room: "", remark: "Fruit Break"
                                         });
-                                        cursor = fEnd;
                                     }
-                                } else if (breakMode === 'SPREAD' && gapSize > 0) {
-                                    cursor += gapSize;
+                                    cursor = gEnd;
                                 }
                             }
                         });
