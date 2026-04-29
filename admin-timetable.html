@@ -2584,15 +2584,187 @@ function handlePrimaryAction() {
             }
         }
 
-        async function generateExamSchedule() {
+      async function generateExamSchedule() {
             const date = document.getElementById('ed-date').value;
             const type = document.getElementById('ed-type').value;
-            if(!date) return alert("Please select a target date from the calendar.");
-            
-            // This is the trigger point for Phase 3!
-            alert(`UI verified!\n\nNext step: Phase 3 (The Core Algorithm) will process a ${type} schedule for ${date} using the Bell Schedule parameters.`);
-        }
+            const targetClasses = Array.from(document.querySelectorAll('.ed-class-cb:checked')).map(cb => cb.value);
 
+            if(!date) return alert("Please select a target date from the calendar.");
+            if(targetClasses.length === 0) return alert("Please select at least one target class.");
+
+            const btn = document.getElementById('ed-generate-btn');
+            btn.innerHTML = "⏳ Computing Algorithms..."; btn.disabled = true;
+
+            try {
+                // 1. Fetch Bell Schedule Master Rules
+                const bellDoc = await db.collection("configs").doc("bell_schedules").get();
+                if (!bellDoc.exists) throw new Error("Bell Schedules not configured. Please save Master Config first.");
+                const bellRules = bellDoc.data()[type.toLowerCase()];
+
+                const examStartMins = universalTimeToMins(bellRules.examStart);
+                const examEndMins = universalTimeToMins(bellRules.examEnd);
+                const lunchStartMins = universalTimeToMins(bellRules.lunchStart);
+                const lunchEndMins = universalTimeToMins(bellRules.lunchEnd);
+
+                // 2. Fetch Base Master Timetable
+                const dayObj = new Date(date);
+                const dayName = dayObj.toLocaleDateString('en-US', { weekday: 'long' });
+                const masterSnap = await db.collection("timetable").where("day", "==", dayName).get();
+                const masterDayData = masterSnap.docs.map(d => d.data());
+
+                let transformedSchedule = [];
+
+                // 3. Process Non-Exam Classes (Keep Normal)
+                masterDayData.forEach(m => {
+                    const key = `${m.className}|${m.section}`;
+                    if (!targetClasses.includes(key)) {
+                        transformedSchedule.push(m);
+                    }
+                });
+
+                // 4. Process Exam Classes
+                targetClasses.forEach(clsKey => {
+                    const [cName, sName] = clsKey.split('|');
+                    const classMaster = masterDayData.filter(m => m.className === cName && m.section === sName);
+
+                    if (classMaster.length === 0) return; // No classes on this day normally
+
+                    // Find standard School End Time for this class
+                    let schoolEndMins = 0;
+                    let originalSubjects = [];
+                    classMaster.forEach(m => {
+                        if (m.end24) {
+                            const em = universalTimeToMins(m.end24);
+                            if (em > schoolEndMins) schoolEndMins = em;
+                        }
+                        if (!['BREAK', 'ASSEMBLY', 'EVENT'].includes(m.subject.toUpperCase())) {
+                            originalSubjects.push(m); // Keep original order
+                        }
+                    });
+
+                    // Sort subjects by original start time to maintain daily flow
+                    originalSubjects.sort((a, b) => universalTimeToMins(a.start24) - universalTimeToMins(b.start24));
+
+                    // A. Inject EXAM Block
+                    transformedSchedule.push({
+                        day: dayName, className: cName, section: sName,
+                        start24: minsTo24(examStartMins), end24: minsTo24(examEndMins),
+                        subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: `${type} Examination`, room: "SHUFFLED",
+                        duration: `${examEndMins - examStartMins} MINS`
+                    });
+
+                    // B. Inject LUNCH Block
+                    transformedSchedule.push({
+                        day: dayName, className: cName, section: sName,
+                        start24: minsTo24(lunchStartMins), end24: minsTo24(lunchEndMins),
+                        subject: "BREAK", teacher: "NONE", remark: "Synced Lunch", room: "",
+                        duration: `${lunchEndMins - lunchStartMins} MINS`
+                    });
+
+                    // C. OT Logic (Objective Test - Doubt Sessions)
+                    if (type === 'OT') {
+                        const selectedSubjects = Array.from(document.querySelectorAll('.ed-sub-cb:checked')).map(cb => cb.value.toUpperCase());
+                        if (selectedSubjects.length > 0) {
+                            const availableMins = schoolEndMins - lunchEndMins;
+                            if (availableMins > 0) {
+                                const durPerSub = Math.floor(availableMins / selectedSubjects.length);
+                                let cursor = lunchEndMins;
+
+                                selectedSubjects.forEach((sub, idx) => {
+                                    // Find original teacher
+                                    const origClass = originalSubjects.find(s => s.subject.toUpperCase() === sub);
+                                    const teacher = origClass ? origClass.teacher : "TBD";
+                                    
+                                    const end = (idx === selectedSubjects.length - 1) ? schoolEndMins : cursor + durPerSub;
+                                    
+                                    transformedSchedule.push({
+                                        day: dayName, className: cName, section: sName,
+                                        start24: minsTo24(cursor), end24: minsTo24(end),
+                                        subject: sub, teacher: teacher, remark: "[OT EXAM - DOUBT SESSION]", room: origClass ? origClass.room : "",
+                                        duration: `${end - cursor} MINS`
+                                    });
+                                    cursor = end;
+                                });
+                            }
+                        }
+                    } 
+                    // D. UT Logic (Smart Buffer Rescaling)
+                    else if (type === 'UT') {
+                        const morningMins = Math.max(0, lunchStartMins - examEndMins);
+                        const afternoonMins = Math.max(0, schoolEndMins - lunchEndMins);
+                        const totalWorkingMins = morningMins + afternoonMins;
+                        const N = originalSubjects.length;
+
+                        if (N > 0 && totalWorkingMins > 0) {
+                            const morningCount = Math.round(N * (morningMins / totalWorkingMins));
+                            const afternoonCount = N - morningCount;
+
+                            let cursor = examEndMins;
+                            
+                            // Process Morning Block
+                            if (morningCount > 0) {
+                                const rawDur = morningMins / morningCount;
+                                const cleanDur = Math.floor(rawDur / 5) * 5;
+                                const gapPool = morningMins - (morningCount * cleanDur);
+                                const gapSize = morningCount > 1 ? Math.floor(gapPool / (morningCount - 1)) : 0;
+
+                                for (let i = 0; i < morningCount; i++) {
+                                    const orig = originalSubjects[i];
+                                    const end = cursor + cleanDur;
+                                    transformedSchedule.push({
+                                        day: dayName, className: cName, section: sName,
+                                        start24: minsTo24(cursor), end24: minsTo24(end),
+                                        subject: orig.subject, teacher: orig.teacher, remark: "Post-Exam Schedule", room: orig.room,
+                                        duration: `${cleanDur} MINS`
+                                    });
+                                    cursor = end + gapSize; // Add buffer gap
+                                }
+                            }
+
+                            // Process Afternoon Block
+                            cursor = lunchEndMins;
+                            if (afternoonCount > 0) {
+                                const rawDur = afternoonMins / afternoonCount;
+                                const cleanDur = Math.floor(rawDur / 5) * 5;
+                                const gapPool = afternoonMins - (afternoonCount * cleanDur);
+                                const gapSize = afternoonCount > 1 ? Math.floor(gapPool / (afternoonCount - 1)) : 0;
+
+                                for (let i = 0; i < afternoonCount; i++) {
+                                    const orig = originalSubjects[morningCount + i];
+                                    // Force the very last class to end exactly at school end
+                                    const isLast = (i === afternoonCount - 1);
+                                    const end = isLast ? schoolEndMins : cursor + cleanDur;
+                                    transformedSchedule.push({
+                                        day: dayName, className: cName, section: sName,
+                                        start24: minsTo24(cursor), end24: minsTo24(end),
+                                        subject: orig.subject, teacher: orig.teacher, remark: "Post-Exam Schedule", room: orig.room,
+                                        duration: `${end - cursor} MINS`
+                                    });
+                                    cursor = end + gapSize; // Add buffer gap
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // 5. Commit to View
+                globalTimetable = transformedSchedule;
+                currentContextDate = date;
+                currentContextMode = 'OVERRIDE';
+                
+                const prettyDate = new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE (UNSAVED DRAFT):</span> ${prettyDate}`;
+                
+                closeExamDispatcher();
+                renderDirectDashboard();
+
+            } catch (e) {
+                alert("Engine Error: " + e.message);
+                console.error(e);
+            } finally {
+                btn.innerHTML = "🚀 Preview Exam Schedule"; btn.disabled = false;
+            }
+        }
         // --- BELL SCHEDULE MASTER ENGINE ---
         async function fetchBellTemplates() {
             try {
