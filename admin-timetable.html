@@ -2627,13 +2627,20 @@ function handlePrimaryAction() {
             }
         }
 
-      async function generateExamSchedule() {
+    async function generateExamSchedule() {
             const date = document.getElementById('ed-date').value;
             const type = document.getElementById('ed-type').value;
-            const targetClasses = Array.from(document.querySelectorAll('.ed-class-cb:checked')).map(cb => cb.value);
+            
+            // NEW: Capture the Class, Section, AND their assigned Lunch Group!
+            const targetClassesData = Array.from(document.querySelectorAll('.ed-class-cb:checked')).map(cb => {
+                const [cName, sName] = cb.value.split('|');
+                const groupSelect = document.getElementById(`lg_${cName}_${sName}`);
+                const lunchGroup = groupSelect ? parseInt(groupSelect.value) : 1;
+                return { className: cName, sectionName: sName, lunchGroup: lunchGroup };
+            });
 
             if(!date) return alert("Please select a target date from the calendar.");
-            if(targetClasses.length === 0) return alert("Please select at least one target class.");
+            if(targetClassesData.length === 0) return alert("Please select at least one target class.");
 
             const btn = document.getElementById('ed-generate-btn');
             btn.innerHTML = "⏳ Computing Algorithms..."; btn.disabled = true;
@@ -2646,8 +2653,9 @@ function handlePrimaryAction() {
 
                 const examStartMins = universalTimeToMins(bellRules.examStart);
                 const examEndMins = universalTimeToMins(bellRules.examEnd);
-                const lunchStartMins = universalTimeToMins(bellRules.lunchStart);
-                const lunchEndMins = universalTimeToMins(bellRules.lunchEnd);
+                const windowStartMins = universalTimeToMins(bellRules.lunchStart);
+                const windowEndMins = universalTimeToMins(bellRules.lunchEnd);
+                const lunchDuration = parseInt(bellRules.lunchDuration) || 30;
 
                 // 2. Fetch Base Master Timetable
                 const dayObj = new Date(date);
@@ -2658,21 +2666,33 @@ function handlePrimaryAction() {
                 let transformedSchedule = [];
 
                 // 3. Process Non-Exam Classes (Keep Normal)
+                const targetKeys = targetClassesData.map(t => `${t.className}|${t.sectionName}`);
                 masterDayData.forEach(m => {
                     const key = `${m.className}|${m.section}`;
-                    if (!targetClasses.includes(key)) {
+                    if (!targetKeys.includes(key)) {
                         transformedSchedule.push(m);
                     }
                 });
 
-                // 4. Process Exam Classes
-                targetClasses.forEach(clsKey => {
-                    const [cName, sName] = clsKey.split('|');
+                // 4. Process Exam Classes dynamically!
+                targetClassesData.forEach(target => {
+                    const cName = target.className;
+                    const sName = target.sectionName;
                     const classMaster = masterDayData.filter(m => m.className === cName && m.section === sName);
 
-                    if (classMaster.length === 0) return; // No classes on this day normally
+                    if (classMaster.length === 0) return; // No classes normally on this day
 
-                    // Find standard School End Time for this class
+                    // Dynamic Lunch Calculation based on Group!
+                    let actualLunchStart = windowStartMins + ((target.lunchGroup - 1) * lunchDuration);
+                    let actualLunchEnd = actualLunchStart + lunchDuration;
+
+                    // Failsafe: Clamp it inside the allowed window if the groups push it too late
+                    if (actualLunchEnd > windowEndMins) {
+                        actualLunchEnd = windowEndMins;
+                        actualLunchStart = windowEndMins - lunchDuration;
+                    }
+
+                    // Find standard School End Time
                     let schoolEndMins = 0;
                     let originalSubjects = [];
                     classMaster.forEach(m => {
@@ -2681,11 +2701,10 @@ function handlePrimaryAction() {
                             if (em > schoolEndMins) schoolEndMins = em;
                         }
                         if (!['BREAK', 'ASSEMBLY', 'EVENT'].includes(m.subject.toUpperCase())) {
-                            originalSubjects.push(m); // Keep original order
+                            originalSubjects.push(m);
                         }
                     });
 
-                    // Sort subjects by original start time to maintain daily flow
                     originalSubjects.sort((a, b) => universalTimeToMins(a.start24) - universalTimeToMins(b.start24));
 
                     // A. Inject EXAM Block
@@ -2696,28 +2715,26 @@ function handlePrimaryAction() {
                         duration: `${examEndMins - examStartMins} MINS`
                     });
 
-                    // B. Inject LUNCH Block
+                    // B. Inject LUNCH Block (Dynamically Staggered!)
                     transformedSchedule.push({
                         day: dayName, className: cName, section: sName,
-                        start24: minsTo24(lunchStartMins), end24: minsTo24(lunchEndMins),
-                        subject: "BREAK", teacher: "NONE", remark: "Synced Lunch", room: "",
-                        duration: `${lunchEndMins - lunchStartMins} MINS`
+                        start24: minsTo24(actualLunchStart), end24: minsTo24(actualLunchEnd),
+                        subject: "BREAK", teacher: "NONE", remark: `Group ${target.lunchGroup} Lunch`, room: "",
+                        duration: `${lunchDuration} MINS`
                     });
 
-                    // C. OT Logic (Objective Test - Doubt Sessions)
+                    // C. OT Logic (Doubt Sessions)
                     if (type === 'OT') {
                         const selectedSubjects = Array.from(document.querySelectorAll('.ed-sub-cb:checked')).map(cb => cb.value.toUpperCase());
                         if (selectedSubjects.length > 0) {
-                            const availableMins = schoolEndMins - lunchEndMins;
+                            const availableMins = schoolEndMins - actualLunchEnd;
                             if (availableMins > 0) {
                                 const durPerSub = Math.floor(availableMins / selectedSubjects.length);
-                                let cursor = lunchEndMins;
+                                let cursor = actualLunchEnd;
 
                                 selectedSubjects.forEach((sub, idx) => {
-                                    // Find original teacher
                                     const origClass = originalSubjects.find(s => s.subject.toUpperCase() === sub);
                                     const teacher = origClass ? origClass.teacher : "TBD";
-                                    
                                     const end = (idx === selectedSubjects.length - 1) ? schoolEndMins : cursor + durPerSub;
                                     
                                     transformedSchedule.push({
@@ -2733,8 +2750,8 @@ function handlePrimaryAction() {
                     } 
                     // D. UT Logic (Smart Buffer Rescaling)
                     else if (type === 'UT') {
-                        const morningMins = Math.max(0, lunchStartMins - examEndMins);
-                        const afternoonMins = Math.max(0, schoolEndMins - lunchEndMins);
+                        const morningMins = Math.max(0, actualLunchStart - examEndMins);
+                        const afternoonMins = Math.max(0, schoolEndMins - actualLunchEnd);
                         const totalWorkingMins = morningMins + afternoonMins;
                         const N = originalSubjects.length;
 
@@ -2744,7 +2761,7 @@ function handlePrimaryAction() {
 
                             let cursor = examEndMins;
                             
-                            // Process Morning Block
+                            // Morning Post-Exam Block
                             if (morningCount > 0) {
                                 const rawDur = morningMins / morningCount;
                                 const cleanDur = Math.floor(rawDur / 5) * 5;
@@ -2760,12 +2777,12 @@ function handlePrimaryAction() {
                                         subject: orig.subject, teacher: orig.teacher, remark: "Post-Exam Schedule", room: orig.room,
                                         duration: `${cleanDur} MINS`
                                     });
-                                    cursor = end + gapSize; // Add buffer gap
+                                    cursor = end + gapSize;
                                 }
                             }
 
-                            // Process Afternoon Block
-                            cursor = lunchEndMins;
+                            // Afternoon Post-Lunch Block
+                            cursor = actualLunchEnd;
                             if (afternoonCount > 0) {
                                 const rawDur = afternoonMins / afternoonCount;
                                 const cleanDur = Math.floor(rawDur / 5) * 5;
@@ -2774,7 +2791,6 @@ function handlePrimaryAction() {
 
                                 for (let i = 0; i < afternoonCount; i++) {
                                     const orig = originalSubjects[morningCount + i];
-                                    // Force the very last class to end exactly at school end
                                     const isLast = (i === afternoonCount - 1);
                                     const end = isLast ? schoolEndMins : cursor + cleanDur;
                                     transformedSchedule.push({
@@ -2783,7 +2799,7 @@ function handlePrimaryAction() {
                                         subject: orig.subject, teacher: orig.teacher, remark: "Post-Exam Schedule", room: orig.room,
                                         duration: `${end - cursor} MINS`
                                     });
-                                    cursor = end + gapSize; // Add buffer gap
+                                    cursor = end + gapSize;
                                 }
                             }
                         }
