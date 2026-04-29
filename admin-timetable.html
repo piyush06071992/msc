@@ -2770,8 +2770,7 @@ async function generateExamSchedule() {
                     const eStartMins = universalTimeToMins(examStart || bellRules.examStart);
                     const eEndMins = universalTimeToMins(examEnd || bellRules.examEnd);
 
-                    let lStart = winStart + ((lunchGroup - 1) * lunchDur);
-                    let lEnd = lStart + lunchDur;
+                    let targetLunchStart = winStart + ((lunchGroup - 1) * lunchDur);
 
                     let schoolEnd = 0;
                     let originalSubs = [];
@@ -2784,7 +2783,7 @@ async function generateExamSchedule() {
                         const subName = m.subject.toUpperCase();
                         if (!['BREAK', 'ASSEMBLY', 'EVENT'].includes(subName)) {
                             if (type === 'OT') {
-                                if (!seenSubs.has(subName)) {
+                                if (!seenSubs.has(subName) && testedSubjects.includes(subName)) {
                                     originalSubs.push(m);
                                     seenSubs.add(subName);
                                 }
@@ -2796,138 +2795,156 @@ async function generateExamSchedule() {
                     originalSubs.sort((a,b) => universalTimeToMins(a.start24) - universalTimeToMins(b.start24));
 
                     transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(eStartMins), end24: minsTo24(eEndMins), subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: `${type} Day`, room: "SHUFFLED" });
-                    transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(lStart), end24: minsTo24(lEnd), subject: "BREAK", teacher: "NONE", remark: `Group ${lunchGroup} Lunch`, room: "" });
 
-                    const processBlock = (blockStart, blockEnd, subjects, isMorningBlock) => {
-                        if (subjects.length === 0 || blockEnd <= blockStart) return;
-                        
-                        let totalMins = blockEnd - blockStart;
-                        
-                        // 1. Establish Gaps
-                        let gapSize = 0;
-                        let fruitBreakMins = 0;
-                        let fruitBreakIdx = -1;
+                    // -- GLOBAL POOL MATH ENGINE --
+                    let totalAvailable = schoolEnd - eEndMins;
+                    
+                    if (originalSubs.length === 0 || totalAvailable <= 0) {
+                        transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(eEndMins), end24: minsTo24(eEndMins + lunchDur), subject: "BREAK", teacher: "NONE", remark: `Group ${lunchGroup} Lunch`, room: "" });
+                        return;
+                    }
 
-                        if (breakMode === 'FRUIT' && isMorningBlock && subjects.length > 1 && totalMins > 20) {
-                            fruitBreakMins = 15;
-                            fruitBreakIdx = Math.max(0, subjects.length - 2); // Put fruit break right before the last morning class
-                        } else if (breakMode === 'SPREAD' && subjects.length > 1) {
-                            gapSize = 5;
-                        }
+                    // 1. Establish Gaps
+                    let gapSize = 0;
+                    let fruitBreakMins = 0;
+                    let fruitBreakIdx = -1;
 
-                        let totalGaps = (breakMode === 'FRUIT') ? fruitBreakMins : (gapSize * (subjects.length - 1));
-                        let teachingAvailable = totalMins - totalGaps;
+                    if (breakMode === 'FRUIT' && originalSubs.length > 2) {
+                        fruitBreakMins = 15;
+                        fruitBreakIdx = Math.floor(originalSubs.length / 2) - 1; // Put fruit break near middle of the day
+                    } else if (breakMode === 'SPREAD' && originalSubs.length > 1) {
+                        gapSize = 5;
+                    }
 
-                        // Failsafe: If gaps eat too much time, remove them to save teaching time
-                        if (teachingAvailable < subjects.length * 15) {
-                            totalGaps = 0; fruitBreakMins = 0; gapSize = 0;
-                            teachingAvailable = totalMins;
-                        }
+                    let totalGaps = (breakMode === 'FRUIT') ? fruitBreakMins : (gapSize * (originalSubs.length - 1));
+                    let teachingAvailable = totalAvailable - lunchDur - totalGaps;
 
-                        // 2. Strict 5-Minute "Card Dealer" Algorithm
-                        // Base duration: 15 for PD, 20 for regular classes
-                        let durations = subjects.map(s => s.subject.toUpperCase().includes("PERSONALITY") ? 15 : 20);
-                        let totalAssigned = durations.reduce((a, b) => a + b, 0);
+                    // Failsafe if gaps take up too much time
+                    if (teachingAvailable < originalSubs.length * 15) {
+                        totalGaps = 0; fruitBreakMins = 0; gapSize = 0;
+                        teachingAvailable = totalAvailable - lunchDur;
+                    }
 
-                        // Only in incredibly extreme crunches do we break the 5-minute rule
-                        if (totalAssigned > teachingAvailable) {
-                            let scale = teachingAvailable / totalAssigned;
-                            durations = durations.map(d => Math.floor(d * scale));
-                            totalAssigned = durations.reduce((a, b) => a + b, 0);
-                        } else {
-                            // Deal out strictly +5 min chunks
-                            let loopGuard = 0;
-                            while (totalAssigned + 5 <= teachingAvailable && loopGuard < 200) {
-                                let added = false;
-                                
-                                // Pass 1: Get PD to 20, Normal to 30
+                    // 2. Base Assignments (20 for PD, 30 for Normal)
+                    let durations = originalSubs.map(s => s.subject.toUpperCase().includes("PERSONALITY") ? 20 : 30);
+                    let totalAssigned = durations.reduce((a, b) => a + b, 0);
+
+                    if (totalAssigned > teachingAvailable) {
+                        // Extreme squish scenario
+                        let scale = teachingAvailable / totalAssigned;
+                        durations = durations.map(d => Math.floor(d * scale));
+                        totalAssigned = durations.reduce((a, b) => a + b, 0);
+                    } else {
+                        // Card Dealer: Add 5 mins round-robin
+                        let loopGuard = 0;
+                        while (totalAssigned + 5 <= teachingAvailable && loopGuard < 200) {
+                            let added = false;
+                            
+                            // Pass 1: Bring PD to 20, Normal to 35
+                            for(let i=0; i<durations.length; i++) {
+                                let maxT = originalSubs[i].subject.toUpperCase().includes("PERSONALITY") ? 20 : 35;
+                                if(durations[i] < maxT && totalAssigned + 5 <= teachingAvailable) {
+                                    durations[i] += 5; totalAssigned += 5; added = true;
+                                }
+                            }
+                            // Pass 2: Bring Normal to 40
+                            if(!added) {
                                 for(let i=0; i<durations.length; i++) {
-                                    let maxT = subjects[i].subject.toUpperCase().includes("PERSONALITY") ? 20 : 30;
+                                    let isPD = originalSubs[i].subject.toUpperCase().includes("PERSONALITY");
+                                    if(!isPD && durations[i] < 40 && totalAssigned + 5 <= teachingAvailable) {
+                                        durations[i] += 5; totalAssigned += 5; added = true;
+                                    }
+                                }
+                            }
+                            // Pass 3: Bring PD to 25, Normal to 45
+                            if(!added) {
+                                for(let i=0; i<durations.length; i++) {
+                                    let maxT = originalSubs[i].subject.toUpperCase().includes("PERSONALITY") ? 25 : 45;
                                     if(durations[i] < maxT && totalAssigned + 5 <= teachingAvailable) {
                                         durations[i] += 5; totalAssigned += 5; added = true;
                                     }
                                 }
-                                // Pass 2: Get Normal to 35
-                                if(!added) {
-                                    for(let i=0; i<durations.length; i++) {
-                                        let isPD = subjects[i].subject.toUpperCase().includes("PERSONALITY");
-                                        if(!isPD && durations[i] < 35 && totalAssigned + 5 <= teachingAvailable) {
-                                            durations[i] += 5; totalAssigned += 5; added = true;
-                                        }
-                                    }
-                                }
-                                // Pass 3: Get PD to 25, Normal to 40
-                                if(!added) {
-                                    for(let i=0; i<durations.length; i++) {
-                                        let maxT = subjects[i].subject.toUpperCase().includes("PERSONALITY") ? 25 : 40;
-                                        if(durations[i] < maxT && totalAssigned + 5 <= teachingAvailable) {
-                                            durations[i] += 5; totalAssigned += 5; added = true;
-                                        }
-                                    }
-                                }
-                                // Pass 4: Deal out remaining time evenly (Normal classes hit 45+)
-                                if(!added) {
-                                    for(let i=0; i<durations.length; i++) {
-                                        let isPD = subjects[i].subject.toUpperCase().includes("PERSONALITY");
-                                        if(!isPD && totalAssigned + 5 <= teachingAvailable) {
-                                            durations[i] += 5; totalAssigned += 5; added = true;
-                                        }
-                                    }
-                                }
-                                // Failsafe break
-                                if(!added && totalAssigned + 5 <= teachingAvailable) {
-                                    durations[0] += 5; totalAssigned += 5;
-                                }
-                                loopGuard++;
                             }
+                            // Pass 4: Even distribution for excess time
+                            if(!added) {
+                                for(let i=0; i<durations.length; i++) {
+                                    let isPD = originalSubs[i].subject.toUpperCase().includes("PERSONALITY");
+                                    if(!isPD && totalAssigned + 5 <= teachingAvailable) {
+                                        durations[i] += 5; totalAssigned += 5; added = true;
+                                    }
+                                }
+                            }
+                            if(!added && totalAssigned + 5 <= teachingAvailable) {
+                                durations[0] += 5; totalAssigned += 5;
+                            }
+                            loopGuard++;
                         }
+                    }
 
-                        // 3. Grid Assignment (ignores ugly 1-4 minute remainders entirely)
-                        let cursor = blockStart;
-                        subjects.forEach((s, idx) => {
-                            let dur = durations[idx];
-                            // Clean up numbers if extreme scaling broke the 5-min rule
-                            if (dur % 5 !== 0) dur = Math.floor(dur / 5) * 5;
-                            
-                            let end = cursor + dur;
-                            if (end > blockEnd) end = blockEnd; 
+                    // Absorb the tiny leftover into the final class
+                    let finalRemainder = teachingAvailable - durations.reduce((a,b)=>a+b,0);
+                    if (finalRemainder > 0) durations[durations.length - 1] += finalRemainder; 
 
+                    // 3. Float Lunch & Layout Schedule
+                    let cursor = eEndMins;
+                    let lunchPlaced = false;
+
+                    originalSubs.forEach((s, idx) => {
+                        // Drop lunch dynamically when we hit the lunch window!
+                        if (!lunchPlaced && (cursor >= targetLunchStart - 15 || idx === originalSubs.length - 1)) {
+                            let lEnd = cursor + lunchDur;
                             transformedSchedule.push({
                                 day: dayName, className: cName, section: sName,
-                                start24: minsTo24(cursor), end24: minsTo24(end),
-                                subject: s.subject, teacher: s.teacher, room: s.room,
-                                remark: (type === 'OT') ? "Doubt Session" : "Rescaled Class"
+                                start24: minsTo24(cursor), end24: minsTo24(lEnd),
+                                subject: "BREAK", teacher: "NONE", room: "", remark: `Group ${lunchGroup} Lunch`
                             });
+                            cursor = lEnd;
+                            lunchPlaced = true;
+                        }
 
-                            cursor = end;
+                        let dur = durations[idx];
+                        // Snap internal classes cleanly to 5 mins
+                        if (dur % 5 !== 0 && idx !== originalSubs.length - 1) {
+                            let diff = dur % 5;
+                            dur -= diff;
+                            durations[durations.length - 1] += diff; 
+                        }
+                        
+                        let end = cursor + dur;
+                        if (idx === originalSubs.length - 1) end = schoolEnd; // Hard lock final class to school bell
 
-                            // Apply Gaps / Fruit Breaks
-                            if (idx < subjects.length - 1) {
-                                if (breakMode === 'FRUIT' && idx === fruitBreakIdx) {
-                                    let fEnd = cursor + fruitBreakMins;
-                                    if (fEnd <= blockEnd) {
-                                        transformedSchedule.push({
-                                            day: dayName, className: cName, section: sName,
-                                            start24: minsTo24(cursor), end24: minsTo24(fEnd),
-                                            subject: "BREAK", teacher: "NONE", room: "", remark: "Fruit Break"
-                                        });
-                                        cursor = fEnd;
-                                    }
-                                } else if (breakMode === 'SPREAD' && gapSize > 0) {
-                                    cursor += gapSize;
-                                }
-                            }
+                        transformedSchedule.push({
+                            day: dayName, className: cName, section: sName,
+                            start24: minsTo24(cursor), end24: minsTo24(end),
+                            subject: s.subject, teacher: s.teacher, room: s.room,
+                            remark: (type === 'OT') ? "Doubt Session" : "Rescaled Class"
                         });
-                    };
 
-                    if (type === 'OT') {
-                        const doubtSubs = originalSubs.filter(s => testedSubjects.includes(s.subject.toUpperCase()));
-                        processBlock(lEnd, schoolEnd, doubtSubs, false);
-                    } else {
-                        const morningSubs = originalSubs.filter(s => universalTimeToMins(s.start24) < lStart);
-                        const afternoonSubs = originalSubs.filter(s => universalTimeToMins(s.start24) >= lStart);
-                        processBlock(eEndMins, lStart, morningSubs, true); 
-                        processBlock(lEnd, schoolEnd, afternoonSubs, false);
+                        cursor = end;
+
+                        // Apply Gap / Fruit Break
+                        if (idx < originalSubs.length - 1) {
+                            if (breakMode === 'FRUIT' && idx === fruitBreakIdx) {
+                                let fEnd = cursor + fruitBreakMins;
+                                transformedSchedule.push({
+                                    day: dayName, className: cName, section: sName,
+                                    start24: minsTo24(cursor), end24: minsTo24(fEnd),
+                                    subject: "BREAK", teacher: "NONE", room: "", remark: "Fruit Break"
+                                });
+                                cursor = fEnd;
+                            } else if (breakMode === 'SPREAD' && gapSize > 0) {
+                                cursor += gapSize;
+                            }
+                        }
+                    });
+                    
+                    // Failsafe in case lunch wasn't placed
+                    if (!lunchPlaced) {
+                         transformedSchedule.push({
+                            day: dayName, className: cName, section: sName,
+                            start24: minsTo24(cursor), end24: minsTo24(cursor + lunchDur),
+                            subject: "BREAK", teacher: "NONE", room: "", remark: `Group ${lunchGroup} Lunch`
+                        });
                     }
                 });
 
