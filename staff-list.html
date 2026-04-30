@@ -674,27 +674,46 @@
             document.getElementById('rm-stats').innerText = "";
         }
 
-        async function fetchAndRenderReports() {
+      async function fetchAndRenderReports() {
             const feed = document.getElementById('rm-feed');
-            feed.innerHTML = `<div class="text-center py-32"><span class="loader mb-4 border-slate-300 border-t-blue-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Compiling Cross-Database Analytics...</span></div>`;
+            feed.innerHTML = `<div class="text-center py-32"><span class="loader mb-4 border-slate-300 border-t-blue-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Compiling Auto-Synced System Reports...</span></div>`;
             
             try {
+                // 1. Determine Target Dates
+                let targetDates = [];
+                if (reportModalMode === 'DATE_WISE') {
+                    const dateVal = document.getElementById('rm-single-date').value;
+                    if(!dateVal) return alert("Select a date.");
+                    targetDates.push(dateVal);
+                } else {
+                    const fromDate = document.getElementById('rm-from-date').value;
+                    const toDate = document.getElementById('rm-to-date').value;
+                    if(!fromDate || !toDate) return alert("Select date range.");
+                    let curr = new Date(fromDate);
+                    let end = new Date(toDate);
+                    while(curr <= end) {
+                        targetDates.push(curr.toISOString().split('T')[0]);
+                        curr.setDate(curr.getDate() + 1);
+                    }
+                }
+
+                // 2. Fetch all necessary data
                 const plannerSnap = await db.collection("lesson_planners").get();
                 const assignSnap = await db.collection("lesson_planner_assignments").get();
-                const structSnap = await db.collection("institute_structure").get(); 
+                const dailySnap = await db.collection("daily_reports").get();
+                const rosterSnap = await db.collection("duty_rosters").get();
+                const holSnap = await db.collection("school_holidays").get();
                 
                 const planners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const assignments = assignSnap.docs.map(d => ({id: d.id, ...d.data()}));
-                const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const holidaysData = holSnap.docs.map(d => d.data());
                 
                 let groupedReports = {}; 
-
-                // HOD Security Check: If HOD, gather allowed emails. 
                 const allowedEmails = currentUserRole === 'HOD' ? allStaff.map(s => s.email) : null;
+                const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
                 const teacherLookup = (nameOrEmail) => {
                     if(!nameOrEmail) return { name: 'Unknown', email: 'unknown@example.com' };
-                    // We search in allStaff which is already securely filtered by HOD department
                     const s = allStaff.find(st => {
                         let nKey = Object.keys(st.details).find(k=>k.toLowerCase().includes('name'));
                         return st.email === nameOrEmail || (nKey && st.details[nKey] === nameOrEmail);
@@ -706,136 +725,137 @@
                     return { name: nameOrEmail, email: nameOrEmail };
                 };
 
+                // --- PHASE 1: BUILD VIRTUAL REPORTS FROM TIMETABLE & DUTIES (The Absolute Truth) ---
+                for (let tDate of targetDates) {
+                    const dateObj = new Date(tDate);
+                    if (dateObj.getDay() === 0) continue; // Skip Sunday
+                    const dayName = daysOfWeek[dateObj.getDay()];
+
+                    // Filter Holidays automatically
+                    let isHoliday = false;
+                    const checkDate = new Date(tDate); checkDate.setHours(0,0,0,0);
+                    for (let h of holidaysData) {
+                        if (!h.startDate) continue;
+                        const hStart = new Date(h.startDate); hStart.setHours(0,0,0,0);
+                        const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23,59,59,999);
+                        if (checkDate >= hStart && checkDate <= hEnd && h.isFullDay) { isHoliday = true; break; }
+                    }
+                    if (isHoliday) continue; 
+
+                    // Inject Timetable Classes
+                    const dayTt = timetableData.filter(t => t.day === dayName);
+                    dayTt.forEach(cls => {
+                        const tStaff = teacherLookup(cls.teacherName || cls.teacher);
+                        if (!tStaff.email || tStaff.email === 'unknown@example.com' || tStaff.email === 'NONE') return;
+                        if (currentUserRole === 'HOD' && !allowedEmails.includes(tStaff.email)) return;
+                        if (reportModalMode === 'INDIVIDUAL' && tStaff.email !== selectedStaffForReport) return;
+
+                        const key = `${tStaff.email}_${tDate}`;
+                        if (!groupedReports[key]) {
+                            groupedReports[key] = { id: `${tDate}_${tStaff.email}`, date: tDate, teacherEmail: tStaff.email, teacherName: tStaff.name, classesConducted: [], dutiesCompleted: [], additionalWork: "", syllabusProgress: [], activityLogs: [] };
+                        }
+
+                        // Protect against duplicating same classes
+                        let exists = groupedReports[key].classesConducted.find(c => c.className === cls.className && c.section === cls.section && c.subject === cls.subject);
+                        if (!exists) {
+                            groupedReports[key].classesConducted.push({
+                                className: cls.className,
+                                section: cls.section,
+                                subject: cls.subject,
+                                time: cls.timeRange || (format12Hour(cls.start24) + ' - ' + format12Hour(cls.end24))
+                            });
+                        }
+                    });
+
+                    // Inject Assigned Duties
+                    const diffToMonday = dateObj.getDate() - dateObj.getDay() + (dateObj.getDay() === 0 ? -6 : 1);
+                    const mondayDate = new Date(new Date(dateObj).setDate(diffToMonday));
+                    const weekId = "week_starting_" + mondayDate.toISOString().split('T')[0];
+                    const rosterDoc = rosterSnap.docs.find(d => d.id === weekId);
+                    
+                    if (rosterDoc) {
+                        const rosterData = rosterDoc.data().rosterData;
+                        Object.keys(rosterData).forEach(clsKey => {
+                            const dayDuty = rosterData[clsKey].days[dayName];
+                            if (dayDuty && dayDuty.status === 'ASSIGNED' && dayDuty.staff) {
+                                const tStaff = teacherLookup(dayDuty.staff.email);
+                                if (!tStaff.email || tStaff.email === 'unknown@example.com') return;
+                                if (currentUserRole === 'HOD' && !allowedEmails.includes(tStaff.email)) return;
+                                if (reportModalMode === 'INDIVIDUAL' && tStaff.email !== selectedStaffForReport) return;
+
+                                const key = `${tStaff.email}_${tDate}`;
+                                if (!groupedReports[key]) {
+                                    groupedReports[key] = { id: `${tDate}_${tStaff.email}`, date: tDate, teacherEmail: tStaff.email, teacherName: tStaff.name, classesConducted: [], dutiesCompleted: [], additionalWork: "", syllabusProgress: [], activityLogs: [] };
+                                }
+                                
+                                let className = rosterData[clsKey].cName; let sectionName = rosterData[clsKey].sName;
+                                if(!className) { const pts = clsKey.split('|'); className = pts[0]; sectionName = pts[1]; }
+
+                                groupedReports[key].dutiesCompleted.push({
+                                    type: "Assigned Duty",
+                                    className: className,
+                                    section: sectionName,
+                                    time: dayDuty.timing || "No Time Set"
+                                });
+                            }
+                        });
+                    }
+                }
+
+                // --- PHASE 2: OVERLAY LESSON PLANNERS (Syllabus & Activities) ---
                 planners.forEach(p => {
                     const assign = assignments.find(a => a.id === p.id) || {};
-                    
-                    let clsName = assign.className || 'Unknown Class';
-                    let secName = assign.section || 'Unknown Section';
-                    let subName = assign.subject || 'Unknown Subject';
-
-                    if (clsName === 'Unknown Class' || secName === 'Unknown Section') {
-                        const lastUnderscore = p.id.lastIndexOf('_');
-                        if (lastUnderscore !== -1) {
-                            const structId = p.id.substring(0, lastUnderscore);
-                            const extractedSub = p.id.substring(lastUnderscore + 1);
-                            const struct = structures.find(s => s.id === structId);
-                            if (struct) {
-                                clsName = struct.className;
-                                secName = struct.sectionName;
-                                subName = extractedSub.replace(/_/g, ' ');
-                            }
-                        } else {
-                            const parts = p.id.split('_');
-                            if(parts.length >= 3) {
-                                clsName = parts[0]; secName = parts[1]; subName = parts[2];
-                            }
-                        }
+                    let clsName = assign.className; let secName = assign.section; let subName = assign.subject;
+                    if (!clsName) {
+                        const pts = p.id.split('_');
+                        if (pts.length >= 3) { clsName = pts[0]; secName = pts[1]; subName = pts[2].replace(/_/g, ' '); }
                     }
 
                     if (p.syllabusData) {
                         p.syllabusData.forEach(topic => {
-                            if (topic.isDone && topic.completedDate) {
-                                const tDate = topic.completedDate;
+                            if (topic.isDone && topic.completedDate && targetDates.includes(topic.completedDate)) {
                                 const tStaff = teacherLookup(topic.tickedBy || assign.assignedTo);
-                                
-                                // STRICT HOD BOUNDARY: Ignore anything logged by a teacher not in this HOD's department
-                                if (!tStaff.email || tStaff.email === 'unknown@example.com') return;
-                                if (currentUserRole === 'HOD' && !allowedEmails.includes(tStaff.email)) return;
-
-                                const key = `${tStaff.email}_${tDate}`;
-                                if (!groupedReports[key]) {
-                                    groupedReports[key] = { id: key, date: tDate, teacherEmail: tStaff.email, teacherName: tStaff.name, classesConducted: [], dutiesCompleted: [], additionalWork: "", syllabusProgress: [] };
+                                const key = `${tStaff.email}_${topic.completedDate}`;
+                                if (groupedReports[key]) {
+                                    groupedReports[key].syllabusProgress.push({ className: clsName, section: secName, subject: subName, chapter: topic['CHAPTER NAME'], subtopic: topic['SUBTOPICS'] });
                                 }
-                                
-                                let clsEntry = groupedReports[key].classesConducted.find(c => c.className === clsName && c.section === secName && c.subject === subName);
-                                if (!clsEntry) {
-                                    clsEntry = { className: clsName, section: secName, subject: subName, time: `${topic.completedMinutes || 0}m` };
-                                    groupedReports[key].classesConducted.push(clsEntry);
-                                } else {
-                                    let currentMax = parseInt(clsEntry.time) || 0;
-                                    let newMin = parseInt(topic.completedMinutes) || 0;
-                                    if(newMin > currentMax) clsEntry.time = `${newMin}m`;
-                                }
-
-                                groupedReports[key].syllabusProgress.push({ className: clsName, section: secName, subject: subName, chapter: topic['CHAPTER NAME'], subtopic: topic['SUBTOPICS'] });
                             }
                         });
                     }
 
-                   if (p.activityLogs) {
+                    if (p.activityLogs) {
                         p.activityLogs.forEach(log => {
-                            const tDate = log.date;
-                            const tStaff = teacherLookup(log.loggedBy || assign.assignedTo);
-                            
-                            // STRICT HOD BOUNDARY
-                            if (!tStaff.email || tStaff.email === 'unknown@example.com') return;
-                            if (currentUserRole === 'HOD' && !allowedEmails.includes(tStaff.email)) return;
-
-                            const key = `${tStaff.email}_${tDate}`;
-                            if (!groupedReports[key]) {
-                                groupedReports[key] = { id: key, date: tDate, teacherEmail: tStaff.email, teacherName: tStaff.name, classesConducted: [], dutiesCompleted: [], additionalWork: "", syllabusProgress: [], activityLogs: [] };
+                            if (targetDates.includes(log.date)) {
+                                const tStaff = teacherLookup(log.loggedBy || assign.assignedTo);
+                                const key = `${tStaff.email}_${log.date}`;
+                                if (groupedReports[key]) {
+                                    groupedReports[key].activityLogs.push({ className: clsName, section: secName, subject: subName, reason: log.reason, minutes: log.minutes });
+                                }
                             }
-                            if (!groupedReports[key].activityLogs) groupedReports[key].activityLogs = [];
-                            groupedReports[key].activityLogs.push({ className: clsName, section: secName, subject: subName, reason: log.reason, minutes: log.minutes });
-                            groupedReports[key].additionalWork += `[${clsName} ${secName} - ${subName}] ${log.reason} (${Math.floor(log.minutes)}m)\n`;
                         });
                     }
                 });
 
-                const dailySnap = await db.collection("daily_reports").get();
+                // --- PHASE 3: OVERLAY MANUAL REPORTS (Extra work & Remarks) ---
                 dailySnap.docs.forEach(d => {
                     const data = d.data();
-                    
-                    // STRICT HOD BOUNDARY
-                    if (currentUserRole === 'HOD' && !allowedEmails.includes(data.teacherEmail)) return;
-
-                  const key = `${data.teacherEmail}_${data.date}`;
-                    if (!groupedReports[key]) {
-                        groupedReports[key] = { id: d.id, ...data, activityLogs: [] };
-                    } else {
-                        if(data.hodRemark) groupedReports[key].hodRemark = data.hodRemark;
-                        if(data.adminRemark) groupedReports[key].adminRemark = data.adminRemark;
-                        
-                        if(data.dutiesCompleted && data.dutiesCompleted.length > 0) {
-                            groupedReports[key].dutiesCompleted = data.dutiesCompleted;
+                    if(targetDates.includes(data.date)) {
+                        const key = `${data.teacherEmail}_${data.date}`;
+                        if (groupedReports[key]) {
+                            if(data.hodRemark) groupedReports[key].hodRemark = data.hodRemark;
+                            if(data.adminRemark) groupedReports[key].adminRemark = data.adminRemark;
+                            if(data.additionalWork && data.additionalWork.trim() !== "") {
+                                groupedReports[key].additionalWork = data.additionalWork.trim();
+                            }
+                            groupedReports[key].id = d.id; // Crucial for saving remarks
                         }
-                        if(data.additionalWork && data.additionalWork.trim() !== "") {
-                            groupedReports[key].additionalWork = (groupedReports[key].additionalWork ? groupedReports[key].additionalWork + "\n\n" : "") + data.additionalWork.trim();
-                        }
-                        
-                        // FIX: Safely merge ALL timetable classes that the teacher actually had today
-                        if(data.classesConducted && data.classesConducted.length > 0) {
-                            if(!groupedReports[key].classesConducted) groupedReports[key].classesConducted = [];
-                            data.classesConducted.forEach(dc => {
-                                let existing = groupedReports[key].classesConducted.find(c => c.className === dc.className && c.section === dc.section && c.subject === dc.subject);
-                                if (!existing) {
-                                    groupedReports[key].classesConducted.push(dc);
-                                } else {
-                                    existing.time = dc.time;
-                                }
-                            });
-                        }
-                        
-                        groupedReports[key].id = d.id;
                     }
                 });
 
                 let rawReports = Object.values(groupedReports);
-
-                if (reportModalMode === 'DATE_WISE') {
-                    const dateVal = document.getElementById('rm-single-date').value;
-                    if(!dateVal) return alert("Select a date.");
-                    rawReports = rawReports.filter(r => r.date === dateVal);
-                } else {
-                    const fromDate = document.getElementById('rm-from-date').value;
-                    const toDate = document.getElementById('rm-to-date').value;
-                    if(!fromDate || !toDate) return alert("Select date range.");
-                    rawReports = rawReports.filter(r => r.teacherEmail === selectedStaffForReport && r.date >= fromDate && r.date <= toDate);
-                }
-                
                 rawReports.sort((a,b) => new Date(b.date) - new Date(a.date));
                 currentReportsData = rawReports;
-                document.getElementById('rm-stats').innerText = `${currentReportsData.length} Reports Compiled`;
+                document.getElementById('rm-stats').innerText = `${currentReportsData.length} Auto-Compiled Reports`;
                 renderReportsList();
             } catch(e) { 
                 console.error(e);
