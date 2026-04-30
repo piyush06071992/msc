@@ -684,6 +684,16 @@
             return `${h.toString().padStart(2, '0')}:${m} ${ampm}`;
         }
 
+       // Helper function to format 24hr time to 12hr AM/PM
+        function format12Hour(timeStr) {
+            if(!timeStr) return ""; 
+            if(timeStr.includes('AM') || timeStr.includes('PM')) return timeStr;
+            let [h, m] = timeStr.split(':');
+            if(!h || !m) return timeStr;
+            let ampm = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+            return `${h.toString().padStart(2, '0')}:${m} ${ampm}`;
+        }
+
         async function fetchAndRenderReports() {
             const feed = document.getElementById('rm-feed');
             feed.innerHTML = `<div class="text-center py-32"><span class="loader mb-4 border-slate-300 border-t-blue-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Compiling Auto-Synced System Reports...</span></div>`;
@@ -707,18 +717,20 @@
                     }
                 }
 
-                // 2. Fetch ALL necessary data (Including the Timetable!)
+                // 2. Fetch ALL necessary data
                 const plannerSnap = await db.collection("lesson_planners").get();
                 const assignSnap = await db.collection("lesson_planner_assignments").get();
                 const dailySnap = await db.collection("daily_reports").get();
                 const rosterSnap = await db.collection("duty_rosters").get();
                 const holSnap = await db.collection("school_holidays").get();
-                const ttSnap = await db.collection("timetable").get(); // FIX: Added Timetable Fetch
+                const ttSnap = await db.collection("timetable").get();
+                const structSnap = await db.collection("institute_structure").get(); // Added Structure Fetch
                 
                 const planners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const assignments = assignSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const holidaysData = holSnap.docs.map(d => d.data());
-                const timetableData = ttSnap.docs.map(d => d.data()); // FIX: Parsed Timetable Data
+                const timetableData = ttSnap.docs.map(d => d.data());
+                const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()})); // Added Structures
                 
                 let groupedReports = {}; 
                 const allowedEmails = currentUserRole === 'HOD' ? allStaff.map(s => s.email) : null;
@@ -786,7 +798,14 @@
                     const rosterDoc = rosterSnap.docs.find(d => d.id === weekId);
                     
                     if (rosterDoc) {
-                        const rosterData = rosterDoc.data().rosterData;
+                        const rDocData = rosterDoc.data();
+                        const rosterData = rDocData.rosterData;
+                        
+                        // Extract specific duty type name
+                        let dutyTypeLabel = rDocData.type || "Assigned Duty";
+                        if (dutyTypeLabel.toUpperCase() === 'LUNCH') dutyTypeLabel = "Lunch Duty";
+                        else if (dutyTypeLabel.toUpperCase() === 'EXAM') dutyTypeLabel = "Exam Duty";
+
                         Object.keys(rosterData).forEach(clsKey => {
                             const dayDuty = rosterData[clsKey].days[dayName];
                             if (dayDuty && dayDuty.status === 'ASSIGNED' && dayDuty.staff) {
@@ -804,7 +823,7 @@
                                 if(!className) { const pts = clsKey.split('|'); className = pts[0]; sectionName = pts[1]; }
 
                                 groupedReports[key].dutiesCompleted.push({
-                                    type: "Assigned Duty",
+                                    type: dutyTypeLabel,
                                     className: className,
                                     section: sectionName,
                                     time: dayDuty.timing || "No Time Set"
@@ -818,9 +837,24 @@
                 planners.forEach(p => {
                     const assign = assignments.find(a => a.id === p.id) || {};
                     let clsName = assign.className; let secName = assign.section; let subName = assign.subject;
+                    
+                    // Safely extract from structure if missing
                     if (!clsName) {
-                        const pts = p.id.split('_');
-                        if (pts.length >= 3) { clsName = pts[0]; secName = pts[1]; subName = pts[2].replace(/_/g, ' '); }
+                        const lastUnderscore = p.id.lastIndexOf('_');
+                        if (lastUnderscore !== -1) {
+                            const structId = p.id.substring(0, lastUnderscore);
+                            const extractedSub = p.id.substring(lastUnderscore + 1);
+                            const struct = structures.find(s => s.id === structId);
+                            if (struct) {
+                                clsName = struct.className;
+                                secName = struct.sectionName;
+                                subName = extractedSub.replace(/_/g, ' ');
+                            }
+                        }
+                        if (!clsName) {
+                            const pts = p.id.split('_');
+                            if (pts.length >= 3) { clsName = pts[0]; secName = pts[1]; subName = pts[2].replace(/_/g, ' '); }
+                        }
                     }
 
                     if (p.syllabusData) {
@@ -872,55 +906,6 @@
             } catch(e) { 
                 console.error(e);
                 feed.innerHTML = `<div class="text-center py-32 text-rose-500 font-black uppercase tracking-widest text-sm">Error compiling cross-database analytics. Check console for details.</div>`; 
-            }
-        }
-
-        function renderReportsList() {
-            const feed = document.getElementById('rm-feed');
-            const remarksOnly = document.getElementById('rm-remarks-only').checked;
-            if (currentReportsData.length === 0) {
-                feed.innerHTML = `<div class="bg-white border-2 border-dashed border-slate-300 p-10 rounded-[2rem] text-center shadow-inner"><p class="text-sm font-black text-slate-400 uppercase tracking-widest">No reports submitted for the selected criteria.</p></div>`;
-                return;
-            }
-            
-            if (reportModalMode === 'DATE_WISE') {
-                const grouped = {};
-                currentReportsData.forEach(rep => {
-                    const staffObj = allStaff.find(s => s.email === rep.teacherEmail);
-                    const dept = staffObj ? getPrimaryDept(staffObj.rawDept) : 'General';
-                    if(!grouped[dept]) grouped[dept] = [];
-                    grouped[dept].push(rep);
-                });
-                feed.innerHTML = Object.keys(grouped).sort().map(dept => `
-                    <details class="bg-white border-2 border-slate-200 rounded-[2.5rem] shadow-sm overflow-hidden group/rdept mb-6" open>
-                        <summary class="p-6 bg-slate-100/50 border-b border-slate-200 font-black text-slate-800 text-lg uppercase tracking-widest cursor-pointer select-none flex justify-between items-center outline-none hover:bg-slate-200 transition-colors">
-                            <div class="flex items-center gap-3"><span class="bg-white p-2 rounded-xl shadow-sm border border-slate-200">🏢</span> ${dept}</div>
-                            <div class="flex items-center gap-4">
-                                <span class="bg-slate-800 text-white px-4 py-2 rounded-xl text-xs shadow-md">${grouped[dept].length} Reports</span>
-                                <span class="text-slate-400 group-open/rdept:rotate-180 transition-transform text-2xl">▼</span>
-                            </div>
-                        </summary>
-                        <div class="p-6 bg-slate-50/50 space-y-8">${grouped[dept].map(rep => generateReportCardHTML(rep, remarksOnly)).join('')}</div>
-                    </details>
-                `).join('');
-            } else {
-                feed.innerHTML = currentReportsData.map(rep => {
-                    const prettyDate = new Date(rep.date).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
-                    return `
-                    <details class="bg-white border-2 border-slate-200 rounded-[2.5rem] shadow-sm overflow-hidden mb-6 group">
-                        <summary class="p-6 sm:p-8 bg-slate-50 border-b border-slate-200 font-black text-slate-800 text-lg uppercase tracking-widest cursor-pointer select-none flex justify-between items-center outline-none hover:bg-slate-100 transition-colors">
-                            <div class="flex items-center gap-4">
-                                <span class="bg-white p-3 rounded-xl shadow-sm border border-slate-200 text-2xl">📅</span>
-                                <div><div class="text-base sm:text-lg tracking-tighter text-blue-700">${prettyDate}</div></div>
-                            </div>
-                            <span class="text-slate-400 group-open:rotate-180 transition-transform text-2xl">▼</span>
-                        </summary>
-                        <div class="p-0 bg-slate-50/50">
-                            ${generateReportCardHTML(rep, remarksOnly)}
-                        </div>
-                    </details>
-                    `;
-                }).join('');
             }
         }
 
