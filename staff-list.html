@@ -674,17 +674,7 @@
             document.getElementById('rm-stats').innerText = "";
         }
 
-    // Helper function to format 24hr time to 12hr AM/PM
-        function format12Hour(timeStr) {
-            if(!timeStr) return ""; 
-            if(timeStr.includes('AM') || timeStr.includes('PM')) return timeStr;
-            let [h, m] = timeStr.split(':');
-            if(!h || !m) return timeStr;
-            let ampm = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
-            return `${h.toString().padStart(2, '0')}:${m} ${ampm}`;
-        }
-
-       // Helper function to format 24hr time to 12hr AM/PM
+   // Helper function to format 24hr time to 12hr AM/PM
         function format12Hour(timeStr) {
             if(!timeStr) return ""; 
             if(timeStr.includes('AM') || timeStr.includes('PM')) return timeStr;
@@ -724,13 +714,13 @@
                 const rosterSnap = await db.collection("duty_rosters").get();
                 const holSnap = await db.collection("school_holidays").get();
                 const ttSnap = await db.collection("timetable").get();
-                const structSnap = await db.collection("institute_structure").get(); // Added Structure Fetch
+                const structSnap = await db.collection("institute_structure").get();
                 
                 const planners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const assignments = assignSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const holidaysData = holSnap.docs.map(d => d.data());
                 const timetableData = ttSnap.docs.map(d => d.data());
-                const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()})); // Added Structures
+                const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 
                 let groupedReports = {}; 
                 const allowedEmails = currentUserRole === 'HOD' ? allStaff.map(s => s.email) : null;
@@ -749,13 +739,12 @@
                     return { name: nameOrEmail, email: nameOrEmail };
                 };
 
-                // --- PHASE 1: BUILD VIRTUAL REPORTS FROM TIMETABLE & DUTIES (The Absolute Truth) ---
+                // --- PHASE 1: BUILD VIRTUAL REPORTS FROM TIMETABLE & DUTIES ---
                 for (let tDate of targetDates) {
                     const dateObj = new Date(tDate);
-                    if (dateObj.getDay() === 0) continue; // Skip Sunday
+                    if (dateObj.getDay() === 0) continue; 
                     const dayName = daysOfWeek[dateObj.getDay()];
 
-                    // Filter Holidays automatically
                     let isHoliday = false;
                     const checkDate = new Date(tDate); checkDate.setHours(0,0,0,0);
                     for (let h of holidaysData) {
@@ -779,7 +768,6 @@
                             groupedReports[key] = { id: `${tDate}_${tStaff.email}`, date: tDate, teacherEmail: tStaff.email, teacherName: tStaff.name, classesConducted: [], dutiesCompleted: [], additionalWork: "", syllabusProgress: [], activityLogs: [] };
                         }
 
-                        // Protect against duplicating same classes
                         let exists = groupedReports[key].classesConducted.find(c => c.className === cls.className && c.section === cls.section && c.subject === cls.subject);
                         if (!exists) {
                             groupedReports[key].classesConducted.push({
@@ -791,20 +779,19 @@
                         }
                     });
 
-                    // Inject Assigned Duties
+                    // Inject Assigned Duties (CRASH-PROOF)
                     const diffToMonday = dateObj.getDate() - dateObj.getDay() + (dateObj.getDay() === 0 ? -6 : 1);
                     const mondayDate = new Date(new Date(dateObj).setDate(diffToMonday));
                     const weekId = "week_starting_" + mondayDate.toISOString().split('T')[0];
                     const rosterDoc = rosterSnap.docs.find(d => d.id === weekId);
                     
-                    if (rosterDoc) {
+                    if (rosterDoc && rosterDoc.exists) {
                         const rDocData = rosterDoc.data();
-                        const rosterData = rDocData.rosterData;
+                        const rosterData = rDocData.rosterData || {};
                         
-                        // Extract specific duty type name
-                        let dutyTypeLabel = rDocData.type || "Assigned Duty";
-                        if (dutyTypeLabel.toUpperCase() === 'LUNCH') dutyTypeLabel = "Lunch Duty";
-                        else if (dutyTypeLabel.toUpperCase() === 'EXAM') dutyTypeLabel = "Exam Duty";
+                        let dutyTypeLabel = rDocData.type ? String(rDocData.type) : "Assigned Duty";
+                        if (dutyTypeLabel.toUpperCase().includes('LUNCH')) dutyTypeLabel = "Lunch Duty";
+                        else if (dutyTypeLabel.toUpperCase().includes('EXAM')) dutyTypeLabel = "Exam Duty";
 
                         Object.keys(rosterData).forEach(clsKey => {
                             const dayDuty = rosterData[clsKey].days[dayName];
@@ -833,17 +820,16 @@
                     }
                 }
 
-                // --- PHASE 2: OVERLAY LESSON PLANNERS (Syllabus & Activities) ---
+                // --- PHASE 2: OVERLAY LESSON PLANNERS (CRASH-PROOF FALLBACKS) ---
                 planners.forEach(p => {
                     const assign = assignments.find(a => a.id === p.id) || {};
                     let clsName = assign.className; let secName = assign.section; let subName = assign.subject;
                     
-                    // Safely extract from structure if missing
                     if (!clsName) {
-                        const lastUnderscore = p.id.lastIndexOf('_');
+                        const lastUnderscore = String(p.id).lastIndexOf('_');
                         if (lastUnderscore !== -1) {
-                            const structId = p.id.substring(0, lastUnderscore);
-                            const extractedSub = p.id.substring(lastUnderscore + 1);
+                            const structId = String(p.id).substring(0, lastUnderscore);
+                            const extractedSub = String(p.id).substring(lastUnderscore + 1);
                             const struct = structures.find(s => s.id === structId);
                             if (struct) {
                                 clsName = struct.className;
@@ -852,49 +838,55 @@
                             }
                         }
                         if (!clsName) {
-                            const pts = p.id.split('_');
+                            const pts = String(p.id).split('_');
                             if (pts.length >= 3) { clsName = pts[0]; secName = pts[1]; subName = pts[2].replace(/_/g, ' '); }
                         }
                     }
 
-                    if (p.syllabusData) {
+                    if (p.syllabusData && Array.isArray(p.syllabusData)) {
                         p.syllabusData.forEach(topic => {
                             if (topic.isDone && topic.completedDate && targetDates.includes(topic.completedDate)) {
                                 const tStaff = teacherLookup(topic.tickedBy || assign.assignedTo);
                                 const key = `${tStaff.email}_${topic.completedDate}`;
-                                if (groupedReports[key]) {
-                                    groupedReports[key].syllabusProgress.push({ className: clsName, section: secName, subject: subName, chapter: topic['CHAPTER NAME'], subtopic: topic['SUBTOPICS'] });
+                                
+                                if (!groupedReports[key]) {
+                                    groupedReports[key] = { id: key, date: topic.completedDate, teacherEmail: tStaff.email, teacherName: tStaff.name, classesConducted: [], dutiesCompleted: [], additionalWork: "", syllabusProgress: [], activityLogs: [] };
                                 }
+                                groupedReports[key].syllabusProgress.push({ className: clsName || "", section: secName || "", subject: subName || "", chapter: topic['CHAPTER NAME'], subtopic: topic['SUBTOPICS'] });
                             }
                         });
                     }
 
-                    if (p.activityLogs) {
+                    if (p.activityLogs && Array.isArray(p.activityLogs)) {
                         p.activityLogs.forEach(log => {
-                            if (targetDates.includes(log.date)) {
+                            if (log.date && targetDates.includes(log.date)) {
                                 const tStaff = teacherLookup(log.loggedBy || assign.assignedTo);
                                 const key = `${tStaff.email}_${log.date}`;
-                                if (groupedReports[key]) {
-                                    groupedReports[key].activityLogs.push({ className: clsName, section: secName, subject: subName, reason: log.reason, minutes: log.minutes });
+                                
+                                if (!groupedReports[key]) {
+                                    groupedReports[key] = { id: key, date: log.date, teacherEmail: tStaff.email, teacherName: tStaff.name, classesConducted: [], dutiesCompleted: [], additionalWork: "", syllabusProgress: [], activityLogs: [] };
                                 }
+                                groupedReports[key].activityLogs.push({ className: clsName || "", section: secName || "", subject: subName || "", reason: log.reason, minutes: log.minutes });
                             }
                         });
                     }
                 });
 
-                // --- PHASE 3: OVERLAY MANUAL REPORTS (Extra work & Remarks) ---
+                // --- PHASE 3: OVERLAY MANUAL REPORTS ---
                 dailySnap.docs.forEach(d => {
                     const data = d.data();
-                    if(targetDates.includes(data.date)) {
+                    if(data.date && targetDates.includes(data.date)) {
                         const key = `${data.teacherEmail}_${data.date}`;
-                        if (groupedReports[key]) {
-                            if(data.hodRemark) groupedReports[key].hodRemark = data.hodRemark;
-                            if(data.adminRemark) groupedReports[key].adminRemark = data.adminRemark;
-                            if(data.additionalWork && data.additionalWork.trim() !== "") {
-                                groupedReports[key].additionalWork = data.additionalWork.trim();
-                            }
-                            groupedReports[key].id = d.id; // Crucial for saving remarks
+                        if (!groupedReports[key]) {
+                             groupedReports[key] = { id: d.id, date: data.date, teacherEmail: data.teacherEmail, teacherName: data.teacherName, classesConducted: [], dutiesCompleted: [], additionalWork: "", syllabusProgress: [], activityLogs: [] };
                         }
+                        
+                        if(data.hodRemark) groupedReports[key].hodRemark = data.hodRemark;
+                        if(data.adminRemark) groupedReports[key].adminRemark = data.adminRemark;
+                        if(data.additionalWork && data.additionalWork.trim() !== "") {
+                            groupedReports[key].additionalWork = data.additionalWork.trim();
+                        }
+                        groupedReports[key].id = d.id; 
                     }
                 });
 
@@ -904,8 +896,57 @@
                 document.getElementById('rm-stats').innerText = `${currentReportsData.length} Auto-Compiled Reports`;
                 renderReportsList();
             } catch(e) { 
-                console.error(e);
-                feed.innerHTML = `<div class="text-center py-32 text-rose-500 font-black uppercase tracking-widest text-sm">Error compiling cross-database analytics. Check console for details.</div>`; 
+                console.error("REPORT COMPILE ERROR:", e);
+                feed.innerHTML = `<div class="text-center py-32 text-rose-500 font-black uppercase tracking-widest text-sm">Error compiling cross-database analytics. Please check console.</div>`; 
+            }
+        }
+
+        function renderReportsList() {
+            const feed = document.getElementById('rm-feed');
+            const remarksOnly = document.getElementById('rm-remarks-only').checked;
+            if (currentReportsData.length === 0) {
+                feed.innerHTML = `<div class="bg-white border-2 border-dashed border-slate-300 p-10 rounded-[2rem] text-center shadow-inner"><p class="text-sm font-black text-slate-400 uppercase tracking-widest">No reports submitted for the selected criteria.</p></div>`;
+                return;
+            }
+            
+            if (reportModalMode === 'DATE_WISE') {
+                const grouped = {};
+                currentReportsData.forEach(rep => {
+                    const staffObj = allStaff.find(s => s.email === rep.teacherEmail);
+                    const dept = staffObj ? getPrimaryDept(staffObj.rawDept) : 'General';
+                    if(!grouped[dept]) grouped[dept] = [];
+                    grouped[dept].push(rep);
+                });
+                feed.innerHTML = Object.keys(grouped).sort().map(dept => `
+                    <details class="bg-white border-2 border-slate-200 rounded-[2.5rem] shadow-sm overflow-hidden group/rdept mb-6" open>
+                        <summary class="p-6 bg-slate-100/50 border-b border-slate-200 font-black text-slate-800 text-lg uppercase tracking-widest cursor-pointer select-none flex justify-between items-center outline-none hover:bg-slate-200 transition-colors">
+                            <div class="flex items-center gap-3"><span class="bg-white p-2 rounded-xl shadow-sm border border-slate-200">🏢</span> ${dept}</div>
+                            <div class="flex items-center gap-4">
+                                <span class="bg-slate-800 text-white px-4 py-2 rounded-xl text-xs shadow-md">${grouped[dept].length} Reports</span>
+                                <span class="text-slate-400 group-open/rdept:rotate-180 transition-transform text-2xl">▼</span>
+                            </div>
+                        </summary>
+                        <div class="p-6 bg-slate-50/50 space-y-8">${grouped[dept].map(rep => generateReportCardHTML(rep, remarksOnly)).join('')}</div>
+                    </details>
+                `).join('');
+            } else {
+                feed.innerHTML = currentReportsData.map(rep => {
+                    const prettyDate = new Date(rep.date).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+                    return `
+                    <details class="bg-white border-2 border-slate-200 rounded-[2.5rem] shadow-sm overflow-hidden mb-6 group">
+                        <summary class="p-6 sm:p-8 bg-slate-50 border-b border-slate-200 font-black text-slate-800 text-lg uppercase tracking-widest cursor-pointer select-none flex justify-between items-center outline-none hover:bg-slate-100 transition-colors">
+                            <div class="flex items-center gap-4">
+                                <span class="bg-white p-3 rounded-xl shadow-sm border border-slate-200 text-2xl">📅</span>
+                                <div><div class="text-base sm:text-lg tracking-tighter text-blue-700">${prettyDate}</div></div>
+                            </div>
+                            <span class="text-slate-400 group-open:rotate-180 transition-transform text-2xl">▼</span>
+                        </summary>
+                        <div class="p-0 bg-slate-50/50">
+                            ${generateReportCardHTML(rep, remarksOnly)}
+                        </div>
+                    </details>
+                    `;
+                }).join('');
             }
         }
 
@@ -949,16 +990,21 @@
                 </div>`;
             }
 
-       // Clean string helper to prevent mismatch errors
-            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            // High-Resilience Fuzzy Matcher
+            const norm = (str) => String(str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const isMatch = (a, b) => {
+                const nA = norm(a); const nB = norm(b);
+                if (nA === "" || nB === "") return true; // Extremely loose fallback if data is partially corrupted
+                return nA === nB || nA.includes(nB) || nB.includes(nA);
+            };
 
             let classesHtml = `<div class="text-xs font-bold text-slate-400 uppercase tracking-widest p-4 bg-slate-50 rounded-xl border border-slate-100">No classes scheduled.</div>`;
             if (rep.classesConducted && rep.classesConducted.length > 0) {
                 classesHtml = rep.classesConducted.map(c => {
                     
-                    // Use normalized matching so "Crash Course" perfectly matches "CRASH-COURSE"
-                    let topics = rep.syllabusProgress ? rep.syllabusProgress.filter(s => norm(s.className) === norm(c.className) && norm(s.section) === norm(c.section) && norm(s.subject) === norm(c.subject)) : [];
-                    let activities = rep.activityLogs ? rep.activityLogs.filter(a => norm(a.className) === norm(c.className) && norm(a.section) === norm(c.section) && norm(a.subject) === norm(c.subject)) : [];
+                    // Fuzzy match ignores caps, symbols, and extra text (e.g. "J-1" matches "J-1 (HPCET)")
+                    let topics = rep.syllabusProgress ? rep.syllabusProgress.filter(s => isMatch(s.className, c.className) && isMatch(s.section, c.section) && isMatch(s.subject, c.subject)) : [];
+                    let activities = rep.activityLogs ? rep.activityLogs.filter(a => isMatch(a.className, c.className) && isMatch(a.section, c.section) && isMatch(a.subject, c.subject)) : [];
                     
                     let sylHtml = "";
                     
@@ -1015,7 +1061,6 @@
                 ${remarksHTML}
             </div>`;
         }
-
         async function saveRemarks(reportId) {
             const hodEl = document.getElementById(`hod-rem-${reportId}`);
             const adminEl = document.getElementById(`admin-rem-${reportId}`);
