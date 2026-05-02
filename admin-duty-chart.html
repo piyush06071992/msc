@@ -598,42 +598,32 @@
                     document.getElementById('chart-main-title').innerText = "Weekly Room Lunch Roster";
                     document.getElementById('chart-sub-title').innerText = "Generic 12:00 PM Break Fallback";
 
-                } else if (currentMode === 'EXAM') {
+              } else if (currentMode === 'EXAM') {
                     const dayName = DAYS_OF_WEEK[examDate.getDay()];
                     const totalDuration = examEndMins - examStartMins;
                     
                     activeDateSchedule = await getScheduleForDate(eDate, dayName);
                     
-                    // Determine chunks
+                    // Determine chunks (Equally divided to avoid micro-shifts)
                     let chunks = [];
-                    if (chunkStrategy === '60') {
-                        let c = examStartMins;
-                        while(c < examEndMins) {
-                            let end = Math.min(c + 60, examEndMins);
-                            chunks.push({ s: c, e: end });
-                            c = end;
-                        }
-                    } else if (chunkStrategy === '90') {
-                        let c = examStartMins;
-                        while(c < examEndMins) {
-                            let end = Math.min(c + 90, examEndMins);
-                            chunks.push({ s: c, e: end });
-                            c = end;
-                        }
-                    } else {
-                        // AUTO: Try to divide into 1.5 hr chunks, remainder in 1 hr chunks
-                        let remaining = totalDuration;
-                        let c = examStartMins;
-                        while (remaining > 0) {
-                            let jump = (remaining >= 90) ? 90 : (remaining >= 60 ? 60 : remaining);
-                            chunks.push({ s: c, e: c + jump });
-                            c += jump;
-                            remaining -= jump;
-                        }
+                    let numChunks;
+                    if (chunkStrategy === '60') numChunks = Math.max(1, Math.round(totalDuration / 60));
+                    else if (chunkStrategy === '90') numChunks = Math.max(1, Math.round(totalDuration / 90));
+                    else numChunks = Math.max(1, Math.round(totalDuration / 75)); // Auto chunks between 1h and 1.5h
+
+                    let baseChunk = Math.floor(totalDuration / numChunks);
+                    let remainder = totalDuration % numChunks;
+                    let c = examStartMins;
+
+                    for(let i=0; i<numChunks; i++) {
+                        let jump = baseChunk + (i < remainder ? 1 : 0); // Distribute extra minutes cleanly
+                        chunks.push({ s: c, e: c + jump });
+                        c += jump;
                     }
 
                     // Assign rooms per chunk
                     let shiftAssignments = {};
+                    let dailyAssignments = new Set(); // TRACKS 1 SHIFT PER PERSON LIMIT
 
                     selectedRooms.forEach(roomName => {
                         generatedRoster[roomName] = { type: 'EXAM', columns: {} };
@@ -645,7 +635,8 @@
                             let evaluatedStaff = [];
 
                             availablePool.forEach(staff => {
-                                if (shiftAssignments[colKey].has(staff.email)) return; // Prevent duplicate names in same shift
+                                if (shiftAssignments[colKey].has(staff.email)) return; // Duplicate in same shift
+                                if (dailyAssignments.has(staff.email)) return; // ONE SHIFT PER PERSON LIMIT
 
                                 const sTt = activeDateSchedule.filter(t => t.teacherName === staff.name || t.teacher === staff.name);
                                 
