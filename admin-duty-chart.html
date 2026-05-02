@@ -15,7 +15,6 @@
         .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
         .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         
-        /* Mobile-Optimized Table CSS */
         table { border-spacing: 0; border-collapse: separate; width: 100%; min-width: 800px; }
         th, td { border-bottom: 1px solid #f1f5f9; border-right: 1px solid #f1f5f9; }
         .sticky-col { position: sticky; left: 0; background: #ffffff; z-index: 20; border-right: 2px solid #e2e8f0 !important; max-width: 140px; }
@@ -83,7 +82,7 @@
                 
                 <div class="xl:col-span-1 space-y-6 no-print">
                     
-                    <!-- DYNAMIC EXAM CONTROLS (Only visible in Exam Mode) -->
+                    <!-- DYNAMIC EXAM CONTROLS -->
                     <div id="exam-controls" class="hidden bg-indigo-50 p-5 sm:p-6 rounded-[2rem] shadow-sm border border-indigo-200 h-fit">
                         <h3 class="font-black text-indigo-800 uppercase text-[10px] tracking-widest mb-4">Exam Parameters</h3>
                         <div class="space-y-4">
@@ -241,9 +240,10 @@
         // --- GLOBAL STATE ---
         let currentMode = null; // 'LUNCH' or 'EXAM'
         let staffData = [], timetableData = [], holidaysData = [], roomsData = [];
-        let generatedRoster = {}; // Dynamic container for the output
+        let generatedRoster = {}; 
         let currentEditParams = null;
         window.hasDutyRights = false;
+        let activeDateSchedule = []; // Cache for Exam mode specific dates
 
         const DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -356,6 +356,7 @@
                         </div>
                         <div class="flex items-center gap-2">
                             <span class="bg-slate-200 text-slate-500 text-[9px] px-2 py-0.5 rounded-full font-black">${members.length}</span>
+                            <svg class="w-4 h-4 text-slate-400 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="3" d="M19 9l-7 7-7-7"/></svg>
                         </div>
                     </summary>
                     <div class="p-2 space-y-1 bg-white border-t border-slate-50">
@@ -430,7 +431,7 @@
             document.getElementById('results-area').classList.add('hidden');
             document.getElementById('results-placeholder').classList.remove('hidden');
             
-            loadUpcomingExams(); // Fetch exams automatically when opening Exam Duty
+            loadUpcomingExams();
         }
 
         // --- EXAM TIMETABLE FETCHER ---
@@ -446,20 +447,26 @@
                 snap.docs.forEach(doc => {
                     const data = doc.data();
                     if (data.schedule) {
-                        // Look for an EXAM block inside this day's schedule
-                        const examBlock = data.schedule.find(s => s.subject === "EXAM");
-                        if (examBlock) {
+                        const examBlocks = data.schedule.filter(s => s.subject === "EXAM");
+                        if (examBlocks.length > 0) {
+                            let minS = 9999, maxE = 0;
+                            let title = examBlocks[0].remark || "Exam Day";
+                            
+                            examBlocks.forEach(eb => {
+                                let s = timeToMins(eb.start24);
+                                let e = timeToMins(eb.end24);
+                                if(s < minS) minS = s;
+                                if(e > maxE) maxE = e;
+                            });
+                            
                             upcomingExams.push({
-                                date: data.date,
-                                title: examBlock.remark || "Exam Day",
-                                start: examBlock.start24,
-                                end: examBlock.end24
+                                date: data.date, title: title,
+                                start: minsTo24(minS), end: minsTo24(maxE)
                             });
                         }
                     }
                 });
 
-                // Sort exams chronologically
                 upcomingExams.sort((a,b) => a.date.localeCompare(b.date));
 
                 if (upcomingExams.length === 0) {
@@ -467,7 +474,6 @@
                     return;
                 }
 
-                // Populate Dropdown
                 dropdown.innerHTML = '<option value="">-- Select an Upcoming Exam --</option>' + upcomingExams.map(ex => {
                     const prettyDate = new Date(ex.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
                     const timeStr = `${format12Hour(ex.start)} - ${format12Hour(ex.end)}`;
@@ -517,6 +523,22 @@
             return { classes: sTt.length, mins };
         }
 
+        async function getScheduleForDate(dateIso, dayName) {
+            try {
+                const historySnap = await db.collection("timetable_history").doc(dateIso).get();
+                if (historySnap.exists && historySnap.data().schedule) {
+                    return historySnap.data().schedule;
+                }
+            } catch(e) { console.warn("No override found, falling back to master."); }
+            return timetableData.filter(t => t.day === dayName);
+        }
+
+        function getTeacherLoadFromSchedule(schedule, teacherName) {
+            const sTt = schedule.filter(t => t.teacherName === teacherName || t.teacher === teacherName);
+            const mins = sTt.reduce((acc, curr) => acc + (parseInt(curr.duration) || 0), 0);
+            return { classes: sTt.length, mins };
+        }
+
         // --- ALGORITHM ENGINE (LUNCH & EXAM) ---
         async function runAllocationAlgorithm() {
             const selectedRooms = Array.from(document.querySelectorAll('.room-cb:checked')).map(i => i.value);
@@ -524,12 +546,15 @@
             
             if(selectedRooms.length === 0) return alert("Please select at least one Target Room.");
 
-            let examDate, examStartMins, examEndMins, chunkStrategy;
+            let examDate, examStartMins, examEndMins, chunkStrategy, eDate;
             if (currentMode === 'EXAM') {
                 const selectedExam = document.getElementById('exam-select-dropdown').value;
                 if(!selectedExam) return alert("Please select an upcoming exam from the dropdown.");
                 
-                const [eDate, eStart, eEnd] = selectedExam.split('|');
+                const parts = selectedExam.split('|');
+                eDate = parts[0];
+                const eStart = parts[1];
+                const eEnd = parts[2];
                 chunkStrategy = document.getElementById('exam-chunk-size').value; // 'AUTO', '60', '90'
                 
                 examDate = new Date(eDate);
@@ -569,6 +594,8 @@
                     const dayName = DAYS_OF_WEEK[examDate.getDay()];
                     const totalDuration = examEndMins - examStartMins;
                     
+                    activeDateSchedule = await getScheduleForDate(eDate, dayName);
+                    
                     // Determine chunks
                     let chunks = [];
                     if (chunkStrategy === '60') {
@@ -598,34 +625,36 @@
                     }
 
                     // Assign rooms per chunk
+                    let shiftAssignments = {};
+
                     selectedRooms.forEach(roomName => {
                         generatedRoster[roomName] = { type: 'EXAM', columns: {} };
                         
                         chunks.forEach((chk, idx) => {
                             const colKey = `Shift ${idx+1}`;
+                            if (!shiftAssignments[colKey]) shiftAssignments[colKey] = new Set();
                             
-                            // 1. Evaluate proximity and conflicts for available pool
                             let evaluatedStaff = [];
 
                             availablePool.forEach(staff => {
-                                const sTt = timetableData.filter(t => t.day === dayName && (t.teacherName === staff.name || t.teacher === staff.name));
+                                if (shiftAssignments[colKey].has(staff.email)) return; // Prevent duplicate names in same shift
+
+                                const sTt = activeDateSchedule.filter(t => t.teacherName === staff.name || t.teacher === staff.name);
                                 
                                 let hasConflict = false;
-                                let adjPenalty = 0; // The Proximity Penalty (Point 11)
+                                let adjPenalty = 0; 
 
                                 sTt.forEach(cls => {
-                                    if(!cls.timeRange) return;
-                                    const clsS = timeToMins(cls.timeRange.split(' - ')[0]);
-                                    const clsE = timeToMins(cls.timeRange.split(' - ')[1]);
+                                    if(!cls.timeRange && (!cls.start24 || !cls.end24)) return;
+                                    const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
+                                    const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
                                     
-                                    // Direct Overlap
                                     if (chk.s < clsE && chk.e > clsS) {
                                         hasConflict = true;
                                     }
 
-                                    // Adjacency Check: Does class start exactly when duty ends?
                                     if (clsS === chk.e || clsE === chk.s) {
-                                        adjPenalty += 5000; // Massive penalty pushes them to bottom of the list
+                                        adjPenalty += 5000; 
                                     }
                                 });
 
@@ -633,15 +662,15 @@
                                     evaluatedStaff.push({
                                         ...staff,
                                         adjPenalty: adjPenalty,
-                                        totalScore: getTeacherLoad(staff.name, dayName).mins + adjPenalty
+                                        totalScore: getTeacherLoadFromSchedule(activeDateSchedule, staff.name).mins + adjPenalty
                                     });
                                 }
                             });
 
-                            // 2. Sort by lowest score (least busy + fewest adjacency penalties)
                             evaluatedStaff.sort((a,b) => a.totalScore - b.totalScore);
-                            
                             let assigned = evaluatedStaff.length > 0 ? evaluatedStaff[0] : null;
+
+                            if (assigned) shiftAssignments[colKey].add(assigned.email);
 
                             generatedRoster[roomName].columns[colKey] = {
                                 status: assigned ? 'ASSIGNED' : 'UNSTAFFED',
@@ -678,7 +707,6 @@
             const rooms = Object.keys(generatedRoster);
             if (rooms.length === 0) return;
 
-            // Determine columns based on the first room
             const cols = Object.keys(generatedRoster[rooms[0]].columns);
 
             head.innerHTML = `<tr>
@@ -725,7 +753,7 @@
         }
 
         // --- MANUAL EDITING ---
-        function openEditModal(roomName, colKey) {
+        async function openEditModal(roomName, colKey) {
             currentEditParams = { roomName, colKey };
             const data = generatedRoster[roomName].columns[colKey];
             
@@ -741,14 +769,14 @@
             if (data && data.staff) {
                 const firstMatchedDept = depts.find(d => data.staff.rawDept.includes(d)) || 'General';
                 document.getElementById('edit-dept').value = firstMatchedDept;
-                populateEditStaff();
+                await populateEditStaff();
                 document.getElementById('edit-staff').value = data.staff.email;
             }
 
             document.getElementById('edit-modal').classList.replace('hidden', 'flex');
         }
 
-        function populateEditStaff() {
+        async function populateEditStaff() {
             const dept = document.getElementById('edit-dept').value;
             const staffSelect = document.getElementById('edit-staff');
             document.getElementById('edit-warning-box').classList.add('hidden');
@@ -762,13 +790,16 @@
             let bStart = timeToMins(data.timing.split(' - ')[0]);
             let bEnd = timeToMins(data.timing.split(' - ')[1]);
             
-            // Assume day based on mode
+            let scheduleToCheck = timetableData; 
             let targetDay;
+            
             if (currentMode === 'LUNCH') {
-                targetDay = currentEditParams.colKey; // In lunch, cols are days
+                targetDay = currentEditParams.colKey;
+                scheduleToCheck = timetableData.filter(t => t.day === targetDay);
             } else {
-                const eDate = document.getElementById('exam-target-date').value || document.getElementById('exam-select-dropdown').value.split('|')[0];
+                const eDate = document.getElementById('exam-select-dropdown').value.split('|')[0];
                 targetDay = DAYS_OF_WEEK[new Date(eDate).getDay()];
+                if(activeDateSchedule && activeDateSchedule.length > 0) scheduleToCheck = activeDateSchedule;
             }
 
             const staffInDept = staffData.filter(s => s.rawDept.includes(dept)).sort((a,b) => a.name.localeCompare(b.name));
@@ -777,12 +808,12 @@
             let busyGroup = '';
 
             staffInDept.forEach(s => {
-                const sTt = timetableData.filter(t => t.day === targetDay && (t.teacherName === s.name || t.teacher === s.name));
+                const sTt = scheduleToCheck.filter(t => t.teacherName === s.name || t.teacher === s.name);
                 const isBusyInClass = sTt.some(cls => {
-                    if(!cls.timeRange) return false;
-                    const sS = timeToMins(cls.timeRange.split(' - ')[0]);
-                    const sE = timeToMins(cls.timeRange.split(' - ')[1]);
-                    return (bStart < sE && bEnd > sS);
+                    if(!cls.timeRange && (!cls.start24 || !cls.end24)) return false;
+                    const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
+                    const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
+                    return (bStart < clsE && bEnd > clsS);
                 });
 
                 let alreadyOnDuty = false;
@@ -799,7 +830,8 @@
                 if (isBusyInClass) reason = " (In Class)";
                 else if (alreadyOnDuty) reason = " (On Duty)";
 
-                const optionHtml = `<option value="${s.email}">${s.name}${reason}</option>`;
+                const loadMins = getTeacherLoadFromSchedule(scheduleToCheck, s.name).mins;
+                const optionHtml = `<option value="${s.email}">${s.name}${reason} (Load: ${loadMins}m)</option>`;
                 
                 if (isBusyInClass || alreadyOnDuty) busyGroup += optionHtml;
                 else availableGroup += optionHtml;
