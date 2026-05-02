@@ -2795,14 +2795,102 @@ async function generateExamSchedule() {
                 masterDayData.forEach(m => {
                     if (!targetKeys.includes(`${m.className}|${m.section}`)) transformedSchedule.push(m);
                 });
-
-                targetClassesData.forEach(target => {
-                    const { className: cName, sectionName: sName, lunchGroup, breakMode, examType, examTitle, testedSubjects, examStart, examEnd } = target;
+targetClassesData.forEach(target => {
+                    const { className: cName, sectionName: sName, lunchGroup, breakMode, testedSubjects, examStart, examEnd } = target;
                     const classMaster = masterDayData.filter(m => m.className === cName && m.section === sName);
                     if (classMaster.length === 0) return;
 
-                    // Pull dynamic rules specific to THIS section's chosen type (UT or OT)
-                    const bellRules = allBellRules[examType.toLowerCase()];
+                    const bellRules = allBellRules[type.toLowerCase()];
+                    const winStart = universalTimeToMins(bellRules.lunchStart);
+                    const lunchDur = parseInt(bellRules.lunchDuration) || 30;
+
+                    const eStartMins = universalTimeToMins(examStart || bellRules.examStart);
+                    const eEndMins = universalTimeToMins(examEnd || bellRules.examEnd);
+
+                    let targetLunchStart = winStart + ((lunchGroup - 1) * lunchDur);
+
+                    let schoolEnd = 0;
+                    let originalSubs = [];
+                    let seenSubs = new Set();
+
+                    classMaster.forEach(m => {
+                        const em = universalTimeToMins(m.end24);
+                        if (em > schoolEnd) schoolEnd = em;
+                        
+                        const subName = m.subject.toUpperCase();
+                        if (!['BREAK', 'ASSEMBLY', 'EVENT'].includes(subName)) {
+                            if (type === 'OT') {
+                                // For OT, we strictly only grab the subjects you selected in the Doubt checkboxes
+                                if (!seenSubs.has(subName) && testedSubjects.includes(subName)) {
+                                    originalSubs.push(m);
+                                    seenSubs.add(subName);
+                                }
+                            } else {
+                                // For UT, we just grab everything on their normal timetable
+                                originalSubs.push(m);
+                            }
+                        }
+                    });
+                    
+                    originalSubs.sort((a,b) => universalTimeToMins(a.start24) - universalTimeToMins(b.start24));
+
+                    transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(eStartMins), end24: minsTo24(eEndMins), subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: globalTitle, room: "SHUFFLED" });
+
+                    let totalAvailable = schoolEnd - eEndMins;
+                    
+                    if (originalSubs.length === 0 || totalAvailable <= 0) {
+                        transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(eEndMins), end24: minsTo24(eEndMins + lunchDur), subject: "BREAK", teacher: "NONE", remark: `Group ${lunchGroup} Lunch`, room: "" });
+                        return;
+                    }
+
+                    // =================================================================================
+                    // MATH BRANCH 1: OT LOGIC (SINGLE DOUBT SESSION, PERFECT EQUAL SPLIT)
+                    // =================================================================================
+                    if (type === 'OT') {
+                        // OT ignores breaks and gaps. It just splits the remaining time perfectly among the tested subjects.
+                        let totalTeachingMins = totalAvailable - lunchDur;
+                        let perSubjectMins = Math.floor(totalTeachingMins / originalSubs.length);
+                        let remainder = totalTeachingMins % originalSubs.length;
+                        
+                        let cursor = eEndMins;
+                        let lunchPlaced = false;
+
+                        originalSubs.forEach((sub, idx) => {
+                            // Check if lunch should happen before this subject starts
+                            if (!lunchPlaced && cursor >= targetLunchStart - 15) {
+                                let lEnd = cursor + lunchDur;
+                                transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(cursor), end24: minsTo24(lEnd), subject: "BREAK", teacher: "NONE", room: "", remark: `Group ${lunchGroup} Lunch` });
+                                cursor = lEnd;
+                                lunchPlaced = true;
+                            }
+
+                            // Give extra remainder minutes to the first few subjects
+                            let myDur = perSubjectMins + (remainder > 0 ? 1 : 0);
+                            if (remainder > 0) remainder--;
+
+                            let myEnd = cursor + myDur;
+                            
+                            // If this is the absolute last block before the bell, snap to the bell
+                            if (idx === originalSubs.length - 1 && lunchPlaced) {
+                                myEnd = schoolEnd;
+                            }
+
+                            transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(cursor), end24: minsTo24(myEnd), subject: sub.subject, teacher: sub.teacher, room: sub.room, remark: "Doubt Session" });
+                            cursor = myEnd;
+                        });
+
+                        // Failsafe if Lunch got skipped
+                        if (!lunchPlaced) {
+                            transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(cursor), end24: minsTo24(cursor + lunchDur), subject: "BREAK", teacher: "NONE", room: "", remark: `Group ${lunchGroup} Lunch` });
+                        }
+                        
+                        return; // Exit the loop for this class, skip the UT logic
+                    }
+
+
+                    // =================================================================================
+                    // MATH BRANCH 2: UT LOGIC (SMART GAPS & BALANCED ROUND-ROBIN)
+                    // =================================================================================
                     const winStart = universalTimeToMins(bellRules.lunchStart);
                     const lunchDur = parseInt(bellRules.lunchDuration) || 30;
 
