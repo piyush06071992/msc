@@ -1803,10 +1803,10 @@ function peekTeacher(btn) {
         function openPrintModal() { document.getElementById('print-modal').classList.replace('hidden', 'flex'); }
 
         async function generateExportData() {
-            alert("Ensure you have clicked 'Save All Changes' first, as the export pulls directly from the live database.");
             const scope = document.getElementById('p-scope').value;
             const timeframe = document.getElementById('p-timeframe').value;
             const selectedDay = document.getElementById('p-day').value;
+            const selectedDate = document.getElementById('p-date').value;
             const wrapper = document.getElementById('export-table-wrapper');
             const hiddenArea = document.getElementById('print-render-area');
             const btn = document.getElementById('print-exec-btn');
@@ -1814,7 +1814,33 @@ function peekTeacher(btn) {
             btn.innerText = "Building..."; btn.disabled = true;
 
             try {
-                const allData = globalTimetable;
+                let allData = [];
+                let displayDateStr = "";
+
+                // 1. SMART FETCHING LOGIC
+                if (timeframe === "DATE") {
+                    if (!selectedDate) throw new Error("Please select a specific date first.");
+                    
+                    // Check if an override (like an Exam Day) exists for this date
+                    const historySnap = await db.collection("timetable_history").doc(selectedDate).get();
+                    if (historySnap.exists && historySnap.data().schedule) {
+                        allData = historySnap.data().schedule;
+                    } else {
+                        // Fall back to the normal Live Master schedule for that specific weekday
+                        const dayName = new Date(selectedDate).toLocaleDateString('en-US', { weekday: 'long' });
+                        const masterSnap = await db.collection("timetable").where("day", "==", dayName).get();
+                        allData = masterSnap.docs.map(d => d.data());
+                    }
+                    displayDateStr = new Date(selectedDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                    
+                } else if (timeframe === "DAY") {
+                    const snap = await db.collection("timetable").where("day", "==", selectedDay).get();
+                    allData = snap.docs.map(d => d.data());
+                } else {
+                    const snap = await db.collection("timetable").get();
+                    allData = snap.docs.map(d => d.data());
+                }
+
                 let exportHtml = "";
 
                 let targetStructures = structureData;
@@ -1825,11 +1851,6 @@ function peekTeacher(btn) {
 
                 targetStructures.forEach(struct => {
                     let secSlots = allData.filter(t => t.className === struct.className && t.section === struct.sectionName);
-                    
-                    // Filter down to a single day if requested
-                    if(timeframe === "DAY") {
-                        secSlots = secSlots.filter(t => t.day === selectedDay);
-                    }
                     
                     if(secSlots.length === 0) return;
 
@@ -1850,7 +1871,11 @@ function peekTeacher(btn) {
                     const sortedContainers = Object.values(timeContainers).sort((a,b) => a.start24.localeCompare(b.start24));
                     if(sortedContainers.length === 0) return;
 
-                    const headerTitle = timeframe === "WEEK" ? `${struct.className} - SEC: ${struct.sectionName} (Full Week)` : `${struct.className} - SEC: ${struct.sectionName} (${selectedDay})`;
+                    // Dynamically set the title based on the selected mode
+                    let headerTitle = `${struct.className} - SEC: ${struct.sectionName}`;
+                    if (timeframe === "WEEK") headerTitle += " (Full Week)";
+                    else if (timeframe === "DAY") headerTitle += ` (${selectedDay})`;
+                    else if (timeframe === "DATE") headerTitle += ` (${displayDateStr})`;
 
                     exportHtml += `
                         <div class="page-break" style="margin-bottom: 30px;">
