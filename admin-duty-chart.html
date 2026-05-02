@@ -426,12 +426,26 @@
             `).join('');
         }
 
+        function saveDutyPrefs() {
+            const selectedClasses = Array.from(document.querySelectorAll('.class-cb:checked')).map(cb => cb.value);
+            const exemptedStaff = Array.from(document.querySelectorAll('.staff-cb:checked')).map(cb => cb.value);
+            localStorage.setItem('minerva_duty_prefs', JSON.stringify({ classes: selectedClasses, staff: exemptedStaff }));
+        }
+
         function renderSelectors() {
-            document.getElementById('class-list').innerHTML = structureData.map(s => `
+            const prefs = JSON.parse(localStorage.getItem('minerva_duty_prefs')) || { classes: [], staff: [] };
+            const hasClassPrefs = prefs.classes.length > 0;
+
+            document.getElementById('class-list').innerHTML = structureData.map(s => {
+                const val = `${s.className}|${s.sectionName}`;
+                // Default to checked on first load, otherwise rely on memory
+                const isChecked = (!hasClassPrefs || prefs.classes.includes(val)) ? 'checked' : '';
+                return `
                 <label class="flex items-center gap-3 p-2 bg-slate-50 hover:bg-blue-50 rounded-xl cursor-pointer border border-transparent transition-all">
-                    <input type="checkbox" class="class-cb w-4 h-4 accent-blue-600" value="${s.className}|${s.sectionName}">
+                    <input type="checkbox" class="class-cb w-4 h-4 accent-blue-600" value="${val}" ${isChecked} onchange="saveDutyPrefs()">
                     <span class="text-[10px] sm:text-xs font-bold text-slate-700 uppercase tracking-tight">${s.className} - ${s.sectionName}</span>
-                </label>`).join('');
+                </label>`;
+            }).join('');
 
             const depts = getUniqueDepartments();
             document.getElementById('staff-list').innerHTML = depts.map(d => {
@@ -452,14 +466,23 @@
                         </div>
                     </summary>
                     <div class="p-2 space-y-1 bg-white border-t border-slate-50">
-                        ${members.map(s => `
+                        ${members.map(s => {
+                            const isChecked = prefs.staff.includes(s.email) ? 'checked' : '';
+                            return `
                             <label class="flex items-center gap-3 p-2 hover:bg-rose-50 rounded-lg cursor-pointer transition-colors">
-                                <input type="checkbox" class="staff-cb dept-${deptId}" value="${s.email}" onchange="checkMasterCb('${deptId}')">
+                                <input type="checkbox" class="staff-cb dept-${deptId}" value="${s.email}" ${isChecked} onchange="checkMasterCb('${deptId}')">
                                 <span class="text-[10px] font-semibold text-slate-700">${s.name}</span>
-                            </label>`).join('')}
+                            </label>`;
+                        }).join('')}
                     </div>
                 </details>`;
             }).join('');
+
+            // Set the master department checkboxes based on the loaded staff memory
+            depts.forEach(d => {
+                const deptId = d.replace(/[^a-zA-Z0-9]/g, '');
+                checkMasterCb(deptId, false);
+            });
         }
 
         function toggleAll(selector, forceState = null) {
@@ -467,19 +490,26 @@
             const targetState = forceState !== null ? forceState : Array.from(cbs).some(c => !c.checked);
             cbs.forEach(c => {
                 c.checked = targetState;
-                if (c.classList.contains('dept-master-cb')) c.onchange(); 
+                if (c.classList.contains('dept-master-cb')) {
+                    const match = c.getAttribute('onchange').match(/'([^']+)'/);
+                    if(match) document.querySelectorAll(`.dept-${match[1]}`).forEach(i => i.checked = targetState);
+                } 
             });
+            saveDutyPrefs();
         }
 
         function toggleDept(cb, deptId) {
             document.querySelectorAll(`.dept-${deptId}`).forEach(i => i.checked = cb.checked);
+            saveDutyPrefs();
         }
 
-        function checkMasterCb(deptId) {
+        function checkMasterCb(deptId, triggerSave = true) {
             const allCbs = document.querySelectorAll(`.dept-${deptId}`);
+            if(allCbs.length === 0) return;
             const allChecked = Array.from(allCbs).every(cb => cb.checked);
             const masterCb = document.querySelector(`.dept-master-cb[onchange*="${deptId}"]`);
             if (masterCb) masterCb.checked = allChecked;
+            if(triggerSave) saveDutyPrefs();
         }
 
         function handleBack() {
@@ -544,8 +574,9 @@
                 } else {
                     oldRosterState = {};
                     console.log("No roster found. Auto-generating...");
-                    toggleAll('.class-cb', true); 
-                    await runLunchAlgorithm(true); 
+                    // We DO NOT force 'Select All' here anymore, so it honors user preferences
+                    // toggleAll('.class-cb', true); 
+                    // await runLunchAlgorithm(true); 
                 }
             } catch(e) {
                 console.log("Error loading roster:", e);
