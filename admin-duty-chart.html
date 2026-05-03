@@ -1466,24 +1466,24 @@
             
             const btn = document.querySelector('button[onclick="saveCurrentRoster()"]');
             const originalText = btn ? btn.innerText : "";
-            if(btn) btn.innerText = "Saving...";
+            if(btn) btn.innerText = "Saving & Notifying...";
             
             try {
                 let docId = "duty_roster_" + Date.now();
-                let displayDate = "Weekly Schedule";
+                let dutyLabel = "Duty Schedule Update";
                 
                 if(currentMode === 'EXAM') {
                     const eDate = document.getElementById('exam-select-dropdown').value.split('|')[0];
                     docId = "exam_duty_" + eDate;
-                    displayDate = eDate;
+                    dutyLabel = `Exam Duty for ${eDate}`;
                 } else {
                     const today = new Date();
                     const day = today.getDay();
                     const diffToMonday = today.getDate() - day + (day === 0 ? -6 : 1);
                     const monday = new Date(today.setDate(diffToMonday));
-                    const mondayIso = monday.toISOString().split('T')[0];
-                    docId = "lunch_duty_" + mondayIso;
-                    displayDate = "Week starting " + mondayIso;
+                    const monIso = monday.toISOString().split('T')[0];
+                    docId = "lunch_duty_" + monIso;
+                    dutyLabel = `Lunch Duty Week: ${monIso}`;
                 }
 
                 await db.collection("duty_rosters").doc(docId).set({
@@ -1493,30 +1493,31 @@
                     timestamp: Date.now()
                 });
 
-                // --- NEW: EXTRACT TEACHERS FOR EMAIL NOTIFICATION ---
-                let affectedTeachersMap = new Map(); // Use Map to avoid sending 2 emails to same person if in 2 shifts
+                // --- EMAIL NOTIFICATION LOGIC ---
+                let teachersToNotifyMap = new Map();
                 
-                Object.keys(generatedRoster).forEach(roomName => {
-                    const room = generatedRoster[roomName];
-                    Object.keys(room.columns).forEach(colKey => {
-                        const shift = room.columns[colKey];
+                Object.keys(generatedRoster).forEach(room => {
+                    const columns = generatedRoster[room].columns;
+                    Object.keys(columns).forEach(col => {
+                        const shift = columns[col];
                         if (shift.status === 'ASSIGNED' && shift.staff && shift.staff.email) {
                             const email = shift.staff.email.trim().toLowerCase();
-                            const name = shift.staff.name;
-                            
-                            if(!affectedTeachersMap.has(email)) {
-                                affectedTeachersMap.set(email, { name: name, email: email });
+                            if(!teachersToNotifyMap.has(email)) {
+                                teachersToNotifyMap.set(email, { 
+                                    name: shift.staff.name, 
+                                    email: email 
+                                });
                             }
                         }
                     });
                 });
 
-                const teachersList = Array.from(affectedTeachersMap.values());
+                const affectedTeachers = Array.from(teachersToNotifyMap.values());
 
-                if (teachersList.length > 0) {
-                    sendDutyEmailNotification(teachersList, currentMode, displayDate);
+                if (affectedTeachers.length > 0) {
+                    sendDutyEmailNotification(affectedTeachers, currentMode, dutyLabel);
                 } else {
-                    alert("✅ Duty Chart saved. No teachers were assigned in this roster.");
+                    alert("✅ Duty Chart saved. (No teachers assigned to notify)");
                 }
                 
                 if(btn) btn.innerText = originalText;
@@ -1525,6 +1526,26 @@
                 alert("Database Error: " + e.message); 
                 if(btn) btn.innerText = originalText;
             }
+        }
+
+        function sendDutyEmailNotification(teachers, mode, dateLabel) {
+            const payload = { 
+                type: "DUTY_CHART_UPDATE", 
+                dutyType: mode,
+                date: dateLabel,
+                teachersAffected: teachers 
+            };
+            
+            // Using your Timetable script URL
+            const scriptURL = "https://script.google.com/macros/s/AKfycbyWUqGV1jd73NK_3zOU2Sy6wXCwcrjCG0ErqyRHM41f7qzcsNwxwjXfUlk2ZjFVeUmcdQ/exec";
+
+            fetch(scriptURL, {
+                method: "POST",
+                mode: "no-cors",
+                body: JSON.stringify(payload)
+            }).catch(e => console.error("Email trigger failed:", e));
+
+            alert(`✅ Duty Chart Saved Successfully!\n\nNotifications sent to ${teachers.length} staff members.`);
         }
 
         function printChart() {
