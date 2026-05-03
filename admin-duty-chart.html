@@ -1544,80 +1544,92 @@
         }
 
         function healRoomTimeline(roomName) {
-            // Get all current shifts for this room and sort them
             let roomShifts = Object.values(generatedRoster[roomName].columns).sort((a,b) => a.rawStart - b.rawStart);
             
-            // Build a "Busy List" of emails currently assigned ANYWHERE in the roster
-            let busyEmails = new Set();
+            // 1. Calculate Absolute Goal End (Max end time of any room in the roster)
+            let targetEnd = 0;
             Object.keys(generatedRoster).forEach(r => {
                 Object.values(generatedRoster[r].columns).forEach(c => {
-                     if(c.staff && c.staff.email) busyEmails.add(c.staff.email.trim().toLowerCase());
+                    if(c.rawEnd > targetEnd) targetEnd = c.rawEnd;
                 });
             });
 
-            // Re-map the columns for the room
             generatedRoster[roomName].columns = {};
             let shiftCounter = 1;
-            
             const exemptedStaffEmails = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value.trim().toLowerCase());
             const availablePool = staffData.filter(s => !exemptedStaffEmails.includes(s.email.trim().toLowerCase()));
+            
+            let busyEmails = new Set();
+            Object.keys(generatedRoster).forEach(r => {
+                Object.values(generatedRoster[r].columns).forEach(c => {
+                    if(c.staff && c.staff.email) busyEmails.add(c.staff.email.trim().toLowerCase());
+                });
+            });
 
             let healerWarning = false;
 
             for (let i = 0; i < roomShifts.length; i++) {
                 const currentShift = roomShifts[i];
                 
-                // Add the teacher in the current shift to the busy list so they aren't picked for the next gap
-                if (currentShift.staff) busyEmails.add(currentShift.staff.email.trim().toLowerCase());
-                
+                // Safety: Fix negative or zero durations
+                if (currentShift.rawEnd <= currentShift.rawStart) {
+                    currentShift.rawEnd = currentShift.rawStart + 5;
+                    currentShift.timing = `${format12Hour(minsTo24(currentShift.rawStart))} - ${format12Hour(minsTo24(currentShift.rawEnd))} (5m)`;
+                }
+
                 generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = currentShift;
 
-                // Gap Detection
+                // GAP CHECK: Between shifts
                 if (i < roomShifts.length - 1) {
                     const nextShift = roomShifts[i + 1];
                     const gapSize = nextShift.rawStart - currentShift.rawEnd;
-                    
-                    if (gapSize > 5) { // If gap is more than 5 minutes
-                        let gapStart = currentShift.rawEnd;
-                        let gapEnd = nextShift.rawStart;
-                        
-                        let newCol = {
-                            status: 'UNSTAFFED', staff: null,
-                            timing: `${format12Hour(minsTo24(gapStart))} - ${format12Hour(minsTo24(gapEnd))} (${gapEnd - gapStart}m)`,
-                            rawStart: gapStart, rawEnd: gapEnd
-                        };
-                        
-                        // Find a teacher NOT in our busy list
-                        let evaluatedStaff = [];
-                        availablePool.forEach(s => {
-                            const sEmail = s.email.trim().toLowerCase();
-                            if (busyEmails.has(sEmail)) return; 
-                            
-                            const sTt = activeDateSchedule.filter(t => (t.teacherName === s.name || t.teacher === s.name));
-                            let hasConflict = false;
-                            sTt.forEach(cls => {
-                                const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
-                                const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
-                                if (gapStart < clsE && gapEnd > clsS) hasConflict = true;
-                            });
-
-                            if (!hasConflict) {
-                                evaluatedStaff.push({...s, totalScore: getTeacherLoadFromSchedule(activeDateSchedule, s.name).mins});
-                            }
-                        });
-
-                        evaluatedStaff.sort((a,b) => a.totalScore - b.totalScore);
-                        if (evaluatedStaff.length > 0) {
-                            newCol.status = 'ASSIGNED';
-                            newCol.staff = evaluatedStaff[0];
-                            busyEmails.add(newCol.staff.email.trim().toLowerCase()); // Block them immediately
-                        } else { healerWarning = true; }
-
+                    if (gapSize > 5) {
+                        const newCol = fillHealedGap(currentShift.rawEnd, nextShift.rawStart, availablePool, busyEmails);
+                        if (!newCol.staff) healerWarning = true;
                         generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = newCol;
                     }
                 }
             }
-            if(healerWarning) setTimeout(() => alert("⚠️ No free teachers found to fill the new time gap!"), 500);
+
+            // 2. FINAL GAP CHECK: Detect shortening of the last shift
+            const finalShift = roomShifts[roomShifts.length - 1];
+            if (finalShift && (targetEnd - finalShift.rawEnd) > 5) {
+                const newCol = fillHealedGap(finalShift.rawEnd, targetEnd, availablePool, busyEmails);
+                if (!newCol.staff) healerWarning = true;
+                generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = newCol;
+            }
+
+            if(healerWarning) setTimeout(() => alert("⚠️ No free staff found to fill the new time gap!"), 500);
+            renderGeneratedGrid();
+        }
+
+        // Internal helper to search and assign staff for gaps
+        function fillHealedGap(gapStart, gapEnd, pool, blocklist) {
+            let newShift = {
+                status: 'UNSTAFFED', staff: null,
+                timing: `${format12Hour(minsTo24(gapStart))} - ${format12Hour(minsTo24(gapEnd))} (${gapEnd - gapStart}m)`,
+                rawStart: gapStart, rawEnd: gapEnd
+            };
+            let evaluatedStaff = [];
+            pool.forEach(s => {
+                const email = s.email.trim().toLowerCase();
+                if (blocklist.has(email)) return; 
+                const sTt = activeDateSchedule.filter(t => (t.teacherName === s.name || t.teacher === s.name));
+                let hasConflict = false;
+                sTt.forEach(cls => {
+                    const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
+                    const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
+                    if (gapStart < clsE && gapEnd > clsS) hasConflict = true;
+                });
+                if (!hasConflict) evaluatedStaff.push({...s, score: getTeacherLoadFromSchedule(activeDateSchedule, s.name).mins});
+            });
+            evaluatedStaff.sort((a,b) => a.score - b.score);
+            if (evaluatedStaff.length > 0) {
+                newShift.status = 'ASSIGNED';
+                newShift.staff = evaluatedStaff[0];
+                blocklist.add(newShift.staff.email.trim().toLowerCase());
+            }
+            return newShift;
         }
 
         async function syncPostGenTimings() {
