@@ -1254,7 +1254,7 @@
             panel.classList.remove('hidden');
         }
 
-      function saveManualEdit() {
+     function saveManualEdit() {
             const email = document.getElementById('edit-staff').value;
             let staff = null;
             if(email) staff = staffData.find(s => s.email === email);
@@ -1267,7 +1267,7 @@
             
             let targetCol = generatedRoster[roomName].columns[colKey];
             
-            // 1. Update the current shift's data
+            // Update current shift's data
             targetCol.status = staff ? 'ASSIGNED' : 'UNSTAFFED';
             targetCol.staff = staff;
             
@@ -1277,7 +1277,7 @@
                 const durLabel = `${targetCol.rawEnd - targetCol.rawStart}m`;
                 targetCol.timing = `${format12Hour(sInp)} - ${format12Hour(eInp)} (${durLabel})`;
                 
-                // 2. TIMELINE HEALER: Rebuild the room's shift list
+                // Trigger the healed timeline reconstruction
                 healRoomTimeline(roomName);
             }
             
@@ -1286,32 +1286,40 @@
         }
 
         function healRoomTimeline(roomName) {
+            // Get all current shifts for this room and sort them
             let roomShifts = Object.values(generatedRoster[roomName].columns).sort((a,b) => a.rawStart - b.rawStart);
+            
+            // Build a "Busy List" of emails currently assigned ANYWHERE in the roster
+            let busyEmails = new Set();
+            Object.keys(generatedRoster).forEach(r => {
+                Object.values(generatedRoster[r].columns).forEach(c => {
+                     if(c.staff && c.staff.email) busyEmails.add(c.staff.email.trim().toLowerCase());
+                });
+            });
+
+            // Re-map the columns for the room
             generatedRoster[roomName].columns = {};
             let shiftCounter = 1;
             
-            const exemptedStaffEmails = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value);
-            const availablePool = staffData.filter(s => !exemptedStaffEmails.includes(s.email));
-            
-            // Track everyone assigned across the entire chart to prevent double-duty
-            let dailyAssignments = new Set();
-            Object.keys(generatedRoster).forEach(r => {
-                Object.values(generatedRoster[r].columns).forEach(c => {
-                     if(c.staff) dailyAssignments.add(c.staff.email);
-                });
-            });
+            const exemptedStaffEmails = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value.trim().toLowerCase());
+            const availablePool = staffData.filter(s => !exemptedStaffEmails.includes(s.email.trim().toLowerCase()));
 
             let healerWarning = false;
 
             for (let i = 0; i < roomShifts.length; i++) {
                 const currentShift = roomShifts[i];
+                
+                // Add the teacher in the current shift to the busy list so they aren't picked for the next gap
+                if (currentShift.staff) busyEmails.add(currentShift.staff.email.trim().toLowerCase());
+                
                 generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = currentShift;
 
+                // Gap Detection
                 if (i < roomShifts.length - 1) {
                     const nextShift = roomShifts[i + 1];
                     const gapSize = nextShift.rawStart - currentShift.rawEnd;
                     
-                    if (gapSize > 10) {
+                    if (gapSize > 5) { // If gap is more than 5 minutes
                         let gapStart = currentShift.rawEnd;
                         let gapEnd = nextShift.rawStart;
                         
@@ -1321,12 +1329,13 @@
                             rawStart: gapStart, rawEnd: gapEnd
                         };
                         
-                        // Find a teacher NOT already used today
+                        // Find a teacher NOT in our busy list
                         let evaluatedStaff = [];
                         availablePool.forEach(s => {
-                            if (dailyAssignments.has(s.email)) return; 
+                            const sEmail = s.email.trim().toLowerCase();
+                            if (busyEmails.has(sEmail)) return; 
                             
-                            const sTt = activeDateSchedule.filter(t => t.teacherName === s.name || t.teacher === s.name);
+                            const sTt = activeDateSchedule.filter(t => (t.teacherName === s.name || t.teacher === s.name));
                             let hasConflict = false;
                             sTt.forEach(cls => {
                                 const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
@@ -1343,65 +1352,74 @@
                         if (evaluatedStaff.length > 0) {
                             newCol.status = 'ASSIGNED';
                             newCol.staff = evaluatedStaff[0];
-                            dailyAssignments.add(newCol.staff.email); // Block this teacher for future healer cycles
+                            busyEmails.add(newCol.staff.email.trim().toLowerCase()); // Block them immediately
                         } else { healerWarning = true; }
 
                         generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = newCol;
                     }
                 }
             }
-            if(healerWarning) setTimeout(() => alert("⚠️ Gap detected! No free teachers available for the new slot."), 500);
+            if(healerWarning) setTimeout(() => alert("⚠️ No free teachers found to fill the new time gap!"), 500);
         }
 
         async function syncPostGenTimings() {
-            if (!confirm("This will overwrite the shift structure of ALL rooms to match this one and re-allocate teachers. Continue?")) return;
+            if (!confirm("This will apply these shift timings to ALL rooms and re-find available teachers. Continue?")) return;
             
             const sourceRoom = currentEditParams.roomName;
-            const sourceShifts = JSON.parse(JSON.stringify(Object.values(generatedRoster[sourceRoom].columns)));
+            // Clean copy of the structure without the teachers
+            const timingStructure = Object.values(generatedRoster[sourceRoom].columns).map(c => ({
+                rawStart: c.rawStart,
+                rawEnd: c.rawEnd,
+                timing: c.timing
+            })).sort((a,b) => a.rawStart - b.rawStart);
             
-            // Build fresh blocklist based on existing assigned staff in rooms we AREN'T overwriting yet
-            let dailyAssignments = new Set();
-            const exemptedStaffEmails = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value);
-            const availablePool = staffData.filter(s => !exemptedStaffEmails.includes(s.email));
+            let busyEmails = new Set();
+            // Start by blocking teachers in the source room so they aren't moved
+            Object.values(generatedRoster[sourceRoom].columns).forEach(c => {
+                if(c.staff) busyEmails.add(c.staff.email.trim().toLowerCase());
+            });
+
+            const exemptedStaffEmails = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value.trim().toLowerCase());
+            const availablePool = staffData.filter(s => !exemptedStaffEmails.includes(s.email.trim().toLowerCase()));
 
             Object.keys(generatedRoster).forEach(roomName => {
-                // Clear other rooms to prep for re-allocation
-                if (roomName !== sourceRoom) {
-                    generatedRoster[roomName].columns = {};
-                    sourceShifts.forEach((template, idx) => {
-                        let newShift = {...template, staff: null, status: 'UNSTAFFED'};
-                        
-                        // Try to find a free teacher for this new block
-                        let evaluatedStaff = [];
-                        availablePool.forEach(s => {
-                            if (dailyAssignments.has(s.email)) return;
-                            const sTt = activeDateSchedule.filter(t => t.teacherName === s.name || t.teacher === s.name);
-                            let hasConflict = false;
-                            sTt.forEach(cls => {
-                                const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
-                                const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
-                                if (template.rawStart < clsE && template.rawEnd > clsS) hasConflict = true;
-                            });
-                            if (!hasConflict) evaluatedStaff.push({...s, score: getTeacherLoadFromSchedule(activeDateSchedule, s.name).mins});
-                        });
+                if (roomName === sourceRoom) return;
 
-                        evaluatedStaff.sort((a,b) => a.score - b.score);
-                        if (evaluatedStaff.length > 0) {
-                            newShift.staff = evaluatedStaff[0];
-                            newShift.status = 'ASSIGNED';
-                            dailyAssignments.add(newShift.staff.email);
-                        }
-                        generatedRoster[roomName].columns[`Shift ${idx+1}`] = newShift;
+                generatedRoster[roomName].columns = {};
+                timingStructure.forEach((tpl, idx) => {
+                    let newShift = { 
+                        status: 'UNSTAFFED', staff: null, 
+                        rawStart: tpl.rawStart, rawEnd: tpl.rawEnd, timing: tpl.timing 
+                    };
+                    
+                    let evaluatedStaff = [];
+                    availablePool.forEach(s => {
+                        const sEmail = s.email.trim().toLowerCase();
+                        if (busyEmails.has(sEmail)) return;
+                        
+                        const sTt = activeDateSchedule.filter(t => (t.teacherName === s.name || t.teacher === s.name));
+                        let hasConflict = false;
+                        sTt.forEach(cls => {
+                            const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
+                            const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
+                            if (tpl.rawStart < clsE && tpl.rawEnd > clsS) hasConflict = true;
+                        });
+                        if (!hasConflict) evaluatedStaff.push({...s, score: getTeacherLoadFromSchedule(activeDateSchedule, s.name).mins});
                     });
-                } else {
-                    // For the source room, keep the existing assignments
-                    Object.values(generatedRoster[roomName].columns).forEach(c => { if(c.staff) dailyAssignments.add(c.staff.email); });
-                }
+
+                    evaluatedStaff.sort((a,b) => a.score - b.score);
+                    if (evaluatedStaff.length > 0) {
+                        newShift.staff = evaluatedStaff[0];
+                        newShift.status = 'ASSIGNED';
+                        busyEmails.add(newShift.staff.email.trim().toLowerCase());
+                    }
+                    generatedRoster[roomName].columns[`Shift ${idx+1}`] = newShift;
+                });
             });
 
             renderGeneratedGrid();
             closeEditModal();
-            alert("✅ All rooms synchronized to the new shift structure.");
+            alert("✅ All rooms updated with new timings and fresh teachers.");
         }
 
         function clearDutyCell() {
