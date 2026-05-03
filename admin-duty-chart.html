@@ -1460,7 +1460,7 @@
         }
 
         // --- DATABASE SAVE & EXPORTS ---
-        async function saveCurrentRoster() {
+       async function saveCurrentRoster() {
             if(!window.hasDutyRights) return; 
             if(Object.keys(generatedRoster).length === 0) return alert("Generate roster first.");
             
@@ -1470,15 +1470,20 @@
             
             try {
                 let docId = "duty_roster_" + Date.now();
+                let displayDate = "Weekly Schedule";
+                
                 if(currentMode === 'EXAM') {
                     const eDate = document.getElementById('exam-select-dropdown').value.split('|')[0];
                     docId = "exam_duty_" + eDate;
+                    displayDate = eDate;
                 } else {
                     const today = new Date();
                     const day = today.getDay();
                     const diffToMonday = today.getDate() - day + (day === 0 ? -6 : 1);
                     const monday = new Date(today.setDate(diffToMonday));
-                    docId = "lunch_duty_" + monday.toISOString().split('T')[0];
+                    const mondayIso = monday.toISOString().split('T')[0];
+                    docId = "lunch_duty_" + mondayIso;
+                    displayDate = "Week starting " + mondayIso;
                 }
 
                 await db.collection("duty_rosters").doc(docId).set({
@@ -1487,9 +1492,34 @@
                     instructions: customInstructions,
                     timestamp: Date.now()
                 });
+
+                // --- NEW: EXTRACT TEACHERS FOR EMAIL NOTIFICATION ---
+                let affectedTeachersMap = new Map(); // Use Map to avoid sending 2 emails to same person if in 2 shifts
                 
-                alert("✅ Duty Chart saved successfully to Database.");
-                if(btn) btn.innerText = "💾 Save Chart";
+                Object.keys(generatedRoster).forEach(roomName => {
+                    const room = generatedRoster[roomName];
+                    Object.keys(room.columns).forEach(colKey => {
+                        const shift = room.columns[colKey];
+                        if (shift.status === 'ASSIGNED' && shift.staff && shift.staff.email) {
+                            const email = shift.staff.email.trim().toLowerCase();
+                            const name = shift.staff.name;
+                            
+                            if(!affectedTeachersMap.has(email)) {
+                                affectedTeachersMap.set(email, { name: name, email: email });
+                            }
+                        }
+                    });
+                });
+
+                const teachersList = Array.from(affectedTeachersMap.values());
+
+                if (teachersList.length > 0) {
+                    sendDutyEmailNotification(teachersList, currentMode, displayDate);
+                } else {
+                    alert("✅ Duty Chart saved. No teachers were assigned in this roster.");
+                }
+                
+                if(btn) btn.innerText = originalText;
             } catch(e) { 
                 console.error("Save error:", e);
                 alert("Database Error: " + e.message); 
