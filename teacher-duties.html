@@ -102,25 +102,26 @@
             } catch (e) { console.error("Auth check failed:", e); }
         }
 
-        async function fetchDutyData() {
+      async function fetchDutyData() {
             const today = new Date();
+            const todayIso = today.toISOString().split('T')[0];
+            
+            // Calculate Monday for Lunch Duties
             const currentDayOfWeek = today.getDay(); 
             const diffToMonday = today.getDate() - currentDayOfWeek + (currentDayOfWeek === 0 ? -6 : 1);
-            const mondayDate = new Date(today.setDate(diffToMonday));
+            const mondayDate = new Date(new Date().setDate(diffToMonday));
             const weekId = "week_starting_" + mondayDate.toISOString().split('T')[0];
 
             try {
-                // 1. Check for Holidays First
+                // 1. Check for Holidays
                 const holSnap = await db.collection("school_holidays").get();
                 let isHoliday = false; let hReason = "";
-                
                 const cDate = new Date(); cDate.setHours(0,0,0,0);
+                
                 holSnap.forEach(doc => {
                     const h = doc.data();
-                    if(!h.startDate) return;
                     const hStart = new Date(h.startDate); hStart.setHours(0,0,0,0);
                     const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23,59,59,999);
-                    
                     if (cDate >= hStart && cDate <= hEnd && h.isFullDay) {
                         isHoliday = true; hReason = h.reason;
                     }
@@ -132,106 +133,131 @@
                     document.getElementById('today-container').classList.add('hidden');
                 }
 
-                // 2. Fetch the Duty Roster
-                const rosterDoc = await db.collection("duty_rosters").doc(weekId).get();
+                // 2. Fetch ALL Duty Rosters
+                const rosterSnap = await db.collection("duty_rosters").get();
                 
                 let myDutiesToday = [];
-                let myDutiesWeek = [];
+                let myDutiesUpcoming = [];
 
-                if (rosterDoc.exists) {
-                    const rosterData = rosterDoc.data().rosterData;
-                    const daysOfWeek = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                rosterSnap.forEach(doc => {
+                    const data = doc.data();
+                    const rosterId = doc.id;
+                    const rosterData = data.rosterData;
 
-                    Object.keys(rosterData).forEach(clsKey => {
-                        const clsData = rosterData[clsKey];
+                    if (data.type === 'EXAM') {
+                        // --- EXAM DUTY LOGIC ---
+                        const examDate = rosterId.replace('exam_duty_', '');
                         
-                        daysOfWeek.forEach(day => {
-                            const dayDuty = clsData.days[day];
-                            // Check if duty is ASSIGNED and the email matches the logged-in teacher
-                            if (dayDuty && dayDuty.status === 'ASSIGNED' && dayDuty.staff && dayDuty.staff.email === activeStaff.email) {
-                                const dutyObj = {
-                                    className: clsData.cName,
-                                    section: clsData.sName,
-                                    day: day,
-                                    timing: dayDuty.timing,
-                                    type: "Lunch / Break Duty"
-                                };
+                        Object.keys(rosterData).forEach(roomName => {
+                            const room = rosterData[roomName];
+                            Object.keys(room.columns).forEach(shiftName => {
+                                const shift = room.columns[shiftName];
                                 
-                                if (day === todayString) {
-                                    myDutiesToday.push(dutyObj);
-                                } else {
-                                    myDutiesWeek.push(dutyObj);
+                                if (shift.status === 'ASSIGNED' && shift.staff && shift.staff.email === activeStaff.email) {
+                                    const dutyObj = {
+                                        type: "Exam Duty",
+                                        date: examDate,
+                                        day: new Date(examDate).toLocaleDateString('en-US', { weekday: 'long' }),
+                                        room: roomName,
+                                        shift: shiftName,
+                                        timing: shift.timing,
+                                        isExam: true
+                                    };
+
+                                    if (examDate === todayIso) myDutiesToday.push(dutyObj);
+                                    else if (examDate > todayIso) myDutiesUpcoming.push(dutyObj);
                                 }
-                            }
+                            });
                         });
-                    });
-                }
+
+                    } else if (data.type === 'LUNCH' && rosterId === weekId) {
+                        // --- LUNCH DUTY LOGIC (Current Week Only) ---
+                        const daysOfWeek = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                        Object.keys(rosterData).forEach(clsKey => {
+                            const clsData = rosterData[clsKey];
+                            daysOfWeek.forEach(day => {
+                                const dayDuty = clsData.days[day];
+                                if (dayDuty && dayDuty.status === 'ASSIGNED' && dayDuty.staff?.email === activeStaff.email) {
+                                    const dutyObj = {
+                                        type: "Lunch Duty",
+                                        date: "Weekly",
+                                        day: day,
+                                        room: `${clsData.cName} | ${clsData.sName}`,
+                                        timing: dayDuty.timing,
+                                        isExam: false
+                                    };
+
+                                    if (day === todayString) myDutiesToday.push(dutyObj);
+                                    else myDutiesUpcoming.push(dutyObj);
+                                }
+                            });
+                        });
+                    }
+                });
 
                 renderTodayDuties(myDutiesToday, isHoliday);
-                renderWeeklyDuties(myDutiesWeek);
+                renderUpcomingDuties(myDutiesUpcoming);
 
             } catch (e) {
                 console.error(e);
-                document.getElementById('today-list').innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase text-xs tracking-widest">Error syncing duty data.</div>`;
+                document.getElementById('today-list').innerHTML = `<p class="text-center text-xs text-rose-500 font-bold uppercase">Sync Error</p>`;
             }
         }
 
         function renderTodayDuties(duties, isHoliday) {
             const list = document.getElementById('today-list');
-            if (isHoliday) return; // Banner handles it
+            if (isHoliday) return;
 
             if (duties.length === 0) {
-                list.innerHTML = `
-                    <div class="text-center py-12">
-                        <div class="text-4xl mb-3">☕</div>
-                        <h3 class="text-slate-800 font-black uppercase tracking-widest text-sm">No Duties Today</h3>
-                        <p class="text-[10px] font-bold text-slate-400 mt-1 uppercase tracking-widest">Enjoy your breaks!</p>
-                    </div>`;
+                list.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase text-[10px]">No Assignments Today</div>`;
                 return;
             }
 
-            list.innerHTML = duties.map(d => `
-                <div class="bg-amber-50 border border-amber-200 p-5 sm:p-6 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm transform transition-all hover:-translate-y-1 hover:shadow-md">
+            list.innerHTML = duties.map(d => {
+                const accentColor = d.isExam ? 'indigo' : 'amber';
+                const icon = d.isExam ? '📝' : '🕒';
+                
+                return `
+                <div class="bg-${accentColor}-50 border border-${accentColor}-200 p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
                     <div class="flex items-center gap-4">
-                        <div class="bg-amber-100 text-amber-600 w-12 h-12 rounded-xl flex items-center justify-center text-xl shadow-inner shrink-0">🕒</div>
+                        <div class="bg-${accentColor}-100 text-${accentColor}-600 w-12 h-12 rounded-xl flex items-center justify-center text-xl shadow-inner shrink-0">${icon}</div>
                         <div>
-                            <h4 class="font-black text-slate-900 text-lg uppercase tracking-tighter">${d.type}</h4>
-                            <p class="text-[11px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">Location: <span class="text-indigo-600">${d.className} | SEC ${d.section}</span></p>
+                            <h4 class="font-black text-slate-900 text-base uppercase tracking-tighter">${d.type} ${d.isExam ? '- '+d.shift : ''}</h4>
+                            <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">
+                                Location: <span class="text-${accentColor}-600">${d.room}</span>
+                            </p>
                         </div>
                     </div>
-                    <div class="bg-white border border-amber-100 px-5 py-3 rounded-xl text-center shadow-sm shrink-0">
-                        <span class="block text-[9px] font-black text-amber-500 uppercase tracking-widest mb-1">Time Slot</span>
-                        <span class="font-black text-slate-800 text-sm tracking-tight">${d.timing}</span>
+                    <div class="bg-white border border-${accentColor}-100 px-4 py-2 rounded-xl text-center shadow-sm">
+                        <span class="block text-[8px] font-black text-slate-400 uppercase">Timing</span>
+                        <span class="font-black text-slate-800 text-xs">${d.timing}</span>
                     </div>
-                </div>
-            `).join('');
+                </div>`;
+            }).join('');
         }
 
-        function renderWeeklyDuties(duties) {
+        function renderUpcomingDuties(duties) {
             const list = document.getElementById('week-list');
-            
             if (duties.length === 0) {
-                list.innerHTML = `<div class="text-center py-6 text-[10px] font-bold text-slate-400 uppercase tracking-widest">No other duties assigned this week.</div>`;
+                list.innerHTML = `<p class="text-center py-6 text-[10px] font-bold text-slate-400 uppercase">No upcoming duties</p>`;
                 return;
             }
 
-            // Sort duties by day of the week
-            const dayOrder = { 'Monday':1, 'Tuesday':2, 'Wednesday':3, 'Thursday':4, 'Friday':5, 'Saturday':6, 'Sunday':7 };
-            duties.sort((a,b) => dayOrder[a.day] - dayOrder[b.day]);
+            duties.sort((a, b) => (a.date > b.date) ? 1 : -1);
 
             list.innerHTML = duties.map(d => `
                 <div class="py-4 flex justify-between items-center group hover:bg-slate-50 transition-colors px-2 rounded-lg">
                     <div class="flex items-center gap-4">
-                        <div class="w-16 text-center shrink-0">
-                            <span class="block text-[9px] font-black text-slate-400 uppercase tracking-widest">Day</span>
+                        <div class="w-20 text-left shrink-0">
+                            <span class="block text-[8px] font-black text-indigo-500 uppercase">${d.date}</span>
                             <span class="block text-xs font-black text-slate-800 uppercase">${d.day.substring(0,3)}</span>
                         </div>
                         <div class="border-l-2 border-slate-200 pl-4">
-                            <h4 class="font-black text-slate-700 text-xs uppercase tracking-widest">${d.type}</h4>
-                            <p class="text-[10px] font-bold text-slate-500 mt-1">Class ${d.className} | Sec ${d.section}</p>
+                            <h4 class="font-black text-slate-700 text-[11px] uppercase tracking-widest">${d.type} ${d.isExam ? '| '+d.shift : ''}</h4>
+                            <p class="text-[10px] font-bold text-slate-500 mt-0.5">${d.room}</p>
                         </div>
                     </div>
-                    <div class="text-[10px] font-black text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-100">
+                    <div class="text-[9px] font-black text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-100">
                         ${d.timing}
                     </div>
                 </div>
