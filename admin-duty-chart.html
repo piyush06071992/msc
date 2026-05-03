@@ -1215,7 +1215,7 @@
             panel.classList.remove('hidden');
         }
 
-        function saveManualEdit() {
+      function saveManualEdit() {
             const email = document.getElementById('edit-staff').value;
             let staff = null;
             if(email) staff = staffData.find(s => s.email === email);
@@ -1228,6 +1228,10 @@
             
             let targetCol = generatedRoster[roomName].columns[colKey];
             
+            // Apply the manually selected staff FIRST so the Healer knows they are busy
+            targetCol.status = staff ? 'ASSIGNED' : 'UNSTAFFED';
+            targetCol.staff = staff;
+            
             if (sInp && eInp && currentMode === 'EXAM') {
                 targetCol.rawStart = timeToMins(sInp);
                 targetCol.rawEnd = timeToMins(eInp);
@@ -1235,36 +1239,33 @@
                 targetCol.timing = `${format12Hour(sInp)} - ${format12Hour(eInp)} (${durLabel})`;
                 
                 // --- TIMELINE HEALER ---
-                // Reconstruct the timeline for this room, sort chronologically, and detect gaps
                 let roomShifts = Object.values(generatedRoster[roomName].columns).sort((a,b) => a.rawStart - b.rawStart);
                 
-                // Clear old columns and rebuild properly mapped
                 generatedRoster[roomName].columns = {};
                 let shiftCounter = 1;
                 
-                // Extract exempted staff and daily tracking data for the auto-fill fallback
                 const exemptedStaffEmails = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value);
                 const availablePool = staffData.filter(s => !exemptedStaffEmails.includes(s.email));
                 let dailyAssignments = new Set();
+                
                 Object.keys(generatedRoster).forEach(r => {
                     Object.values(generatedRoster[r].columns).forEach(c => {
                          if(c.staff) dailyAssignments.add(c.staff.email);
                     });
                 });
 
+                let healerWarning = false;
+
                 for (let i = 0; i < roomShifts.length; i++) {
                     const currentShift = roomShifts[i];
                     
-                    // Gap Detection (If there is a gap between current shift end and next shift start)
                     if (i < roomShifts.length - 1) {
                         const nextShift = roomShifts[i + 1];
                         const gapSize = nextShift.rawStart - currentShift.rawEnd;
                         
-                        // If gap is greater than 10 minutes, insert a healing block
                         if (gapSize > 10) {
                             generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = currentShift;
                             
-                            // Create the Healing Gap Block
                             let gapStart = currentShift.rawEnd;
                             let gapEnd = nextShift.rawStart;
                             const gapDurLabel = `${gapEnd - gapStart}m`;
@@ -1277,7 +1278,6 @@
                                 rawEnd: gapEnd
                             };
                             
-                            // Auto-allocate a free teacher to the newly detected gap
                             let evaluatedStaff = [];
                             availablePool.forEach(s => {
                                 if (dailyAssignments.has(s.email)) return; 
@@ -1307,20 +1307,22 @@
                                 newCol.status = 'ASSIGNED';
                                 newCol.staff = evaluatedStaff[0];
                                 dailyAssignments.add(newCol.staff.email);
+                            } else {
+                                healerWarning = true;
                             }
 
                             generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = newCol;
-                            continue; // Skip adding currentShift again since it was added above
+                            continue; 
                         }
                     }
                     
-                    // Add current shift
                     generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = currentShift;
                 }
+
+                if(healerWarning) {
+                    setTimeout(() => alert("⚠️ Timeline Healer created a new shift to fill a time gap, but could not find any free teachers! The shift was left UNSTAFFED."), 600);
+                }
             }
-            
-            targetCol.status = staff ? 'ASSIGNED' : 'UNSTAFFED';
-            targetCol.staff = staff;
             
             renderGeneratedGrid();
             closeEditModal();
