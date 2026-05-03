@@ -371,36 +371,105 @@
         const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         const DAY_SHORTS = { 'Monday':'MON', 'Tuesday':'TUE', 'Wednesday':'WED', 'Thursday':'THU', 'Friday':'FRI', 'Saturday':'SAT', 'Sunday':'SUN' };
 
-        window.onload = async () => {
+       window.onload = async () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const viewDoc = urlParams.get('viewDoc'); 
+            const oldViewDate = urlParams.get('viewDate'); // Fallback just in case
+            
+            const targetDocId = viewDoc || (oldViewDate ? "exam_duty_" + oldViewDate : null);
+            
             const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+            const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+
+            if (!activeStaff && !isAdmin) return window.location.replace('staff-login.html');
+
+            // --- 1. READ-ONLY VIEWER MODE (From Teacher Portal) ---
+            if (targetDocId && !isAdmin) {
+                window.hasDutyRights = false;
+                isReadOnly = true;
+                
+                // Hide sidebars and physically expand the grid to full width!
+                const leftPanel = document.querySelector('.xl\\:col-span-1');
+                const rightPanel = document.querySelector('.xl\\:col-span-3');
+                if(leftPanel) leftPanel.style.display = 'none';
+                if(rightPanel) {
+                    rightPanel.classList.remove('xl:col-span-3');
+                    rightPanel.classList.add('xl:col-span-4'); 
+                }
+                
+                // Hide unnecessary control UI
+                document.getElementById('module-selection').classList.add('hidden');
+                document.getElementById('duty-configuration-view').classList.remove('hidden');
+                document.getElementById('exam-controls').classList.add('hidden');
+                document.getElementById('sub-header-text').innerText = "Master Duty Viewer";
+                
+                // Hide Save/Share buttons & custom instruction input
+                const saveBtn = document.querySelector('button[onclick="saveCurrentRoster()"]');
+                if(saveBtn) saveBtn.style.display = 'none';
+                const whatsappBtn = document.getElementById('btn-whatsapp');
+                if(whatsappBtn) whatsappBtn.style.display = 'none';
+                const instInput = document.getElementById('instruction-input');
+                if(instInput) instInput.parentElement.style.display = 'none';
+
+                // Load the background data, then fetch the specific chart
+                await preloadData();
+                await loadSpecificChartForViewer(targetDocId);
+                return; 
+            }
+
+            // --- 2. FULL ADMIN / DELEGATED STAFF MODE ---
             if (isAdmin) {
                 window.hasDutyRights = true;
                 document.getElementById('auth-btn').classList.remove('hidden');
                 await preloadData();
-         } else {
-                const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
-                if(activeStaff) {
-                    try {
-                        const snap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
-                        
-                        // Check if they are admin. If not, they become a View-Only user.
-                        window.hasDutyRights = (!snap.empty && snap.docs[0].data().canManageDutyChart === true);
-                        
-                        if (!window.hasDutyRights) {
-                            // Hide the admin controls from view-only teachers
-                            document.getElementById('btn-generate').style.display = 'none';
-                            const saveBtn = document.querySelector('button[onclick="saveCurrentRoster()"]');
-                            if(saveBtn) saveBtn.style.display = 'none';
-                            const instInput = document.getElementById('instruction-input');
-                            if(instInput) instInput.parentElement.style.display = 'none';
-                        }
-                        
+            } else {
+                try {
+                    const snap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                    if (!snap.empty && snap.docs[0].data().canManageDutyChart === true) {
+                        window.hasDutyRights = true;
                         await preloadData();
-                    } catch(e) { window.location.replace('teacher-portal.html'); }
-                } else { window.location.replace('staff-login.html'); }
+                    } else {
+                        alert("You are not authorized to view the Master Duty Manager.");
+                        window.location.replace('teacher-portal.html');
+                    }
+                } catch(e) { window.location.replace('teacher-portal.html'); }
             }
         };
 
+        // --- HELPER FOR VIEWER MODE ---
+        async function loadSpecificChartForViewer(docId) {
+            try {
+                document.getElementById('results-placeholder').classList.remove('hidden');
+                document.getElementById('results-placeholder').innerHTML = `<div class="text-2xl animate-pulse text-indigo-500 font-black uppercase tracking-widest mt-10">Fetching Chart Data...</div>`;
+                
+                const snap = await db.collection("duty_rosters").doc(docId).get();
+                if (snap.exists) {
+                    const data = snap.data();
+                    generatedRoster = data.rosterData || {};
+                    customInstructions = data.instructions || [];
+                    
+                    if (data.type === 'EXAM') {
+                        document.getElementById('chart-main-title').innerText = "Exam Duty Chart";
+                        const dateStr = docId.replace('exam_duty_', '');
+                        const dObj = new Date(dateStr);
+                        const dayName = DAYS_OF_WEEK[dObj.getDay()];
+                        const prettyExamDate = dObj.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+                        document.getElementById('chart-sub-title').innerText = `${dayName} ${prettyExamDate}`;
+                    } else if (data.type === 'LUNCH') {
+                        document.getElementById('chart-main-title').innerText = "Lunch Duty Chart";
+                        const dateStr = docId.replace('lunch_duty_', '');
+                        const dObj = new Date(dateStr);
+                        const prettyDate = dObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+                        document.getElementById('chart-sub-title').innerText = `Week of ${prettyDate}`;
+                    }
+                    
+                    renderGeneratedGrid();
+                    renderInstructions();
+                } else {
+                    document.getElementById('results-placeholder').innerHTML = `<div class="text-rose-500 font-black uppercase tracking-widest text-lg mt-10">⚠️ No chart has been published for this date yet.</div>`;
+                }
+            } catch(e) { console.error(e); }
+        }
         async function preloadData() {
             try {
                 const [staffSnap, ttSnap, holSnap, roomSnap] = await Promise.all([
