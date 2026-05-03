@@ -1027,39 +1027,59 @@
                             
                             let evaluatedStaff = [];
 
-                            availablePool.forEach(staff => {
-                                // 1. Check if they are busy at THIS exact time in another room
+                           availablePool.forEach(staff => {
                                 if (shiftAssignments[timeKey].has(staff.email)) return; 
-                                // 2. Check if they already got a shift TODAY
                                 if (dailyAssignments.has(staff.email)) return; 
 
+                                const sEmail = staff.email.trim().toLowerCase();
                                 const sTt = activeDateSchedule.filter(t => t.teacherName === staff.name || t.teacher === staff.name);
                                 
                                 let hasConflict = false;
                                 let adjPenalty = 0; 
+                                let hasClassAfterExam = false;
+                                let hasImmediateClassAfter = false;
 
                                 sTt.forEach(cls => {
                                     if(!cls.timeRange && (!cls.start24 || !cls.end24)) return;
                                     const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
                                     const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
                                     
-                                    if (chk.s < clsE && chk.e > clsS) {
-                                        hasConflict = true;
-                                    }
+                                    // 1. Conflict Check (During this specific shift)
+                                    if (chk.s < clsE && chk.e > clsS) hasConflict = true;
 
-                                    // Adjacency Penalty
-                                    if (clsS === chk.e || clsE === chk.s) {
-                                        adjPenalty += 5000; 
+                                    // 2. Adjacency Penalty (Class right before or after this shift)
+                                    if (clsS === chk.e || clsE === chk.s) adjPenalty += 5000;
+
+                                    // 3. Look-Ahead Check (Classes starting AFTER the entire exam block ends)
+                                    if (clsS >= globalEndMins) {
+                                        hasClassAfterExam = true;
+                                        // Is the class starting within 15 mins of exam end?
+                                        if (clsS <= globalEndMins + 15) hasImmediateClassAfter = true;
                                     }
                                 });
 
-                                if (!hasConflict) {
-                                    evaluatedStaff.push({
-                                        ...staff,
-                                        adjPenalty: adjPenalty,
-                                        totalScore: getTeacherLoadFromSchedule(activeDateSchedule, staff.name).mins + adjPenalty
-                                    });
-                                }
+                                if (hasConflict) return;
+
+                                // --- LOGIC: Shift 1 Restriction ---
+                                // If teacher has an immediate class after the exam, they MUST get Shift 1.
+                                // We block them from Shift 2, Shift 3, etc.
+                                if (hasImmediateClassAfter && colKey !== "Shift 1") return;
+
+                                // --- LOGIC: Priority Scoring ---
+                                let baseLoad = getTeacherLoadFromSchedule(activeDateSchedule, staff.name).mins;
+                                let totalScore = baseLoad + adjPenalty;
+
+                                // Penalty: Least priority for teachers with classes after the exam
+                                if (hasClassAfterExam) totalScore += 10000;
+
+                                // Penalty: Least priority for teachers who did duty in the last exam
+                                if (lastExamStaffSet.has(sEmail)) totalScore += 5000;
+
+                                evaluatedStaff.push({
+                                    ...staff,
+                                    adjPenalty: adjPenalty,
+                                    totalScore: totalScore
+                                });
                             });
 
                             evaluatedStaff.sort((a,b) => a.totalScore - b.totalScore);
