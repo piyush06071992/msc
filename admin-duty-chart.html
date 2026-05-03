@@ -95,8 +95,14 @@
                         <div class="space-y-4">
                             <div>
                                 <label class="block text-xs font-black text-slate-500 uppercase mb-1">Select Upcoming Exam</label>
-                                <select id="exam-select-dropdown" class="w-full p-3 bg-white border border-indigo-200 rounded-xl text-sm font-black text-indigo-800 outline-none focus:border-indigo-500 cursor-pointer shadow-sm">
+                                <select id="exam-select-dropdown" onchange="loadExamTemplates()" class="w-full p-3 bg-white border border-indigo-200 rounded-xl text-sm font-black text-indigo-800 outline-none focus:border-indigo-500 cursor-pointer shadow-sm">
                                     <option value="">Loading exams from timetable...</option>
+                                </select>
+                            </div>
+                            <div id="exam-templates-container" class="hidden">
+                                <label class="block text-xs font-black text-slate-500 uppercase mb-1">Global Default Template</label>
+                                <select id="global-exam-template" onchange="applyGlobalTemplate()" class="w-full p-3 bg-white border border-indigo-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500 shadow-sm">
+                                    <!-- Populated dynamically -->
                                 </select>
                             </div>
                             <div>
@@ -336,6 +342,7 @@
         window.hasDutyRights = false;
         let activeDateSchedule = []; 
         let rawExamHistoryData = [];
+        let examTemplates = []; // Stores unique timings from selected date
         
         let customInstructions = []; 
 
@@ -638,21 +645,9 @@
                             uniqueDates.add(data.date);
                             const prettyDate = new Date(data.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
                             
-                            // Find outermost bounds for the entire day across ALL exams
-                            let minS = 9999, maxE = 0;
-                            const examBlocks = data.schedule.filter(s => s.subject === "EXAM");
-                            examBlocks.forEach(eb => {
-                                let s = timeToMins(eb.start24);
-                                let e = timeToMins(eb.end24);
-                                if(s < minS) minS = s;
-                                if(e > maxE) maxE = e;
-                            });
-
-                            const timeStr = `${format12Hour(minsTo24(minS))} - ${format12Hour(minsTo24(maxE))}`;
-                            
                             examOptions.push({ 
-                                val: `${data.date}|${minsTo24(minS)}|${minsTo24(maxE)}`, 
-                                text: `${prettyDate} | Exam Day (${timeStr})` 
+                                val: data.date, 
+                                text: `${prettyDate} (Multiple Exams)` 
                             });
                         }
                     }
@@ -673,6 +668,56 @@
                 console.error("Error loading exams:", e);
                 dropdown.innerHTML = '<option value="">Error loading exams</option>';
             }
+        }
+
+        function loadExamTemplates() {
+            const selectedVal = document.getElementById('exam-select-dropdown').value;
+            const container = document.getElementById('exam-templates-container');
+            const templateDropdown = document.getElementById('global-exam-template');
+            
+            if (!selectedVal) {
+                container.classList.add('hidden');
+                examTemplates = [];
+                renderRoomSelectors();
+                return;
+            }
+
+            const selectedDate = selectedVal.split('|')[0];
+            const data = rawExamHistoryData.find(d => d.date === selectedDate);
+            if (!data || !data.schedule) return;
+
+            let templatesMap = {};
+            data.schedule.forEach(s => {
+                if (s.subject === "EXAM") {
+                    const title = s.remark || "Exam";
+                    const tKey = `${title}-${s.start24}-${s.end24}`;
+                    if(!templatesMap[tKey]) {
+                        templatesMap[tKey] = {
+                            id: tKey,
+                            start: s.start24,
+                            end: s.end24,
+                            title: title,
+                            timeStr: `${format12Hour(s.start24)} - ${format12Hour(s.end24)}`
+                        };
+                    }
+                }
+            });
+
+            examTemplates = Object.values(templatesMap).sort((a,b) => timeToMins(a.start) - timeToMins(b.start));
+
+            if (examTemplates.length > 0) {
+                templateDropdown.innerHTML = examTemplates.map(t => `<option value="${t.id}">${t.title} (${t.timeStr})</option>`).join('');
+                container.classList.remove('hidden');
+            } else {
+                container.classList.add('hidden');
+            }
+            
+            // Re-render rooms to pass the selected configuration options
+            renderRoomSelectors();
+        }
+
+        function applyGlobalTemplate() {
+            // Can be used to sync global updates if required
         }
 
         // --- TIME HELPER FUNCTIONS ---
@@ -735,15 +780,20 @@
             
             if(selectedRooms.length === 0) return alert("Please select at least one Target Room.");
 
-            let examDate, globalNumShifts, eDate, examStartMins, examEndMins;
+            let examDate, globalTemplateId, globalNumShifts, eDate, globalStartMins, globalEndMins;
             if (currentMode === 'EXAM') {
-                const selectedExam = document.getElementById('exam-select-dropdown').value;
-                if(!selectedExam) return alert("Please select an upcoming exam date.");
+                eDate = document.getElementById('exam-select-dropdown').value;
+                if(!eDate) return alert("Please select an upcoming exam date.");
                 
-                const parts = selectedExam.split('|');
-                eDate = parts[0];
-                examStartMins = timeToMins(parts[1]);
-                examEndMins = timeToMins(parts[2]);
+                globalTemplateId = document.getElementById('global-exam-template').value;
+                if(!globalTemplateId && examTemplates.length > 0) globalTemplateId = examTemplates[0].id;
+                
+                const tpl = examTemplates.find(t => t.id === globalTemplateId);
+                if (!tpl) return alert("No valid exam timings found for this date.");
+                
+                globalStartMins = timeToMins(tpl.start);
+                globalEndMins = timeToMins(tpl.end);
+                
                 globalNumShifts = parseInt(document.getElementById('exam-num-shifts').value) || 2;
                 
                 examDate = new Date(eDate);
@@ -792,8 +842,8 @@
                     selectedRooms.forEach(roomName => {
                         generatedRoster[roomName] = { type: 'EXAM', columns: {} };
                         
-                        let rStartMins = examStartMins;
-                        let rEndMins = examEndMins;
+                        let rStartMins = globalStartMins;
+                        let rEndMins = globalEndMins;
                         let rShifts = globalNumShifts;
 
                         // Check for custom room overrides
@@ -883,7 +933,7 @@
 
                     document.getElementById('chart-main-title').innerText = "Exam Duty Chart";
                     const prettyExamDate = examDate.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
-                    const subText = `${dayName} ${prettyExamDate} | Base: ${format12Hour(minsTo24(examStartMins))} - ${format12Hour(minsTo24(examEndMins))}`;
+                    const subText = `${dayName} ${prettyExamDate}`;
                     document.getElementById('chart-sub-title').innerText = subText;
                     document.getElementById('print-main-title').innerText = "Exam Duty Chart";
                     document.getElementById('print-sub-title').innerText = subText;
