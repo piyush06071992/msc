@@ -30,17 +30,35 @@
 
     <main class="max-w-4xl mx-auto p-4 sm:p-8 space-y-6">
 
-        <!-- DELEGATED STAFF ONLY BANNER -->
+        <!-- HOD DELEGATION PANEL (Hidden for normal staff) -->
         <div id="hod-panel" class="hidden bg-gradient-to-r from-amber-100 to-orange-50 border-2 border-amber-200 rounded-2xl p-6 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4">
             <div>
                 <h3 class="font-black text-amber-900 uppercase tracking-widest flex items-center gap-2">
                     <span class="text-xl">👑</span> Duty Manager Access
                 </h3>
-                <p class="text-[10px] font-bold text-amber-700 uppercase tracking-widest mt-1">You are authorized to edit the Master Duty Chart.</p>
+                <p class="text-[10px] font-bold text-amber-700 uppercase tracking-widest mt-1">You are authorized to edit and generate Master Duty Charts.</p>
             </div>
-           <button onclick="window.location.href='admin-duty-chart.html'" class="w-full sm:w-auto bg-amber-500 hover:bg-amber-600 text-white px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[10px] shadow-md transition-all active:scale-95">
-                Open Master Chart ➔
+           <button onclick="window.location.href='admin-duty-chart.html'" class="w-full sm:w-auto bg-amber-500 hover:bg-amber-600 text-white px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[10px] shadow-md transition-all active:scale-95 whitespace-nowrap">
+                Open Manager ➔
             </button>
+        </div>
+
+        <!-- UNIVERSAL VIEWER PANEL (Visible to ALL staff) -->
+        <div class="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-100 rounded-2xl p-6 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div class="flex-1">
+                <h3 class="font-black text-indigo-900 uppercase tracking-widest flex items-center gap-2">
+                    <span class="text-xl">🗺️</span> Master Duty Chart
+                </h3>
+                <p class="text-[10px] font-bold text-indigo-700 uppercase tracking-widest mt-1">Look up complete schedules for any active Exam or Lunch week.</p>
+            </div>
+            <div class="flex w-full md:w-auto items-center gap-2">
+                <select id="universal-date-select" class="flex-1 md:w-56 p-3 bg-white border border-indigo-200 rounded-xl text-xs font-bold text-indigo-800 outline-none focus:border-indigo-500 shadow-sm cursor-pointer disabled:opacity-50">
+                    <option value="">Loading charts...</option>
+                </select>
+                <button onclick="openSelectedMasterChart()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[10px] shadow-md transition-all active:scale-95 whitespace-nowrap">
+                    View ➔
+                </button>
+            </div>
         </div>
 
         <div id="holiday-banner" class="hidden bg-emerald-50 border-2 border-emerald-200 rounded-3xl p-8 text-center shadow-sm">
@@ -68,7 +86,7 @@
                 <h2 class="text-sm font-black text-slate-800 uppercase tracking-widest">Upcoming This Week</h2>
             </div>
             <div id="week-list" class="p-6 divide-y divide-slate-100">
-                </div>
+            </div>
         </div>
 
     </main>
@@ -94,7 +112,7 @@
             await fetchDutyData();
         };
 
-        // --- SECURITY LOCK: Check if user is delegated to view top banner ---
+        // --- SECURITY LOCK: Check if user is delegated to view Admin button ---
         async function checkHODAuthorization() {
             try {
                 const snap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
@@ -108,14 +126,12 @@
             const today = new Date();
             const todayIso = today.toISOString().split('T')[0];
             
-            // Calculate Monday for Lunch Duties
             const currentDayOfWeek = today.getDay(); 
             const diffToMonday = today.getDate() - currentDayOfWeek + (currentDayOfWeek === 0 ? -6 : 1);
             const mondayDate = new Date(new Date().setDate(diffToMonday));
             const weekId = "week_starting_" + mondayDate.toISOString().split('T')[0];
 
             try {
-                // 1. Check for Holidays
                 const holSnap = await db.collection("school_holidays").get();
                 let isHoliday = false; let hReason = "";
                 const cDate = new Date(); cDate.setHours(0,0,0,0);
@@ -135,11 +151,13 @@
                     document.getElementById('today-container').classList.add('hidden');
                 }
 
-                // 2. Fetch ALL Duty Rosters
                 const rosterSnap = await db.collection("duty_rosters").get();
                 
                 let myDutiesToday = [];
                 let myDutiesUpcoming = [];
+                
+                let allPublishedExams = [];
+                let allPublishedLunches = [];
 
                 rosterSnap.forEach(doc => {
                     const data = doc.data();
@@ -147,63 +165,96 @@
                     const rosterData = data.rosterData;
 
                     if (data.type === 'EXAM') {
-                        // --- EXAM DUTY LOGIC ---
                         const examDate = rosterId.replace('exam_duty_', '');
+                        allPublishedExams.push({ id: rosterId, date: examDate });
                         
                         Object.keys(rosterData).forEach(roomName => {
                             const room = rosterData[roomName];
                             Object.keys(room.columns).forEach(shiftName => {
                                 const shift = room.columns[shiftName];
-                                
                                 if (shift.status === 'ASSIGNED' && shift.staff && shift.staff.email === activeStaff.email) {
                                     const dutyObj = {
-                                        type: "Exam Duty",
-                                        date: examDate,
+                                        type: "Exam Duty", date: examDate,
                                         day: new Date(examDate).toLocaleDateString('en-US', { weekday: 'long' }),
-                                        room: roomName,
-                                        shift: shiftName,
-                                        timing: shift.timing,
-                                        isExam: true
+                                        room: roomName, shift: shiftName, timing: shift.timing,
+                                        isExam: true, rosterId: rosterId
                                     };
-
                                     if (examDate === todayIso) myDutiesToday.push(dutyObj);
                                     else if (examDate > todayIso) myDutiesUpcoming.push(dutyObj);
                                 }
                             });
                         });
 
-                    } else if (data.type === 'LUNCH' && rosterId === weekId) {
-                        // --- LUNCH DUTY LOGIC (Current Week Only) ---
-                        const daysOfWeek = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                        Object.keys(rosterData).forEach(clsKey => {
-                            const clsData = rosterData[clsKey];
-                            daysOfWeek.forEach(day => {
-                                const dayDuty = clsData.days[day];
-                                if (dayDuty && dayDuty.status === 'ASSIGNED' && dayDuty.staff?.email === activeStaff.email) {
-                                    const dutyObj = {
-                                        type: "Lunch Duty",
-                                        date: "Weekly",
-                                        day: day,
-                                        room: `${clsData.cName} | ${clsData.sName}`,
-                                        timing: dayDuty.timing,
-                                        isExam: false
-                                    };
-
-                                    if (day === todayString) myDutiesToday.push(dutyObj);
-                                    else myDutiesUpcoming.push(dutyObj);
-                                }
+                    } else if (data.type === 'LUNCH') {
+                        const lunchDate = rosterId.replace('lunch_duty_', '');
+                        allPublishedLunches.push({ id: rosterId, date: lunchDate });
+                        
+                        if (rosterId === weekId) {
+                            const daysOfWeek = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                            Object.keys(rosterData).forEach(clsKey => {
+                                const clsData = rosterData[clsKey];
+                                daysOfWeek.forEach(day => {
+                                    const dayDuty = clsData.days[day];
+                                    if (dayDuty && dayDuty.status === 'ASSIGNED' && dayDuty.staff?.email === activeStaff.email) {
+                                        const dutyObj = {
+                                            type: "Lunch Duty", date: "Weekly", day: day,
+                                            room: `${clsData.cName} | ${clsData.sName}`, timing: dayDuty.timing,
+                                            isExam: false, rosterId: rosterId
+                                        };
+                                        if (day === todayString) myDutiesToday.push(dutyObj);
+                                        else myDutiesUpcoming.push(dutyObj);
+                                    }
+                                });
                             });
-                        });
+                        }
                     }
                 });
 
                 renderTodayDuties(myDutiesToday, isHoliday);
                 renderUpcomingDuties(myDutiesUpcoming);
 
+                // Populate Dropdown for the Viewer
+                const dateSelect = document.getElementById('universal-date-select');
+                let optionsHtml = '<option value="">-- Select a Duty Chart --</option>';
+
+                if (allPublishedExams.length > 0) {
+                    optionsHtml += '<optgroup label="📝 Exam Duties">';
+                    allPublishedExams.sort((a,b) => b.date.localeCompare(a.date)).forEach(ex => {
+                        const dObj = new Date(ex.date);
+                        const prettyDate = dObj.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+                        optionsHtml += `<option value="${ex.id}">${prettyDate} (Exam)</option>`;
+                    });
+                    optionsHtml += '</optgroup>';
+                }
+
+                if (allPublishedLunches.length > 0) {
+                    optionsHtml += '<optgroup label="🕒 Lunch Duties (Weekly)">';
+                    allPublishedLunches.sort((a,b) => b.date.localeCompare(a.date)).forEach(lu => {
+                        const dObj = new Date(lu.date);
+                        const prettyDate = dObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+                        optionsHtml += `<option value="${lu.id}">Week of ${prettyDate}</option>`;
+                    });
+                    optionsHtml += '</optgroup>';
+                }
+
+                if (allPublishedExams.length === 0 && allPublishedLunches.length === 0) {
+                    dateSelect.innerHTML = '<option value="">No published charts</option>';
+                    dateSelect.disabled = true;
+                } else {
+                    dateSelect.innerHTML = optionsHtml;
+                    dateSelect.disabled = false;
+                }
+
             } catch (e) {
                 console.error(e);
                 document.getElementById('today-list').innerHTML = `<p class="text-center text-xs text-rose-500 font-bold uppercase">Sync Error</p>`;
             }
+        }
+
+        function openSelectedMasterChart() {
+            const selectedDoc = document.getElementById('universal-date-select').value;
+            if (!selectedDoc) return alert("Please select a chart from the dropdown first.");
+            window.location.href = `admin-duty-chart.html?viewDoc=${selectedDoc}`;
         }
 
         function renderTodayDuties(duties, isHoliday) {
@@ -236,7 +287,7 @@
                             <span class="font-black text-slate-800 text-xs">${d.timing}</span>
                         </div>
                     </div>
-                    ${d.isExam ? `<button onclick="window.location.href='admin-duty-chart.html?viewDate=${d.date}'" class="w-full mt-2 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-black text-[10px] uppercase tracking-widest rounded-xl transition-colors shadow-md">📊 View Master Chart for Today</button>` : ''}
+                    <button onclick="window.location.href='admin-duty-chart.html?viewDoc=${d.rosterId}'" class="w-full mt-2 py-3 bg-${accentColor}-600 hover:bg-${accentColor}-700 text-white font-black text-[10px] uppercase tracking-widest rounded-xl transition-colors shadow-md">📊 View Master Chart for Today</button>
                 </div>`;
             }).join('');
         }
@@ -265,7 +316,7 @@
                         <div class="text-[9px] font-black text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-100 whitespace-nowrap">
                             ${d.timing}
                         </div>
-                        ${d.isExam ? `<button onclick="window.location.href='admin-duty-chart.html?viewDate=${d.date}'" class="text-[9px] font-black text-white bg-indigo-500 hover:bg-indigo-600 px-4 py-1.5 rounded-lg shadow-sm whitespace-nowrap transition-colors">📊 Chart</button>` : ''}
+                        <button onclick="window.location.href='admin-duty-chart.html?viewDoc=${d.rosterId}'" class="text-[9px] font-black text-white bg-indigo-500 hover:bg-indigo-600 px-4 py-1.5 rounded-lg shadow-sm whitespace-nowrap transition-colors">📊 Chart</button>
                     </div>
                 </div>
             `).join('');
