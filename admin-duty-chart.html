@@ -1060,12 +1060,15 @@
             }).join('');
         }
 
-        // --- MANUAL EDITING ---
+     // --- MANUAL EDITING & TIMELINE HEALER ---
         async function openEditModal(roomName, colKey) {
             currentEditParams = { roomName, colKey };
             const data = generatedRoster[roomName].columns[colKey];
             
             document.getElementById('edit-modal-subtitle').innerText = `${roomName} | ${colKey} (${data.timing})`;
+            
+            if(data.rawStart) document.getElementById('edit-shift-start').value = minsTo24(data.rawStart);
+            if(data.rawEnd) document.getElementById('edit-shift-end').value = minsTo24(data.rawEnd);
             
             const depts = getUniqueDepartments();
             document.getElementById('edit-dept').innerHTML = `<option value="">-- Choose Department --</option>` + depts.map(d => `<option value="${d}">${d}</option>`).join('');
@@ -1095,9 +1098,13 @@
                 staffSelect.disabled = true; return;
             }
 
+            // We must read the manually updated input times for accuracy checking, not just the original data.timing
+            const sInp = document.getElementById('edit-shift-start').value;
+            const eInp = document.getElementById('edit-shift-end').value;
             const data = generatedRoster[currentEditParams.roomName].columns[currentEditParams.colKey];
-            let bStart = timeToMins(data.timing.split(' - ')[0]);
-            let bEnd = timeToMins(data.timing.split(' - ')[1]);
+            
+            let bStart = sInp ? timeToMins(sInp) : timeToMins(data.timing.split(' - ')[0]);
+            let bEnd = eInp ? timeToMins(eInp) : timeToMins(data.timing.split(' - ')[1]);
             
             let scheduleToCheck = timetableData; 
             let targetDay;
@@ -1129,7 +1136,6 @@
                 Object.keys(generatedRoster).forEach(rKey => {
                     Object.values(generatedRoster[rKey].columns).forEach(colData => {
                         if (colData.status === 'ASSIGNED' && colData.staff && colData.staff.email === s.email) {
-                            // Only flag if it's NOT the exact cell we are currently editing
                             if (!(rKey === currentEditParams.roomName && colData.timing === data.timing)) {
                                 alreadyOnDuty = true;
                             }
@@ -1211,11 +1217,110 @@
 
         function saveManualEdit() {
             const email = document.getElementById('edit-staff').value;
-            if(!email) return alert("Please select a teacher.");
-            const staff = staffData.find(s => s.email === email);
+            let staff = null;
+            if(email) staff = staffData.find(s => s.email === email);
             
-            generatedRoster[currentEditParams.roomName].columns[currentEditParams.colKey].status = 'ASSIGNED';
-            generatedRoster[currentEditParams.roomName].columns[currentEditParams.colKey].staff = staff;
+            const sInp = document.getElementById('edit-shift-start').value;
+            const eInp = document.getElementById('edit-shift-end').value;
+            
+            const roomName = currentEditParams.roomName;
+            const colKey = currentEditParams.colKey;
+            
+            let targetCol = generatedRoster[roomName].columns[colKey];
+            
+            if (sInp && eInp && currentMode === 'EXAM') {
+                targetCol.rawStart = timeToMins(sInp);
+                targetCol.rawEnd = timeToMins(eInp);
+                const durLabel = `${targetCol.rawEnd - targetCol.rawStart}m`;
+                targetCol.timing = `${format12Hour(sInp)} - ${format12Hour(eInp)} (${durLabel})`;
+                
+                // --- TIMELINE HEALER ---
+                // Reconstruct the timeline for this room, sort chronologically, and detect gaps
+                let roomShifts = Object.values(generatedRoster[roomName].columns).sort((a,b) => a.rawStart - b.rawStart);
+                
+                // Clear old columns and rebuild properly mapped
+                generatedRoster[roomName].columns = {};
+                let shiftCounter = 1;
+                
+                // Extract exempted staff and daily tracking data for the auto-fill fallback
+                const exemptedStaffEmails = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value);
+                const availablePool = staffData.filter(s => !exemptedStaffEmails.includes(s.email));
+                let dailyAssignments = new Set();
+                Object.keys(generatedRoster).forEach(r => {
+                    Object.values(generatedRoster[r].columns).forEach(c => {
+                         if(c.staff) dailyAssignments.add(c.staff.email);
+                    });
+                });
+
+                for (let i = 0; i < roomShifts.length; i++) {
+                    const currentShift = roomShifts[i];
+                    
+                    // Gap Detection (If there is a gap between current shift end and next shift start)
+                    if (i < roomShifts.length - 1) {
+                        const nextShift = roomShifts[i + 1];
+                        const gapSize = nextShift.rawStart - currentShift.rawEnd;
+                        
+                        // If gap is greater than 10 minutes, insert a healing block
+                        if (gapSize > 10) {
+                            generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = currentShift;
+                            
+                            // Create the Healing Gap Block
+                            let gapStart = currentShift.rawEnd;
+                            let gapEnd = nextShift.rawStart;
+                            const gapDurLabel = `${gapEnd - gapStart}m`;
+                            
+                            let newCol = {
+                                status: 'UNSTAFFED',
+                                staff: null,
+                                timing: `${format12Hour(minsTo24(gapStart))} - ${format12Hour(minsTo24(gapEnd))} (${gapDurLabel})`,
+                                rawStart: gapStart,
+                                rawEnd: gapEnd
+                            };
+                            
+                            // Auto-allocate a free teacher to the newly detected gap
+                            let evaluatedStaff = [];
+                            availablePool.forEach(s => {
+                                if (dailyAssignments.has(s.email)) return; 
+                                const sTt = activeDateSchedule.filter(t => t.teacherName === s.name || t.teacher === s.name);
+                                let hasConflict = false;
+                                let adjPenalty = 0; 
+
+                                sTt.forEach(cls => {
+                                    if(!cls.timeRange && (!cls.start24 || !cls.end24)) return;
+                                    const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
+                                    const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
+                                    if (gapStart < clsE && gapEnd > clsS) hasConflict = true;
+                                    if (clsS === gapEnd || clsE === gapStart) adjPenalty += 5000; 
+                                });
+
+                                if (!hasConflict) {
+                                    evaluatedStaff.push({
+                                        ...s,
+                                        adjPenalty: adjPenalty,
+                                        totalScore: getTeacherLoadFromSchedule(activeDateSchedule, s.name).mins + adjPenalty
+                                    });
+                                }
+                            });
+
+                            evaluatedStaff.sort((a,b) => a.totalScore - b.totalScore);
+                            if (evaluatedStaff.length > 0) {
+                                newCol.status = 'ASSIGNED';
+                                newCol.staff = evaluatedStaff[0];
+                                dailyAssignments.add(newCol.staff.email);
+                            }
+
+                            generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = newCol;
+                            continue; // Skip adding currentShift again since it was added above
+                        }
+                    }
+                    
+                    // Add current shift
+                    generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = currentShift;
+                }
+            }
+            
+            targetCol.status = staff ? 'ASSIGNED' : 'UNSTAFFED';
+            targetCol.staff = staff;
             
             renderGeneratedGrid();
             closeEditModal();
