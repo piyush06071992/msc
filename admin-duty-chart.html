@@ -1589,22 +1589,54 @@ function renderGeneratedGrid(forceOpenRoom = null) {
             currentEditParams = null;
         }
 function deleteShift(roomName, colKey) {
-            if (!confirm(`Are you sure you want to delete ${colKey} from ${roomName}?`)) return;
+            if (!confirm(`Are you sure you want to delete ${colKey}? The remaining shifts will automatically stretch to cover the time.`)) return;
             
-            // Create a fresh copy of the columns, EXCLUDING the one we want to delete
-            let updatedColumns = {};
-            Object.keys(generatedRoster[roomName].columns).forEach(key => {
-                if (key !== colKey) {
-                    updatedColumns[key] = generatedRoster[roomName].columns[key];
-                }
+            let shifts = Object.values(generatedRoster[roomName].columns);
+            const shiftToDelete = generatedRoster[roomName].columns[colKey];
+            
+            // 1. Remove the target shift
+            shifts = shifts.filter(s => s !== shiftToDelete).sort((a,b) => a.rawStart - b.rawStart);
+            
+            if (shifts.length === 0) {
+                alert("Cannot delete the only shift in the room.");
+                return;
+            }
+
+            // 2. Find the global end time of the exam
+            let targetEnd = 0;
+            Object.keys(generatedRoster).forEach(r => {
+                Object.values(generatedRoster[r].columns).forEach(c => {
+                    if(c.rawEnd > targetEnd) targetEnd = c.rawEnd;
+                });
             });
-            
-            generatedRoster[roomName].columns = updatedColumns;
-            
-            // Re-run the timeline healer. 
-            // Because we pass 'true' as the second parameter, the grid will know 
-            // to keep this specific room open after re-rendering.
-            healRoomTimeline(roomName, true);
+
+            // 3. Re-calculate equal durations for the remaining shifts
+            let rStart = shifts[0].rawStart;
+            let totalDur = targetEnd - rStart;
+            let newDur = totalDur / shifts.length;
+
+            generatedRoster[roomName].columns = {};
+            let currStart = rStart;
+
+            for (let i = 0; i < shifts.length; i++) {
+                let s = shifts[i];
+                let rawEnd = currStart + newDur;
+                let snappedEnd = Math.round(rawEnd / 5) * 5; // Keep times clean (multiples of 5 mins)
+                
+                // Ensure the final shift exactly hits the target end time
+                if (i === shifts.length - 1) snappedEnd = targetEnd; 
+                
+                s.rawStart = currStart;
+                s.rawEnd = snappedEnd;
+                s.timing = `${format12Hour(minsTo24(s.rawStart))} - ${format12Hour(minsTo24(s.rawEnd))} (${s.rawEnd - s.rawStart}m)`;
+                
+                // Save it back nicely ordered as Shift 1, Shift 2, etc.
+                generatedRoster[roomName].columns[`Shift ${i+1}`] = s;
+                currStart = snappedEnd;
+            }
+
+            // Render the grid and pass the roomName so the accordion stays open!
+            renderGeneratedGrid(roomName);
         }
         // --- CUSTOM INSTRUCTIONS ---
         function addInstruction() {
