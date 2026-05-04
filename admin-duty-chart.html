@@ -371,36 +371,93 @@
         const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         const DAY_SHORTS = { 'Monday':'MON', 'Tuesday':'TUE', 'Wednesday':'WED', 'Thursday':'THU', 'Friday':'FRI', 'Saturday':'SAT', 'Sunday':'SUN' };
 
-        window.onload = async () => {
+      window.onload = async () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const viewDoc = urlParams.get('viewDoc'); 
+            
             const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+            const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+
+            if (!activeStaff && !isAdmin) return window.location.replace('staff-login.html');
+
+            // 1. Determine Rights
             if (isAdmin) {
                 window.hasDutyRights = true;
                 document.getElementById('auth-btn').classList.remove('hidden');
-                await preloadData();
-         } else {
-                const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
-                if(activeStaff) {
-                    try {
-                        const snap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
-                        
-                        // Check if they are admin. If not, they become a View-Only user.
-                        window.hasDutyRights = (!snap.empty && snap.docs[0].data().canManageDutyChart === true);
-                        
-                        if (!window.hasDutyRights) {
-                            // Hide the admin controls from view-only teachers
-                            document.getElementById('btn-generate').style.display = 'none';
-                            const saveBtn = document.querySelector('button[onclick="saveCurrentRoster()"]');
-                            if(saveBtn) saveBtn.style.display = 'none';
-                            const instInput = document.getElementById('instruction-input');
-                            if(instInput) instInput.parentElement.style.display = 'none';
-                        }
-                        
-                        await preloadData();
-                    } catch(e) { window.location.replace('teacher-portal.html'); }
-                } else { window.location.replace('staff-login.html'); }
+            } else {
+                try {
+                    const snap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                    window.hasDutyRights = (!snap.empty && snap.docs[0].data().canManageDutyChart === true);
+                } catch(e) { window.hasDutyRights = false; }
+            }
+            
+            window.isReadOnly = !window.hasDutyRights;
+            await preloadData();
+
+            // 2. If Deep Linked directly from Teacher Portal
+            if (viewDoc) {
+                document.getElementById('module-selection').classList.add('hidden');
+                document.getElementById('duty-configuration-view').classList.remove('hidden');
+                
+                if (window.isReadOnly) applyReadonlyUI();
+                await loadSpecificChartForViewer(viewDoc);
             }
         };
 
+        function applyReadonlyUI() {
+            // Hide the configuration sidebar and make the grid full screen
+            const leftPanel = document.querySelector('.xl\\:col-span-1');
+            const rightPanel = document.querySelector('.xl\\:col-span-3');
+            if(leftPanel) leftPanel.style.display = 'none';
+            if(rightPanel) {
+                rightPanel.classList.remove('xl:col-span-3');
+                rightPanel.classList.add('xl:col-span-4'); 
+            }
+            
+            // Hide all Action/Edit buttons for unauthorized staff
+            const saveBtn = document.querySelector('button[onclick="saveCurrentRoster()"]');
+            if(saveBtn) saveBtn.style.display = 'none';
+            const whatsappBtn = document.getElementById('btn-whatsapp');
+            if(whatsappBtn) whatsappBtn.style.display = 'none';
+            const instInput = document.getElementById('instruction-input');
+            if(instInput) instInput.parentElement.style.display = 'none';
+            document.getElementById('sub-header-text').innerText = "Master Duty Viewer";
+        }
+
+        // --- HELPER FOR VIEWER MODE ---
+        async function loadSpecificChartForViewer(docId) {
+            try {
+                document.getElementById('results-placeholder').classList.remove('hidden');
+                document.getElementById('results-placeholder').innerHTML = `<div class="text-2xl animate-pulse text-indigo-500 font-black uppercase tracking-widest mt-10">Fetching Chart Data...</div>`;
+                
+                const snap = await db.collection("duty_rosters").doc(docId).get();
+                if (snap.exists) {
+                    const data = snap.data();
+                    generatedRoster = data.rosterData || {};
+                    customInstructions = data.instructions || [];
+                    
+                    if (data.type === 'EXAM') {
+                        document.getElementById('chart-main-title').innerText = "Exam Duty Chart";
+                        const dateStr = docId.replace('exam_duty_', '');
+                        const dObj = new Date(dateStr);
+                        const dayName = DAYS_OF_WEEK[dObj.getDay()];
+                        const prettyExamDate = dObj.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+                        document.getElementById('chart-sub-title').innerText = `${dayName} ${prettyExamDate}`;
+                    } else if (data.type === 'LUNCH') {
+                        document.getElementById('chart-main-title').innerText = "Lunch Duty Chart";
+                        const dateStr = docId.replace('lunch_duty_', '');
+                        const dObj = new Date(dateStr);
+                        const prettyDate = dObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+                        document.getElementById('chart-sub-title').innerText = `Week of ${prettyDate}`;
+                    }
+                    
+                    renderGeneratedGrid();
+                    renderInstructions();
+                } else {
+                    document.getElementById('results-placeholder').innerHTML = `<div class="text-rose-500 font-black uppercase tracking-widest text-lg mt-10">⚠️ No chart has been published for this date yet.</div>`;
+                }
+            } catch(e) { console.error(e); }
+        }
         async function preloadData() {
             try {
                 const [staffSnap, ttSnap, holSnap, roomSnap] = await Promise.all([
@@ -639,12 +696,15 @@
             currentMode = 'LUNCH';
             document.getElementById('module-selection').classList.add('hidden');
             document.getElementById('free-staff-view').classList.add('hidden');
+            
+            // Intercept Unauthorized Staff and show them the Viewer
+            if (window.isReadOnly) return setupViewerMode('LUNCH');
+            
             document.getElementById('exam-controls').classList.add('hidden');
             document.getElementById('duty-configuration-view').classList.remove('hidden');
             document.getElementById('sub-header-text').innerText = "Lunch Duty Engine (Room-Wise)";
             document.getElementById('results-area').classList.add('hidden');
             document.getElementById('results-placeholder').classList.remove('hidden');
-            
             renderRoomSelectors(); 
             renderInstructions();
         }
@@ -653,17 +713,82 @@
             currentMode = 'EXAM';
             document.getElementById('module-selection').classList.add('hidden');
             document.getElementById('free-staff-view').classList.add('hidden');
+            
+            // Intercept Unauthorized Staff and show them the Viewer
+            if (window.isReadOnly) return setupViewerMode('EXAM');
+            
             document.getElementById('exam-controls').classList.remove('hidden');
             document.getElementById('duty-configuration-view').classList.remove('hidden');
             document.getElementById('sub-header-text').innerText = "Exam Duty Engine";
             document.getElementById('results-area').classList.add('hidden');
             document.getElementById('results-placeholder').classList.remove('hidden');
-            
             renderRoomSelectors();
             loadUpcomingExams();
             renderInstructions();
         }
 
+        async function setupViewerMode(type) {
+            document.getElementById('duty-configuration-view').classList.remove('hidden');
+            applyReadonlyUI();
+            
+            document.getElementById('sub-header-text').innerText = type === 'EXAM' ? "Exam Duty Viewer" : "Lunch Duty Viewer";
+            
+            const placeholder = document.getElementById('results-placeholder');
+            placeholder.classList.remove('hidden');
+            document.getElementById('results-area').classList.add('hidden');
+
+            const titleText = type === 'EXAM' ? "Select Exam Date" : "Select Lunch Week";
+            const iconText = type === 'EXAM' ? "📝" : "🕒";
+
+            placeholder.innerHTML = `
+                <div class="w-full max-w-md mx-auto bg-white p-6 rounded-[2rem] shadow-xl border border-slate-200 mt-10 text-left">
+                    <h3 class="font-black text-slate-800 uppercase tracking-widest mb-4 flex items-center gap-3 border-b border-slate-100 pb-3">
+                        <span class="text-3xl">${iconText}</span> ${titleText}
+                    </h3>
+                    <select id="viewer-chart-select" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 outline-none focus:border-indigo-500 cursor-pointer mb-4">
+                        <option value="">Searching database...</option>
+                    </select>
+                    <button onclick="loadViewerChart()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black uppercase tracking-widest text-xs py-4 rounded-xl shadow-md transition-colors active:scale-95">
+                        View Duty Chart ➔
+                    </button>
+                </div>
+            `;
+
+            try {
+                const snap = await db.collection("duty_rosters").where("type", "==", type).get();
+                let options = [];
+                snap.forEach(doc => {
+                    options.push({ id: doc.id, date: doc.id.replace(type === 'EXAM' ? 'exam_duty_' : 'lunch_duty_', '') });
+                });
+                
+                options.sort((a,b) => b.date.localeCompare(a.date));
+
+                const select = document.getElementById('viewer-chart-select');
+                if (options.length === 0) {
+                    select.innerHTML = '<option value="">No charts published yet.</option>';
+                    select.disabled = true;
+                } else {
+                    select.innerHTML = '<option value="">-- Select Date --</option>' + options.map(o => {
+                        const dObj = new Date(o.date);
+                        if(type === 'EXAM') {
+                            return `<option value="${o.id}">${dObj.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' })}</option>`;
+                        } else {
+                            return `<option value="${o.id}">Week starting ${dObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</option>`;
+                        }
+                    }).join('');
+                    select.disabled = false;
+                }
+            } catch(e) {
+                console.error(e);
+                document.getElementById('viewer-chart-select').innerHTML = '<option value="">Database error</option>';
+            }
+        }
+
+        async function loadViewerChart() {
+            const docId = document.getElementById('viewer-chart-select').value;
+            if(!docId) return alert("Please select a date from the dropdown.");
+            await loadSpecificChartForViewer(docId);
+        }
         function initStaffSearch() {
             currentMode = 'STAFF';
             document.getElementById('module-selection').classList.add('hidden');
@@ -1217,12 +1342,14 @@ function renderGeneratedGrid(forceOpenRoom = null) {
                             }
                         }
 
-                        const cellStateClasses = isFilteredOut ? 'opacity-30 grayscale pointer-events-none' : 'cursor-pointer hover:shadow-inner';
+        // Only add pointer events and clicks if they have Duty Rights
+                        const cellStateClasses = isFilteredOut ? 'opacity-30 grayscale pointer-events-none' : (window.hasDutyRights ? 'cursor-pointer hover:shadow-inner' : '');
                         const bgClass = isAssigned ? 'bg-indigo-50/50 hover:bg-indigo-100/60' : 'bg-rose-50/50 hover:bg-rose-100/60';
                         const borderClass = isAssigned ? 'border-indigo-100' : 'border-rose-100';
+                        const clickAttr = window.hasDutyRights ? `onclick="openEditModal('${roomName}', '${colKey}')"` : '';
 
                         tableHTML += `
-                        <td class="p-3 border-r border-slate-200 align-top group/cell ${cellStateClasses}" onclick="openEditModal('${roomName}', '${colKey}')">
+                        <td class="p-3 border-r border-slate-200 align-top group/cell ${cellStateClasses}" ${clickAttr}>
                             <div class="h-full flex flex-col justify-between p-4 rounded-2xl border ${borderClass} ${bgClass} transition-colors relative min-h-[90px]">
                                 ${isAssigned ? `
                                     <div>
@@ -1237,12 +1364,12 @@ function renderGeneratedGrid(forceOpenRoom = null) {
                                     <div class="font-black text-rose-600 uppercase text-sm mb-1">⚠️ Unstaffed</div>
                                     <div class="text-[10px] font-bold text-rose-400 mt-auto pt-2">🕒 ${data.timing}</div>
                                 `}
+                                ${window.hasDutyRights ? `
                                 <div class="absolute top-3 right-3 opacity-0 group-hover/cell:opacity-100 transition-opacity flex gap-1 no-print">
                                     <span class="bg-white/80 p-1.5 rounded shadow-sm text-[10px]">✏️</span>
-                                </div>
+                                </div>` : ''}
                             </div>
                         </td>`;
-                    } else {
                         // Empty slot if this room has fewer shifts than the max columns
                         tableHTML += `<td class="p-4 border-r border-slate-200 bg-slate-50/30 text-center align-middle">
                                         <span class="text-slate-300 font-black text-xl">-</span>
