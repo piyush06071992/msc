@@ -565,7 +565,7 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
         });
 
         // --- FILTER ENGINE ---
-       function populateFilterDropdowns() {
+        function populateFilterDropdowns() {
             const subSelect = document.getElementById('filter-subject');
             let allSubjects = new Set();
             
@@ -575,9 +575,7 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
                 depts.forEach(d => { if (d && d !== 'General') allSubjects.add(d.trim().toUpperCase()); });
             });
             structureData.forEach(st => {
-                if (st.subjects) {
-                    st.subjects.forEach(s => allSubjects.add(s.trim().toUpperCase()));
-                }
+                st.subjects.forEach(s => allSubjects.add(s.trim().toUpperCase()));
             });
 
             Array.from(allSubjects).sort().forEach(sub => {
@@ -677,26 +675,18 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
             sessionStorage.setItem('minerva_teachers', JSON.stringify(allTeachers));
         }
 
-     async function fetchTimetable() {
-    const cached = sessionStorage.getItem('minerva_timetable');
-    const lastUpdated = sessionStorage.getItem('minerva_timetable_last_updated');
-
-    // ⏱️ Cache valid only for 10 seconds (prevents stale data)
-    const isCacheValid = lastUpdated && (Date.now() - parseInt(lastUpdated) < 10000);
-
-    if (cached && isCacheValid) {
-        globalTimetable = JSON.parse(cached);
-        oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
-        return;
-    }
-
-    const snap = await db.collection("timetable").get();
-    globalTimetable = snap.docs.map(d => ({id: d.id, ...d.data()}));
-    oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
-
-    sessionStorage.setItem('minerva_timetable', JSON.stringify(globalTimetable));
-    sessionStorage.setItem('minerva_timetable_last_updated', Date.now());
-}
+        async function fetchTimetable() {
+            const cached = sessionStorage.getItem('minerva_timetable');
+            if (cached) {
+                globalTimetable = JSON.parse(cached);
+                oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
+                return;
+            }
+            const snap = await db.collection("timetable").get();
+            globalTimetable = snap.docs.map(d => ({id: d.id, ...d.data()}));
+            oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
+            sessionStorage.setItem('minerva_timetable', JSON.stringify(globalTimetable));
+        }
 
         // --- HOLIDAY OVERLAY ENGINE ---
         async function fetchHolidays() {
@@ -830,11 +820,15 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
             const selectedSub = document.getElementById('filter-subject') ? document.getElementById('filter-subject').value : 'ALL';
             const selectedTea = document.getElementById('filter-teacher') ? document.getElementById('filter-teacher').value : 'ALL';
 
-           globalTimetable.forEach(item => {
-                // We now load ALL data into the DOM so manual edits are never destroyed.
-                // We will use a visual CSS filter to hide items later!
-                if(renderGroups[item.className] && renderGroups[item.className][item.section]) {
-                    renderGroups[item.className][item.section].push(item);
+            globalTimetable.forEach(item => {
+                // Determine if this specific class matches the selected filters
+                let matchSub = selectedSub === 'ALL' || (item.subject && item.subject.toUpperCase() === selectedSub.toUpperCase());
+                let matchTea = selectedTea === 'ALL' || item.teacher === selectedTea;
+
+                if (matchSub && matchTea) {
+                    if(renderGroups[item.className] && renderGroups[item.className][item.section]) {
+                        renderGroups[item.className][item.section].push(item);
+                    }
                 }
             });
             // --- NEW: TEACHER WORKLOAD SUMMARY ---
@@ -871,7 +865,7 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
                 teacherSummaryHtml = `
                     <div class="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-200 p-4 sm:p-6 rounded-[2rem] mb-8 shadow-md flex flex-col sm:flex-row items-center justify-between gap-6">
                         <div class="flex items-center gap-4">
-                            <div class="bg-indigo-600 text-white w-12 h-12 rounded-full flex items-center justify-center font-black text-xl shadow-inner">👨‍🏫</div>
+                            <div class="bg-indigo-600 text-white w-12 h-12 rounded-full flex items-center justify-center font-black text-xl shadow-inner">👨🏫</div>
                             <div>
                                 <h3 class="font-black text-indigo-900 uppercase tracking-tighter text-xl leading-none">${selectedTea}</h3>
                                 <p class="text-[10px] font-bold text-indigo-600 uppercase tracking-widest mt-1">Workload For: ${targetDay}</p>
@@ -911,8 +905,19 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
             let hasPinned = false;
             let normalHtml = "";
 
-          // 2. Loop through all classes
+            // 2. Loop through all classes
             Object.keys(renderGroups).sort().forEach(className => {
+                const isFiltering = document.getElementById('filter-subject') && (document.getElementById('filter-subject').value !== 'ALL' || document.getElementById('filter-teacher').value !== 'ALL');
+                
+                // Check if this class has any data matching the filter
+                let classHasData = false;
+                Object.keys(renderGroups[className]).forEach(sec => {
+                    if(renderGroups[className][sec].length > 0) classHasData = true;
+                });
+                
+                // Hide empty classes entirely when filtering
+                if (isFiltering && !classHasData) return;
+
                 let groupHtml = `
                     <style>details > summary { list-style: none; } details > summary::-webkit-details-marker { display: none; }</style>
                     <details class="bg-white shadow-xl rounded-[2rem] overflow-hidden border border-slate-200 class-group mb-10 group" ${isFiltering ? 'open' : ''}>
@@ -926,6 +931,9 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
                 let hasUnpinned = false;
 
                 Object.keys(renderGroups[className]).sort().forEach(sectionName => {
+                    // Hide empty sections when filtering
+                    if (isFiltering && renderGroups[className][sectionName].length === 0) return;
+
                     const secId = `sec_${className.replace(/\s+/g, '')}_${sectionName.replace(/\s+/g, '')}`;
                     const isPinned = pinnedSections.has(secId);
                     
@@ -1009,37 +1017,9 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
                 });
             });
             
-           checkGlobalClash();
-            checkGlobalLunchBreaks(); 
-            applyVisualFilters(); // Physically hides filtered elements using CSS!
+            checkGlobalClash();
+            checkGlobalLunchBreaks(); // ADDED: Scans for missing lunch breaks
         }
-
-        function applyVisualFilters() {
-            const selectedSub = document.getElementById('filter-subject') ? document.getElementById('filter-subject').value : 'ALL';
-            const selectedTea = document.getElementById('filter-teacher') ? document.getElementById('filter-teacher').value : 'ALL';
-
-            const allBlocks = document.querySelectorAll('.time-block');
-            allBlocks.forEach(b => {
-                const subs = b.getAttribute('data-subjects') || "";
-                const teas = b.getAttribute('data-teachers') || "";
-                
-                let matchSub = selectedSub === 'ALL' || subs.includes(selectedSub.toUpperCase());
-                let matchTea = selectedTea === 'ALL' || teas.split(',').includes(selectedTea);
-                
-                b.style.display = (matchSub && matchTea) ? 'flex' : 'none';
-            });
-
-            document.querySelectorAll('details.group').forEach(sec => {
-                const hasVisible = Array.from(sec.querySelectorAll('.time-block')).some(b => b.style.display !== 'none');
-                sec.style.display = hasVisible ? 'block' : 'none';
-            });
-
-            document.querySelectorAll('details.class-group').forEach(cls => {
-                const hasVisible = Array.from(cls.querySelectorAll('details.group')).some(s => s.style.display !== 'none');
-                cls.style.display = hasVisible ? 'block' : 'none';
-            });
-        }
-
         function addSmartBlock(className, sectionName, secId) {
             injectSmartBlock(className, sectionName, secId, {
                 start24: "", end24: "",
@@ -1055,15 +1035,9 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
             const div = document.createElement('div');
             div.className = "time-block flex flex-col";
             div.id = blockId;
-          div.setAttribute('data-class', className);
+            div.setAttribute('data-class', className);
             div.setAttribute('data-section', sectionName);
             div.setAttribute('data-s24', blockData.start24);
-            
-            // Add tags so the CSS filter can find them
-            const subs = blockData.entries.map(e => (e.subject||'').toUpperCase()).join(',');
-            const teas = blockData.entries.map(e => e.teacher||'').join(',');
-            div.setAttribute('data-subjects', subs);
-            div.setAttribute('data-teachers', teas);
 
             div.innerHTML = `
                 <div class="read-view flex flex-col h-full cursor-pointer hover:bg-slate-50 transition-colors ${autoEdit ? 'hidden' : ''}" onclick="toggleEditMode('${blockId}', true)" title="Click to Edit">
@@ -1291,26 +1265,7 @@ function generateReadHTML(blockData, className, sectionName) {
                 const bCls = block.getAttribute('data-class');
                 const bSec = block.getAttribute('data-section');
                 
-               block.setAttribute('data-s24', s24);
-
-                // CRITICAL FIX: Lock values into HTML so they survive DOM sorting
-                block.querySelector('.tb-s24').setAttribute('value', s24);
-                block.querySelector('.tb-e24').setAttribute('value', e24);
-                entryRows.forEach(r => {
-                    r.querySelector('.ent-room').setAttribute('value', r.querySelector('.ent-room').value);
-                    r.querySelector('.ent-rem').setAttribute('value', r.querySelector('.ent-rem').value);
-                    const tSel = r.querySelector('.ent-tea');
-                    Array.from(tSel.options).forEach(o => o.value === tSel.value ? o.setAttribute('selected', 'true') : o.removeAttribute('selected'));
-                    const sSel = r.querySelector('.ent-sub');
-                    Array.from(sSel.options).forEach(o => o.value === sSel.value ? o.setAttribute('selected', 'true') : o.removeAttribute('selected'));
-                });
-
-                // Add tags so the CSS filter can find them
-                const subs = entries.map(e => (e.subject||'').toUpperCase()).join(',');
-                const teas = entries.map(e => e.teacher||'').join(',');
-                block.setAttribute('data-subjects', subs);
-                block.setAttribute('data-teachers', teas);
-
+                block.setAttribute('data-s24', s24);
                 readView.innerHTML = generateReadHTML({ start24: s24, end24: e24, entries }, bCls, bSec);
                 
                 editView.classList.add('hidden');
@@ -1318,7 +1273,6 @@ function generateReadHTML(blockData, className, sectionName) {
                 
                 sortSectionBlocks(secId); 
                 checkGlobalClash(); 
-                if (typeof applyVisualFilters === 'function') applyVisualFilters();
             }
         }
 function cancelEditMode(blockId) {
@@ -1413,9 +1367,8 @@ function cancelEditMode(blockId) {
             checkGlobalClash();
         }
 
-      function sortSectionBlocks(secId) {
+        function sortSectionBlocks(secId) {
             const container = document.getElementById('grid-' + secId);
-            if (!container) return;
             const blocks = Array.from(container.querySelectorAll('.time-block'));
             const addBtn = document.getElementById('add-btn-' + secId);
             
@@ -1425,9 +1378,7 @@ function cancelEditMode(blockId) {
                 return aTime.localeCompare(bTime); 
             });
             
-            // CRITICAL FIX: Use CSS Flexbox Order to sort visually without destroying DOM form states!
-            blocks.forEach((b, index) => b.style.order = index);
-            if (addBtn) addBtn.style.order = blocks.length;
+            blocks.forEach(b => container.insertBefore(b, addBtn));
         }
 function peekTeacher(btn) {
             const row = btn.closest('.ent-row');
@@ -1483,7 +1434,7 @@ function peekTeacher(btn) {
         // === GLOBAL VIRTUAL CLASH DETECTOR                                        ===
         // ============================================================================
         function checkGlobalClash() {
-            const allBlocks = Array.from(document.getElementById('timetable-container').querySelectorAll('.time-block'));
+            const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             const virtualDb = [];
             
             // Build virtual DB
@@ -1697,7 +1648,7 @@ function peekTeacher(btn) {
         // === SAVE ENGINE & EMAIL NOTIFICATION                                     ===
         // ============================================================================
        async function saveAllChanges() {
-            const allBlocks = Array.from(document.getElementById('timetable-container').querySelectorAll('.time-block'));
+            const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             let newSlots = []; 
             let conflictMsg = "";
 
@@ -2279,15 +2230,17 @@ function handlePrimaryAction() {
    async function saveOverrideForSpecificDate() {
             if (!confirm(`Save these specific changes for ${currentContextDate}? This will NOT alter your normal weekly master schedule.`)) return;
 
-          // Bug Fixed: We no longer wipe the screen before saving! 
-            // The scraper perfectly captures your manual edits, even if they are hidden by a filter.
-            
-            const btn = document.getElementById('main-action-btn');
+            // 🚨 CRITICAL FIX: Clear filters and render the ENTIRE school before scraping!
+            if (document.getElementById('filter-subject')) document.getElementById('filter-subject').value = 'ALL';
+            if (document.getElementById('filter-teacher')) document.getElementById('filter-teacher').value = 'ALL';
+            renderDirectDashboard();
+
+            const btn = document.getElementById('main-action-btn'); 
             const originalHTML = btn.innerHTML;
             btn.innerHTML = "⌛ Saving..."; btn.disabled = true;
 
             try {
-                const allBlocks = Array.from(document.getElementById('timetable-container').querySelectorAll('.time-block'));
+                const allBlocks = Array.from(document.querySelectorAll('.time-block'));
                 let newSlots = []; 
                 let conflictMsg = "";
 
@@ -2380,7 +2333,7 @@ function handlePrimaryAction() {
 
             try {
                 // 1. Scrape the current screen to capture your actual edits
-                const allBlocks = Array.from(document.getElementById('timetable-container').querySelectorAll('.time-block'));
+                const allBlocks = Array.from(document.querySelectorAll('.time-block'));
                 let newSlots = []; 
                 for (let b of allBlocks) {
                     const className = b.getAttribute('data-class');
@@ -2483,7 +2436,7 @@ function handlePrimaryAction() {
 
             try {
                 // 1. Scrape the current screen to capture your actual edits
-                const allBlocks = Array.from(document.getElementById('timetable-container').querySelectorAll('.time-block'));
+                const allBlocks = Array.from(document.querySelectorAll('.time-block'));
                 let newSlots = []; 
                 for (let b of allBlocks) {
                     const className = b.getAttribute('data-class');
@@ -3218,3 +3171,4 @@ function handlePrimaryAction() {
     </script>
 </body>
 </html>
+
