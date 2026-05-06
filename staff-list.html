@@ -656,7 +656,7 @@
         let rawSectionLogsForDraft = [];
         let adminReportsList = [];
         // --- HOD FLOW: GENERATE REPORTS ---
-        function openHODReportGenerator() {
+       function openHODReportGenerator() {
             document.getElementById('rm-title').innerText = "Generate Section Report";
             document.getElementById('rm-subtitle').innerText = "Fetch teacher data and compile a section-specific evaluation";
             
@@ -676,20 +676,26 @@
                 staffOptions += `<option value="${s.email}">${name}</option>`;
             });
 
+            // UI FIX: Compact Grid Layout for Mobile (Prevents screen freezing)
+            document.getElementById('rm-dynamic-controls').className = "p-4 bg-slate-50 border-b border-slate-200 shrink-0";
             document.getElementById('rm-dynamic-controls').innerHTML = `
-                <div class="w-full sm:flex-1">
-                    <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">1. Select Staff Member</label>
-                    <select id="gen-staff" class="w-full p-3.5 bg-white border border-slate-300 rounded-xl text-sm font-bold text-slate-700 outline-none focus:border-indigo-500 shadow-sm cursor-pointer">${staffOptions}</select>
+                <div class="w-full grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
+                    <div class="col-span-2 md:col-span-1">
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Staff Member</label>
+                        <select id="gen-staff" class="w-full p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold outline-none shadow-sm">${staffOptions}</select>
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">From</label>
+                        <input type="date" id="gen-from" value="${lastWeekIso}" class="w-full p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold outline-none shadow-sm">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">To</label>
+                        <input type="date" id="gen-to" value="${todayIso}" class="w-full p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold outline-none shadow-sm">
+                    </div>
+                    <div class="col-span-2 md:col-span-1">
+                        <button onclick="fetchTeacherSectionsForRange()" class="w-full bg-indigo-600 text-white p-2.5 rounded-lg font-black uppercase tracking-widest text-[10px] shadow-md hover:bg-indigo-500 transition-colors">Fetch Sections</button>
+                    </div>
                 </div>
-                <div class="w-full sm:w-auto">
-                    <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">2. From Date</label>
-                    <input type="date" id="gen-from" value="${lastWeekIso}" class="w-full p-3.5 bg-white border border-slate-300 rounded-xl text-sm font-bold text-slate-700 outline-none focus:border-indigo-500 shadow-sm cursor-pointer">
-                </div>
-                <div class="w-full sm:w-auto">
-                    <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">3. To Date</label>
-                    <input type="date" id="gen-to" value="${todayIso}" class="w-full p-3.5 bg-white border border-slate-300 rounded-xl text-sm font-bold text-slate-700 outline-none focus:border-indigo-500 shadow-sm cursor-pointer">
-                </div>
-                <button onclick="fetchTeacherSectionsForRange()" class="w-full sm:w-auto bg-indigo-600 text-white px-8 py-3.5 rounded-xl font-black uppercase tracking-widest text-xs shadow-md hover:bg-indigo-500 transition-colors">Fetch Sections</button>
             `;
             document.getElementById('rm-feed').innerHTML = `<div class="text-center py-32 text-slate-400 font-black uppercase tracking-widest text-sm">Select criteria and fetch sections.</div>`;
             document.getElementById('reports-modal').classList.remove('hidden');
@@ -703,22 +709,73 @@
             if(!email || !fromDate || !toDate) return alert("Please fill all fields.");
 
             const feed = document.getElementById('rm-feed');
-            feed.innerHTML = `<div class="text-center py-32"><span class="loader mb-4 border-slate-300 border-t-indigo-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Extracting Section Data...</span></div>`;
+            feed.innerHTML = `<div class="text-center py-20"><span class="loader mb-4 border-slate-300 border-t-indigo-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Cross-referencing Master Timetable...</span></div>`;
 
             try {
-                // 1. Fetch the daily reports for this teacher in the date range
-                const snap = await db.collection("daily_reports").where("teacherEmail", "==", email).get();
-                let reports = snap.docs.map(d => d.data()).filter(r => r.date >= fromDate && r.date <= toDate);
+                // Determine target dates
+                let targetDates = [];
+                let curr = new Date(fromDate);
+                let end = new Date(toDate);
+                while(curr <= end) {
+                    targetDates.push(curr.toISOString().split('T')[0]);
+                    curr.setDate(curr.getDate() + 1);
+                }
+
+                // DATA FIX: Virtual Compiler reads directly from root tables, catching everything!
+                const plannerSnap = await db.collection("lesson_planners").get();
+                const assignSnap = await db.collection("lesson_planner_assignments").get();
+                const ttSnap = await db.collection("timetable").get();
                 
-                reports.sort((a,b) => new Date(a.date) - new Date(b.date));
+                const planners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const assignments = assignSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const timetableData = ttSnap.docs.map(d => d.data());
+                
+                const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                let virtualReports = [];
 
-                // 2. Slice and Dice by Section
+                const tObj = allStaff.find(s => s.email === email);
+                const tName = tObj ? (Object.keys(tObj.details).find(k=>k.toLowerCase().includes('name')) ? tObj.details[Object.keys(tObj.details).find(k=>k.toLowerCase().includes('name'))] : email) : email;
+
+                // 1. Rebuild Classes from Timetable
+                for (let tDate of targetDates) {
+                    const dateObj = new Date(tDate);
+                    if (dateObj.getDay() === 0) continue; 
+                    const dayName = daysOfWeek[dateObj.getDay()];
+
+                    let dailyObj = { date: tDate, classes: [], topics: [], duties: [] };
+                    
+                    const dayTt = timetableData.filter(t => t.day === dayName && (t.teacherEmail === email || t.teacher === tName || t.teacherName === tName));
+                    dayTt.forEach(cls => {
+                        dailyObj.classes.push({ className: cls.className, section: cls.section, subject: cls.subject, time: cls.timeRange || `${cls.start24} - ${cls.end24}` });
+                    });
+                    virtualReports.push(dailyObj);
+                }
+
+                // 2. Rebuild Topics from Lesson Planners
+                planners.forEach(p => {
+                    const assign = assignments.find(a => a.id === p.id) || {};
+                    let clsName = assign.className; let secName = assign.section; let subName = assign.subject;
+                    if (!clsName) {
+                        const pts = String(p.id).split('_');
+                        if (pts.length >= 3) { clsName = pts[0]; secName = pts[1]; subName = pts[2].replace(/_/g, ' '); }
+                    }
+
+                    if (p.syllabusData && Array.isArray(p.syllabusData)) {
+                        p.syllabusData.forEach(topic => {
+                            if (topic.isDone && topic.completedDate && targetDates.includes(topic.completedDate)) {
+                                if (topic.tickedBy === email || topic.tickedBy === tName || assign.assignedTo === email) {
+                                    let r = virtualReports.find(v => v.date === topic.completedDate);
+                                    if(r) r.topics.push({ className: clsName, section: secName, subject: subName, chapter: topic['CHAPTER NAME'], subtopic: topic['SUBTOPICS'] });
+                                }
+                            }
+                        });
+                    }
+                });
+
+                // Slice and Dice by Section
                 currentExtractedSections = {}; 
-                rawSectionLogsForDraft = reports; 
-
-                reports.forEach(rep => {
+                virtualReports.forEach(rep => {
                     const processArray = (arr, type) => {
-                        if(!arr) return;
                         arr.forEach(item => {
                             if(!item.className || !item.section) return;
                             const secKey = `${item.className}|${item.section}`;
@@ -732,14 +789,13 @@
                         });
                     };
 
-                    processArray(rep.classesConducted, 'classes');
-                    processArray(rep.syllabusProgress, 'topics');
-                    processArray(rep.dutiesCompleted, 'duties');
+                    processArray(rep.classes, 'classes');
+                    processArray(rep.topics, 'topics');
                 });
 
-             const secKeys = Object.keys(currentExtractedSections).sort();
+                const secKeys = Object.keys(currentExtractedSections).sort();
                 if(secKeys.length === 0) {
-                    feed.innerHTML = `<div class="text-center py-20 bg-white rounded-3xl border border-slate-200"><p class="text-slate-400 font-black uppercase text-sm tracking-widest">No classes taught by this teacher in this range.</p></div>`;
+                    feed.innerHTML = `<div class="text-center py-20 bg-white rounded-3xl border border-slate-200"><p class="text-slate-400 font-black uppercase text-sm tracking-widest">No classes assigned to this teacher in this range.</p></div>`;
                     return;
                 }
 
@@ -747,45 +803,43 @@
                     const sec = currentExtractedSections[key];
                     const daysActive = Object.keys(sec.dayLogs).length;
                     
-                    // Build the internal logs HTML
-                    let logsHtml = "";
-                    const days = Object.keys(sec.dayLogs).sort();
-                    logsHtml = days.map(d => {
+                    let logsHtml = Object.keys(sec.dayLogs).sort().map(d => {
                         const dayData = sec.dayLogs[d];
                         const prettyDate = new Date(d).toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short'});
                         
-                        let clsHtml = dayData.classes.map(c => `<div class="text-[10px] font-bold text-indigo-700 bg-white p-2 rounded-lg border border-indigo-100 mt-1 shadow-sm">🕒 ${c.time} - <span class="uppercase">${c.subject}</span></div>`).join('');
-                        let topHtml = dayData.topics.map(t => `<div class="text-[10px] font-bold text-emerald-700 bg-white p-2 rounded-lg border border-emerald-100 mt-1 shadow-sm">✅ ${t.chapter} - ${t.subtopic}</div>`).join('');
-                        let dutHtml = dayData.duties.map(d => `<div class="text-[10px] font-bold text-amber-700 bg-white p-2 rounded-lg border border-amber-100 mt-1 shadow-sm">🛡️ ${d.type} (${d.time})</div>`).join('');
+                        let clsHtml = dayData.classes.map(c => `<div class="text-[10px] font-bold text-indigo-700 bg-white p-1.5 rounded-lg border border-indigo-100 mt-1 shadow-sm leading-tight">🕒 ${c.time} - <span class="uppercase">${c.subject}</span></div>`).join('');
+                        let topHtml = dayData.topics.map(t => `<div class="text-[10px] font-bold text-emerald-700 bg-white p-1.5 rounded-lg border border-emerald-100 mt-1 shadow-sm leading-tight">✅ ${t.chapter}</div>`).join('');
 
                         return `
-                        <div class="mb-4 bg-slate-50 p-4 rounded-2xl border border-slate-200 shadow-sm">
-                            <div class="font-black text-slate-800 text-xs uppercase tracking-widest border-b border-slate-200 pb-2 mb-3">${prettyDate}</div>
-                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div><span class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Classes</span>${clsHtml || '<div class="text-[10px] text-slate-400 mt-1">-</div>'}</div>
-                                <div><span class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Syllabus</span>${topHtml || '<div class="text-[10px] text-slate-400 mt-1">-</div>'}</div>
-                                <div><span class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Duties</span>${dutHtml || '<div class="text-[10px] text-slate-400 mt-1">-</div>'}</div>
+                        <div class="mb-3 bg-slate-50 p-3 rounded-xl border border-slate-200 shadow-sm">
+                            <div class="font-black text-slate-800 text-[10px] uppercase tracking-widest border-b border-slate-200 pb-1 mb-2">${prettyDate}</div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <div><span class="text-[8px] font-black text-slate-400 uppercase tracking-widest">Classes</span>${clsHtml || '<div class="text-[9px] text-slate-400 mt-1">-</div>'}</div>
+                                <div><span class="text-[8px] font-black text-slate-400 uppercase tracking-widest">Syllabus</span>${topHtml || '<div class="text-[9px] text-slate-400 mt-1">-</div>'}</div>
                             </div>
                         </div>`;
                     }).join('');
 
                     return `
                     <style>details > summary { list-style: none; } details > summary::-webkit-details-marker { display: none; }</style>
-                    <details class="bg-white border-2 border-slate-200 rounded-[2rem] shadow-sm hover:border-indigo-300 transition-colors group mb-4">
-                        <summary class="p-6 flex flex-col sm:flex-row gap-4 justify-between sm:items-center cursor-pointer outline-none list-none">
-                            <div class="flex items-center gap-4">
-                                <span class="text-3xl bg-slate-50 p-3 rounded-xl border border-slate-100">🏫</span>
-                                <div>
-                                    <h4 class="font-black text-slate-800 text-lg uppercase tracking-tighter flex items-center gap-2">Class ${sec.className} | Sec ${sec.section} <span class="text-slate-400 group-open:rotate-180 transition-transform text-lg">▼</span></h4>
-                                    <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">Active on ${daysActive} distinct days in this range</p>
+                    <details class="bg-white border-2 border-slate-200 rounded-2xl shadow-sm hover:border-indigo-300 transition-colors group mb-3">
+                        <summary class="p-4 flex flex-col gap-3 cursor-pointer outline-none list-none">
+                            <div class="flex items-center gap-3">
+                                <span class="text-2xl bg-slate-50 p-2 rounded-lg border border-slate-100 shrink-0">🏫</span>
+                                <div class="flex-1">
+                                    <h4 class="font-black text-slate-800 text-base uppercase tracking-tighter flex justify-between items-center w-full">
+                                        <span>Class ${sec.className} | Sec ${sec.section}</span>
+                                        <span class="text-slate-400 group-open:rotate-180 transition-transform">▼</span>
+                                    </h4>
+                                    <p class="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Active on ${daysActive} days</p>
                                 </div>
                             </div>
-                            <button onclick="event.preventDefault(); event.stopPropagation(); openReportDraftForm('${sec.className}', '${sec.section}')" class="bg-indigo-50 text-indigo-700 hover:bg-indigo-600 hover:text-white px-5 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-colors border border-indigo-200 shadow-sm shrink-0">Make Report</button>
+                            <button onclick="event.preventDefault(); event.stopPropagation(); openReportDraftForm('${sec.className}', '${sec.section}')" class="w-full bg-indigo-50 text-indigo-700 hover:bg-indigo-600 hover:text-white py-2 rounded-lg font-black text-[10px] uppercase tracking-widest transition-colors border border-indigo-200 shadow-sm">Make Report</button>
                         </summary>
-                        <div class="px-6 pb-6 pt-2 border-t border-slate-100 mt-2">
-                            <h5 class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Extracted Logs for Evaluation:</h5>
-                            <div class="max-h-60 overflow-y-auto custom-scroll pr-2">
-                                ${logsHtml}
+                        <div class="px-4 pb-4 pt-0">
+                            <div class="border-t border-slate-100 pt-3">
+                                <h5 class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">Logs for Evaluation:</h5>
+                                <div class="max-h-48 overflow-y-auto custom-scroll pr-1">${logsHtml}</div>
                             </div>
                         </div>
                     </details>`;
