@@ -701,7 +701,7 @@
             document.getElementById('reports-modal').classList.remove('hidden');
         }
 
-        async function fetchTeacherSectionsForRange() {
+       async function fetchTeacherSectionsForRange() {
             const email = document.getElementById('gen-staff').value;
             const fromDate = document.getElementById('gen-from').value;
             const toDate = document.getElementById('gen-to').value;
@@ -709,10 +709,9 @@
             if(!email || !fromDate || !toDate) return alert("Please fill all fields.");
 
             const feed = document.getElementById('rm-feed');
-            feed.innerHTML = `<div class="text-center py-20"><span class="loader mb-4 border-slate-300 border-t-indigo-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Cross-referencing Master Timetable...</span></div>`;
+            feed.innerHTML = `<div class="text-center py-20"><span class="loader mb-4 border-slate-300 border-t-indigo-600"></span><br><span class="text-slate-400 font-black uppercase tracking-widest text-xs">Cross-referencing Timetable & Submissions...</span></div>`;
 
             try {
-                // Determine target dates
                 let targetDates = [];
                 let curr = new Date(fromDate);
                 let end = new Date(toDate);
@@ -721,14 +720,18 @@
                     curr.setDate(curr.getDate() + 1);
                 }
 
-                // DATA FIX: Virtual Compiler reads directly from root tables, catching everything!
+                // Fetch ALL databases to ensure no logs, activities, or duties are missed
                 const plannerSnap = await db.collection("lesson_planners").get();
                 const assignSnap = await db.collection("lesson_planner_assignments").get();
                 const ttSnap = await db.collection("timetable").get();
+                const rosterSnap = await db.collection("duty_rosters").get();
+                const dailySnap = await db.collection("daily_reports").where("teacherEmail", "==", email).get();
                 
                 const planners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const assignments = assignSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const timetableData = ttSnap.docs.map(d => d.data());
+                const rosters = rosterSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const dailyReports = dailySnap.docs.map(d => d.data()).filter(r => r.date >= fromDate && r.date <= toDate);
                 
                 const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                 let virtualReports = [];
@@ -736,22 +739,38 @@
                 const tObj = allStaff.find(s => s.email === email);
                 const tName = tObj ? (Object.keys(tObj.details).find(k=>k.toLowerCase().includes('name')) ? tObj.details[Object.keys(tObj.details).find(k=>k.toLowerCase().includes('name'))] : email) : email;
 
-                // 1. Rebuild Classes from Timetable
+                // 1. Rebuild Classes & Duties
                 for (let tDate of targetDates) {
                     const dateObj = new Date(tDate);
                     if (dateObj.getDay() === 0) continue; 
                     const dayName = daysOfWeek[dateObj.getDay()];
 
-                    let dailyObj = { date: tDate, classes: [], topics: [], duties: [] };
+                    let dailyObj = { date: tDate, classes: [], topics: [], activities: [], duties: [], additionalWork: "" };
                     
                     const dayTt = timetableData.filter(t => t.day === dayName && (t.teacherEmail === email || t.teacher === tName || t.teacherName === tName));
                     dayTt.forEach(cls => {
                         dailyObj.classes.push({ className: cls.className, section: cls.section, subject: cls.subject, time: cls.timeRange || `${cls.start24} - ${cls.end24}` });
                     });
+
+                    const diffToMonday = dateObj.getDate() - dateObj.getDay() + (dateObj.getDay() === 0 ? -6 : 1);
+                    const mondayDate = new Date(new Date(dateObj).setDate(diffToMonday));
+                    const weekId = "week_starting_" + mondayDate.toISOString().split('T')[0];
+                    const rDoc = rosters.find(r => r.id === weekId);
+                    if (rDoc && rDoc.rosterData) {
+                        let dType = rDoc.type ? String(rDoc.type) : "Assigned Duty";
+                        Object.keys(rDoc.rosterData).forEach(clsKey => {
+                            const dayDuty = rDoc.rosterData[clsKey].days[dayName];
+                            if (dayDuty && dayDuty.status === 'ASSIGNED' && dayDuty.staff && dayDuty.staff.email === email) {
+                                let cName = rDoc.rosterData[clsKey].cName; let sName = rDoc.rosterData[clsKey].sName;
+                                if(!cName) { const pts = clsKey.split('|'); cName = pts[0]; sName = pts[1]; }
+                                dailyObj.duties.push({ type: dType, className: cName, section: sName, time: dayDuty.timing || "No Time" });
+                            }
+                        });
+                    }
                     virtualReports.push(dailyObj);
                 }
 
-                // 2. Rebuild Topics from Lesson Planners
+                // 2. Rebuild Topics & Activities
                 planners.forEach(p => {
                     const assign = assignments.find(a => a.id === p.id) || {};
                     let clsName = assign.className; let secName = assign.section; let subName = assign.subject;
@@ -770,6 +789,49 @@
                             }
                         });
                     }
+                    if (p.activityLogs && Array.isArray(p.activityLogs)) {
+                        p.activityLogs.forEach(act => {
+                            if (act.date && targetDates.includes(act.date)) {
+                                if (act.loggedBy === email || act.loggedBy === tName || assign.assignedTo === email) {
+                                    let r = virtualReports.find(v => v.date === act.date);
+                                    if(r) r.activities.push({ className: clsName, section: secName, subject: subName, reason: act.reason, minutes: act.minutes });
+                                }
+                            }
+                        });
+                    }
+                });
+
+                // 3. Merge Manual Overrides, Simulated logs, and Extra Work
+                dailyReports.forEach(rep => {
+                    let v = virtualReports.find(r => r.date === rep.date);
+                    if (!v) {
+                        v = { date: rep.date, classes: [], topics: [], activities: [], duties: [], additionalWork: "" };
+                        virtualReports.push(v);
+                    }
+                    if (rep.additionalWork) v.additionalWork = rep.additionalWork;
+                    
+                    if(rep.classesConducted) {
+                        rep.classesConducted.forEach(c => {
+                            if(!v.classes.some(vc => vc.className === c.className && vc.section === c.section)) v.classes.push(c);
+                        });
+                    }
+                    if(rep.syllabusProgress) {
+                        rep.syllabusProgress.forEach(tGroup => {
+                            let mappedClass = tGroup.classId && tGroup.classId.includes('sim') ? 'Simulation Class' : (v.classes[0]?.className || 'General');
+                            let mappedSec = tGroup.classId && tGroup.classId.includes('sim') ? 'A' : (v.classes[0]?.section || 'General');
+                            
+                            if(tGroup.topics) {
+                                tGroup.topics.forEach(t => v.topics.push({ className: mappedClass, section: mappedSec, chapter: t['CHAPTER NAME'], subtopic: t['SUBTOPICS'] }));
+                            } else if (tGroup.chapter) {
+                                v.topics.push({ className: mappedClass, section: mappedSec, chapter: tGroup.chapter, subtopic: tGroup.subtopic });
+                            }
+                        });
+                    }
+                    if(rep.dutiesCompleted) {
+                        rep.dutiesCompleted.forEach(d => {
+                            if(!v.duties.some(vd => vd.className === d.className && vd.section === d.section)) v.duties.push(d);
+                        });
+                    }
                 });
 
                 // Slice and Dice by Section
@@ -777,20 +839,37 @@
                 virtualReports.forEach(rep => {
                     const processArray = (arr, type) => {
                         arr.forEach(item => {
-                            if(!item.className || !item.section) return;
-                            const secKey = `${item.className}|${item.section}`;
+                            let cName = item.className || 'General'; let sName = item.section || 'General';
+                            const secKey = `${cName}|${sName}`;
+                            
                             if(!currentExtractedSections[secKey]) {
-                                currentExtractedSections[secKey] = { className: item.className, section: item.section, dayLogs: {} };
+                                currentExtractedSections[secKey] = { className: cName, section: sName, dayLogs: {}, extWork: [] };
                             }
                             if(!currentExtractedSections[secKey].dayLogs[rep.date]) {
-                                currentExtractedSections[secKey].dayLogs[rep.date] = { date: rep.date, classes: [], topics: [], duties: [] };
+                                currentExtractedSections[secKey].dayLogs[rep.date] = { date: rep.date, classes: [], topics: [], activities: [], duties: [] };
                             }
-                            currentExtractedSections[secKey].dayLogs[rep.date][type].push(item);
+                            // Avoid exact duplicates
+                            if (!currentExtractedSections[secKey].dayLogs[rep.date][type].some(x => JSON.stringify(x) === JSON.stringify(item))) {
+                                currentExtractedSections[secKey].dayLogs[rep.date][type].push(item);
+                            }
+                            if (rep.additionalWork && !currentExtractedSections[secKey].extWork.includes(`[${rep.date}] ${rep.additionalWork}`)) {
+                                currentExtractedSections[secKey].extWork.push(`[${rep.date}] ${rep.additionalWork}`);
+                            }
                         });
                     };
 
                     processArray(rep.classes, 'classes');
                     processArray(rep.topics, 'topics');
+                    processArray(rep.activities, 'activities');
+                    processArray(rep.duties, 'duties');
+                    
+                    // If ONLY extra work, map to General
+                    if (rep.additionalWork && rep.classes.length === 0 && rep.topics.length === 0 && rep.duties.length === 0) {
+                        if(!currentExtractedSections["General|General"]) currentExtractedSections["General|General"] = { className: "General", section: "General", dayLogs: {}, extWork: [] };
+                        if(!currentExtractedSections["General|General"].extWork.includes(`[${rep.date}] ${rep.additionalWork}`)) {
+                            currentExtractedSections["General|General"].extWork.push(`[${rep.date}] ${rep.additionalWork}`);
+                        }
+                    }
                 });
 
                 const secKeys = Object.keys(currentExtractedSections).sort();
@@ -807,18 +886,30 @@
                         const dayData = sec.dayLogs[d];
                         const prettyDate = new Date(d).toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short'});
                         
-                        let clsHtml = dayData.classes.map(c => `<div class="text-[10px] font-bold text-indigo-700 bg-white p-1.5 rounded-lg border border-indigo-100 mt-1 shadow-sm leading-tight">🕒 ${c.time} - <span class="uppercase">${c.subject}</span></div>`).join('');
-                        let topHtml = dayData.topics.map(t => `<div class="text-[10px] font-bold text-emerald-700 bg-white p-1.5 rounded-lg border border-emerald-100 mt-1 shadow-sm leading-tight">✅ ${t.chapter}</div>`).join('');
+                        let clsHtml = dayData.classes.map(c => `<div class="text-[11px] font-bold text-indigo-700 bg-white p-2 rounded-lg border border-indigo-100 mt-1 shadow-sm leading-tight">🕒 ${c.time} - <span class="uppercase">${c.subject || ''}</span></div>`).join('');
+                        let topHtml = dayData.topics.map(t => `<div class="text-[11px] font-bold text-emerald-700 bg-white p-2 rounded-lg border border-emerald-100 mt-1 shadow-sm leading-tight">✅ ${t.chapter} ${t.subtopic ? '- '+t.subtopic : ''}</div>`).join('');
+                        let actHtml = dayData.activities.map(a => `<div class="text-[11px] font-bold text-blue-700 bg-white p-2 rounded-lg border border-blue-100 mt-1 shadow-sm leading-tight">🎯 ${a.reason} (${a.minutes}m)</div>`).join('');
+                        let dutHtml = dayData.duties.map(d => `<div class="text-[11px] font-bold text-amber-700 bg-white p-2 rounded-lg border border-amber-100 mt-1 shadow-sm leading-tight">🛡️ ${d.type} (${d.time})</div>`).join('');
+
+                        let allItemsHtml = clsHtml + topHtml + actHtml + dutHtml;
+                        if(!allItemsHtml) return '';
 
                         return `
-                        <div class="mb-3 bg-slate-50 p-3 rounded-xl border border-slate-200 shadow-sm">
-                            <div class="font-black text-slate-800 text-[10px] uppercase tracking-widest border-b border-slate-200 pb-1 mb-2">${prettyDate}</div>
-                            <div class="grid grid-cols-2 gap-2">
-                                <div><span class="text-[8px] font-black text-slate-400 uppercase tracking-widest">Classes</span>${clsHtml || '<div class="text-[9px] text-slate-400 mt-1">-</div>'}</div>
-                                <div><span class="text-[8px] font-black text-slate-400 uppercase tracking-widest">Syllabus</span>${topHtml || '<div class="text-[9px] text-slate-400 mt-1">-</div>'}</div>
+                        <div class="mb-3 bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-sm">
+                            <div class="font-black text-slate-800 text-[11px] uppercase tracking-widest border-b border-slate-200 pb-2 mb-3">${prettyDate}</div>
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                <div><span class="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Classes</span>${clsHtml || '<div class="text-[11px] text-slate-400">-</div>'}</div>
+                                <div><span class="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Syllabus</span>${topHtml || '<div class="text-[11px] text-slate-400">-</div>'}</div>
+                                <div><span class="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Activities</span>${actHtml || '<div class="text-[11px] text-slate-400">-</div>'}</div>
+                                <div><span class="text-[9px] font-black text-slate-400 uppercase tracking-widest block mb-1">Duties</span>${dutHtml || '<div class="text-[11px] text-slate-400">-</div>'}</div>
                             </div>
                         </div>`;
                     }).join('');
+
+                    let extWorkHtml = "";
+                    if(sec.extWork && sec.extWork.length > 0) {
+                        extWorkHtml = `<div class="mt-4 p-4 bg-blue-50/50 border border-blue-200 rounded-xl"><span class="text-[9px] font-black text-blue-800 uppercase tracking-widest block mb-2">Extra Work Logged:</span>` + sec.extWork.map(w => `<div class="text-[11px] font-bold text-slate-700 whitespace-pre-wrap mb-1">${w}</div>`).join('') + `</div>`;
+                    }
 
                     return `
                     <style>details > summary { list-style: none; } details > summary::-webkit-details-marker { display: none; }</style>
@@ -831,15 +922,15 @@
                                         <span>Class ${sec.className} | Sec ${sec.section}</span>
                                         <span class="text-slate-400 group-open:rotate-180 transition-transform">▼</span>
                                     </h4>
-                                    <p class="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Active on ${daysActive} days</p>
+                                    <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">Logs attached for ${daysActive} days</p>
                                 </div>
                             </div>
-                            <button onclick="event.preventDefault(); event.stopPropagation(); openReportDraftForm('${sec.className}', '${sec.section}')" class="w-full bg-indigo-50 text-indigo-700 hover:bg-indigo-600 hover:text-white py-2 rounded-lg font-black text-[10px] uppercase tracking-widest transition-colors border border-indigo-200 shadow-sm">Make Report</button>
+                            <button onclick="event.preventDefault(); event.stopPropagation(); openReportDraftForm('${sec.className}', '${sec.section}')" class="w-full bg-indigo-50 text-indigo-700 hover:bg-indigo-600 hover:text-white py-3 rounded-lg font-black text-xs uppercase tracking-widest transition-colors border border-indigo-200 shadow-sm">Make Report</button>
                         </summary>
-                        <div class="px-4 pb-4 pt-0">
-                            <div class="border-t border-slate-100 pt-3">
-                                <h5 class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">Logs for Evaluation:</h5>
-                                <div class="max-h-48 overflow-y-auto custom-scroll pr-1">${logsHtml}</div>
+                        <div class="px-5 pb-5 pt-0">
+                            <div class="border-t border-slate-100 pt-4">
+                                <h5 class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Compiled Internal Logs:</h5>
+                                <div class="max-h-60 overflow-y-auto custom-scroll pr-2">${logsHtml}${extWorkHtml}</div>
                             </div>
                         </div>
                     </details>`;
