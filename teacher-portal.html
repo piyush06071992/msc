@@ -211,10 +211,34 @@ async function checkNotifStatus() {
         }
         async function loadTodaysScheduleForAlerts(teacherName) {
             try {
-                const snap = await db.collection("timetable").where("teacherName", "==", teacherName).where("day", "==", daysOfWeek[new Date().getDay()]).get();
-                todaysSchedule = snap.docs.map(d => d.data());
-                checkUpcomingClasses(); setInterval(checkUpcomingClasses, 60000); 
-            } catch(e) { console.error(e); }
+                const now = new Date();
+                const todayDayName = daysOfWeek[now.getDay()];
+                const todayDateIso = now.toISOString().split('T')[0]; // Current date: YYYY-MM-DD
+
+                // 1. PRIORITY CHECK: Fetch any schedule set for this SPECIFIC DATE (Exam/Special)
+                const dateSnap = await db.collection("timetable")
+                    .where("teacherName", "==", teacherName)
+                    .where("date", "==", todayDateIso)
+                    .get();
+
+                if (!dateSnap.empty) {
+                    console.log("Date override detected for today. Using specific date schedule.");
+                    todaysSchedule = dateSnap.docs.map(d => d.data());
+                } else {
+                    // 2. FALLBACK: Fetch the standard Weekly schedule for this Day (e.g. Wednesday)
+                    // We also ensure we don't pick up entries intended for other specific dates
+                    const daySnap = await db.collection("timetable")
+                        .where("teacherName", "==", teacherName)
+                        .where("day", "==", todayDayName)
+                        .get();
+                    
+                    // Filter out any entries that belong to a specific date that isn't today
+                    todaysSchedule = daySnap.docs.map(d => d.data()).filter(item => !item.date);
+                }
+
+                checkUpcomingClasses(); 
+                setInterval(checkUpcomingClasses, 60000); 
+            } catch(e) { console.error("Alert Engine Error:", e); }
         }
         function checkUpcomingClasses() {
             if (todaysSchedule.length === 0) return;
