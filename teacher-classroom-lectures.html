@@ -152,57 +152,72 @@
         async function fetchDriveContent() {
             const grid = document.getElementById('explorer-grid');
             const empty = document.getElementById('empty-state');
-            grid.innerHTML = '<div class="col-span-full text-center p-10 font-bold text-slate-300 text-[10px] uppercase">Scanning Drive...</div>';
+            grid.innerHTML = '<div class="col-span-full text-center p-10 font-bold text-slate-300 text-[10px] uppercase animate-pulse">Scanning Drive...</div>';
 
             try {
-                // Fetch Folders
+                // 1. Fetch ALL Folders for this teacher
                 const fSnap = await db.collection("lecture_folders")
                     .where("teacherEmail", "==", activeStaff.email)
                     .where("parentId", "==", currentFolderId)
                     .get();
 
-                // Fetch Files
+                // 2. Fetch ALL Lectures for this teacher (Legacy Friendly)
+                // Note: We removed the .orderBy() here to stop the "Loading Error" 
+                // and avoid needing manual Firebase indexes.
                 const lSnap = await db.collection("classroom_lectures")
                     .where("teacherEmail", "==", activeStaff.email)
-                    .where("folderId", "==", currentFolderId)
-                    .orderBy("timestamp", "desc")
                     .get();
 
                 grid.innerHTML = "";
-                
-                if(fSnap.empty && lSnap.empty) {
-                    empty.classList.remove('hidden');
-                } else {
-                    empty.classList.add('hidden');
-                    
-                    // Render Folders
-                    fSnap.forEach(doc => {
-                        const d = doc.data();
-                        grid.innerHTML += `
-                            <div onclick="navigateToFolder('${doc.id}', '${d.name}')" class="folder-card bg-white p-4 rounded-2xl border-2 border-slate-100 flex flex-col items-center justify-center text-center cursor-pointer transition-all shadow-sm group">
-                                <span class="text-3xl mb-2 group-hover:scale-110 transition-transform">📂</span>
-                                <h4 class="text-[10px] font-black uppercase text-slate-700 truncate w-full px-2">${d.name}</h4>
-                                <button onclick="event.stopPropagation(); deleteFolder('${doc.id}')" class="mt-2 text-[8px] text-rose-400 font-bold opacity-0 group-hover:opacity-100">DELETE</button>
-                            </div>`;
-                    });
+                let hasContent = false;
 
-                    // Render Files
-                    lSnap.forEach(doc => {
-                        const d = doc.data();
-                        grid.innerHTML += `
-                            <div class="file-card bg-white p-4 rounded-2xl border-2 border-slate-100 flex flex-col items-center justify-center text-center cursor-pointer transition-all shadow-sm group relative">
-                                <div onclick="launchLecture('${doc.id}')" class="flex flex-col items-center">
-                                    <span class="text-3xl mb-2 group-hover:scale-110 transition-transform">📄</span>
-                                    <h4 class="text-[10px] font-black uppercase text-slate-700 truncate w-full px-2">${d.title}</h4>
-                                </div>
-                                <div class="flex gap-2 mt-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <button onclick="editLecture('${doc.id}')" class="text-[8px] bg-slate-100 px-2 py-1 rounded-lg font-bold text-slate-500">EDIT</button>
-                                    <button onclick="deleteLecture('${doc.id}')" class="text-[8px] bg-rose-50 px-2 py-1 rounded-lg font-bold text-rose-500">DEL</button>
-                                </div>
-                            </div>`;
-                    });
-                }
-            } catch(e) { grid.innerHTML = "Error loading drive."; console.error(e); }
+                // Render Folders
+                fSnap.forEach(doc => {
+                    hasContent = true;
+                    const d = doc.data();
+                    grid.innerHTML += `
+                        <div onclick="navigateToFolder('${doc.id}', '${d.name}')" class="folder-card bg-white p-4 rounded-2xl border-2 border-slate-100 flex flex-col items-center justify-center text-center cursor-pointer transition-all shadow-sm group">
+                            <span class="text-3xl mb-2 group-hover:scale-110 transition-transform">📂</span>
+                            <h4 class="text-[10px] font-black uppercase text-slate-700 truncate w-full px-2">${d.name}</h4>
+                            <button onclick="event.stopPropagation(); deleteFolder('${doc.id}')" class="mt-2 text-[8px] text-rose-400 font-bold opacity-0 group-hover:opacity-100">DELETE</button>
+                        </div>`;
+                });
+
+                // Filter & Render Files (Handles legacy files with no folderId)
+                const lectures = [];
+                lSnap.forEach(doc => {
+                    const data = doc.data();
+                    const docFolder = data.folderId || 'root'; // Treat missing folderId as root
+                    if (docFolder === currentFolderId) {
+                        lectures.push({ id: doc.id, ...data });
+                    }
+                });
+
+                // Sort files by timestamp manually (Most recent first)
+                lectures.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+                lectures.forEach(file => {
+                    hasContent = true;
+                    grid.innerHTML += `
+                        <div class="file-card bg-white p-4 rounded-2xl border-2 border-slate-100 flex flex-col items-center justify-center text-center cursor-pointer transition-all shadow-sm group relative">
+                            <div onclick="launchLecture('${file.id}')" class="flex flex-col items-center">
+                                <span class="text-3xl mb-2 group-hover:scale-110 transition-transform">📄</span>
+                                <h4 class="text-[10px] font-black uppercase text-slate-700 truncate w-full px-2">${file.title}</h4>
+                            </div>
+                            <div class="flex gap-2 mt-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button onclick="editLecture('${file.id}')" class="text-[8px] bg-slate-100 px-2 py-1 rounded-lg font-bold text-slate-500">EDIT</button>
+                                <button onclick="deleteLecture('${file.id}')" class="text-[8px] bg-rose-50 px-2 py-1 rounded-lg font-bold text-rose-500">DEL</button>
+                            </div>
+                        </div>`;
+                });
+
+                if (!hasContent) empty.classList.remove('hidden');
+                else empty.classList.add('hidden');
+
+            } catch(e) { 
+                grid.innerHTML = `<div class="col-span-full text-rose-500 font-bold text-xs p-10 text-center">DRIVE ERROR: ${e.message}</div>`;
+                console.error(e); 
+            }
         }
 
         async function createNewFolder() {
