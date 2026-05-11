@@ -3056,16 +3056,25 @@ function processSave(type) {
                     masterDayData = masterSnap.docs.map(d => d.data());
                 }
 
-                let transformedSchedule = [];
-                const targetKeys = targetClassesData.map(t => `${t.className}|${t.sectionName}`);
+               let transformedSchedule = [];
+                
+                // CRITICAL FIX: The Normalizer strips spaces and forces lowercase so matching NEVER fails
+                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                
+                const targetKeys = targetClassesData.map(t => `${norm(t.className)}|${norm(t.sectionName)}`);
                 
                 masterDayData.forEach(m => {
-                    if (!targetKeys.includes(`${m.className}|${m.section}`)) transformedSchedule.push(m);
+                    // Push classes that were NOT selected to remain completely unchanged
+                    if (!targetKeys.includes(`${norm(m.className)}|${norm(m.section)}`)) {
+                        transformedSchedule.push(m);
+                    }
                 });
 
                 targetClassesData.forEach(target => {
                     const { className: cName, sectionName: sName, lunchGroup, breakMode, examType, examTitle, testedSubjects, examStart, examEnd } = target;
-                    const classMaster = masterDayData.filter(m => m.className === cName && m.section === sName);
+                    
+                    // Safely find the master schedule for the selected class using the normalizer
+                    const classMaster = masterDayData.filter(m => norm(m.className) === norm(cName) && norm(m.section) === norm(sName));
                     if (classMaster.length === 0) return;
 
                     const bellRules = allBellRules[examType.toLowerCase()];
@@ -3080,17 +3089,21 @@ function processSave(type) {
                     let schoolEnd = 0;
                     let originalSubs = [];
                     let seenSubs = new Set();
+                    const normTestedSubjects = testedSubjects.map(ts => norm(ts));
 
                     classMaster.forEach(m => {
                         const em = universalTimeToMins(m.end24);
                         if (em > schoolEnd) schoolEnd = em;
                         
-                        const subName = m.subject.toUpperCase();
-                        if (!['BREAK', 'ASSEMBLY', 'EVENT', 'EXAM'].includes(subName)) {
+                        const normSub = norm(m.subject);
+                        const rawUpper = m.subject.toUpperCase();
+                        
+                        if (!['BREAK', 'ASSEMBLY', 'EVENT', 'EXAM'].includes(rawUpper)) {
                             if (examType === 'OT') {
-                                if (!seenSubs.has(subName) && testedSubjects.includes(subName)) {
+                                // Safely check if the subject was checked in the dispatcher
+                                if (!seenSubs.has(normSub) && normTestedSubjects.includes(normSub)) {
                                     originalSubs.push(m);
-                                    seenSubs.add(subName);
+                                    seenSubs.add(normSub);
                                 }
                             } else {
                                 originalSubs.push(m);
@@ -3098,7 +3111,6 @@ function processSave(type) {
                         }
                     });
                     originalSubs.sort((a,b) => universalTimeToMins(a.start24) - universalTimeToMins(b.start24));
-
                    transformedSchedule.push({ day: dayName, className: cName, section: sName, start24: minsTo24(eStartMins), end24: minsTo24(eEndMins), subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: examTitle, room: "SHUFFLED" });
 
                     let classStartCursor = eEndMins;
