@@ -254,15 +254,28 @@
 
         async function compileDayData(teacherName) {
             try {
-                // 1. Fetch Timetable for Today
-                const ttSnap = await getCollection("timetable")
-                    .where("teacherName", "==", teacherName)
-                    .where("day", "==", todayDayName)
-                    .get();
+               // 1. Fetch Timetable for Today & Apply Exam Overrides
+                const ttSnap = await getCollection("timetable").where("teacherName", "==", teacherName).get();
+                const todayIsoStr = new Date(new Date().getTime() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0];
+                const todayOverride = window.historyOverrides ? window.historyOverrides.find(o => o.date === todayIsoStr) : null;
                 
-                let rawClasses = ttSnap.docs.map(d => ({ id: d.id, ...d.data() }))
-                                         .sort((a,b) => (a.timeRange || "").localeCompare(b.timeRange || ""));
+                let rawClasses = [];
+                if (todayOverride && todayOverride.schedule) {
+                    rawClasses = todayOverride.schedule.filter(s => (s.teacherName === teacherName || s.teacher === teacherName) && s.day === todayDayName);
+                } else {
+                    rawClasses = ttSnap.docs.filter(d => d.data().day === todayDayName).map(d => ({ id: d.id, ...d.data() }));
+                }
 
+                // CRITICAL FIX: Safely format missing timeRanges (caused by Exam Dispatcher) to prevent crashes
+                rawClasses = rawClasses.map(cls => {
+                    if (!cls.timeRange && cls.start24 && cls.end24) {
+                        const f12 = (t24) => { let [h,m]=t24.split(':'); let ampm=h>=12?'PM':'AM'; h=h%12||12; return `${h.toString().padStart(2,'0')}:${m} ${ampm}`; };
+                        cls.timeRange = `${f12(cls.start24)} - ${f12(cls.end24)}`;
+                        const [sh, sm] = cls.start24.split(':').map(Number); const [eh, em] = cls.end24.split(':').map(Number);
+                        cls.duration = (eh*60+em) - (sh*60+sm);
+                    }
+                    return cls;
+                }).sort((a,b) => (a.timeRange || "").localeCompare(b.timeRange || ""));
                 // 2. Fetch Holidays & Filter Out Classes that fall on a holiday
                 const holSnap = await getCollection("school_holidays").get();
                 const holidaysData = holSnap.docs.map(d => d.data());
