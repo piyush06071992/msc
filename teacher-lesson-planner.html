@@ -216,23 +216,38 @@
 
            // POINT 8: Caching entirely removed. Always fetches Live Data.
 
-            try {
+          try {
                 // FETCH ENTIRE WEEKLY TIMETABLE FOR ACCURATE CALENDAR MATH
                 const snap = await getCollection("timetable")
                                      .where("teacherName", "==", safeName)
                                      .get();
                                      
                 window.teacherTimetable = snap.docs.map(d => d.data());
+
+                // --- CRITICAL FIX: OVERRIDE ENGINE FOR TEACHER DASHBOARD ---
+                // Check if today has a specific date override (like an Exam Day)
+                const todayDateObj = new Date();
+                const offset = todayDateObj.getTimezoneOffset() * 60000;
+                const todayIsoStr = (new Date(todayDateObj - offset)).toISOString().split('T')[0];
                 
-                // Filter only today's classes for the home dashboard
-                const todayDocs = snap.docs.filter(d => d.data().day === todayName);
+                const todayOverride = window.historyOverrides ? window.historyOverrides.find(o => o.date === todayIsoStr) : null;
+                
+                let todayDocs = [];
+                if (todayOverride && todayOverride.schedule) {
+                    // Feed the override schedule to the dashboard!
+                    todayDocs = todayOverride.schedule.filter(s => s.teacherName === safeName || s.teacher === safeName);
+                } else {
+                    // Fall back to the normal master timetable
+                    todayDocs = snap.docs.filter(d => d.data().day === todayName).map(d => ({ id: d.id, ...d.data() }));
+                }
                                      
                 if(todayDocs.length > 0) {
                     const structSnap = await getCollection("institute_structure").get();
                     const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
 
-                    mySessions = todayDocs.map(d => {
-                        const data = d.data();
+                    mySessions = todayDocs.map((data, index) => {
+                        // Data is correctly formatted whether it comes from the DB or the Override Array
+                        const docId = data.id || `override_${index}`; 
                         const times = data.timeRange ? data.timeRange.split(' - ') : ['00:00 AM', '00:00 AM'];
                         const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
@@ -250,7 +265,7 @@
                         }
                         
                         return { 
-                            id: d.id, 
+                            id: docId, 
                             assignmentId: `${structId}_${exactSubjectCasing}`.replace(/\s+/g, '_'),
                             className: data.className, section: data.section, 
                             subject: data.subject, start: times[0], end: times[1], duration: parseInt(data.duration) || 0 
