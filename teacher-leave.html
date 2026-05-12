@@ -77,11 +77,12 @@
 
         <div id="input-section" class="hidden bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-4">
             <div class="grid grid-cols-2 gap-3">
-                <div class="col-span-2"><label id="date-label-1" class="block text-[10px] font-black text-slate-400 uppercase mb-1 ml-1">Start Date</label><input type="date" id="l-date" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
-                <div id="end-date-wrap" class="hidden col-span-2"><label class="block text-[10px] font-black text-slate-400 uppercase mb-1 ml-1">End Date</label><input type="date" id="l-end-date" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
+                <div class="col-span-2"><label class="block text-[10px] font-black text-slate-400 uppercase mb-1 ml-1">Date</label><input type="date" id="l-date" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
+                <div id="end-date-wrap" class="hidden col-span-2"><label class="block text-[10px] font-black text-slate-400 uppercase mb-1 ml-1">End Date (Optional)</label><input type="date" id="l-end-date" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
                 <div id="time-wrap" class="hidden"><label class="block text-[10px] font-black text-slate-400 uppercase mb-1 ml-1">From Time</label><input type="time" id="l-time" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
-                <div id="auto-end-wrap" class="hidden"><label class="block text-[10px] font-black text-rose-400 uppercase mb-1 ml-1">Until Time</label><div id="l-auto-end" class="w-full p-4 bg-rose-50 border border-rose-100 rounded-xl font-black text-rose-600 text-center">--:--</div></div>
+                <div id="auto-end-wrap" class="hidden"><label class="block text-[10px] font-black text-indigo-400 uppercase mb-1 ml-1">Until Time</label><input type="time" id="l-end-time" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
             </div>
+            <p id="time-error" class="hidden text-[10px] font-black text-rose-600 uppercase bg-rose-50 p-2 rounded-lg border border-rose-100 text-center animate-pulse">Time limit exceeded for this leave type</p>
         </div>
 
         <div id="analysis-section" class="hidden space-y-4">
@@ -105,7 +106,7 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        let activeStaff = null, leaveType = null, calculatedEndMins = 0;
+        let activeStaff = null, leaveType = null;
         let timetableData = [], dutyData = [], staffData = [], historyData = [];
 
         window.onload = async () => {
@@ -129,15 +130,21 @@
             timetableData = tt.docs.map(d => d.data());
             historyData = hist.docs.map(d => d.data());
             dutyData = rosters.docs.map(d => ({ id: d.id, ...d.data() }));
+
             staffData = staff.docs.map(d => {
                 const docData = d.data();
                 const det = docData.details || {};
                 const cKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
                 const centerVal = cKey ? String(det[cKey]).toUpperCase() : "GHUMARWIN";
+                
+                // Smart Name Check
+                const nameKey = Object.keys(det).find(k => k.toLowerCase().includes('name'));
+                const actualName = nameKey ? det[nameKey] : docData.email;
+
                 return { 
                     email: docData.email, 
-                    name: det.Name || docData.email, 
-                    mobile: docData.mobile || "0000000000",
+                    name: actualName, 
+                    mobile: docData.mobile || det.Mobile || "0000000000",
                     center: centerVal,
                     rawDept: (det.Department || det.Subject || "General").toString() 
                 };
@@ -159,17 +166,42 @@
 
         function timeToMins(t) { 
             if(!t) return 0; 
-            if(t.includes(' ')) { 
-                let [tm, mod] = t.split(' '); let [h,m] = tm.split(':').map(Number); 
-                if(h===12) h=0; if(mod==='PM') h+=12; return h*60+m; 
-            } 
-            let [h,m]=t.split(':').map(Number); return h*60+m; 
+            let [h,m] = t.split(':').map(Number); return h*60+m; 
         }
+
         function minsTo12H(m) { let h=Math.floor(m/60)%24; let mn=m%60; let mod=h>=12?'PM':'AM'; h=h%12||12; return `${h.toString().padStart(2,'0')}:${mn.toString().padStart(2,'0')} ${mod}`; }
 
         async function runAnalysis() {
             const dateVal = document.getElementById('l-date').value;
+            const startTime = document.getElementById('l-time').value;
+            const endTime = document.getElementById('l-end-time').value;
+            const errorBar = document.getElementById('time-error');
+            const submitBtn = document.getElementById('submit-btn');
+            
             if (!dateVal || !leaveType) return;
+
+            // --- FLEXIBLE TIME VALIDATION ---
+            let leaveStart = 0, leaveEnd = 1440;
+            errorBar.classList.add('hidden');
+            submitBtn.disabled = false;
+            document.getElementById('l-end-time').classList.replace('border-rose-400', 'border-slate-200');
+
+            if (leaveType !== 'FULL') {
+                if(!startTime || !endTime) return;
+                leaveStart = timeToMins(startTime);
+                leaveEnd = timeToMins(endTime);
+                
+                let diff = leaveEnd - leaveStart;
+                let maxAllowed = (leaveType === 'HALF') ? 300 : 60; // 5 hours or 1 hour
+
+                if (diff > maxAllowed || diff <= 0) {
+                    errorBar.classList.remove('hidden');
+                    errorBar.innerText = leaveType === 'HALF' ? "HALF DAY CANNOT EXCEED 5 HOURS" : "SHORT LEAVE CANNOT EXCEED 60 MINUTES";
+                    document.getElementById('l-end-time').classList.replace('border-slate-200', 'border-rose-400');
+                    submitBtn.disabled = true;
+                }
+            }
+
             document.getElementById('analysis-section').classList.remove('hidden');
             const feed = document.getElementById('clash-feed');
             feed.innerHTML = '<div class="flex justify-center p-10"><div class="loader"></div></div>';
@@ -184,26 +216,22 @@
             const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
             const myName = norm(activeStaff.name);
 
+            // Fetch Staff Options once per analysis
+            const allStaffOptions = staffData
+                .sort((a,b) => a.name.localeCompare(b.name))
+                .map(s => `<option value="${s.name}">${s.name}</option>`).join('');
+
             for (let tDate of allDates) {
                 const dayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date(tDate).getDay()];
                 if(dayName === 'Sunday') continue;
-
-                let leaveStart = 0, leaveEnd = 1440;
-                if (leaveType !== 'FULL') {
-                    const startTime = document.getElementById('l-time').value;
-                    if(!startTime) { feed.innerHTML = ""; return; }
-                    leaveStart = timeToMins(startTime);
-                    let dur = (leaveType === 'HALF') ? 300 : 60;
-                    leaveEnd = Math.min(leaveStart + dur, 1020);
-                    document.getElementById('l-auto-end').innerText = minsTo12H(leaveEnd);
-                }
 
                 const override = historyData.find(o => o.date === tDate);
                 const activeSchedule = (override && override.schedule) ? override.schedule : timetableData.filter(t => t.day === dayName);
                 let userConflicts = [];
 
                 activeSchedule.forEach(slot => {
-                    if (norm(slot.teacherName) === myName || norm(slot.teacher) === myName) {
+                    const slotT = norm(slot.teacherName || slot.teacher);
+                    if (slotT === myName) {
                         const s = timeToMins(slot.timeRange?.split(' - ')[0] || slot.start24);
                         const e = timeToMins(slot.timeRange?.split(' - ')[1] || slot.end24);
                         if (leaveStart < e && leaveEnd > s) userConflicts.push({ type: slot.subject === 'EXAM' ? 'EXAM DUTY' : 'CLASS', title: slot.subject, sub: `${slot.className} | Sec ${slot.section}`, start: s, end: e });
@@ -228,15 +256,14 @@
                 
                 analysisHtml += `<div class="mb-10 last:mb-0"><div class="flex items-center gap-3 mb-6"><span class="bg-indigo-600 text-white px-4 py-1.5 rounded-xl font-black text-xs uppercase shadow-md">${new Date(tDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short'})}</span><div class="h-1 flex-1 bg-slate-700/50 rounded-full"></div></div>`;
                 
-                // --- SECTION: ADDITIONAL RESPONSIBILITY (PER DATE) ---
-                const allStaffOptions = staffData.map(s => `<option value="${s.name}">${s.name}</option>`).join('');
+                // Responsibility Dropdown
                 analysisHtml += `
-                    <div class="bg-slate-800 p-5 rounded-3xl border border-slate-700 mb-6 shadow-lg">
-                        <p class="text-[10px] font-black text-sky-400 uppercase tracking-widest mb-3 flex items-center gap-2"><span>📌</span> Additional Responsibility for this Date</p>
+                    <div class="bg-slate-800 p-5 rounded-3xl border border-slate-700 mb-6">
+                        <p class="text-[10px] font-black text-sky-400 uppercase tracking-widest mb-3">Responsibility Handover</p>
                         <div class="space-y-3">
-                            <input type="text" class="add-task-input p-3.5 bg-slate-900 border border-slate-700 rounded-xl text-xs font-bold text-white w-full outline-none focus:border-sky-400" placeholder="e.g. Handle Center Key / Register" data-date="${tDate}">
-                            <select class="add-sub-select p-3.5 bg-slate-900 border border-slate-700 rounded-xl text-xs font-black text-sky-300 w-full cursor-pointer outline-none" data-date="${tDate}">
-                                <option value="">Select Replacement for this task...</option>${allStaffOptions}
+                            <input type="text" class="add-task-input p-3.5 bg-slate-900 border border-slate-700 rounded-xl text-xs font-bold text-white w-full outline-none" placeholder="Task description..." data-date="${tDate}">
+                            <select class="add-sub-select p-3.5 bg-slate-900 border border-slate-700 rounded-xl text-xs font-black text-sky-300 w-full" data-date="${tDate}">
+                                <option value="">Select Replacement...</option>${allStaffOptions}
                             </select>
                         </div>
                     </div>
@@ -244,19 +271,17 @@
 
                 if (uniqueConflicts.length > 0) {
                     uniqueConflicts.forEach(con => {
-                        // FIND FREE STAFF FOR THIS SLOT
                         const subs = staffData.filter(staff => {
                             if (norm(staff.name) === myName) return false;
-                            const staffTt = activeSchedule.filter(s => norm(s.teacherName) === norm(staff.name) || norm(s.teacher) === norm(staff.name));
+                            const staffTt = activeSchedule.filter(s => norm(s.teacherName || s.teacher) === norm(staff.name));
                             return !staffTt.some(slot => {
                                 const s = timeToMins(slot.timeRange?.split(' - ')[0] || slot.start24);
                                 const e = timeToMins(slot.timeRange?.split(' - ')[1] || slot.end24);
                                 return (con.start < e && con.end > s);
                             });
-                        }).map(s => staffData.find(sd => sd.email === s.email) || s);
+                        });
 
                         let deptMap = {}; subs.forEach(s => { let d = (s.rawDept || "General").split(',')[0].trim(); if(!deptMap[d]) deptMap[d] = []; deptMap[d].push(s); });
-                        
                         let deptHtml = Object.keys(deptMap).sort().map(dN => `
                             <details class="mb-2 last:mb-0 border border-slate-100 rounded-xl overflow-hidden bg-white shadow-sm">
                                 <summary class="p-3 flex justify-between items-center cursor-pointer hover:bg-slate-50 transition-colors">
@@ -265,14 +290,11 @@
                                 </summary>
                                 <div class="p-3 bg-slate-50/50 space-y-3">
                                     ${deptMap[dN].map(s => `
-                                        <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
-                                            <div class="flex justify-between items-center mb-2">
-                                                <span class="text-xs font-black text-slate-800 uppercase">${s.name}</span>
-                                                <span class="text-[9px] font-bold text-slate-400">${s.mobile}</span>
-                                            </div>
+                                        <div class="bg-white p-3 rounded-xl border border-slate-200 shadow-sm flex justify-between items-center">
+                                            <span class="text-xs font-black text-slate-800 uppercase">${s.name}</span>
                                             <div class="flex gap-2">
-                                                <a href="tel:${s.mobile}" class="flex-1 py-2 bg-indigo-50 text-indigo-700 text-center rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-100">Call</a>
-                                                <a href="https://wa.me/91${s.mobile}" target="_blank" class="flex-1 py-2 bg-emerald-50 text-emerald-700 text-center rounded-lg text-[10px] font-black uppercase tracking-widest border border-emerald-100">WhatsApp</a>
+                                                <a href="tel:${s.mobile}" class="p-2 bg-indigo-50 text-indigo-700 rounded-lg text-[10px] border border-indigo-100">📞</a>
+                                                <a href="https://wa.me/91${s.mobile}" target="_blank" class="p-2 bg-emerald-50 text-emerald-700 rounded-lg text-[10px] border border-emerald-100">💬</a>
                                             </div>
                                         </div>`).join('')}
                                 </div>
@@ -284,11 +306,11 @@
                                     <div><p class="text-[8px] font-black text-rose-500 uppercase tracking-widest">${con.type}</p><p class="font-black text-slate-900 text-sm uppercase">${con.title}</p><p class="text-[9px] font-bold text-slate-400 uppercase">${con.sub}</p></div>
                                     <div class="text-right"><p class="font-black text-slate-700 text-xs">${minsTo12H(con.start)}</p><p class="text-[9px] font-bold text-slate-400 lowercase">to ${minsTo12H(con.end)}</p></div>
                                 </div>
-                                <div class="p-3">${deptHtml || '<p class="text-center text-[10px] py-4 text-slate-400 font-bold uppercase">No substitutes available for this slot</p>'}</div>
+                                <div class="p-3">${deptHtml || '<p class="text-center text-[10px] py-4 text-slate-400 font-bold uppercase">No substitutes free</p>'}</div>
                             </div>`;
                     });
                 } else {
-                    analysisHtml += `<div class="bg-emerald-500/10 text-emerald-400 p-5 rounded-2xl font-bold text-center text-xs uppercase border border-emerald-500/20 mb-6">✅ No classes found for this date.</div>`;
+                    analysisHtml += `<div class="bg-emerald-500/10 text-emerald-400 p-5 rounded-2xl font-bold text-center text-xs uppercase border border-emerald-500/20 mb-6">✅ No clashes detected</div>`;
                 }
                 analysisHtml += `</div>`;
             }
@@ -313,6 +335,8 @@
                     teacherEmail: activeStaff.email, teacherName: activeStaff.name,
                     type: leaveType, startDate: document.getElementById('l-date').value,
                     endDate: document.getElementById('l-end-date').value || document.getElementById('l-date').value,
+                    startTime: document.getElementById('l-time').value || "00:00",
+                    endTime: document.getElementById('l-end-time').value || "23:59",
                     reason, additionalResponsibilities: extraTasks, status: "PENDING", timestamp: Date.now()
                 });
                 alert("✅ Application Submitted Successfully."); window.location.href = 'teacher-portal.html';
