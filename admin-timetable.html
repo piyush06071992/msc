@@ -2254,30 +2254,32 @@ function forceSync() {
         }
 
 async function confirmDateContext() {
-        const dateVal = document.getElementById('context-date-input').value;
-        if (!dateVal) return alert("Please select a date.");
+        const dateVal = document.getElementById('context-date-input').value;
+        if (!dateVal) return alert("Please select a date.");
 
-        currentContextDate = dateVal;
-        currentContextMode = pendingMode || 'OVERRIDE'; // SAFETY LOCK: Prevents accidental master wipe
-        
-        const dateObj = new Date(dateVal);
-        const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
-        const prettyDate = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        currentContextDate = dateVal;
+        currentContextMode = pendingMode || 'OVERRIDE'; // SAFETY LOCK
+        
+        const dateObj = new Date(dateVal);
+        const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
+        const prettyDate = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
-        document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
-        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Syncing Master Slots & Scaling Splits...</div>`;
+        document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
+        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Syncing Master Slots & Scaling Splits...</div>`;
 
-       try {
+        try {
             const nameTagInp = document.getElementById('schedule-name-tag');
-            nameTagInp.classList.remove('hidden');
-            nameTagInp.value = ""; // Reset first
+            if (nameTagInp) {
+                nameTagInp.classList.remove('hidden');
+                nameTagInp.value = ""; // Reset first
+            }
 
             const historySnap = await getCollection("timetable_history").doc(dateVal).get();
             
             if (historySnap.exists) {
                 const hData = historySnap.data();
-                globalTimetable = hData.schedule;
-                nameTagInp.value = hData.tag || "";
+                globalTimetable = hData.schedule || [];
+                if (nameTagInp) nameTagInp.value = hData.tag || "";
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
                 renderDirectDashboard();
                 return;
@@ -2290,146 +2292,9 @@ async function confirmDateContext() {
             renderDirectDashboard();
 
         } catch (error) {
-            if (historySnap.exists && examSnap.exists) {
-                const wantSaved = confirm(`A schedule is already saved for ${prettyDate}.\n\nClick OK to load the SAVED version.\nClick CANCEL to REGENERATE a fresh layout from the Exam Plan.`);
-                if (wantSaved) {
-                    globalTimetable = historySnap.data().schedule;
-                    document.getElementById('view-label').innerHTML = `<span class="text-rose-500 font-bold">🔴 EXAM MODE (SAVED):</span> ${dayName}, ${prettyDate}`;
-                    renderDirectDashboard();
-                    return;
-                }
-            } else if (historySnap.exists) {
-                globalTimetable = historySnap.data().schedule;
-                document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
-                renderDirectDashboard();
-                return;
-            }
-
-            if (!examSnap.exists) {
-                // Fetch ONLY the classes for this specific day from the master schedule
-                const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                globalTimetable = masterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
-                renderDirectDashboard();
-                return;
-            }
-            // 2. EXAM GENERATION LOGIC
-            const config = examSnap.data();
-            const schoolEndMins = universalTimeToMins(config.schoolEndTime || "15:45");
-            const transformedSchedule = [];
-
-            const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-            const masterDayData = masterSnap.docs.map(d => d.data());
-
-            // --- INJECT THE REST OF THE SCHOOL NORMAL CLASSES ---
-            const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-            const examSectionKeys = config.sections.map(s => `${norm(s.className)}_${norm(s.sectionName)}`);
-
-            masterDayData.forEach(m => {
-                const key = `${norm(m.className)}_${norm(m.section)}`;
-                if (!examSectionKeys.includes(key)) {
-                    transformedSchedule.push(m);
-                }
-            });
-            // ----------------------------------------------------
-
-            config.sections.forEach(sec => {
-                const selectedSubList = (sec.postExamSubjects || []).map(ps => norm(ps.subject));
-                
-                transformedSchedule.push({
-                    day: dayName, className: sec.className, section: sec.sectionName,
-                    start24: sec.prepStart, end24: sec.examEnd,
-                    subject: "EXAM", teacher: "ASSIGN IN DUTY HUB", remark: config.examTitle, room: "SHUFFLED"
-                });
-
-                const examEndMins = universalTimeToMins(sec.examEnd);
-                const sectionMaster = masterDayData.filter(m => norm(m.className) === norm(sec.className) && norm(m.section) === norm(sec.sectionName));
-                
-                const timeContainers = {};
-                sectionMaster.forEach(m => {
-                    if (m.subject.toUpperCase() === "ASSEMBLY") return; 
-                    const tKey = `${m.start24}-${m.end24}`;
-                    if (!timeContainers[tKey]) {
-                        timeContainers[tKey] = { 
-                            start24: m.start24, end24: m.end24, 
-                            sMins: universalTimeToMins(m.start24), eMins: universalTimeToMins(m.end24),
-                            entries: [] 
-                        };
-                    }
-                    timeContainers[tKey].entries.push(m);
-                });
-
-                const activeSlots = Object.values(timeContainers)
-                    .filter(tc => tc.entries.some(ent => selectedSubList.includes(norm(ent.subject)) || ent.subject.toUpperCase() === "BREAK"))
-                    .sort((a,b) => a.sMins - b.sMins);
-
-                const normalBreak = activeSlots.find(tc => tc.entries.some(e => e.subject.toUpperCase() === "BREAK"));
-                let bStart = normalBreak ? normalBreak.sMins : 780;
-                let bEnd = normalBreak ? normalBreak.eMins : 810;
-                if (bStart < 700 || bStart > 860) { bStart = 780; bEnd = 810; } 
-
-                const preLunchSlots = activeSlots.filter(tc => tc.sMins < bStart && !tc.entries.some(e => e.subject.toUpperCase() === "BREAK"));
-                const postLunchSlots = activeSlots.filter(tc => tc.sMins >= bStart && !tc.entries.some(e => e.subject.toUpperCase() === "BREAK"));
-
-                const totalPreNormal = preLunchSlots.reduce((acc, curr) => acc + (curr.eMins - curr.sMins), 0);
-                const totalPostNormal = postLunchSlots.reduce((acc, curr) => acc + (curr.eMins - curr.sMins), 0);
-
-                const morningGap = bStart - examEndMins;
-                const afternoonGap = schoolEndMins - bEnd;
-
-                const preRatio = morningGap / totalPreNormal;
-                const postRatio = afternoonGap / totalPostNormal;
-
-                let cursor = examEndMins;
-                preLunchSlots.forEach((tc, idx) => {
-                    const normalDur = tc.eMins - tc.sMins;
-                    const scaledDur = Math.floor(normalDur * preRatio);
-                    const end = (idx === preLunchSlots.length - 1) ? bStart : cursor + scaledDur;
-                    
-                    tc.entries.forEach(ent => {
-                        if (selectedSubList.includes(norm(ent.subject))) {
-                            transformedSchedule.push({
-                                day: dayName, className: sec.className, section: sec.sectionName,
-                                start24: minsTo24(cursor), end24: minsTo24(end),
-                                subject: ent.subject, teacher: ent.teacherName || ent.teacher, 
-                                teacherEmail: ent.teacherEmail, remark: "Exam Day Schedule", room: ent.room
-                            });
-                        }
-                    });
-                    cursor = end;
-                });
-
-                transformedSchedule.push({
-                    day: dayName, className: sec.className, section: sec.sectionName,
-                    start24: minsTo24(bStart), end24: minsTo24(bEnd),
-                    subject: "BREAK", teacher: "NONE", remark: "Synced Lunch", room: ""
-                });
-
-                cursor = bEnd;
-                postLunchSlots.forEach((tc, idx) => {
-                    const normalDur = tc.eMins - tc.sMins;
-                    const scaledDur = Math.floor(normalDur * postRatio);
-                    const end = (idx === postLunchSlots.length - 1) ? schoolEndMins : cursor + scaledDur;
-
-                    tc.entries.forEach(ent => {
-                        if (selectedSubList.includes(norm(ent.subject))) {
-                            transformedSchedule.push({
-                                day: dayName, className: sec.className, section: sec.sectionName,
-                                start24: minsTo24(cursor), end24: minsTo24(end),
-                                subject: ent.subject, teacher: ent.teacherName || ent.teacher, 
-                                teacherEmail: ent.teacherEmail, remark: "Exam Day Schedule", room: ent.room
-                            });
-                        }
-                    });
-                    cursor = end;
-                });
-            });
-
-            globalTimetable = transformedSchedule;
-            document.getElementById('view-label').innerHTML = `<span class="text-rose-500 animate-pulse">🔴 EXAM MODE (UNSAVED DRAFT):</span> ${config.examTitle}`;
-            renderDirectDashboard();
-
-        } catch (e) { alert("Logic Error: " + e.message); console.error(e); }
+            alert("Error loading schedule: " + error.message);
+            console.error(error);
+        }
     }
     // Helper to convert minutes back to 24hr string for the UI
     function minsTo24(totalMinutes) {
