@@ -342,6 +342,167 @@
                 alert("Database Error: " + e.message); 
             }
         }
+        // ============================================================================
+        // === SUBSTITUTE ACCEPTANCE & AUTO-INJECTOR ENGINE ===
+        // ============================================================================
+        
+        function listenForMyAdjustmentRequests() {
+            const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
+            const myEmail = activeStaff.email.toLowerCase();
+
+            db.collection(prefix + "leave_requests")
+              .where("status", "==", "PENDING")
+              .onSnapshot(snap => {
+                  const box = document.getElementById('pending-requests-box');
+                  const list = document.getElementById('pending-requests-list');
+                  
+                  // Safety check: ensure the UI box actually exists
+                  if (!box || !list) return; 
+                  
+                  let html = "";
+                  let hasPending = false;
+
+                  snap.forEach(doc => {
+                      const req = doc.data();
+                      if(req.adjustments) {
+                          req.adjustments.forEach(adj => {
+                              // Check if I am the target and haven't responded yet
+                              if(adj.adjustedEmail && adj.adjustedEmail.toLowerCase() === myEmail && !adj.substituteResponse) {
+                                  hasPending = true;
+                                  html += `
+                                    <div class="bg-white p-4 rounded-2xl shadow-sm border border-rose-100 flex flex-col gap-3">
+                                        <div class="flex justify-between items-start border-b border-rose-50 pb-2">
+                                            <div>
+                                                <span class="text-[9px] font-black bg-rose-100 text-rose-700 px-2 py-0.5 rounded uppercase tracking-widest">${adj.date}</span>
+                                                <h4 class="font-black text-slate-800 text-sm uppercase mt-1">${adj.title}</h4>
+                                                <p class="text-[10px] font-bold text-slate-500 uppercase">${adj.sub} | ${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}</p>
+                                            </div>
+                                            <div class="text-right">
+                                                <span class="text-[8px] font-black text-slate-400 uppercase tracking-widest block">Requested By</span>
+                                                <span class="text-[10px] font-black text-rose-600 uppercase">${req.teacherName}</span>
+                                            </div>
+                                        </div>
+                                        <div class="flex gap-2">
+                                            <button onclick="handleAdjustmentResponse('${doc.id}', '${adj.id}', 'DECLINED')" class="flex-1 py-2 bg-slate-50 text-slate-500 hover:bg-rose-50 hover:text-rose-600 font-black rounded-xl text-[10px] uppercase tracking-widest transition-colors border border-slate-200">Decline</button>
+                                            <button onclick="handleAdjustmentResponse('${doc.id}', '${adj.id}', 'ACCEPTED', '${encodeURIComponent(JSON.stringify(adj))}', '${req.teacherName}')" class="flex-1 py-2 bg-rose-600 text-white hover:bg-rose-500 font-black rounded-xl text-[10px] uppercase tracking-widest shadow-md transition-colors">Accept & Inject</button>
+                                        </div>
+                                    </div>
+                                  `;
+                              }
+                          });
+                      }
+                  });
+
+                  list.innerHTML = html;
+                  if (hasPending) box.classList.remove('hidden');
+                  else box.classList.add('hidden');
+              });
+        }
+
+        async function handleAdjustmentResponse(docId, clashId, response, adjDataEncoded, originalTeacherName) {
+            if (response === 'DECLINED') {
+                const reason = prompt("Mandatory: Please provide a reason for declining this substitution.");
+                if (!reason || reason.trim() === "") {
+                    alert("You must provide a reason to decline.");
+                    return;
+                }
+                await processResponse(docId, clashId, 'DECLINED', reason);
+            } else {
+                if(!confirm("Accepting this will automatically alter the Master Timetable and assign this class to you. Proceed?")) return;
+                
+                const btn = event.target;
+                const orig = btn.innerText;
+                btn.innerText = "Injecting..."; btn.disabled = true;
+                
+                try {
+                    const adjData = JSON.parse(decodeURIComponent(adjDataEncoded));
+                    await applyTimetableOverride(adjData, originalTeacherName);
+                    await processResponse(docId, clashId, 'ACCEPTED', 'Accepted via Auto-Injector');
+                } catch(e) {
+                    alert("Error injecting timetable: " + e.message);
+                    btn.innerText = orig; btn.disabled = false;
+                }
+            }
+        }
+
+        async function processResponse(docId, clashId, responseStatus, reasonMsg) {
+            const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
+            const docRef = db.collection(prefix + "leave_requests").doc(docId);
+            
+            try {
+                await db.runTransaction(async (transaction) => {
+                    const docSnap = await transaction.get(docRef);
+                    if (!docSnap.exists) throw new Error("Request no longer exists.");
+                    
+                    let data = docSnap.data();
+                    let adjIndex = data.adjustments.findIndex(a => a.id === clashId);
+                    
+                    if(adjIndex > -1) {
+                        data.adjustments[adjIndex].substituteResponse = responseStatus;
+                        data.adjustments[adjIndex].substituteMessage = reasonMsg;
+                        transaction.update(docRef, { adjustments: data.adjustments });
+                    }
+                });
+                alert(`Response logged as ${responseStatus}.`);
+            } catch(e) {
+                alert("Error saving response: " + e.message);
+            }
+        }
+
+        async function applyTimetableOverride(adj, originalTeacherName) {
+            const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
+            const histRef = db.collection(prefix + "timetable_history").doc(adj.date);
+            const dayName = new Date(adj.date).toLocaleDateString('en-US', { weekday: 'long' });
+            
+            // Format class/section to match timetable data structure
+            const parts = adj.sub.split('|');
+            const cName = parts[0].trim();
+            const sName = parts[1].replace('Sec', '').trim();
+
+            const docSnap = await histRef.get();
+            let targetSchedule = [];
+
+            if (docSnap.exists && docSnap.data().schedule) {
+                targetSchedule = docSnap.data().schedule;
+            } else {
+                // If no override exists for this date, clone the normal weekly master schedule
+                const masterSnap = await db.collection(prefix + "timetable").where("day", "==", dayName).get();
+                targetSchedule = masterSnap.docs.map(d => d.data());
+            }
+
+            // Find the specific slot and overwrite the teacher
+            let slotUpdated = false;
+            targetSchedule = targetSchedule.map(slot => {
+                const slotStart = timeToMins(slot.start24 || (slot.timeRange ? slot.timeRange.split(' - ')[0] : "00:00"));
+                const slotEnd = timeToMins(slot.end24 || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00"));
+                
+                const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                
+                // Match by Class, Section, and EXACT Time Window
+                if (norm(slot.className) === norm(cName) && norm(slot.section) === norm(sName) && slotStart === adj.start && slotEnd === adj.end) {
+                    slot.teacher = activeStaff.name;
+                    slot.teacherName = activeStaff.name;
+                    slot.teacherEmail = activeStaff.email;
+                    slot.remark = `Sub for ${originalTeacherName}`;
+                    slotUpdated = true;
+                }
+                return slot;
+            });
+
+            if (!slotUpdated) throw new Error("Could not locate the exact timetable slot to override. The master schedule may have changed.");
+
+            // Save the updated schedule back to history
+            await histRef.set({
+                date: adj.date,
+                lastUpdated: Date.now(),
+                schedule: targetSchedule,
+                type: "DAILY_OVERRIDE",
+                tag: "Substitutions Applied"
+            }, { merge: true });
+
+            // Trigger global sync so portals refresh
+            await db.collection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
+        }
     </script>
 </body>
 </html>
