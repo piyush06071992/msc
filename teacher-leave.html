@@ -78,7 +78,7 @@
         <div id="input-section" class="hidden bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-4">
             <div class="grid grid-cols-2 gap-3">
                 <div class="col-span-2"><label class="block text-[10px] font-black text-slate-400 uppercase mb-1 ml-1">Date</label><input type="date" id="l-date" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
-                <div id="end-date-wrap" class="hidden col-span-2"><label class="block text-[10px] font-black text-slate-400 uppercase mb-1 ml-1">End Date (Optional)</label><input type="date" id="l-end-date" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
+                <div id="end-date-wrap" class="hidden col-span-2"><label class="block text-[10px] font-black text-slate-400 uppercase mb-1 ml-1">End Date</label><input type="date" id="l-end-date" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
                 <div id="time-wrap" class="hidden"><label class="block text-[10px] font-black text-slate-400 uppercase mb-1 ml-1">From Time</label><input type="time" id="l-time" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
                 <div id="auto-end-wrap" class="hidden"><label class="block text-[10px] font-black text-indigo-400 uppercase mb-1 ml-1">Until Time</label><input type="time" id="l-end-time" onchange="runAnalysis()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold"></div>
             </div>
@@ -95,7 +95,7 @@
 
             <div class="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
                 <label class="block text-[10px] font-black text-slate-400 uppercase mb-2 ml-1">Final Note for Admin</label>
-                <textarea id="l-reason" rows="3" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm outline-none focus:border-indigo-500" placeholder="Summary of arrangements..."></textarea>
+                <textarea id="l-reason" rows="3" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm outline-none focus:border-indigo-500" placeholder="Reason for leave..."></textarea>
                 <button id="submit-btn" onclick="submitLeave()" class="w-full mt-6 py-5 bg-indigo-600 text-white font-black rounded-2xl uppercase tracking-[0.2em] text-xs shadow-xl active:scale-95 transition-all">Submit Application</button>
             </div>
         </div>
@@ -138,13 +138,7 @@
                 const centerVal = cKey ? String(det[cKey]).toUpperCase() : "GHUMARWIN";
                 const nameKey = Object.keys(det).find(k => k.toLowerCase().includes('name'));
                 const actualName = nameKey ? det[nameKey] : docData.email;
-                return { 
-                    email: docData.email, 
-                    name: actualName, 
-                    mobile: docData.mobile || det.Mobile || "0000000000",
-                    center: centerVal,
-                    rawDept: (det.Department || det.Subject || "General").toString() 
-                };
+                return { email: docData.email, name: actualName, mobile: docData.mobile || "0", center: centerVal, rawDept: (det.Department || det.Subject || "General").toString() };
             }).filter(s => s.center === center);
         }
 
@@ -173,10 +167,14 @@
             
             if (!dateVal || !leaveType) return;
 
+            // NORMALIZER (Strips punctuation/spaces for matching)
+            const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const myName = norm(activeStaff.name);
+            const myEmail = activeStaff.email.toLowerCase();
+
             let leaveStart = 0, leaveEnd = 1440;
             errorBar.classList.add('hidden');
             submitBtn.disabled = false;
-            document.getElementById('l-end-time').classList.replace('border-rose-400', 'border-slate-200');
 
             if (leaveType !== 'FULL') {
                 if(!startTime || !endTime) return;
@@ -187,7 +185,6 @@
                 if (diff > maxAllowed || diff <= 0) {
                     errorBar.classList.remove('hidden');
                     errorBar.innerText = leaveType === 'HALF' ? "HALF DAY LIMIT: 5 HOURS" : "SHORT LEAVE LIMIT: 60 MINS";
-                    document.getElementById('l-end-time').classList.replace('border-slate-200', 'border-rose-400');
                     submitBtn.disabled = true;
                     return;
                 }
@@ -204,31 +201,32 @@
                 while(start <= end) { allDates.push(start.toISOString().split('T')[0]); start.setDate(start.getDate() + 1); }
             } else { allDates.push(dateVal); }
 
-            const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-            const myName = norm(activeStaff.name);
-            const myEmail = activeStaff.email.toLowerCase();
-
             const allStaffOptions = staffData.sort((a,b) => a.name.localeCompare(b.name)).map(s => `<option value="${s.name}">${s.name}</option>`).join('');
 
             for (let tDate of allDates) {
                 const dayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date(tDate).getDay()];
                 if(dayName === 'Sunday') continue;
 
-                // AGGRESSIVE OVERRIDE & TIMETABLE CHECK
+                // AGGRESSIVE FETCH (Prioritize Override, then Master)
                 const overrideDoc = historyData.find(o => o.date === tDate);
                 let activeSchedule = (overrideDoc && overrideDoc.schedule) ? overrideDoc.schedule : timetableData.filter(t => t.day === dayName);
 
                 let userConflicts = [];
+
+                // CHECK CLASSES
                 activeSchedule.forEach(slot => {
                     const slotT = norm(slot.teacherName || slot.teacher || "");
                     const slotE = (slot.teacherEmail || "").toLowerCase();
                     if (slotT === myName || slotE === myEmail) {
-                        const s = timeToMins(slot.timeRange?.split(' - ')[0] || slot.start24);
-                        const e = timeToMins(slot.timeRange?.split(' - ')[1] || slot.end24);
-                        if (leaveStart < e && leaveEnd > s) userConflicts.push({ type: slot.subject === 'EXAM' ? 'EXAM DUTY' : 'CLASS', title: slot.subject, sub: `${slot.className || 'N/A'} | Sec ${slot.section || 'N/A'}`, start: s, end: e });
+                        const s = timeToMins(slot.start24 || (slot.timeRange ? slot.timeRange.split(' - ')[0] : "00:00"));
+                        const e = timeToMins(slot.end24 || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00"));
+                        if (leaveStart < e && leaveEnd > s) {
+                            userConflicts.push({ type: slot.subject === 'EXAM' ? 'EXAM DUTY' : 'CLASS', title: slot.subject, sub: `${slot.className || 'N/A'} | Sec ${slot.section || 'N/A'}`, start: s, end: e });
+                        }
                     }
                 });
 
+                // CHECK DUTIES
                 const diffToMonday = new Date(tDate).getDate() - new Date(tDate).getDay() + (new Date(tDate).getDay() === 0 ? -6 : 1);
                 const monday = new Date(new Date(tDate).setDate(diffToMonday)).toISOString().split('T')[0];
                 const roster = dutyData.find(r => r.id === "lunch_duty_" + monday || r.id === "week_starting_" + monday);
@@ -236,22 +234,17 @@
                     Object.values(roster.rosterData).forEach(room => {
                         const d = room.days ? room.days[dayName] : (room.columns ? room.columns[dayName] : null);
                         if (d && d.status === 'ASSIGNED' && (norm(d.staff?.name) === myName || d.staff?.email === myEmail)) {
-                            const s = timeToMins(d.timing?.split(' - ')[0] || "13:15");
-                            const e = timeToMins(d.timing?.split(' - ')[1] || "14:00");
-                            if (leaveStart < e && leaveEnd > s) userConflicts.push({ type: 'DUTY', title: 'Campus Supervision', sub: `Loc: ${room.cName || 'Area'}`, start: s, end: e });
+                            const [ds, de] = (d.timing || "13:15 - 14:00").split(' - ');
+                            const s = timeToMins(ds); const e = timeToMins(de);
+                            if (leaveStart < e && leaveEnd > s) {
+                                userConflicts.push({ type: 'CAMPUS DUTY', title: 'Supervision', sub: `Loc: ${room.cName || 'Area'}`, start: s, end: e });
+                            }
                         }
                     });
                 }
 
                 analysisHtml += `<div class="mb-10"><div class="flex items-center gap-3 mb-6"><span class="bg-indigo-600 text-white px-4 py-1.5 rounded-xl font-black text-xs uppercase shadow-md">${new Date(tDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short'})}</span><div class="h-1 flex-1 bg-slate-700/50 rounded-full"></div></div>`;
-                analysisHtml += `
-                    <div class="bg-slate-800 p-5 rounded-3xl border border-slate-700 mb-6">
-                        <p class="text-[10px] font-black text-sky-400 uppercase tracking-widest mb-3">Responsibility Handover</p>
-                        <div class="space-y-3">
-                            <input type="text" class="add-task-input p-3.5 bg-slate-900 border border-slate-700 rounded-xl text-xs font-bold text-white w-full outline-none" placeholder="Task details (e.g. Center Keys)" data-date="${tDate}">
-                            <select class="add-sub-select p-3.5 bg-slate-900 border border-slate-700 rounded-xl text-xs font-black text-sky-300 w-full" data-date="${tDate}"><option value="">Assigned To...</option>${allStaffOptions}</select>
-                        </div>
-                    </div>`;
+                analysisHtml += `<div class="bg-slate-800 p-5 rounded-3xl border border-slate-700 mb-6"><p class="text-[10px] font-black text-sky-400 uppercase tracking-widest mb-3">Replacement for Responsibility</p><div class="space-y-3"><input type="text" class="add-task-input p-3.5 bg-slate-900 border border-slate-700 rounded-xl text-xs font-bold text-white w-full outline-none" placeholder="Task description..." data-date="${tDate}"><select class="add-sub-select p-3.5 bg-slate-900 border border-slate-700 rounded-xl text-xs font-black text-sky-300 w-full" data-date="${tDate}"><option value="">Select Replacement...</option>${allStaffOptions}</select></div></div>`;
 
                 if (userConflicts.length > 0) {
                     userConflicts.forEach(con => {
@@ -259,29 +252,16 @@
                             if (norm(staff.name) === myName) return false;
                             const staffTt = activeSchedule.filter(s => norm(s.teacherName || s.teacher) === norm(staff.name));
                             return !staffTt.some(slot => {
-                                const s = timeToMins(slot.timeRange?.split(' - ')[0] || slot.start24);
-                                const e = timeToMins(slot.timeRange?.split(' - ')[1] || slot.end24);
+                                const s = timeToMins(slot.start24 || (slot.timeRange ? slot.timeRange.split(' - ')[0] : "00:00"));
+                                const e = timeToMins(slot.end24 || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00"));
                                 return (con.start < e && con.end > s);
                             });
                         });
                         let deptMap = {}; subs.forEach(s => { let d = (s.rawDept || "General").split(',')[0].trim(); if(!deptMap[d]) deptMap[d] = []; deptMap[d].push(s); });
-                        let deptHtml = Object.keys(deptMap).sort().map(dN => `
-                            <details class="mb-2 border border-slate-100 rounded-xl overflow-hidden bg-white">
-                                <summary class="p-3 flex justify-between items-center cursor-pointer hover:bg-slate-50 font-black text-[10px] uppercase text-slate-700">${dN} (${deptMap[dN].length} Free)</summary>
-                                <div class="p-3 bg-slate-50/50 space-y-3">
-                                    ${deptMap[dN].map(s => `<div class="bg-white p-3 rounded-xl border border-slate-200 flex justify-between items-center"><span class="text-xs font-black text-slate-800 uppercase">${s.name}</span><div class="flex gap-2"><a href="tel:${s.mobile}" class="p-2 bg-indigo-50 text-indigo-700 rounded-lg text-[10px]">📞</a><a href="https://wa.me/91${s.mobile}" target="_blank" class="p-2 bg-emerald-50 text-emerald-700 rounded-lg text-[10px]">💬</a></div></div>`).join('')}
-                                </div>
-                            </details>`).join('');
-                        analysisHtml += `
-                            <div class="bg-white rounded-3xl overflow-hidden shadow-lg border border-slate-200 mb-4">
-                                <div class="p-4 flex justify-between items-center bg-rose-50/50 border-b border-rose-100">
-                                    <div><p class="text-[8px] font-black text-rose-500 uppercase tracking-widest">${con.type}</p><p class="font-black text-slate-900 text-sm uppercase">${con.title}</p><p class="text-[9px] font-bold text-slate-400 uppercase">${con.sub}</p></div>
-                                    <div class="text-right"><p class="font-black text-slate-700 text-xs">${minsTo12H(con.start)}</p><p class="text-[9px] font-bold text-slate-400 lowercase">to ${minsTo12H(con.end)}</p></div>
-                                </div>
-                                <div class="p-3">${deptHtml || '<p class="text-center text-[10px] py-4 text-slate-400 font-bold uppercase">No free staff available</p>'}</div>
-                            </div>`;
+                        let deptHtml = Object.keys(deptMap).sort().map(dN => `<details class="mb-2 border border-slate-100 rounded-xl overflow-hidden bg-white"><summary class="p-3 flex justify-between items-center cursor-pointer hover:bg-slate-50 font-black text-[10px] uppercase text-slate-700">${dN} (${deptMap[dN].length} Free)</summary><div class="p-3 bg-slate-50/50 space-y-3">${deptMap[dN].map(s => `<div class="bg-white p-3 rounded-xl border border-slate-200 flex justify-between items-center"><span class="text-xs font-black text-slate-800 uppercase">${s.name}</span><div class="flex gap-2"><a href="tel:${s.mobile}" class="p-2 bg-indigo-50 text-indigo-700 rounded-lg text-[10px]">📞</a><a href="https://wa.me/91${s.mobile}" target="_blank" class="p-2 bg-emerald-50 text-emerald-700 rounded-lg text-[10px]">💬</a></div></div>`).join('')}</div></details>`).join('');
+                        analysisHtml += `<div class="bg-white rounded-3xl overflow-hidden shadow-lg border border-slate-200 mb-4"><div class="p-4 flex justify-between items-center bg-rose-50/50 border-b border-rose-100"><div><p class="text-[8px] font-black text-rose-500 uppercase tracking-widest">${con.type}</p><p class="font-black text-slate-900 text-sm uppercase">${con.title}</p><p class="text-[9px] font-bold text-slate-400 uppercase">${con.sub}</p></div><div class="text-right"><p class="font-black text-slate-700 text-xs">${minsTo12H(con.start)}</p><p class="text-[9px] font-bold text-slate-400 lowercase">to ${minsTo12H(con.end)}</p></div></div><div class="p-3">${deptHtml || '<p class="text-center text-[10px] py-4 text-slate-400 font-bold uppercase">No free staff available</p>'}</div></div>`;
                     });
-                } else { analysisHtml += `<div class="bg-emerald-500/10 text-emerald-400 p-5 rounded-2xl font-bold text-center text-xs uppercase border border-emerald-500/20 mb-6">✅ No classes detected</div>`; }
+                } else { analysisHtml += `<div class="bg-emerald-500/10 text-emerald-400 p-5 rounded-2xl font-bold text-center text-xs uppercase border border-emerald-500/20 mb-6">✅ No clashes detected for this date.</div>`; }
                 analysisHtml += `</div>`;
             }
             feed.innerHTML = analysisHtml;
@@ -289,7 +269,7 @@
 
         async function submitLeave() {
             const reason = document.getElementById('l-reason').value.trim();
-            if(!reason) return alert("Please enter a reason.");
+            if(!reason) return alert("Please enter reason.");
             const btn = document.getElementById('submit-btn');
             btn.disabled = true; btn.innerText = "SUBMITTING...";
             let extraTasks = [];
@@ -307,7 +287,7 @@
                     endTime: document.getElementById('l-end-time').value || "23:59",
                     reason, additionalResponsibilities: extraTasks, status: "PENDING", timestamp: Date.now()
                 });
-                alert("✅ Submitted Successfully."); window.location.href = 'teacher-portal.html';
+                alert("✅ Application Submitted Successfully."); window.location.href = 'teacher-portal.html';
             } catch(e) { btn.disabled = false; btn.innerText = "Submit Application"; }
         }
     </script>
