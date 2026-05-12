@@ -136,11 +136,14 @@
                 const docData = d.data();
                 const det = docData.details || {};
                 const nameKey = Object.keys(det).find(k => k.toLowerCase().includes('name'));
+                const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
+                const staffCenter = centerKey ? String(det[centerKey]).toUpperCase() : "GHUMARWIN";
+                
                 return { 
                     email: docData.email, 
                     name: nameKey ? det[nameKey] : docData.email, 
                     mobile: docData.mobile || "0", 
-                    center: String(det.Center || "GHUMARWIN").toUpperCase(), 
+                    center: staffCenter, 
                     dept: (det.Department || det.Subject || "General").toString() 
                 };
             }).filter(s => s.center === center);
@@ -240,15 +243,13 @@
                             });
                         });
 
-                        // Grouping Logic
                         let deptMap = {};
                         subs.forEach(s => { let d = s.dept.split(',')[0].trim(); if(!deptMap[d]) deptMap[d] = []; deptMap[d].push(s); });
                         
                         let deptHtml = Object.keys(deptMap).sort().map(dN => `
                             <details class="mb-2 border border-slate-100 rounded-xl overflow-hidden bg-white">
                                 <summary class="p-3 flex justify-between items-center cursor-pointer hover:bg-slate-50 font-black text-[10px] uppercase text-slate-700">
-                                    ${dN} (${deptMap[dN].length} Free)
-                                    <span class="text-slate-300">▼</span>
+                                    ${dN} (${deptMap[dN].length} Free) <span class="text-slate-300">▼</span>
                                 </summary>
                                 <div class="p-2 space-y-1 bg-slate-50">
                                     ${deptMap[dN].map(s => `
@@ -260,14 +261,13 @@
                             </details>`).join('');
 
                         analysisHtml += `
-                            <div id="clash-${con.id}" class="bg-white rounded-3xl overflow-hidden shadow-lg border border-slate-200 mb-4" data-clash='${JSON.stringify(con)}'>
+                            <div id="clash-${con.id}" class="clash-item bg-white rounded-3xl overflow-hidden shadow-lg border border-slate-200 mb-4" data-clash='${JSON.stringify(con)}'>
                                 <div class="p-4 flex justify-between items-center bg-rose-50/50 border-b border-rose-100">
                                     <div><p class="text-[8px] font-black text-rose-500 uppercase tracking-widest">${con.type}</p><p class="font-black text-slate-900 text-sm uppercase">${con.title}</p><p class="text-[9px] font-bold text-slate-400 uppercase">${con.sub}</p></div>
                                     <div class="text-right"><p class="font-black text-slate-700 text-xs">${minsTo12H(con.start)}</p><p class="text-[9px] font-bold text-slate-400 lowercase">to ${minsTo12H(con.end)}</p></div>
                                 </div>
                                 <div class="p-4">
-                                    <p class="text-[9px] font-black text-slate-400 uppercase mb-3">Available Substitutes:</p>
-                                    <div class="max-h-56 overflow-y-auto custom-scroll">${deptHtml || '<p class="text-center text-[10px] py-4 text-slate-400 font-bold uppercase">No free staff available</p>'}</div>
+                                    <div class="max-h-56 overflow-y-auto custom-scroll">${deptHtml || '<p class="text-center text-[10px] py-4 text-slate-400 font-bold">No free staff available</p>'}</div>
                                     <div class="mt-4 pt-3 border-t border-slate-100">
                                         <label class="flex items-center gap-2 cursor-pointer">
                                             <input type="checkbox" id="incharge-${con.id}" onchange="toggleIncharge('${con.id}', this)" class="w-4 h-4 accent-indigo-600">
@@ -285,28 +285,31 @@
 
         async function submitLeave() {
             const reason = document.getElementById('l-reason').value.trim();
-            if(!reason) return alert("Enter reason.");
+            if(!reason) return alert("Please enter reason.");
             const btn = document.getElementById('submit-btn');
             btn.disabled = true; btn.innerText = "SAVING DATA...";
 
             const finalAdjustments = [];
             const emailList = [];
 
-            document.querySelectorAll('[id^="clash-"]').forEach(el => {
-                const clashData = JSON.parse(el.getAttribute('data-clash'));
-                const selection = selectedAdjustments[clashData.id];
-                if(selection) {
-                    finalAdjustments.push({ ...clashData, adjustedTo: selection.name, adjustedEmail: selection.email, isEmergency: selection.requestIncharge });
-                    if(!selection.requestIncharge) {
-                        emailList.push({ name: selection.name, email: selection.email, date: clashData.date, time: `${minsTo12H(clashData.start)} - ${minsTo12H(clashData.end)}`, section: clashData.sub, subject: clashData.title });
+            // SAFE LOOP: Only run if items exist to prevent "Cannot read properties of null" error
+            const clashElements = document.querySelectorAll('.clash-item');
+            if (clashElements.length > 0) {
+                clashElements.forEach(el => {
+                    const clashData = JSON.parse(el.getAttribute('data-clash'));
+                    const selection = selectedAdjustments[clashData.id];
+                    if(selection) {
+                        finalAdjustments.push({ ...clashData, adjustedTo: selection.name, adjustedEmail: selection.email, isEmergency: selection.requestIncharge });
+                        if(!selection.requestIncharge) {
+                            emailList.push({ name: selection.name, email: selection.email, date: clashData.date, time: `${minsTo12H(clashData.start)} - ${minsTo12H(clashData.end)}`, section: clashData.sub, subject: clashData.title });
+                        }
                     }
-                }
-            });
+                });
+            }
 
             try {
                 const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
                 
-                // SAVE TO DATABASE FIRST
                 await db.collection(prefix + "leave_requests").add({
                     teacherEmail: activeStaff.email, teacherName: activeStaff.name,
                     type: leaveType, startDate: document.getElementById('l-date').value,
@@ -314,7 +317,6 @@
                     reason, adjustments: finalAdjustments, status: "PENDING", timestamp: Date.now()
                 });
 
-                // START EMAIL DISPATCH IN BACKGROUND
                 if(emailList.length > 0) {
                     btn.innerText = "DISPATCHING EMAILS...";
                     const scriptURL = "https://script.google.com/macros/s/AKfycbyWUqGV1jd73NK_3zOU2Sy6wXCwcrjCG0ErqyRHM41f7qzcsNwxwjXfUlk2ZjFVeUmcdQ/exec";
@@ -324,12 +326,9 @@
                     }).catch(e => console.log("Email background error:", e));
                 }
 
-                alert("✅ Leave Saved Successfully!");
+                alert("✅ Leave Submitted Successfully!");
                 window.location.href = 'teacher-portal.html';
-            } catch(e) { 
-                btn.disabled = false; btn.innerText = "Confirm & Submit"; 
-                alert("Database Error: " + e.message); 
-            }
+            } catch(e) { btn.disabled = false; btn.innerText = "Confirm & Submit"; alert("Database Error: " + e.message); }
         }
     </script>
 </body>
