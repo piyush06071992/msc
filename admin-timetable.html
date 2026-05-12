@@ -2643,78 +2643,103 @@ function processSave(type) {
             document.getElementById('multi-date-modal').classList.replace('hidden', 'flex');
         }
 
+       function toggleScopeUI() {
+            const scope = document.querySelector('input[name="rep-scope"]:checked').value;
+            const picker = document.getElementById('rep-section-picker');
+            picker.classList.toggle('hidden', scope !== 'PARTIAL');
+            if(scope === 'PARTIAL') {
+                const list = document.getElementById('rep-sec-list');
+                list.innerHTML = structureData.map(s => `
+                    <label class="flex items-center gap-2 p-2 bg-white border border-slate-100 rounded-lg cursor-pointer">
+                        <input type="checkbox" class="rep-sec-cb w-3 h-3 accent-indigo-600" value="${s.className}|${s.sectionName}">
+                        <span class="text-[9px] font-bold text-slate-600 uppercase">${s.className} - ${s.sectionName}</span>
+                    </label>`).join('');
+            }
+        }
+
         async function confirmMultiDates() {
             const selectedDates = Array.from(document.querySelectorAll('input[name="multi-date-cb"]:checked')).map(cb => cb.value);
+            const scope = document.querySelector('input[name="rep-scope"]:checked').value;
+            const schedName = document.getElementById('schedule-name-tag').value.trim() || "Daily Override";
+            
             if(selectedDates.length === 0) return alert("Please select at least one date.");
             
-            if(!confirm(`Apply this schedule to ${selectedDates.length} dates?`)) return;
+            let targetSections = [];
+            if(scope === 'PARTIAL') {
+                targetSections = Array.from(document.querySelectorAll('.rep-sec-cb:checked')).map(cb => cb.value);
+                if(targetSections.length === 0) return alert("Select at least one section to replicate.");
+            }
 
+            if(!confirm(`Apply this schedule to ${selectedDates.length} dates?`)) return;
             const btn = document.querySelector('button[onclick="confirmMultiDates()"]');
-            btn.disabled = true; btn.innerText = "⌛ Writing to Database...";
+            btn.disabled = true; btn.innerText = "⌛ Merging & Writing...";
 
             try {
-                // 1. Scrape the current screen to capture your actual edits
-                const allBlocks = Array.from(document.querySelectorAll('.time-block'));
-                let newSlots = []; 
-                for (let b of allBlocks) {
+                // 1. Scrape the CURRENT screen (Source of Truth for the override)
+                const currentBlocks = Array.from(document.querySelectorAll('.time-block'));
+                let sourceSlots = []; 
+                currentBlocks.forEach(b => {
                     const className = b.getAttribute('data-class');
                     const sectionName = b.getAttribute('data-section');
-                    const s24 = b.querySelector('.tb-s24').value; 
-                    const e24 = b.querySelector('.tb-e24').value;
+                    const s24 = b.querySelector('.tb-s24').value; const e24 = b.querySelector('.tb-e24').value;
                     const entries = Array.from(b.querySelectorAll('.ent-row'));
-                    if (!s24 || !e24) continue;
-                    const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
-                    const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
-                    const dur = `${eMins - sMins} MINS`;
-                    const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
-
-                    for(let ent of entries) {
+                    if (!s24 || !e24) return;
+                    entries.forEach(ent => {
                         const sub = ent.querySelector('.ent-sub').value;
-                        const teacher = ent.querySelector('.ent-tea').value || "NONE"; 
+                        const teacher = ent.querySelector('.ent-tea').value || "NONE";
                         const room = ent.querySelector('.ent-room').value.trim();
                         const remark = ent.querySelector('.ent-rem').value.trim();
                         const activeDays = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
-
                         activeDays.forEach(day => {
                             let teacherEmail = "";
                             if (teacher !== "NONE") {
                                 const tObj = allTeachers.find(t => t.name === teacher);
                                 if (tObj) teacherEmail = tObj.email || ""; 
                             }
-                            newSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark, sMins, eMins });
+                            sourceSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark });
                         });
-                    }
-                }
-
-                // 2. Check who got affected
-                const teachersToNotify = detectTeacherChanges(oldTimetableState, newSlots);
-
-                // 3. Save to Firebase using a Batch (Safely saves multiple dates instantly)
-                const batch = db.batch();
-                selectedDates.forEach(dateIso => {
-                    const docRef = getCollection("timetable_history").doc(dateIso);
-                    batch.set(docRef, {
-                        date: dateIso,
-                        lastUpdated: Date.now(),
-                        schedule: newSlots, // Saves exactly what you edited on the screen!
-                        type: pendingActionType // Cloned or Specific_Dates
                     });
                 });
-                await batch.commit();
 
-                // 4. Send the Emails!
-                if (teachersToNotify.length > 0) {
-                    // Send email notification silently runs the alert() when done
-                    sendEmailNotification(teachersToNotify);
-                } else {
-                    alert(`✅ Success! Stamped onto ${selectedDates.length} dates. No teacher schedules were changed.`);
+                const batch = db.batch();
+                for (const dateIso of selectedDates) {
+                    const dayName = new Date(dateIso).toLocaleDateString('en-US', { weekday: 'long' });
+                    let finalMergedSchedule = [];
+
+                    if (scope === 'FULL') {
+                        finalMergedSchedule = sourceSlots;
+                    } else {
+                        // HYBRID MERGE LOGIC
+                        // A. Get Normal Live Schedule for that date's weekday
+                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                        const masterSlots = masterSnap.docs.map(d => d.data());
+                        
+                        // B. Keep normal schedule for NON-SELECTED sections
+                        const normalPortion = masterSlots.filter(ms => !targetSections.includes(`${ms.className}|${ms.section}`));
+                        
+                        // C. Take new schedule for SELECTED sections
+                        const overridePortion = sourceSlots.filter(ss => targetSections.includes(`${ss.className}|${ss.section}`));
+                        
+                        finalMergedSchedule = [...normalPortion, ...overridePortion];
+                    }
+
+                    batch.set(getCollection("timetable_history").doc(dateIso), {
+                        date: dateIso,
+                        lastUpdated: Date.now(),
+                        schedule: finalMergedSchedule,
+                        type: "DAILY_OVERRIDE",
+                        tag: schedName
+                    });
                 }
-                
+
+                await batch.commit();
+                await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
+                alert(`✅ Successfully replicated to ${selectedDates.length} dates.`);
                 document.getElementById('multi-date-modal').classList.replace('flex', 'hidden');
             } catch (error) {
-                alert("Save failed: " + error.message);
+                alert("Error: " + error.message);
             } finally {
-                btn.disabled = false; btn.innerText = "Confirm Selected Dates";
+                btn.disabled = false; btn.innerText = "🚀 Execute Replication";
             }
         }
         // --- VISUAL CLASH FILTER ENGINE ---
