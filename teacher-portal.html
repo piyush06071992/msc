@@ -182,6 +182,7 @@
             
             // Start listening for substitute requests!
             listenForPendingAdjustments(activeStaff);
+            loadLeaveNoticeBoard();
         };
 
         // --- NEW: PENDING ADJUSTMENT LISTENER ---
@@ -339,6 +340,99 @@ async function checkNotifStatus() {
                 localStorage.removeItem('minervaActiveStaff');
                 window.location.replace('index.html');
             }
+        }
+        // ============================================================================
+        // === LEAVE NOTICE BOARD ENGINE ===
+        // ============================================================================
+        function loadLeaveNoticeBoard() {
+            const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+            const center = activeStaff.center || "GHUMARWIN";
+            const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
+            
+            const today = new Date();
+            today.setHours(0,0,0,0);
+            const todayIso = today.toISOString().split('T')[0];
+            
+            // Look 7 days ahead
+            const nextWeek = new Date();
+            nextWeek.setDate(today.getDate() + 7);
+            const nextWeekIso = nextWeek.toISOString().split('T')[0];
+
+            db.collection(prefix + "leave_requests")
+              .where("endDate", ">=", todayIso)
+              .onSnapshot(snap => {
+                  const board = document.getElementById('leave-notice-board');
+                  if (!board) return;
+
+                  let records = [];
+                  snap.forEach(doc => {
+                      const data = doc.data();
+                      // Only show approved leaves that start within the next 7 days
+                      if (data.status === "APPROVED" && data.startDate <= nextWeekIso) {
+                          records.push(data);
+                      }
+                  });
+
+                  if (records.length === 0) {
+                      board.innerHTML = `<div class="text-center py-6"><p class="text-2xl mb-2">🌴</p><p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">No upcoming leaves scheduled.</p></div>`;
+                      return;
+                  }
+
+                  // Sort by start date
+                  records.sort((a,b) => a.startDate.localeCompare(b.startDate));
+
+                  let html = "";
+                  records.forEach(req => {
+                      const sDate = new Date(req.startDate).toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+                      const eDate = new Date(req.endDate).toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+                      const dateStr = req.startDate === req.endDate ? sDate : `${sDate} - ${eDate}`;
+                      
+                      let typeLabel = "Full Day";
+                      if (req.type === "HALF") typeLabel = `Half Day (${req.startTime} - ${req.endTime})`;
+                      if (req.type === "SHORT") typeLabel = `Short Leave (${req.startTime} - ${req.endTime})`;
+
+                      let adjHtml = "";
+                      if (req.adjustments && req.adjustments.length > 0) {
+                          adjHtml = `<div class="mt-3 pt-3 border-t border-slate-100 space-y-2">`;
+                          req.adjustments.forEach(adj => {
+                              let statusBadge = `<span class="text-[8px] bg-slate-100 text-slate-500 px-2 py-0.5 rounded font-black uppercase">Pending</span>`;
+                              if (adj.substituteResponse === "ACCEPTED") statusBadge = `<span class="text-[8px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded font-black uppercase">Accepted</span>`;
+                              if (adj.substituteResponse === "DECLINED") statusBadge = `<span class="text-[8px] bg-rose-100 text-rose-700 px-2 py-0.5 rounded font-black uppercase">Declined</span>`;
+                              
+                              adjHtml += `
+                                <div class="flex justify-between items-center bg-slate-50 p-2 rounded-lg border border-slate-100">
+                                    <div class="flex flex-col leading-tight">
+                                        <span class="text-[9px] font-black text-slate-700 uppercase">${adj.sub}</span>
+                                        <span class="text-[8px] font-bold text-slate-500 uppercase mt-0.5">${adj.title} (${adj.date})</span>
+                                    </div>
+                                    <div class="flex flex-col items-end gap-1">
+                                        <span class="text-[9px] font-black text-indigo-700 uppercase">Sub: ${adj.adjustedTo || "Admin"}</span>
+                                        ${statusBadge}
+                                    </div>
+                                </div>
+                              `;
+                          });
+                          adjHtml += `</div>`;
+                      } else {
+                          adjHtml = `<p class="text-[9px] font-bold text-slate-400 uppercase italic mt-3 pt-2 border-t border-slate-100">No classes require adjustment.</p>`;
+                      }
+
+                      html += `
+                        <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-sm transition-all hover:border-indigo-300">
+                            <div class="flex justify-between items-start">
+                                <div>
+                                    <h4 class="font-black text-slate-800 text-sm uppercase tracking-tighter">${req.teacherName}</h4>
+                                    <p class="text-[10px] font-bold text-slate-500 uppercase mt-0.5">${dateStr} • ${typeLabel}</p>
+                                </div>
+                                <span class="bg-emerald-100 text-emerald-700 px-2 py-1 rounded text-[8px] font-black uppercase tracking-widest shadow-sm">Approved</span>
+                            </div>
+                            ${adjHtml}
+                        </div>
+                      `;
+                  });
+
+                  board.innerHTML = html;
+              }, error => console.error("Notice board error:", error));
         }
     </script>
 </body>
