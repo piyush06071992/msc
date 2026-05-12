@@ -641,12 +641,51 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
         authBtn.classList.remove('hidden');
     }
 // 3. Load the rest of the timetable
-    await Promise.all([fetchStructure(), fetchTeachers()]);
-    await fetchTimetable();
-    await fetchHolidays();
-    await fetchBellTemplates(); // <--- NEW: Loads the Exam Bell Schedules
-    populateFilterDropdowns(); // <--- This runs the filter auto-detection
-    renderDirectDashboard();
+    await checkAndApplyFutureMaster(); // <--- NEW: Applies future schedules automatically
+    await Promise.all([fetchStructure(), fetchTeachers()]);
+    await fetchTimetable();
+    await fetchHolidays();
+    await fetchBellTemplates();
+    populateFilterDropdowns();
+    renderDirectDashboard();
+}
+
+async function checkAndApplyFutureMaster() {
+    const todayIso = new Date().toISOString().split('T')[0];
+    try {
+        const histSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+        if (histSnap.empty) return;
+
+        let pendingMasters = [];
+        histSnap.forEach(doc => { if (doc.id <= todayIso) pendingMasters.push(doc.data()); });
+        if (pendingMasters.length === 0) return;
+
+        // Get the most recent valid future master
+        pendingMasters.sort((a, b) => b.date.localeCompare(a.date));
+        const targetMaster = pendingMasters[0];
+
+        const batch = db.batch();
+        
+        // 1. Wipe the old Live Master
+        const liveSnap = await getCollection("timetable").get();
+        liveSnap.forEach(doc => batch.delete(doc.ref));
+
+        // 2. Apply the new Live Master
+        targetMaster.schedule.forEach(slot => {
+            const { sMins, eMins, ...cleanSlot } = slot;
+            batch.set(getCollection("timetable").doc(), cleanSlot);
+        });
+
+        // 3. Mark it as APPLIED so it never runs again
+        batch.update(getCollection("timetable_history").doc(targetMaster.date), { type: "APPLIED_MASTER" });
+        batch.set(db.collection("system_metadata").doc("timetable"), { lastUpdated: Date.now() }, { merge: true });
+
+        await batch.commit();
+        sessionStorage.removeItem('minerva_timetable'); // Force fresh fetch
+        console.log("✅ Auto-Promoted Future Master to Live Schedule!");
+    } catch (e) {
+        console.error("Auto-Promote Failed:", e);
+    }
 }
        async function fetchStructure() {
             // Check memory first!
