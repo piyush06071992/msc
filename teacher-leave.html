@@ -43,7 +43,7 @@
                     <p id="pref-dept" class="text-[9px] font-bold text-slate-400 uppercase mt-1 tracking-widest">Faculty</p>
                 </div>
             </div>
-           <div class="text-right">
+            <div class="text-right">
                 <span class="text-[8px] font-black text-slate-400 uppercase block">Centre</span>
                 <p id="pref-center" class="font-black text-indigo-600 text-[10px] uppercase">Loading...</p>
             </div>
@@ -103,7 +103,7 @@
 
             <div class="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
                 <label class="block text-[10px] font-black text-slate-400 uppercase mb-2 ml-1">Final Remarks</label>
-                <textarea id="l-reason" rows="3" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm outline-none focus:border-indigo-500" placeholder="Summary of arrangements..."></textarea>
+                <textarea id="l-reason" rows="3" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl font-bold text-sm outline-none focus:border-indigo-500" placeholder="Type reason..."></textarea>
                 <button id="submit-btn" onclick="submitLeave()" class="w-full mt-6 py-5 bg-indigo-600 text-white font-black rounded-2xl uppercase tracking-[0.2em] text-xs shadow-xl active:scale-95 transition-all">Confirm & Submit</button>
             </div>
         </div>
@@ -124,6 +124,8 @@
             document.getElementById('pref-name').innerText = activeStaff.name || activeStaff.email;
             document.getElementById('pref-center').innerText = activeStaff.center || "GHUMARWIN";
             await loadDatabases();
+            
+            // Start listening for incoming substitution requests for this user
             listenForMyAdjustmentRequests();
         };
 
@@ -172,6 +174,7 @@
 
         function selectReplacement(clashId, name, email, rowEl) {
             const container = document.getElementById('clash-' + clashId);
+            if (!container) return;
             container.querySelectorAll('.sub-row').forEach(r => r.classList.remove('selected-sub'));
             rowEl.classList.add('selected-sub');
             const inchargeCheck = document.getElementById('incharge-' + clashId);
@@ -181,10 +184,13 @@
 
         function toggleIncharge(clashId, checkbox) {
             const container = document.getElementById('clash-' + clashId);
+            if (!container) return;
             if(checkbox.checked) {
                 container.querySelectorAll('.sub-row').forEach(r => r.classList.remove('selected-sub'));
                 selectedAdjustments[clashId] = { name: "INCHARGE", email: "ADMIN", requestIncharge: true };
-            } else { delete selectedAdjustments[clashId]; }
+            } else {
+                delete selectedAdjustments[clashId];
+            }
         }
 
         async function runAnalysis() {
@@ -201,7 +207,15 @@
             if (leaveType !== 'FULL') {
                 if(!startTime || !endTime) return;
                 leaveStart = timeToMins(startTime); leaveEnd = timeToMins(endTime);
+                let diff = leaveEnd - leaveStart;
+                let maxAllowed = (leaveType === 'HALF') ? 300 : 60;
+                if (diff > maxAllowed || diff <= 0) {
+                    document.getElementById('time-error').classList.remove('hidden');
+                    document.getElementById('time-error').innerText = leaveType === 'HALF' ? "LIMIT EXCEEDED (5 HRS MAX)" : "LIMIT EXCEEDED (1 HR MAX)";
+                    return;
+                }
             }
+            document.getElementById('time-error').classList.add('hidden');
 
             document.getElementById('analysis-section').classList.remove('hidden');
             const feed = document.getElementById('clash-feed');
@@ -209,14 +223,25 @@
 
             let allDates = [];
             if(leaveType === 'FULL') {
-                let start = new Date(dateVal);
-                let end = new Date(document.getElementById('l-end-date').value || dateVal);
-                while(start <= end) { allDates.push(start.toISOString().split('T')[0]); start.setDate(start.getDate() + 1); }
+                // FIXED LOCAL TIMEZONE ISSUE
+                let currDate = new Date(dateVal + "T00:00:00");
+                let endObj = new Date((document.getElementById('l-end-date').value || dateVal) + "T00:00:00");
+                while(currDate <= endObj) { 
+                    const yyyy = currDate.getFullYear();
+                    const mm = String(currDate.getMonth() + 1).padStart(2, '0');
+                    const dd = String(currDate.getDate()).padStart(2, '0');
+                    allDates.push(`${yyyy}-${mm}-${dd}`); 
+                    currDate.setDate(currDate.getDate() + 1); 
+                }
             } else { allDates.push(dateVal); }
 
             let analysisHtml = "";
             for (let tDate of allDates) {
-                const dayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date(tDate).getDay()];
+                // Local day parsing
+                const dParts = tDate.split('-');
+                const localDateObj = new Date(dParts[0], dParts[1] - 1, dParts[2]);
+                const dayName = localDateObj.toLocaleDateString('en-US', { weekday: 'long' });
+                
                 if(dayName === 'Sunday') continue;
 
                 const override = historyData.find(o => o.date === tDate);
@@ -233,7 +258,7 @@
                     }
                 });
 
-                analysisHtml += `<div class="mb-10"><div class="flex items-center gap-3 mb-6"><span class="bg-indigo-600 text-white px-4 py-1.5 rounded-xl font-black text-xs uppercase shadow-md">${new Date(tDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short'})}</span><div class="h-1 flex-1 bg-slate-700/50 rounded-full"></div></div>`;
+                analysisHtml += `<div class="mb-10"><div class="flex items-center gap-3 mb-6"><span class="bg-indigo-600 text-white px-4 py-1.5 rounded-xl font-black text-xs uppercase shadow-md">${localDateObj.toLocaleDateString('en-GB', {day:'2-digit', month:'short'})}</span><div class="h-1 flex-1 bg-slate-700/50 rounded-full"></div></div>`;
 
                 if (userConflicts.length > 0) {
                     userConflicts.forEach(con => {
@@ -281,13 +306,13 @@
                                 </div>
                             </div>`;
                     });
-                } else { analysisHtml += `<div class="bg-emerald-500/10 text-emerald-400 p-5 rounded-2xl font-bold text-center text-xs uppercase border border-emerald-500/20 mb-6">✅ No classes detected</div>`; }
+                } else { analysisHtml += `<div id="no-clash-msg" class="bg-emerald-500/10 text-emerald-400 p-5 rounded-2xl font-bold text-center text-xs uppercase border border-emerald-500/20 mb-6">✅ No classes detected</div>`; }
                 analysisHtml += `</div>`;
             }
             feed.innerHTML = analysisHtml;
         }
 
-     async function submitLeave() {
+        async function submitLeave() {
             const reason = document.getElementById('l-reason').value.trim();
             if(!reason) return alert("Please enter reason.");
             const btn = document.getElementById('submit-btn');
@@ -296,7 +321,6 @@
             const finalAdjustments = [];
             const emailList = [];
 
-            // SAFE CHECK: compile the adjusted teachers
             const items = document.querySelectorAll('.clash-item');
             items.forEach(el => {
                 try {
@@ -308,13 +332,12 @@
                             emailList.push({ name: selection.name, email: selection.email, date: clashData.date, time: `${minsTo12H(clashData.start)} - ${minsTo12H(clashData.end)}`, section: clashData.sub, subject: clashData.title });
                         }
                     }
-                } catch(e) { console.error("Parse error", e); }
+                } catch(e) { console.error("Parse error on element", e); }
             });
 
             try {
                 const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
                 
-                // 1. SAVE TO DATABASE
                 await db.collection(prefix + "leave_requests").add({
                     teacherEmail: activeStaff.email, teacherName: activeStaff.name,
                     type: leaveType, startDate: document.getElementById('l-date').value,
@@ -322,27 +345,20 @@
                     reason, adjustments: finalAdjustments, status: "PENDING", timestamp: Date.now()
                 });
 
-                // 2. DISPATCH EMAILS (WITH AWAIT)
                 if(emailList.length > 0) {
                     btn.innerText = "DISPATCHING EMAILS...";
                     const scriptURL = "https://script.google.com/macros/s/AKfycbyWUqGV1jd73NK_3zOU2Sy6wXCwcrjCG0ErqyRHM41f7qzcsNwxwjXfUlk2ZjFVeUmcdQ/exec";
-                    
-                    // We wait for the fetch to send before redirecting
-                    try {
-                        await fetch(scriptURL, {
-                            method: "POST", mode: "no-cors",
-                            body: JSON.stringify({ type: "TEACHER_ADJUSTMENT_NOTIFY", requester: activeStaff.name, list: emailList })
-                        });
-                    } catch(e) { console.log("Email fetch error:", e); }
+                    fetch(scriptURL, {
+                        method: "POST", mode: "no-cors",
+                        body: JSON.stringify({ type: "TEACHER_ADJUSTMENT_NOTIFY", requester: activeStaff.name, list: emailList })
+                    }).catch(e => console.log("Email background error:", e));
                 }
 
-                alert("✅ Leave & Adjustments Submitted Successfully!");
+                alert("✅ Leave Submitted Successfully!");
                 window.location.href = 'teacher-portal.html';
-            } catch(e) { 
-                btn.disabled = false; btn.innerText = "Confirm & Submit"; 
-                alert("Database Error: " + e.message); 
-            }
+            } catch(e) { btn.disabled = false; btn.innerText = "Confirm & Submit"; alert("Database Error: " + e.message); }
         }
+
         // ============================================================================
         // === SUBSTITUTE ACCEPTANCE & AUTO-INJECTOR ENGINE ===
         // ============================================================================
@@ -356,8 +372,6 @@
               .onSnapshot(snap => {
                   const box = document.getElementById('pending-requests-box');
                   const list = document.getElementById('pending-requests-list');
-                  
-                  // Safety check: ensure the UI box actually exists
                   if (!box || !list) return; 
                   
                   let html = "";
@@ -367,7 +381,6 @@
                       const req = doc.data();
                       if(req.adjustments) {
                           req.adjustments.forEach(adj => {
-                              // Check if I am the target and haven't responded yet
                               if(adj.adjustedEmail && adj.adjustedEmail.toLowerCase() === myEmail && !adj.substituteResponse) {
                                   hasPending = true;
                                   html += `
@@ -453,9 +466,12 @@
         async function applyTimetableOverride(adj, originalTeacherName) {
             const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
             const histRef = db.collection(prefix + "timetable_history").doc(adj.date);
-            const dayName = new Date(adj.date).toLocaleDateString('en-US', { weekday: 'long' });
             
-            // Format class/section to match timetable data structure
+            // STRICT LOCAL DAY PARSING
+            const partsD = adj.date.split('-');
+            const dateObj = new Date(partsD[0], partsD[1] - 1, partsD[2]);
+            const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
+            
             const parts = adj.sub.split('|');
             const cName = parts[0].trim();
             const sName = parts[1].replace('Sec', '').trim();
@@ -466,20 +482,16 @@
             if (docSnap.exists && docSnap.data().schedule) {
                 targetSchedule = docSnap.data().schedule;
             } else {
-                // If no override exists for this date, clone the normal weekly master schedule
                 const masterSnap = await db.collection(prefix + "timetable").where("day", "==", dayName).get();
                 targetSchedule = masterSnap.docs.map(d => d.data());
             }
 
-            // Find the specific slot and overwrite the teacher
             let slotUpdated = false;
             targetSchedule = targetSchedule.map(slot => {
                 const slotStart = timeToMins(slot.start24 || (slot.timeRange ? slot.timeRange.split(' - ')[0] : "00:00"));
                 const slotEnd = timeToMins(slot.end24 || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00"));
-                
                 const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
                 
-                // Match by Class, Section, and EXACT Time Window
                 if (norm(slot.className) === norm(cName) && norm(slot.section) === norm(sName) && slotStart === adj.start && slotEnd === adj.end) {
                     slot.teacher = activeStaff.name;
                     slot.teacherName = activeStaff.name;
@@ -492,7 +504,6 @@
 
             if (!slotUpdated) throw new Error("Could not locate the exact timetable slot to override. The master schedule may have changed.");
 
-            // Save the updated schedule back to history
             await histRef.set({
                 date: adj.date,
                 lastUpdated: Date.now(),
@@ -501,7 +512,6 @@
                 tag: "Substitutions Applied"
             }, { merge: true });
 
-            // Trigger global sync so portals refresh
             await db.collection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
         }
     </script>
