@@ -177,11 +177,11 @@
                 const masterSnap = await getCollection("timetable").where("day", "==", viewDayFull).get();
                 let dayData = masterSnap.docs.map(d => ({id: d.id, ...d.data()}));
 
-                // 2. Fetch Override for this exact date
+              // 2. Fetch Override for this exact date
                 const historySnap = await getCollection("timetable_history").doc(viewDateIso).get();
                 let isExamDay = false;
                 if (historySnap.exists && historySnap.data().schedule) {
-                    dayData = historySnap.data().schedule;
+                    dayData = historySnap.data().schedule.filter(s => s.day === viewDayFull); // Strict day filter
                     isExamDay = true;
                 }
 
@@ -189,6 +189,55 @@
                     ...item,
                     id: item.id || 'id_' + Math.random().toString(36).substr(2, 9)
                 }));
+
+                // --- NEW: THE LIVE LEAVE PATCHER FOR DATE VIEW ---
+                const minsTo24 = (mins) => `${Math.floor(mins / 60).toString().padStart(2, '0')}:${(mins % 60).toString().padStart(2, '0')}`;
+                const leaveSnap = await getCollection("leave_requests").get();
+                leaveSnap.forEach(doc => {
+                    const leaveData = doc.data();
+                    if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
+                        if (leaveData.adjustments) {
+                            leaveData.adjustments.forEach(adj => {
+                                if (adj.date === viewDateIso && adj.substituteResponse === "ACCEPTED") {
+                                    const parts = (adj.sub || "").split('|');
+                                    const cName = parts[0] ? parts[0].trim() : "";
+                                    const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "";
+                                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+                                    const targetSlot = dayData.find(slot => {
+                                        if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adj.title)) return false;
+                                        return true;
+                                    });
+
+                                    if (targetSlot) {
+                                        targetSlot.teacher = adj.adjustedTo;
+                                        targetSlot.teacherName = adj.adjustedTo;
+                                        targetSlot.teacherEmail = adj.adjustedEmail;
+                                        targetSlot.remark = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
+                                    } else if (adj.type === "OTHER" || cName === "Custom" || cName === "Extra Duty") {
+                                        dayData.push({
+                                            id: 'sub_' + Math.random().toString(36).substr(2,9),
+                                            day: viewDayFull,
+                                            className: "Extra Duty",
+                                            section: "Task",
+                                            subject: adj.title,
+                                            teacher: adj.adjustedTo,
+                                            teacherName: adj.adjustedTo,
+                                            teacherEmail: adj.adjustedEmail,
+                                            start24: minsTo24(adj.start),
+                                            end24: minsTo24(adj.end),
+                                            room: "TBD",
+                                            remark: "(Assigned)"
+                                        });
+                                        if (!structureData.some(s => s.className === "Extra Duty")) {
+                                            structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adj.title] });
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
 
                 const badge = document.getElementById('today-badge');
                 if (isExamDay) {
