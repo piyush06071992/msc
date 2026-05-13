@@ -119,9 +119,16 @@
         const firebaseConfig = { apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", authDomain: "shop-portal-bbbbb.firebaseapp.com", projectId: "shop-portal-bbbbb", storageBucket: "shop-portal-bbbbb.firebasestorage.app", messagingSenderId: "701377739976", appId: "1:701377739976:web:99998220272090e56e79fd" };
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
-        const messaging = firebase.messaging();
-        const VAPID_KEY = "BNRj05AzoopGwYm3ruRhIu7x3xn0SrSPGKELJ7ruSZwyvx33WqQPAav0HUPi8GmbI4LbRemlxgzoWgX9EcadgW4";
+        
+        // --- SAFETY NET: Prevent crashes if Push Notifications are unsupported ---
+        let messaging = null;
+        try {
+            if (firebase.messaging && firebase.messaging.isSupported) {
+                messaging = firebase.messaging();
+            }
+        } catch(e) { console.log("Push notifications not supported in this environment."); }
 
+        const VAPID_KEY = "BNRj05AzoopGwYm3ruRhIu7x3xn0SrSPGKELJ7ruSZwyvx33WqQPAav0HUPi8GmbI4LbRemlxgzoWgX9EcadgW4";
         const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
 
         window.onload = async () => {
@@ -131,18 +138,20 @@
                 return;
             }
 
-            if ('serviceWorker' in navigator) {
+            // 1. INSTANT UI UPDATE (Prevents indefinite loading)
+            const safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name : activeStaff.email;
+            const safeDept = (activeStaff.dept && activeStaff.dept !== "undefined") ? activeStaff.dept : "General";
+            document.getElementById('staff-name').innerText = `"${safeName}"`;
+            document.getElementById('staff-dept').innerText = `"${safeDept}"`;
+            document.getElementById('staff-center').innerText = `"${activeStaff.center || "GHUMARWIN"}"`;
+
+            if ('serviceWorker' in navigator && messaging) {
                 try {
                     await navigator.serviceWorker.register('/firebase-messaging-sw.js');
                     console.log("Messaging SW Registered.");
                 } catch (e) { console.error("SW Reg Failed", e); }
             }
 
-            const safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name : activeStaff.email;
-            const safeDept = (activeStaff.dept && activeStaff.dept !== "undefined") ? activeStaff.dept : "General";
-            document.getElementById('staff-name').innerText = `"${safeName}"`;
-            document.getElementById('staff-dept').innerText = `"${safeDept}"`;
-            
             try {
                 const docSnap = await db.collection("staff_applications").doc(activeStaff.uid).get();
                 if (docSnap.exists) {
@@ -184,6 +193,7 @@
         };
 
         async function checkNotifStatus() {
+            if (!messaging) return;
             if (Notification.permission === 'default') {
                 document.getElementById('notif-card').classList.remove('hidden');
             } else if (Notification.permission === 'granted') {
@@ -196,6 +206,7 @@
         }
 
         async function requestNotifPermission() {
+            if (!messaging) return alert("Push notifications are not supported on this browser.");
             const btn = document.getElementById('subscribe-btn');
             const orig = btn.innerText;
             btn.innerText = "Syncing..."; btn.disabled = true;
@@ -245,13 +256,21 @@
             return hours * 60 + minutes;
         }
 
+        function minsTo12H(m) { 
+            let h=Math.floor(m/60)%24; let mn=m%60; let mod=h>=12?'PM':'AM'; h=h%12||12; 
+            return `${h.toString().padStart(2,'0')}:${mn.toString().padStart(2,'0')} ${mod}`; 
+        }
+
         async function loadTodaysScheduleForAlerts(teacherName) {
             try {
+                const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+                const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
+                
                 const now = new Date();
                 const todayDayName = daysOfWeek[now.getDay()];
                 const todayDateIso = now.toISOString().split('T')[0];
 
-                const dateSnap = await db.collection("timetable")
+                const dateSnap = await db.collection(prefix + "timetable")
                     .where("teacherName", "==", teacherName)
                     .where("date", "==", todayDateIso)
                     .get();
@@ -260,7 +279,7 @@
                 if (!dateSnap.empty) {
                     todaysSchedule = dateSnap.docs.map(d => d.data());
                 } else {
-                    const daySnap = await db.collection("timetable")
+                    const daySnap = await db.collection(prefix + "timetable")
                         .where("teacherName", "==", teacherName)
                         .where("day", "==", todayDayName)
                         .get();
@@ -269,7 +288,6 @@
 
                 // 2. --- NEW: THE LIVE LEAVE PATCHER ---
                 // Fetch ALL accepted leave adjustments for today to see if this teacher is substituting
-                const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
                 const leaveSnap = await db.collection(prefix + "leave_requests")
                     .where("status", "==", "PENDING") // Leave is still pending or approved
                     .get();
@@ -281,10 +299,10 @@
                             // If the current user is the substitute for a class TODAY
                             if (adj.date === todayDateIso && adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
                                 // Construct the class object from the adjustment data
-                                const parts = adj.sub.split('|');
+                                const parts = (adj.sub || "").split('|');
                                 todaysSchedule.push({
-                                    className: parts[0].trim(),
-                                    section: parts[1].replace('Sec', '').trim(),
+                                    className: parts[0] ? parts[0].trim() : "Custom",
+                                    section: parts[1] ? parts[1].replace('Sec', '').trim() : "Duty",
                                     subject: adj.title,
                                     timeRange: `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`,
                                     teacherName: activeStaff.name,
@@ -295,12 +313,6 @@
                         });
                     }
                 });
-                    const daySnap = await db.collection("timetable")
-                        .where("teacherName", "==", teacherName)
-                        .where("day", "==", todayDayName)
-                        .get();
-                    todaysSchedule = daySnap.docs.map(d => d.data()).filter(item => !item.date);
-                }
 
                 checkUpcomingClasses(); 
                 setInterval(checkUpcomingClasses, 60000); 
@@ -374,17 +386,14 @@
             nextWeek.setDate(d.getDate() + 7);
             const nextWeekIso = `${nextWeek.getFullYear()}-${String(nextWeek.getMonth()+1).padStart(2,'0')}-${String(nextWeek.getDate()).padStart(2,'0')}`;
 
-            // FIX: Removed the .where() clause to prevent Firebase Index requirement errors.
-            // We filter the dates safely in memory instead!
-            db.collection(prefix + "leave_requests")
-              .onSnapshot(snap => {
+            // SAFE MEMORY FILTERING (Bypasses Firebase Index errors)
+            db.collection(prefix + "leave_requests").onSnapshot(snap => {
                   const board = document.getElementById('leave-notice-board');
                   if (!board) return;
 
                   let records = [];
                   snap.forEach(doc => {
                       const data = doc.data();
-                      // Safely check if dates exist and fall within our 7-day window
                       if (data.startDate && data.endDate) {
                           if ((data.status === "APPROVED" || data.status === "PENDING") && data.endDate >= todayIso && data.startDate <= nextWeekIso) {
                               records.push(data);
@@ -393,7 +402,7 @@
                   });
 
                   if (records.length === 0) {
-                      board.innerHTML = `<div class="text-center py-6"><p class="text-2xl mb-2">🌴</p><p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">No upcoming leaves scheduled.</p></div>`;
+                      board.innerHTML = `<div class="text-center py-6"><p class="text-2xl mb-2">🌴</p><p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">No active or upcoming leaves.</p></div>`;
                       return;
                   }
 
@@ -437,7 +446,7 @@
 
                       html += `
                         <style>details > summary { list-style: none; } details > summary::-webkit-details-marker { display: none; }</style>
-                        <details class="bg-white rounded-xl border border-slate-200 shadow-sm transition-all group overflow-hidden">
+                        <details class="bg-white rounded-xl border border-slate-200 shadow-sm transition-all group overflow-hidden mb-3">
                             <summary class="p-3.5 flex justify-between items-center cursor-pointer outline-none hover:bg-slate-50">
                                 <div>
                                     <h4 class="font-black text-slate-800 text-sm uppercase tracking-tighter">${req.teacherName}</h4>
