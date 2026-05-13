@@ -64,7 +64,6 @@
                     <button onclick="document.getElementById('context-modal').classList.replace('hidden', 'flex'); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-indigo-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-indigo-50 transition-all">⚙️ Edit Master Modes</button>
                     <button onclick="openCalendar(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-slate-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-slate-50 transition-all">📅 View by Date</button>
                     <button onclick="openHolidayModal(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-rose-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-rose-50 transition-all">🌴 Manage Holidays</button>
-                 <button onclick="openExamDispatcher(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-fuchsia-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-fuchsia-50 transition-all">🚀 Exam Dispatcher</button>
                     <button onclick="openPrintModal(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-emerald-800 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-emerald-50 transition-all">🖨️ Export / Print</button>
                     <button onclick="forceSync(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-sky-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-sky-50 transition-all">↻ Force Sync</button>
                     <button id="auth-btn" onclick="window.location.href='admin-timetable-auth.html'; document.getElementById('top-menu-dropdown').classList.add('hidden')" class="hidden w-full text-left flex items-center gap-3 text-indigo-800 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-indigo-50 transition-all">🔐 Delegations</button>
@@ -671,55 +670,55 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
         authBtn.classList.remove('hidden');
     }
 // 3. Load the rest of the timetable
-    await checkAndApplyFutureMaster(); 
-    await Promise.all([fetchStructure(), fetchTeachers()]);
-    await fetchTimetable();
-    await fetchHolidays();
-    await fetchBellTemplates();
-    populateFilterDropdowns();
-    
-    // Auto-load Today's Schedule by default
-    const todayIso = new Date().toISOString().split('T')[0];
-    document.getElementById('context-date-input').value = todayIso;
-    await confirmDateContext();
+    await checkAndApplyFutureMaster(); 
+    await Promise.all([fetchStructure(), fetchTeachers()]);
+    await fetchTimetable();
+    await fetchHolidays();
+    await fetchBellTemplates();
+    populateFilterDropdowns();
+    
+    // Auto-load Today's Schedule by default
+    const todayIso = new Date().toISOString().split('T')[0];
+    document.getElementById('context-date-input').value = todayIso;
+    await confirmDateContext();
 }
 
 async function checkAndApplyFutureMaster() {
-    const todayIso = new Date().toISOString().split('T')[0];
-    try {
-        const histSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
-        if (histSnap.empty) return;
+    const todayIso = new Date().toISOString().split('T')[0];
+    try {
+        const histSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+        if (histSnap.empty) return;
 
-        let pendingMasters = [];
-        histSnap.forEach(doc => { if (doc.id <= todayIso) pendingMasters.push(doc.data()); });
-        if (pendingMasters.length === 0) return;
+        let pendingMasters = [];
+        histSnap.forEach(doc => { if (doc.id <= todayIso) pendingMasters.push(doc.data()); });
+        if (pendingMasters.length === 0) return;
 
-        // Get the most recent valid future master
-        pendingMasters.sort((a, b) => b.date.localeCompare(a.date));
-        const targetMaster = pendingMasters[0];
+        // Get the most recent valid future master
+        pendingMasters.sort((a, b) => b.date.localeCompare(a.date));
+        const targetMaster = pendingMasters[0];
 
-        const batch = db.batch();
-        
-        // 1. Wipe the old Live Master
-        const liveSnap = await getCollection("timetable").get();
-        liveSnap.forEach(doc => batch.delete(doc.ref));
+        const batch = db.batch();
+        
+        // 1. Wipe the old Live Master
+        const liveSnap = await getCollection("timetable").get();
+        liveSnap.forEach(doc => batch.delete(doc.ref));
 
-        // 2. Apply the new Live Master
-        targetMaster.schedule.forEach(slot => {
-            const { sMins, eMins, ...cleanSlot } = slot;
-            batch.set(getCollection("timetable").doc(), cleanSlot);
-        });
+        // 2. Apply the new Live Master
+        targetMaster.schedule.forEach(slot => {
+            const { sMins, eMins, ...cleanSlot } = slot;
+            batch.set(getCollection("timetable").doc(), cleanSlot);
+        });
 
-        // 3. Mark it as APPLIED so it never runs again
-        batch.update(getCollection("timetable_history").doc(targetMaster.date), { type: "APPLIED_MASTER" });
-        batch.set(db.collection("system_metadata").doc("timetable"), { lastUpdated: Date.now() }, { merge: true });
+        // 3. Mark it as APPLIED so it never runs again
+        batch.update(getCollection("timetable_history").doc(targetMaster.date), { type: "APPLIED_MASTER" });
+        batch.set(db.collection("system_metadata").doc("timetable"), { lastUpdated: Date.now() }, { merge: true });
 
-        await batch.commit();
-        sessionStorage.removeItem('minerva_timetable'); // Force fresh fetch
-        console.log("✅ Auto-Promoted Future Master to Live Schedule!");
-    } catch (e) {
-        console.error("Auto-Promote Failed:", e);
-    }
+        await batch.commit();
+        sessionStorage.removeItem('minerva_timetable'); // Force fresh fetch
+        console.log("✅ Auto-Promoted Future Master to Live Schedule!");
+    } catch (e) {
+        console.error("Auto-Promote Failed:", e);
+    }
 }
        async function fetchStructure() {
             // Check memory first!
@@ -2431,16 +2430,11 @@ async function saveOverrideForSpecificDate() {
 
                 activeDays.forEach(day => {
                     let teacherEmail = "";
-               if (teacher !== "NONE") {
+                    if (teacher !== "NONE") {
                         const tObj = allTeachers.find(t => t.name === teacher);
                         if (tObj) teacherEmail = tObj.email || ""; 
                     }
-                    
-                    // NEW: Capture the exam type (OT/UT) from the dispatcher UI. Defaults to UT.
-                    const typeSelect = document.getElementById(`type_${className}_${sectionName}`);
-                    const examTypeTag = typeSelect ? typeSelect.value : 'UT'; 
-
-                    newSlots.push({ day: day, className: className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail: teacherEmail, room, remark, sMins, eMins, examType: examTypeTag });
+                    newSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark, sMins, eMins });
                 });
             }
         }
