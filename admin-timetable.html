@@ -2281,14 +2281,81 @@ async function confirmDateContext() {
                 globalTimetable = hData.schedule || [];
                 if (nameTagInp) nameTagInp.value = hData.tag || "";
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
-                renderDirectDashboard();
-                return;
+            } else {
+                // Fall back to the normal Live Master schedule for that specific day
+                const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                globalTimetable = masterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
             }
 
-            // Fall back to the normal Live Master schedule for that specific day
-            const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-            globalTimetable = masterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-            document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
+            // --- NEW: THE LIVE LEAVE PATCHER FOR ADMIN ---
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            const leaveSnap = await db.collection(prefix + "leave_requests").get(); // Fetched into memory to avoid index errors
+
+            leaveSnap.forEach(doc => {
+                const leaveData = doc.data();
+                if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
+                    if (leaveData.adjustments) {
+                        leaveData.adjustments.forEach(adj => {
+                            if (adj.date === dateVal && adj.substituteResponse === "ACCEPTED") {
+                                const parts = (adj.sub || "").split('|');
+                                const cName = parts[0] ? parts[0].trim() : "";
+                                const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "";
+                                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+                                // Try to find the exact class in globalTimetable
+                                const targetSlot = globalTimetable.find(slot => {
+                                    if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adj.title)) return false;
+                                    if (slot.start24) {
+                                        const [sh, sm] = slot.start24.split(':').map(Number);
+                                        const slotStartMins = sh * 60 + sm;
+                                        // 15-minute buffer in case of minor time shifts
+                                        if (Math.abs(slotStartMins - adj.start) > 15) return false;
+                                    }
+                                    return true;
+                                });
+
+                                if (targetSlot) {
+                                    // Override Teacher Name to the Substitute!
+                                    targetSlot.teacher = adj.adjustedTo;
+                                    targetSlot.teacherName = adj.adjustedTo;
+                                    targetSlot.teacherEmail = adj.adjustedEmail;
+                                    targetSlot.remark = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
+                                } else if (adj.type === "OTHER" || cName === "Custom") {
+                                    // Check if it was already saved to prevent duplicates
+                                    const existingDuty = globalTimetable.find(slot => 
+                                        norm(slot.className) === "extraduty" && 
+                                        norm(slot.subject) === norm(adj.title) && 
+                                        norm(slot.teacher) === norm(adj.adjustedTo)
+                                    );
+                                    
+                                    if (!existingDuty) {
+                                        // Inject Extra Duty into the Timetable view!
+                                        globalTimetable.push({
+                                            day: dayName,
+                                            className: "Extra Duty",
+                                            section: "Task",
+                                            subject: adj.title,
+                                            teacher: adj.adjustedTo,
+                                            teacherName: adj.adjustedTo,
+                                            teacherEmail: adj.adjustedEmail,
+                                            start24: minsTo24(adj.start),
+                                            end24: minsTo24(adj.end),
+                                            remark: "(Assigned to " + adj.adjustedTo.split(' ')[0] + ")",
+                                            room: "TBD"
+                                        });
+                                        // Force structure injection so it renders on screen
+                                        if (!structureData.some(s => s.className === "Extra Duty")) {
+                                            structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adj.title] });
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            });
+
             renderDirectDashboard();
 
         } catch (error) {
