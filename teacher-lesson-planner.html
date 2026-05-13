@@ -210,15 +210,11 @@
         try {
                 const holSnap = await getCollection("school_holidays").get();
                 holidaysData = holSnap.docs.map(d => d.data());
-                // FIX: Added 'DAILY_OVERRIDE' so substitutions load into the dashboard!
                 const histSnap = await getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"]).get();
                 window.historyOverrides = histSnap.docs.map(d => d.data());
             } catch(e) { console.error("Error fetching exclusions:", e); }
 
-           // POINT 8: Caching entirely removed. Always fetches Live Data.
-
           try {
-                // FIX: Fetch the FULL timetable so Substitutes can accurately calculate past class pace!
                 const snap = await getCollection("timetable").get();
                 window.fullTimetable = snap.docs.map(d => d.data());
                 
@@ -232,23 +228,53 @@
                 
                 const todayOverride = window.historyOverrides ? window.historyOverrides.find(o => o.date === todayIsoStr) : null;
                 
-               // 2. Fetch Override for this exact date
-                const historySnap = await getCollection("timetable_history").doc(viewDateIso).get();
-                let isExamDay = false;
-                if (historySnap.exists && historySnap.data().schedule) {
-                    dayData = historySnap.data().schedule;
-                    isExamDay = true;
+                let todayDocs = [];
+                if (todayOverride && todayOverride.schedule) {
+                    todayDocs = todayOverride.schedule.filter(s => (s.teacherName === safeName || s.teacher === safeName) && s.day === todayName);
+                } else {
+                    todayDocs = window.teacherTimetable.filter(t => t.day === todayName);
                 }
 
-                dayData = dayData.map(item => ({
-                    ...item,
-                    id: item.id || 'id_' + Math.random().toString(36).substr(2, 9)
-                }));
+                // --- THE LIVE LEAVE PATCHER ---
+                function minsTo12H(m) { 
+                    let h=Math.floor(m/60)%24; let mn=m%60; let mod=h>=12?'PM':'AM'; h=h%12||12; 
+                    return `${h.toString().padStart(2,'0')}:${mn.toString().padStart(2,'0')} ${mod}`; 
+                }
+                
+                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+                const leaveSnap = await db.collection(prefix + "leave_requests").get();
+                leaveSnap.forEach(doc => {
+                    const leaveData = doc.data();
+                    if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
+                        if (leaveData.adjustments) {
+                            leaveData.adjustments.forEach(adj => {
+                                // If the current user is the substitute for a class TODAY
+                                if (adj.date === todayIsoStr && adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
+                                    const parts = (adj.sub || "").split('|');
+                                    const cName = parts[0] ? parts[0].trim() : "Extra Duty";
+                                    const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "Task";
+                                    
+                                    todayDocs.push({
+                                        id: 'sub_' + Math.random().toString(36).substr(2,9),
+                                        className: cName,
+                                        section: sName,
+                                        subject: adj.title,
+                                        timeRange: `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`,
+                                        duration: adj.end - adj.start,
+                                        teacher: activeStaff.name,
+                                        teacherName: activeStaff.name
+                                    });
+                                }
+                            });
+                        }
+                    }
+                });
+                                     
+                if(todayDocs.length > 0) {
                     const structSnap = await getCollection("institute_structure").get();
                     const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
 
                     mySessions = todayDocs.map((data, index) => {
-                        // Data is correctly formatted whether it comes from the DB or the Override Array
                         const docId = data.id || `override_${index}`; 
                         const times = data.timeRange ? data.timeRange.split(' - ') : ['00:00 AM', '00:00 AM'];
                         const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
@@ -367,10 +393,7 @@
             // --- TIME RESTRICTION LOGIC ---
             if (!isDemoMode && timeString && timeString.includes(' - ')) {
                 try {
-                    // Extract the end time string (e.g., "10:30 AM")
                     const endTimeStr = timeString.split(' - ')[1].trim();
-                    
-                    // Parse the end time to minutes for accurate math
                     const endParts = endTimeStr.split(' ');
                     const timeParts = endParts[0].split(':');
                     let endH = parseInt(timeParts[0], 10);
@@ -388,7 +411,6 @@
                     }
                 } catch (e) {
                     console.error("Time parse error in locker:", e);
-                    // If parsing fails for some reason, we let them through rather than breaking the app completely
                 }
             }
 
@@ -495,10 +517,15 @@
 
                 const today = new Date();
                 let lwd = new Date(today);
-                lwd.setDate(today.getDate() - 1); // Start checking from yesterday
+                lwd.setDate(today.getDate() - 1); 
 
-                // 🧠 SMART LWD CALCULATOR: Trace backward until we hit a valid working day
-                while (!isTimetableWorkingDay(lwd, cName, sName, subName)) {
+                // 🧠 SMART LWD CALCULATOR: Trace backward until we hit a valid working day FOR THIS TEACHER
+                let foundValidLWD = false;
+                while (true) {
+                    // Passed 'true' to strictly check this teacher's schedule, ignoring shared teachers
+                    foundValidLWD = isTimetableWorkingDay(lwd, cName, sName, subName, true); 
+                    if (foundValidLWD) break;
+                    
                     lwd.setDate(lwd.getDate() - 1);
                     // Failsafe: Don't look back further than 14 days
                     if (today.getTime() - lwd.getTime() > 14 * 24 * 60 * 60 * 1000) {
@@ -506,32 +533,16 @@
                     }
                 }
                 
-                const daysStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                const lwdName = daysStr[lwd.getDay()];
                 const lwdDateStr = lwd.toISOString().split('T')[0];
 
-                // FIX: Remove teacherName filter so substitutes can check if the CLASS ran yesterday, regardless of who taught it.
-                const lwdSnap = await getCollection("timetable").where("day", "==", lwdName).get();
-                let hadClassLWD = false;
-                
-                if (!lwdSnap.empty && currSession) {
-                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                    lwdSnap.forEach(d => {
-                        const t = d.data();
-                        if (norm(t.className) === norm(currSession.className) && norm(t.section) === norm(currSession.section) && norm(t.subject) === norm(currSession.subject)) {
-                            hadClassLWD = true;
-                        }
-                    });
-                }
-
                 let loggedOnLWD = false;
-                if (hadClassLWD) {
+                if (foundValidLWD) {
                     const tickedTopic = currentPlannerData.find(r => r.completedDate === lwdDateStr);
                     const loggedActivity = window.currentActivityLogs.find(l => l.date === lwdDateStr);
                     if (tickedTopic || loggedActivity) loggedOnLWD = true;
                 }
 
-                window.complianceLocked = enableDailyBlock ? (hadClassLWD && !loggedOnLWD) : false;
+                window.complianceLocked = enableDailyBlock ? (foundValidLWD && !loggedOnLWD) : false;
                 window.lwdDateStr = lwdDateStr;
 
                 const reqBtn = document.getElementById('request-unlock-btn');
@@ -562,7 +573,8 @@
                 renderSyllabusExactMath();
             } catch(e) { console.error(e); }
         }
-// --- SMART EXCLUSION ENGINE (Holidays + OT Exams) ---
+
+        // --- SMART EXCLUSION ENGINE (Holidays + OT Exams) ---
         function checkDateExclusion(dateObj, className, sectionName, subjectName) {
             const curStr = dateObj.toISOString().split('T')[0];
             const checkDate = new Date(curStr); checkDate.setHours(0,0,0,0);
@@ -582,11 +594,9 @@
                         if (h.isFullDay) {
                             return { isExcluded: true, reason: h.reason };
                         } else if (h.startTime && h.endTime) {
-                            // Partial Day Check - Find the actual class timing to see if it overlaps with the quiz/holiday
                             const daysStr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                             const dayName = daysStr[dateObj.getDay()];
                             
-                            // Check against the global teacher timetable
                             const classMatch = (window.teacherTimetable || []).find(t => 
                                 t.day === dayName && 
                                 norm(t.className) === norm(className) && 
@@ -595,19 +605,16 @@
                             );
 
                             if (classMatch && classMatch.timeRange) {
-                                // Extract class start/end times
                                 const [startStr] = classMatch.timeRange.split(' - ');
                                 const [sh, sm] = startStr.split(' ')[0].split(':').map(Number);
                                 const sMins = (startStr.includes('PM') && sh !== 12 ? sh+12 : (sh===12 && startStr.includes('AM') ? 0 : sh))*60 + sm;
                                 const eMins = sMins + (parseInt(classMatch.duration) || 0);
 
-                                // Extract holiday start/end times
                                 const [hsh, hsm] = h.startTime.split(':').map(Number); 
                                 const [heh, hem] = h.endTime.split(':').map(Number);
                                 const hStartMins = hsh*60+hsm; 
                                 const hEndMins = heh*60+hem;
 
-                                // Overlap Math: If the class overlaps with the holiday/quiz window
                                 if (sMins < hEndMins && eMins > hStartMins) {
                                     return { isExcluded: true, reason: h.reason };
                                 }
@@ -621,36 +628,38 @@
             if (window.historyOverrides) {
                 const override = window.historyOverrides.find(o => o.date === curStr);
                 if (override && override.schedule) {
-                    // Use normalizer to match the overridden schedule perfectly
                     const classSlots = override.schedule.filter(s => norm(s.className) === norm(className) && norm(s.section) === norm(sectionName));
                     
                     if (classSlots.length > 0) {
                         const subSlot = classSlots.find(s => norm(s.subject) === norm(subjectName));
-                        // If it's a Doubt Session (OT), or the subject isn't running at all due to an exam day
                         if (!subSlot || subSlot.remark === "Doubt Session") {
                             return { isExcluded: true, reason: subSlot ? "OT Doubt Session" : "Exam Day (No Class)" };
                         }
+                    } else {
+                        // Class was completely wiped out by this override
+                        return { isExcluded: true, reason: "Class Not Scheduled" };
                     }
                 }
             }
             
             return { isExcluded: false, reason: "" };
         }
-       function isTimetableWorkingDay(dateObj, className, sectionName, subjectName) {
+
+       function isTimetableWorkingDay(dateObj, className, sectionName, subjectName, checkTeacherOnly = false) {
             if (dateObj.getDay() === 0) return false; 
             if (isDemoMode) return true; 
             
-            // 🧠 USE THE SMART EXCLUSION ENGINE (Skips Holidays AND OT Exams)
             const exclusion = checkDateExclusion(dateObj, className, sectionName, subjectName);
             if (exclusion.isExcluded) return false;
             
-           const targetTimetable = window.fullTimetable || window.teacherTimetable;
+            // FIX: Allow checking strictly the teacher's schedule to prevent locking them for shared classes!
+            const targetTimetable = checkTeacherOnly ? window.teacherTimetable : (window.fullTimetable || window.teacherTimetable);
             if (!targetTimetable) return false;
+            
             const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const dayName = days[dateObj.getDay()];
             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-            // FIX: Check if the CLASS was scheduled to run, rather than checking the teacher's personal schedule
             return targetTimetable.some(t => 
                 t.day === dayName && 
                 norm(t.className) === norm(className) && 
