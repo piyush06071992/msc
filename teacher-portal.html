@@ -256,9 +256,45 @@
                     .where("date", "==", todayDateIso)
                     .get();
 
+              // 1. Load the Base Schedule (Exam Override OR Master Timetable)
                 if (!dateSnap.empty) {
                     todaysSchedule = dateSnap.docs.map(d => d.data());
                 } else {
+                    const daySnap = await db.collection("timetable")
+                        .where("teacherName", "==", teacherName)
+                        .where("day", "==", todayDayName)
+                        .get();
+                    todaysSchedule = daySnap.docs.map(d => d.data()).filter(item => !item.date);
+                }
+
+                // 2. --- NEW: THE LIVE LEAVE PATCHER ---
+                // Fetch ALL accepted leave adjustments for today to see if this teacher is substituting
+                const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
+                const leaveSnap = await db.collection(prefix + "leave_requests")
+                    .where("status", "==", "PENDING") // Leave is still pending or approved
+                    .get();
+
+                leaveSnap.forEach(doc => {
+                    const leaveData = doc.data();
+                    if (leaveData.adjustments) {
+                        leaveData.adjustments.forEach(adj => {
+                            // If the current user is the substitute for a class TODAY
+                            if (adj.date === todayDateIso && adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
+                                // Construct the class object from the adjustment data
+                                const parts = adj.sub.split('|');
+                                todaysSchedule.push({
+                                    className: parts[0].trim(),
+                                    section: parts[1].replace('Sec', '').trim(),
+                                    subject: adj.title,
+                                    timeRange: `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`,
+                                    teacherName: activeStaff.name,
+                                    isSubstitution: true,
+                                    originalTeacher: leaveData.teacherName
+                                });
+                            }
+                        });
+                    }
+                });
                     const daySnap = await db.collection("timetable")
                         .where("teacherName", "==", teacherName)
                         .where("day", "==", todayDayName)
