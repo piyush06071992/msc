@@ -2690,7 +2690,7 @@ async function confirmMultiDates() {
             btn.disabled = true; btn.innerText = "⌛ Merging & Writing...";
 
             try {
-                // 1. Scrape the CURRENT screen
+                // 1. Scrape the CURRENT screen (Source of Truth for your edits)
                 const currentBlocks = Array.from(document.querySelectorAll('.time-block'));
                 let sourceSlots = []; 
                 currentBlocks.forEach(b => {
@@ -2722,20 +2722,7 @@ async function confirmMultiDates() {
                     });
                 });
 
-                // 2. SMART OT INJECTOR
-                const otTrackerOverride = new Set();
-                sourceSlots.forEach(slot => {
-                    if (slot.subject === 'OT') otTrackerOverride.add(slot.className + '_' + slot.section);
-                });
-                sourceSlots.forEach(slot => {
-                    if (!SPECIAL_SUBJECTS.includes((slot.subject || '').toUpperCase())) {
-                        if (otTrackerOverride.has(slot.className + '_' + slot.section)) {
-                            slot.remark = "Doubt Session";
-                        }
-                    }
-                });
-
-                // 3. Normalizer to ensure spaces/caps don't break the section matching
+                // 2. Normalize section keys for reliable matching
                 const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
                 const normalizedTargetKeys = targetSections.map(ts => {
                     const [c, s] = ts.split('|');
@@ -2744,32 +2731,38 @@ async function confirmMultiDates() {
 
                 const batch = db.batch();
                 for (const dateIso of selectedDates) {
-                    
-                    // --- SAFE DATE PARSER ---
-                    const [y, m, d] = dateIso.split('-');
-                    const localDate = new Date(y, m - 1, d);
+                    // Safe Date Parsing
+                    const [y, m, d_val] = dateIso.split('-');
+                    const localDate = new Date(y, m - 1, d_val);
                     const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                     const dayName = daysArr[localDate.getDay()];
                     
-                    // Force the copied slots to adopt the target's day of the week
                     const stampedSourceSlots = sourceSlots.map(slot => ({ ...slot, day: dayName }));
-
                     let finalMergedSchedule = [];
 
                     if (scope === 'FULL') {
                         finalMergedSchedule = stampedSourceSlots;
                     } else {
-                        // --- SAFE DATABASE FETCH ---
+                        // 3. FETCH MASTER FOR FILLING BLANKS
                         const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
                         const masterSlots = masterSnap.docs.map(doc => doc.data());
                         
-                        // Keep normal schedule for NON-SELECTED sections
+                        // Keep non-selected sections from Master
                         const normalPortion = masterSlots.filter(ms => {
                             const key = `${norm(ms.className)}|${norm(ms.section)}`;
                             return !normalizedTargetKeys.includes(key);
+                        }).map(slot => {
+                            // Ensure time properties are strictly included for the UI renderer
+                            if (slot.start24 && slot.end24 && !slot.sMins) {
+                                const [sh, sm] = slot.start24.split(':').map(Number);
+                                const [eh, em] = slot.end24.split(':').map(Number);
+                                slot.sMins = sh * 60 + sm;
+                                slot.eMins = eh * 60 + em;
+                            }
+                            return slot;
                         });
                         
-                        // Take new schedule for SELECTED sections
+                        // Take edited sections from the Screen
                         const overridePortion = stampedSourceSlots.filter(ss => {
                             const key = `${norm(ss.className)}|${norm(ss.section)}`;
                             return normalizedTargetKeys.includes(key);
@@ -2789,10 +2782,10 @@ async function confirmMultiDates() {
 
                 await batch.commit();
                 await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
-                alert(`✅ Successfully replicated to ${selectedDates.length} dates.`);
+                alert(`✅ Replicated Successfully. May 15 now contains the merged view.`);
                 document.getElementById('multi-date-modal').classList.replace('flex', 'hidden');
             } catch (error) {
-                alert("Error: " + error.message);
+                alert("Critical Merge Error: " + error.message);
             } finally {
                 btn.disabled = false; btn.innerText = "🚀 Execute Replication";
             }
