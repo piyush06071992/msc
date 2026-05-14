@@ -3537,41 +3537,150 @@ async function confirmMultiDates() {
         }
         // --- AUTO-RESOLVER HELPERS ---
 
-// Checks if a teacher is free globally at a specific time/day, 
-// optionally ignoring a specific section (to prevent self-clashing)
-function isTeacherAvailable(teacher, day, sMins, eMins, ignoreBlockId = null) {
-    if (teacher === "NONE") return true;
-    
-    return !globalTimetable.some(slot => {
-        if (slot.teacher !== teacher || slot.day !== day) return false;
-        if (slot.blockId === ignoreBlockId) return false;
+// --- DEEP RECURSIVE AUTO-RESOLVER ENGINE ---
         
-        // Merged Room Exception (Matching rooms means they are supposed to be together)
-        // We'll skip this for the auto-resolver to keep logic pure for now.
+        async function runAutoResolver() {
+            // 1. Take a safety snapshot first
+            if (typeof takeSnapshot === 'function') takeSnapshot();
+            
+            const btn = document.getElementById('auto-resolve-btn');
+            const origText = btn.innerHTML;
+            btn.innerHTML = "⏳ Solving Chains...";
+            btn.disabled = true;
 
-        return (sMins < slot.eMins && eMins > slot.sMins);
-    });
-}
+            // Wait a tiny bit for UI to update
+            await new Promise(r => setTimeout(r, 100));
 
-// Gets all time-blocks belonging to a specific section
-function getSectionTimeline(className, section) {
-    const allBlocks = Array.from(document.querySelectorAll('.time-block'));
-    return allBlocks.filter(b => 
-        b.getAttribute('data-class') === className && 
-        b.getAttribute('data-section') === section
-    ).map(b => {
-        const s24 = b.querySelector('.tb-s24').value;
-        const e24 = b.querySelector('.tb-e24').value;
-        const [sh, sm] = s24.split(':').map(Number);
-        const [eh, em] = e24.split(':').map(Number);
-        return {
-            id: b.id,
-            sMins: sh * 60 + sm,
-            eMins: eh * 60 + em,
-            duration: (eh * 60 + em) - (sh * 60 + sm)
-        };
-    });
-}
+            try {
+                // 2. Identify all current clashes
+                // We use the existing logic to see which blocks have the 'CLASH' warning
+                const clashingBlocks = Array.from(document.querySelectorAll('.time-block')).filter(b => {
+                    const warn = b.querySelector('.read-warn');
+                    return warn && !warn.classList.contains('hidden');
+                });
+
+                if (clashingBlocks.length === 0) {
+                    alert("✨ No clashes detected! Your timetable is already clean.");
+                    return;
+                }
+
+                let solvedCount = 0;
+                let failCount = 0;
+
+                // 3. Process each clashing section
+                for (let block of clashingBlocks) {
+                    const className = block.getAttribute('data-class');
+                    const sectionName = block.getAttribute('data-section');
+                    
+                    // Attempt to resolve this specific section
+                    const success = await attemptSectionResolve(className, sectionName);
+                    if (success) solvedCount++; else failCount++;
+                }
+
+                if (failCount === 0) {
+                    alert(`✅ Success! Resolved ${solvedCount} clashing sections.`);
+                } else {
+                    alert(`⚠️ Partial Success: Resolved ${solvedCount} sections, but ${failCount} sections are too complex to solve automatically. Please check red markers.`);
+                }
+
+            } catch (e) {
+                console.error(e);
+                alert("Resolver Error: " + e.message);
+            } finally {
+                btn.innerHTML = origText;
+                btn.disabled = false;
+                checkGlobalClash(); // Refresh warnings
+                renderDirectDashboard(); // Re-draw to show new positions
+            }
+        }
+
+        async function attemptSectionResolve(className, sectionName) {
+            const timeline = getSectionTimeline(className, sectionName);
+            // We try to shuffle the order of the time slots within this section
+            // until the teachers in those slots don't clash with their other sections.
+            
+            const slots = [...timeline];
+            const entries = [];
+            
+            // Get all actual class data for this section
+            globalTimetable.forEach(t => {
+                if (t.className === className && t.section === sectionName) {
+                    entries.push({...t});
+                }
+            });
+
+            // If no entries or slots, skip
+            if (slots.length < 2 || entries.length === 0) return false;
+
+            // Simple Permutation/Swap Logic
+            // We will try 50 different random configurations for this section
+            for (let attempt = 0; idx < 50; attempt++) {
+                shuffleArray(slots);
+                
+                let currentConfigValid = true;
+                for (let i = 0; i < entries.length; i++) {
+                    const targetSlot = slots[i % slots.length];
+                    if (!isTeacherAvailableGlobally(entries[i].teacher, entries[i].day, targetSlot.sMins, targetSlot.eMins, className, sectionName)) {
+                        currentConfigValid = false;
+                        break;
+                    }
+                }
+
+                if (currentConfigValid) {
+                    // Apply this config to globalTimetable
+                    for (let i = 0; i < entries.length; i++) {
+                        const targetSlot = slots[i % slots.length];
+                        const matchIdx = globalTimetable.findIndex(gt => 
+                            gt.className === className && 
+                            gt.section === sectionName && 
+                            gt.subject === entries[i].subject && 
+                            gt.day === entries[i].day
+                        );
+                        if (matchIdx > -1) {
+                            globalTimetable[matchIdx].start24 = minsTo24(targetSlot.sMins);
+                            globalTimetable[matchIdx].end24 = minsTo24(targetSlot.eMins);
+                        }
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function isTeacherAvailableGlobally(teacher, day, sMins, eMins, currentClass, currentSec) {
+            if (teacher === "NONE" || !teacher) return true;
+            return !globalTimetable.some(slot => {
+                // Ignore the section we are currently trying to fix
+                if (slot.className === currentClass && slot.section === currentSec) return false;
+                if (slot.teacher !== teacher || slot.day !== day) return false;
+                return (sMins < slot.eMins && eMins > slot.sMins);
+            });
+        }
+
+        function shuffleArray(array) {
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+        }
+
+        function getSectionTimeline(className, section) {
+            const allBlocks = Array.from(document.querySelectorAll('.time-block'));
+            return allBlocks.filter(b => 
+                b.getAttribute('data-class') === className && 
+                b.getAttribute('data-section') === section
+            ).map(b => {
+                const s24 = b.querySelector('.tb-s24').value;
+                const e24 = b.querySelector('.tb-e24').value;
+                if(!s24 || !e24) return null;
+                const [sh, sm] = s24.split(':').map(Number);
+                const [eh, em] = e24.split(':').map(Number);
+                return {
+                    sMins: sh * 60 + sm,
+                    eMins: eh * 60 + em
+                };
+            }).filter(x => x !== null);
+        }
     </script>
 </body>
 </html>
