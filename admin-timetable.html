@@ -3594,54 +3594,84 @@ async function confirmMultiDates() {
             }
         }
 
-        async function attemptSectionResolve(className, sectionName) {
-            // 1. Get the fixed time slots available in this section
-            const timeline = getSectionTimeline(className, sectionName);
-            
-            // 2. Get all class entries currently assigned to this section
-            // Filter globalTimetable directly so we are working with the real data
+  async function attemptSectionResolve(className, sectionName) {
+            // 1. Get all entries for this section from the live memory
             const sectionEntries = globalTimetable.filter(t => t.className === className && t.section === sectionName);
+            if (sectionEntries.length < 2) return false;
 
-            if (timeline.length < 1 || sectionEntries.length === 0) return false;
-
-            // 3. Permutation Loop: Try to find a valid arrangement
-            const slots = [...timeline];
-            
-            for (let attempt = 0; attempt < 100; attempt++) {
-                shuffleArray(slots);
+            // 2. Group entries by their current time slot (handles Split Classes safely)
+            const timeBlocks = {};
+            sectionEntries.forEach(ent => {
+                const tKey = `${ent.sMins}-${ent.eMins}`;
+                if (!timeBlocks[tKey]) {
+                    timeBlocks[tKey] = {
+                        sMins: ent.sMins,
+                        eMins: ent.eMins,
+                        entries: [],
+                        isMovable: true // Assume movable until proven otherwise
+                    };
+                }
+                timeBlocks[tKey].entries.push(ent);
                 
+                // --- CRITICAL LOCK (SIMPLIFIED) ---
+                // If there is no teacher, bolt this block to the floor. 
+                // This protects breaks, lunches, and exams no matter what you name them.
+                if (!ent.teacher || ent.teacher === "NONE" || ent.teacher.trim() === "") {
+                    timeBlocks[tKey].isMovable = false;
+                }
+            });
+
+            // 3. Separate out only the blocks we are allowed to shuffle
+            const movableBlocks = Object.values(timeBlocks).filter(b => b.isMovable);
+            if (movableBlocks.length < 2) return false; // Nothing to swap
+
+            // The target time slots we can shuffle into
+            const movableTimeSlots = movableBlocks.map(b => ({ sMins: b.sMins, eMins: b.eMins }));
+
+            // 4. Permutation Loop: Try 100 different random configurations
+            for (let attempt = 0; attempt < 100; attempt++) {
+                const slotsCopy = [...movableTimeSlots];
+                shuffleArray(slotsCopy);
+
                 let currentConfigValid = true;
-                for (let i = 0; i < sectionEntries.length; i++) {
-                    const targetSlot = slots[i % slots.length];
-                    // Check if the teacher of this entry is free at this specific new time slot
-                    if (!isTeacherAvailableGlobally(sectionEntries[i].teacher, sectionEntries[i].day, targetSlot.sMins, targetSlot.eMins, className, sectionName)) {
-                        currentConfigValid = false;
-                        break;
+                
+                // Check if this specific shuffle works for all teachers in all movable blocks
+                for (let i = 0; i < movableBlocks.length; i++) {
+                    const targetSlot = slotsCopy[i];
+                    const blockToMove = movableBlocks[i];
+                    
+                    for (const ent of blockToMove.entries) {
+                        if (!isTeacherAvailableGlobally(ent.teacher, ent.day, targetSlot.sMins, targetSlot.eMins, className, sectionName)) {
+                            currentConfigValid = false;
+                            break;
+                        }
                     }
+                    if (!currentConfigValid) break;
                 }
 
                 if (currentConfigValid) {
-                    // --- SUCCESS: WRITING TO MAIN MEMORY ---
-                    for (let i = 0; i < sectionEntries.length; i++) {
-                        const targetSlot = slots[i % slots.length];
+                    // --- SUCCESS: WRITE TO MAIN MEMORY ---
+                    for (let i = 0; i < movableBlocks.length; i++) {
+                        const targetSlot = slotsCopy[i];
+                        const blockToMove = movableBlocks[i];
                         
-                        // Update the ACTUAL globalTimetable objects
-                        // Find the specific reference in the main array
-                        const realEntry = globalTimetable.find(gt => 
-                            gt.className === className && 
-                            gt.section === sectionName && 
-                            gt.subject === sectionEntries[i].subject && 
-                            gt.day === sectionEntries[i].day &&
-                            gt.teacher === sectionEntries[i].teacher
-                        );
+                        for (const ent of blockToMove.entries) {
+                            const realEntry = globalTimetable.find(gt => 
+                                gt.className === className && 
+                                gt.section === sectionName && 
+                                gt.subject === ent.subject && 
+                                gt.day === ent.day &&
+                                gt.teacher === ent.teacher &&
+                                gt.sMins === blockToMove.sMins // Ensures we grab the original
+                            );
 
-                        if (realEntry) {
-                            realEntry.start24 = minsTo24(targetSlot.sMins);
-                            realEntry.end24 = minsTo24(targetSlot.eMins);
-                            realEntry.sMins = targetSlot.sMins;
-                            realEntry.eMins = targetSlot.eMins;
-                            // Update the string range for the UI
-                            realEntry.timeRange = `${format12Hour(realEntry.start24)} - ${format12Hour(realEntry.end24)}`;
+                            if (realEntry) {
+                                realEntry.start24 = minsTo24(targetSlot.sMins);
+                                realEntry.end24 = minsTo24(targetSlot.eMins);
+                                realEntry.sMins = targetSlot.sMins;
+                                realEntry.eMins = targetSlot.eMins;
+                                realEntry.timeRange = `${format12Hour(realEntry.start24)} - ${format12Hour(realEntry.end24)}`;
+                            }
                         }
                     }
                     return true; 
