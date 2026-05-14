@@ -2722,7 +2722,6 @@ async function confirmMultiDates() {
                     });
                 });
 
-                // 2. Normalize section keys for reliable matching
                 const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
                 const normalizedTargetKeys = targetSections.map(ts => {
                     const [c, s] = ts.split('|');
@@ -2731,9 +2730,8 @@ async function confirmMultiDates() {
 
                 const batch = db.batch();
                 for (const dateIso of selectedDates) {
-                    // Safe Date Parsing
-                    const [y, m, d_val] = dateIso.split('-');
-                    const localDate = new Date(y, m - 1, d_val);
+                    const [y, m_val, d_val] = dateIso.split('-');
+                    const localDate = new Date(y, m_val - 1, d_val);
                     const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                     const dayName = daysArr[localDate.getDay()];
                     
@@ -2743,26 +2741,27 @@ async function confirmMultiDates() {
                     if (scope === 'FULL') {
                         finalMergedSchedule = stampedSourceSlots;
                     } else {
-                        // 3. FETCH MASTER FOR FILLING BLANKS
+                        // 2. FETCH MASTER FOR FILLING BLANKS
                         const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
                         const masterSlots = masterSnap.docs.map(doc => doc.data());
                         
-                        // Keep non-selected sections from Master
+                        // 3. RECONSTRUCT MASTER SLOTS (The part that was causing blanks)
                         const normalPortion = masterSlots.filter(ms => {
                             const key = `${norm(ms.className)}|${norm(ms.section)}`;
                             return !normalizedTargetKeys.includes(key);
                         }).map(slot => {
-                            // Ensure time properties are strictly included for the UI renderer
-                            if (slot.start24 && slot.end24 && !slot.sMins) {
+                            // Ensure all time properties exist so the UI can render them
+                            if (slot.start24 && slot.end24) {
                                 const [sh, sm] = slot.start24.split(':').map(Number);
                                 const [eh, em] = slot.end24.split(':').map(Number);
                                 slot.sMins = sh * 60 + sm;
                                 slot.eMins = eh * 60 + em;
+                                slot.timeRange = `${format12Hour(slot.start24)} - ${format12Hour(slot.end24)}`;
+                                slot.duration = `${slot.eMins - slot.sMins} MINS`;
                             }
                             return slot;
                         });
                         
-                        // Take edited sections from the Screen
                         const overridePortion = stampedSourceSlots.filter(ss => {
                             const key = `${norm(ss.className)}|${norm(ss.section)}`;
                             return normalizedTargetKeys.includes(key);
@@ -2782,7 +2781,7 @@ async function confirmMultiDates() {
 
                 await batch.commit();
                 await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
-                alert(`✅ Replicated Successfully. May 15 now contains the merged view.`);
+                alert(`✅ Successfully Replicated. The remaining sections now correctly show the Master Schedule.`);
                 document.getElementById('multi-date-modal').classList.replace('flex', 'hidden');
             } catch (error) {
                 alert("Critical Merge Error: " + error.message);
