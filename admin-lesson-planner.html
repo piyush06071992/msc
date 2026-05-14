@@ -518,8 +518,11 @@
         function toggleDemoMode(val) { isDemoMode = val; document.getElementById('demo-mode-indicator').classList.toggle('hidden', !val); renderSummary(); }
 // --- SMART EXCLUSION ENGINE (Holidays + OT Exams) ---
         function checkDateExclusion(dateObj, className, sectionName, subjectName) {
-            const curStr = dateObj.toISOString().split('T')[0];
+            // Precise timezone fixing
+            const offset = dateObj.getTimezoneOffset() * 60000;
+            const curStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
             const checkDate = new Date(curStr); checkDate.setHours(0,0,0,0);
+            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
             
             // 1. Check Standard Holidays
             for (let h of holidaysData) {
@@ -535,41 +538,56 @@
                 }
             }
             
-            // 2. Check Timetable History (Exams / OT Doubt Sessions)
+            // 2. Check Timetable History (Exams / OT Doubt Sessions / Replications)
             if (window.historyOverrides) {
                 const override = window.historyOverrides.find(o => o.date === curStr);
                 if (override && override.schedule) {
-                    const classSlots = override.schedule.filter(s => s.className === className && s.section === sectionName);
+                    const classSlots = override.schedule.filter(s => norm(s.className) === norm(className) && norm(s.section) === norm(sectionName));
                     if (classSlots.length > 0) {
-                        const subSlot = classSlots.find(s => s.subject === subjectName);
+                        const subSlot = classSlots.find(s => norm(s.subject) === norm(subjectName));
                         // If it's a Doubt Session (OT), or the subject isn't running at all due to an exam day
                         if (!subSlot || subSlot.remark === "Doubt Session") {
                             return { isExcluded: true, reason: subSlot ? "OT Doubt Session" : "Exam Day (No Class)" };
                         }
+                    } else {
+                        // Class wiped out by override
+                        return { isExcluded: true, reason: "Class Not Scheduled" };
                     }
                 }
             }
-            
             return { isExcluded: false, reason: "" };
         }
-     function isTimetableWorkingDay(dateObj, className, sectionName, subjectName) {
+
+        function isTimetableWorkingDay(dateObj, className, sectionName, subjectName) {
             if (dateObj.getDay() === 0) return false; 
             if (isDemoMode) return true; 
             
-            // 🧠 USE THE SMART EXCLUSION ENGINE (Skips Holidays AND OT Exams)
             const exclusion = checkDateExclusion(dateObj, className, sectionName, subjectName);
             if (exclusion.isExcluded) return false;
             
             const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const dayName = days[dateObj.getDay()];
+            
+            const offset = dateObj.getTimezoneOffset() * 60000;
+            const dateIsoStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-            return timetableData.some(t => 
-                t.day === dayName && 
-                norm(t.className) === norm(className) && 
-                norm(t.section) === norm(sectionName) && 
-                norm(t.subject) === norm(subjectName)
-            );
+            // FIX: Check Overrides first before falling back to Master
+            const override = window.historyOverrides ? window.historyOverrides.find(o => o.date === dateIsoStr) : null;
+            let scheduleToCheck = [];
+            
+            if (override && override.schedule) {
+                scheduleToCheck = override.schedule; 
+            } else {
+                scheduleToCheck = timetableData || []; 
+            }
+
+            return scheduleToCheck.some(t => {
+                // Do not bypass the day match! It ensures replicated days map perfectly.
+                const dayMatch = t.day === dayName; 
+                const classMatch = norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName);
+                return dayMatch && classMatch;
+            });
         }
 
         function renderSummary() {
