@@ -2663,7 +2663,7 @@ function processSave(type) {
             }
         }
 
-       async function confirmMultiDates() {
+  async function confirmMultiDates() {
             const selectedDates = Array.from(document.querySelectorAll('input[name="multi-date-cb"]:checked')).map(cb => cb.value);
             const scope = document.querySelector('input[name="rep-scope"]:checked').value;
             const schedName = document.getElementById('schedule-name-tag').value.trim() || "Daily Override";
@@ -2709,7 +2709,6 @@ function processSave(type) {
                             if (tObj) teacherEmail = tObj.email || ""; 
                         }
 
-                        // DO NOT rely on UI checkboxes. Grab one clean copy of the slot!
                         sourceSlots.push({ className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark, sMins, eMins, examType: examTypeTag });
                     });
                 });
@@ -2727,11 +2726,22 @@ function processSave(type) {
                     }
                 });
 
+                // Normalizer to ensure spaces/caps don't break the section matching
+                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const normalizedTargetKeys = targetSections.map(ts => {
+                    const [c, s] = ts.split('|');
+                    return `${norm(c)}|${norm(s)}`;
+                });
+
                 const batch = db.batch();
                 for (const dateIso of selectedDates) {
-                    const dayName = new Date(dateIso).toLocaleDateString('en-US', { weekday: 'long' });
+                    // Safe Timezone-Independent Date Parsing
+                    const [y, m, d] = dateIso.split('-');
+                    const localDate = new Date(y, m - 1, d);
+                    const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                    const dayName = daysArr[localDate.getDay()];
                     
-                    // CRITICAL FIX: Force the day of the week to perfectly match the target calendar date!
+                    // Force the copied slots to adopt the target's day of the week
                     const stampedSourceSlots = sourceSlots.map(slot => ({ ...slot, day: dayName }));
 
                     let finalMergedSchedule = [];
@@ -2739,16 +2749,21 @@ function processSave(type) {
                     if (scope === 'FULL') {
                         finalMergedSchedule = stampedSourceSlots;
                     } else {
-                        // HYBRID MERGE LOGIC
-                        // A. Get Normal Live Schedule for that date's weekday
-                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                        const masterSlots = masterSnap.docs.map(d => d.data());
+                        // HYBRID MERGE LOGIC (Using memory instead of database queries!)
+                        // A. Get Normal Live Schedule for that date's weekday from browser memory
+                        const masterSlots = oldTimetableState.filter(t => t.day === dayName);
                         
                         // B. Keep normal schedule for NON-SELECTED sections
-                        const normalPortion = masterSlots.filter(ms => !targetSections.includes(`${ms.className}|${ms.section}`));
+                        const normalPortion = masterSlots.filter(ms => {
+                            const key = `${norm(ms.className)}|${norm(ms.section)}`;
+                            return !normalizedTargetKeys.includes(key);
+                        });
                         
                         // C. Take new schedule for SELECTED sections
-                        const overridePortion = stampedSourceSlots.filter(ss => targetSections.includes(`${ss.className}|${ss.section}`));
+                        const overridePortion = stampedSourceSlots.filter(ss => {
+                            const key = `${norm(ss.className)}|${norm(ss.section)}`;
+                            return normalizedTargetKeys.includes(key);
+                        });
                         
                         finalMergedSchedule = [...normalPortion, ...overridePortion];
                     }
