@@ -3595,56 +3595,59 @@ async function confirmMultiDates() {
         }
 
         async function attemptSectionResolve(className, sectionName) {
+            // 1. Get the fixed time slots available in this section
             const timeline = getSectionTimeline(className, sectionName);
-            // We try to shuffle the order of the time slots within this section
-            // until the teachers in those slots don't clash with their other sections.
             
+            // 2. Get all class entries currently assigned to this section
+            // Filter globalTimetable directly so we are working with the real data
+            const sectionEntries = globalTimetable.filter(t => t.className === className && t.section === sectionName);
+
+            if (timeline.length < 1 || sectionEntries.length === 0) return false;
+
+            // 3. Permutation Loop: Try to find a valid arrangement
             const slots = [...timeline];
-            const entries = [];
             
-            // Get all actual class data for this section
-            globalTimetable.forEach(t => {
-                if (t.className === className && t.section === sectionName) {
-                    entries.push({...t});
-                }
-            });
-
-            // If no entries or slots, skip
-            if (slots.length < 2 || entries.length === 0) return false;
-
-           // Simple Permutation/Swap Logic
-            // We will try 50 different random configurations for this section
-            for (let attempt = 0; attempt < 50; attempt++) {
+            for (let attempt = 0; attempt < 100; attempt++) {
                 shuffleArray(slots);
                 
                 let currentConfigValid = true;
-                for (let i = 0; i < entries.length; i++) {
+                for (let i = 0; i < sectionEntries.length; i++) {
                     const targetSlot = slots[i % slots.length];
-                    if (!isTeacherAvailableGlobally(entries[i].teacher, entries[i].day, targetSlot.sMins, targetSlot.eMins, className, sectionName)) {
+                    // Check if the teacher of this entry is free at this specific new time slot
+                    if (!isTeacherAvailableGlobally(sectionEntries[i].teacher, sectionEntries[i].day, targetSlot.sMins, targetSlot.eMins, className, sectionName)) {
                         currentConfigValid = false;
                         break;
                     }
                 }
 
                 if (currentConfigValid) {
-                    // Apply this config to globalTimetable
-                    for (let i = 0; i < entries.length; i++) {
+                    // --- SUCCESS: WRITING TO MAIN MEMORY ---
+                    for (let i = 0; i < sectionEntries.length; i++) {
                         const targetSlot = slots[i % slots.length];
-                        const matchIdx = globalTimetable.findIndex(gt => 
+                        
+                        // Update the ACTUAL globalTimetable objects
+                        // Find the specific reference in the main array
+                        const realEntry = globalTimetable.find(gt => 
                             gt.className === className && 
                             gt.section === sectionName && 
-                            gt.subject === entries[i].subject && 
-                            gt.day === entries[i].day
+                            gt.subject === sectionEntries[i].subject && 
+                            gt.day === sectionEntries[i].day &&
+                            gt.teacher === sectionEntries[i].teacher
                         );
-                        if (matchIdx > -1) {
-                            globalTimetable[matchIdx].start24 = minsTo24(targetSlot.sMins);
-                            globalTimetable[matchIdx].end24 = minsTo24(targetSlot.eMins);
+
+                        if (realEntry) {
+                            realEntry.start24 = minsTo24(targetSlot.sMins);
+                            realEntry.end24 = minsTo24(targetSlot.eMins);
+                            realEntry.sMins = targetSlot.sMins;
+                            realEntry.eMins = targetSlot.eMins;
+                            // Update the string range for the UI
+                            realEntry.timeRange = `${format12Hour(realEntry.start24)} - ${format12Hour(realEntry.end24)}`;
                         }
                     }
-                    return true;
+                    return true; 
                 }
             }
-            return false;
+            return false; // Could not find a valid shuffle after 100 tries
         }
 
         function isTeacherAvailableGlobally(teacher, day, sMins, eMins, currentClass, currentSec) {
