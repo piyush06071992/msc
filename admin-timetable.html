@@ -2663,7 +2663,7 @@ function processSave(type) {
             }
         }
 
-        async function confirmMultiDates() {
+       async function confirmMultiDates() {
             const selectedDates = Array.from(document.querySelectorAll('input[name="multi-date-cb"]:checked')).map(cb => cb.value);
             const scope = document.querySelector('input[name="rep-scope"]:checked').value;
             const schedName = document.getElementById('schedule-name-tag').value.trim() || "Daily Override";
@@ -2690,30 +2690,54 @@ function processSave(type) {
                     const s24 = b.querySelector('.tb-s24').value; const e24 = b.querySelector('.tb-e24').value;
                     const entries = Array.from(b.querySelectorAll('.ent-row'));
                     if (!s24 || !e24) return;
+
+                    const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
+                    const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
+                    const dur = `${eMins - sMins} MINS`;
+                    const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
+
                     entries.forEach(ent => {
                         const sub = ent.querySelector('.ent-sub').value;
                         const teacher = ent.querySelector('.ent-tea').value || "NONE";
                         const room = ent.querySelector('.ent-room').value.trim();
-                        const remark = ent.querySelector('.ent-rem').value.trim();
-                        const activeDays = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
-                        activeDays.forEach(day => {
-                            let teacherEmail = "";
-                            if (teacher !== "NONE") {
-                                const tObj = allTeachers.find(t => t.name === teacher);
-                                if (tObj) teacherEmail = tObj.email || ""; 
-                            }
-                            sourceSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark });
-                        });
+                        let remark = ent.querySelector('.ent-rem').value.trim();
+                        let examTypeTag = (sub === 'OT') ? 'OT' : 'UT';
+                        
+                        let teacherEmail = "";
+                        if (teacher !== "NONE") {
+                            const tObj = allTeachers.find(t => t.name === teacher);
+                            if (tObj) teacherEmail = tObj.email || ""; 
+                        }
+
+                        // DO NOT rely on UI checkboxes. Grab one clean copy of the slot!
+                        sourceSlots.push({ className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark, sMins, eMins, examType: examTypeTag });
                     });
+                });
+
+                // --- SMART OT INJECTOR FOR REPLICATIONS ---
+                const otTrackerOverride = new Set();
+                sourceSlots.forEach(slot => {
+                    if (slot.subject === 'OT') otTrackerOverride.add(slot.className + '_' + slot.section);
+                });
+                sourceSlots.forEach(slot => {
+                    if (!SPECIAL_SUBJECTS.includes((slot.subject || '').toUpperCase())) {
+                        if (otTrackerOverride.has(slot.className + '_' + slot.section)) {
+                            slot.remark = "Doubt Session";
+                        }
+                    }
                 });
 
                 const batch = db.batch();
                 for (const dateIso of selectedDates) {
                     const dayName = new Date(dateIso).toLocaleDateString('en-US', { weekday: 'long' });
+                    
+                    // CRITICAL FIX: Force the day of the week to perfectly match the target calendar date!
+                    const stampedSourceSlots = sourceSlots.map(slot => ({ ...slot, day: dayName }));
+
                     let finalMergedSchedule = [];
 
                     if (scope === 'FULL') {
-                        finalMergedSchedule = sourceSlots;
+                        finalMergedSchedule = stampedSourceSlots;
                     } else {
                         // HYBRID MERGE LOGIC
                         // A. Get Normal Live Schedule for that date's weekday
@@ -2724,7 +2748,7 @@ function processSave(type) {
                         const normalPortion = masterSlots.filter(ms => !targetSections.includes(`${ms.className}|${ms.section}`));
                         
                         // C. Take new schedule for SELECTED sections
-                        const overridePortion = sourceSlots.filter(ss => targetSections.includes(`${ss.className}|${ss.section}`));
+                        const overridePortion = stampedSourceSlots.filter(ss => targetSections.includes(`${ss.className}|${ss.section}`));
                         
                         finalMergedSchedule = [...normalPortion, ...overridePortion];
                     }
