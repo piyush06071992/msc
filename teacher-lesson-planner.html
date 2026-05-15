@@ -77,13 +77,10 @@
                     </div>
                 </button>
 
-               <div class="border-2 border-slate-100 rounded-[1.5rem] p-5 focus-within:border-amber-500 focus-within:bg-amber-50 transition-all shadow-sm">
+                <div class="border-2 border-slate-100 rounded-[1.5rem] p-5 focus-within:border-amber-500 focus-within:bg-amber-50 transition-all shadow-sm">
                     <div class="font-black text-slate-800 text-base uppercase tracking-widest mb-3 flex items-center gap-3">
                         <span class="bg-amber-100 text-amber-600 p-2.5 rounded-xl">🎯</span> Revision / Activity
                     </div>
-                    <select id="revision-chapter" class="w-full bg-white border border-slate-200 rounded-xl p-3 text-[11px] font-bold text-slate-700 outline-none focus:border-amber-500 mb-2 shadow-inner">
-                        <option value="GENERAL">General / Unspecified Revision</option>
-                    </select>
                     <textarea id="revision-reason" rows="2" class="w-full bg-white border border-slate-200 rounded-xl p-3 text-[11px] font-bold text-slate-700 outline-none focus:border-amber-500" placeholder="Mandatory Reason..."></textarea>
                     <button onclick="submitRevision()" class="w-full mt-3 bg-amber-500 text-white font-black py-3 rounded-xl uppercase tracking-widest text-[10px] shadow-lg hover:bg-amber-600 active:scale-95 transition-all">Submit Activity Log</button>
                 </div>
@@ -406,7 +403,7 @@
             }
         }
 
-     async function openModeSelection(assignmentId, title, duration, timeString) {
+      function openModeSelection(assignmentId, title, duration, timeString) {
             // --- TIME RESTRICTION LOGIC ---
             if (!isDemoMode && timeString && timeString.includes(' - ')) {
                 try {
@@ -424,33 +421,17 @@
                     
                     if (currentMins < endMins) {
                         alert(`🛑 ACTION BLOCKED\n\nYou cannot mark syllabus progress or log revision activities until the class officially ends at ${endTimeStr}.`);
-                        return; 
+                        return; // Hard stop. Do not open modal.
                     }
-                } catch (e) { console.error("Time parse error:", e); }
+                } catch (e) {
+                    console.error("Time parse error in locker:", e);
+                }
             }
 
             activeSubjectId = assignmentId; activeSessionMins = duration;
             document.getElementById('mode-class-title').innerText = title;
             document.getElementById('mode-session-info').innerText = `Timetable: ${timeString} | Session Length: ${duration} Minutes`;
             document.getElementById('revision-reason').value = '';
-
-            // NEW: Fetch active chapters for the tag dropdown
-            const chSelect = document.getElementById('revision-chapter');
-            chSelect.innerHTML = '<option value="GENERAL">General / Subject-Level Revision</option>';
-            if (!isDemoMode) {
-                try {
-                    const doc = await getCollection("lesson_planners").doc(assignmentId).get();
-                    if (doc.exists && doc.data().syllabusData) {
-                        const chapters = [...new Set(doc.data().syllabusData.map(r => r["CHAPTER NAME"]))];
-                        chapters.forEach(ch => {
-                            chSelect.innerHTML += `<option value="${ch}">Chapter: ${ch}</option>`;
-                        });
-                    }
-                } catch(e) { console.error(e); }
-            } else {
-                chSelect.innerHTML += `<option value="Logarithms">Chapter: Logarithms</option><option value="Quadratics">Chapter: Quadratics</option>`;
-            }
-
             openModal('mode-modal');
         }
 
@@ -469,15 +450,14 @@
             const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
             const todayStr = new Date().toISOString().split('T')[0];
 
-           const chapterTag = document.getElementById('revision-chapter').value;
             const logEntry = {
                 date: todayStr,
                 reason: reason,
-                chapter: chapterTag, // NEW EXPLICIT TAG
                 minutes: activeSessionMins,
                 loggedBy: safeName,
                 timestamp: new Date().getTime()
             };
+
             try {
                 if(isDemoMode) {
                     alert(`Simulation: Activity logged for ${activeSessionMins} mins.\nReason: ${reason}`);
@@ -735,7 +715,7 @@
             });
         }
 
-function renderSyllabusExactMath() {
+        function renderSyllabusExactMath() {
             const currSession = mySessions.find(s => s.assignmentId === activeSubjectId) || {};
             const cName = currSession.className || "";
             const sName = currSession.section || "";
@@ -758,12 +738,11 @@ function renderSyllabusExactMath() {
                 if (r.chapterStartDate || r.isDone) chMap.get(r['CHAPTER NAME']).isStarted = true;
             });
             
-            let totalTargetDaysAll = 0, totalTargetMinsAll = 0;
-            let totalActualDaysAll = 0; 
+        let totalTargetDaysAll = 0, totalTargetMinsAll = 0;
+            let totalActualDaysAll = 0; // CLOCK FIX: Track all days spent
             let completedTargetDays = 0, completedTargetMins = 0;
             let completedActualDays = 0, completedActualMins = 0;
-            
-            let uniqueCompletedDays = new Set();
+            let chapterRanges = []; // Duration Model: Track active boundaries
 
             chMap.forEach(v => { totalTargetDaysAll += v.days; totalTargetMinsAll += v.mins; });
 
@@ -782,60 +761,49 @@ function renderSyllabusExactMath() {
                 const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
                 const targetMins = parseInt(rows[0]?.['Target Minutes For Chapter']) || 0;
 
-                // 1. Calculate Standard Syllabus Lecture Minutes
+                // POINT 1 & 5: MULTI-SESSION MATH (Using parseFloat for Decimal Trick)
                 let sessionMap = {}; let extraMins = 0;
                 doneR.forEach(r => {
                     let d = r.completedDate; 
                     let mRaw = parseFloat(r.completedMinutes) || 0;
                     let sessionKey = d + "_" + mRaw;
+                    
                     if(d) { 
                         if(!sessionMap[sessionKey]) sessionMap[sessionKey] = mRaw; 
                     } else {
                         extraMins += mRaw;
                     }
                 });
-                let lecMins = Object.values(sessionMap).reduce((a,b) => a + Math.floor(b), 0) + Math.floor(extraMins);
-
-                // 2. STRICT TAGGING: Fetch Revisions specifically tagged for THIS chapter
-                let chRevs = (window.currentActivityLogs || []).filter(log => log.chapter === ch);
-                let revMins = chRevs.reduce((sum, log) => sum + (parseFloat(log.minutes) || 0), 0);
-
-                // RULE 2: Activities Consume Minutes directly from the budget!
-                const actualMins = lecMins + Math.floor(revMins); 
-
+            // Add unique sessions, using Math.floor to hide decimals in final total
+                const actualMins = Object.values(sessionMap).reduce((a,b) => a + Math.floor(b), 0) + Math.floor(extraMins);
                 let chStartStr = rows[0]?.chapterStartDate; let chStart = chStartStr ? new Date(chStartStr) : null;
                 const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
                 const chEnd = (isCompleted && compDates.length) ? new Date(Math.max(...compDates)) : null;
 
-                let gapHtml = "", actualDaysTaken = 0;
-                let excludedHtml = '<span class="font-bold mt-1">None</span>'; 
+               let gapHtml = "", actualDaysTaken = 0;
+                let excludedHtml = '<span class="font-bold mt-1">None</span>'; // Default state
 
-                if (chStart) {
+              if (chStart) {
                     let effectiveEnd = chEnd ? new Date(chEnd) : new Date();
                     effectiveEnd.setHours(23,59,59,999);
+                    chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
 
                     let cur = new Date(chStart); let finish = new Date(effectiveEnd);
-                    let excludedHolidays = []; 
+                    let excludedHolidays = []; // 🧠 THE SMART COLLECTOR
 
-                    while(cur <= finish) {
+                  while(cur <= finish) {
                         const exclusion = checkDateExclusion(cur, cName, sName, subName);
                         
                         if (exclusion.isExcluded) {
                             const shortDate = cur.toLocaleDateString('en-GB', {day: '2-digit', month: 'short'});
                             excludedHolidays.push({ date: shortDate, reason: exclusion.reason });
                         } else {
-                            if(isTimetableWorkingDay(cur, cName, sName, subName)) {
-                                actualDaysTaken++;
-                                if (isCompleted) {
-                                    const offset = cur.getTimezoneOffset() * 60000;
-                                    const localIso = new Date(cur.getTime() - offset).toISOString().split('T')[0];
-                                    uniqueCompletedDays.add(localIso);
-                                }
-                            }
+                            if(isTimetableWorkingDay(cur, cName, sName, subName)) actualDaysTaken++;
                         }
                         cur.setDate(cur.getDate() + 1);
                     }
 
+                    // Build the dynamic UI badges
                     if (excludedHolidays.length > 0) {
                         let holTags = excludedHolidays.map(h => `
                             <div class="text-[8px] bg-rose-50 text-rose-700 px-2 py-1 rounded-lg border border-rose-200 w-full leading-tight shadow-sm" title="${h.reason}">
@@ -843,11 +811,13 @@ function renderSyllabusExactMath() {
                                 <span class="opacity-80 truncate block w-full max-w-[100px]">${h.reason}</span>
                             </div>
                         `).join('');
+                        
                         excludedHtml = `<span class="font-black mt-1 text-lg leading-none text-rose-600">${excludedHolidays.length}</span><div class="flex flex-col gap-1 mt-2 items-center w-full px-2 max-h-24 overflow-y-auto custom-scroll">${holTags}</div>`;
                     }
 
-                    totalActualDaysAll += actualDaysTaken; 
+                    totalActualDaysAll += actualDaysTaken; // CLOCK FIX: Keeps math synced
 
+                    // NEW DURATION MODEL: No variance locked or shown until 100% Finished
                     if (isCompleted) {
                         let dayGap = targetDays - actualDaysTaken; 
                         let minGap = targetMins - actualMins;      
@@ -860,21 +830,21 @@ function renderSyllabusExactMath() {
                         gapHtml = `
                             <div class="flex flex-wrap gap-2 mt-2">
                                 <span class="text-[9px] font-black px-3 py-1 rounded-full border ${dayGap >= 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-600 border-rose-100'}" title="Schedule Adherence">
-                                    ${dayGap >= 0 ? '📅 SPANNED' : '📅 SPANNED'}: ${actualDaysTaken} Days
+                                    ${dayGap >= 0 ? '📅 ON TRACK' : '⚠️ LATE'}: ${dayGap > 0 ? '+' : ''}${dayGap} Days
                                 </span>
-                                <span class="text-[9px] font-black px-3 py-1 rounded-full border ${minGap >= 0 ? 'bg-teal-50 text-teal-600 border-teal-100 shadow-sm' : 'bg-purple-50 text-purple-600 border-purple-100 shadow-sm'}" title="Time Utilization">
-                                    ${minGap >= 0 ? '⏱️ EFFICIENT' : '🚨 OVERTIME'}: ${minGap > 0 ? '+' : ''}${minGap}m
+                                <span class="text-[9px] font-black px-3 py-1 rounded-full border ${minGap >= 0 ? 'bg-teal-50 text-teal-600 border-teal-100' : 'bg-purple-50 text-purple-600 border-purple-100'}" title="Time Utilization">
+                                    ${minGap >= 0 ? '⏱️ EFFICIENT' : '💪 EXTRA EFFORT'}: ${minGap > 0 ? '+' : ''}${minGap}m
                                 </span>
                             </div>`;
                     }
                 }
-                
-                let badge = isCompleted ? `<span class="bg-emerald-500 text-white px-3 py-1 rounded-md text-[9px] font-black uppercase shadow-sm">✓ COMPLETED</span>` 
+               let badge = isCompleted ? `<span class="bg-emerald-500 text-white px-3 py-1 rounded-md text-[9px] font-black uppercase">✓ COMPLETED</span>` 
                           : (isStarted ? `<span class="bg-blue-100 text-blue-700 px-3 py-1 rounded-md text-[9px] font-black uppercase">ONGOING</span>` 
                           : `<span class="bg-slate-200 text-slate-600 px-3 py-1 rounded-md text-[9px] font-black uppercase">PENDING</span>`);
 
                 let contentHTML = '';
                 if (!isStarted) {
+                    // FIX: Safely escape any apostrophes in the chapter name so it doesn't crash the onclick handler
                     const safeChName = ch.replace(/'/g, "\\'");
                     contentHTML = `<div class="p-6 text-center bg-white border-t border-slate-100"><button onclick="startChapter('${safeChName}')" class="bg-blue-600 text-white px-6 py-2.5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-md hover:bg-blue-700 transition-all">Start Chapter</button></div>`;
                 } else {
@@ -891,80 +861,65 @@ function renderSyllabusExactMath() {
                             </div>`;
                     }).join('') + `</div>`;
                 }
-
                 let startHtml = `<span class="text-slate-900 ml-1 font-bold">${chStart ? chStart.toLocaleDateString('en-GB') : '--'}</span>`;
-                
-                // NEW: Embedded revisions HTML uses the explicitly tagged array
-                let embeddedRevisionsHtml = "";
-                if (chRevs.length > 0) {
-                    embeddedRevisionsHtml = `<div class="bg-amber-50/30 p-4 sm:p-6 border-t border-slate-100"><h5 class="text-[10px] sm:text-[11px] font-black text-amber-600 uppercase tracking-widest mb-3 sm:mb-4">🎯 Activities During This Chapter</h5><div class="grid grid-cols-1 md:grid-cols-2 gap-3">` + chRevs.map(log => `
-                        <div class="flex justify-between items-center bg-white p-3 sm:p-4 rounded-xl border border-amber-100 shadow-sm">
-                            <div class="flex gap-3 items-center">
-                                <span class="text-[9px] sm:text-[10px] font-black text-amber-500 bg-amber-50 px-2 sm:px-3 py-1.5 rounded-lg uppercase tracking-widest border border-amber-100">${new Date(log.date).toLocaleDateString('en-GB')}</span>
-                                <div><div class="text-[10px] sm:text-[11px] font-bold text-slate-800 uppercase leading-snug">${log.reason}</div><div class="text-[8px] sm:text-[9px] text-slate-400 mt-0.5 uppercase font-bold">By: ${log.loggedBy}</div></div>
-                            </div>
-                            <div class="text-[9px] sm:text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-100 px-2 sm:px-3 py-1.5 rounded-lg">${Math.floor(log.minutes)} Mins</div>
-                        </div>
-                    `).join('') + `</div></div>`;
-                }
 
                 htmlContent += `
                     <details ${isCompleted ? '' : 'open'} class="bg-[#f8f9fa] border border-slate-200 rounded-xl mb-4 overflow-hidden shadow-sm group">
                         <summary class="bg-${isCompleted ? 'slate-100' : 'slate-50'} text-slate-800 p-4 flex justify-between items-center cursor-pointer select-none outline-none">
                             <div><span class="font-black text-base uppercase tracking-tight text-slate-900">${ch} <span class="text-sm ml-2 text-slate-500 font-bold">(${Math.round((doneR.length/rows.length)*100)}%)</span></span>
-                                <div class="flex gap-4 mt-1 text-[9px] font-bold text-slate-400 uppercase items-center"><span>Target: ${targetMins}m</span>${gapHtml}</div>
+                                <div class="flex gap-4 mt-1 text-[9px] font-bold text-slate-400 uppercase items-center"><span>Target: ${targetDays} Days / ${targetMins}m</span>${gapHtml}</div>
                             </div>
                             ${badge}
                         </summary>
                       <div class="grid grid-cols-2 bg-white text-[11px] font-black text-slate-500 text-center border-y uppercase">
-                        <div class="p-3 border-r border-b border-slate-100 flex flex-col items-center justify-start">
-                            <span class="text-[8px] text-slate-400">Start Date</span>
-                            <span class="text-slate-900 font-bold mt-1">${startHtml}</span>
-                        </div>
-                        <div class="p-3 border-b border-slate-100 flex flex-col items-center justify-start">
-                            <span class="text-[8px] text-slate-400">End Date</span>
-                            <span class="text-slate-900 font-bold mt-1">${(isCompleted && chEnd) ? chEnd.toLocaleDateString('en-GB') : '--'}</span>
-                        </div>
-                        <div class="p-3 border-r border-slate-100 flex flex-col items-center justify-start text-rose-500">
-                            <span class="text-[8px] opacity-70">Excluded Days</span>
-                            ${excludedHtml}
-                        </div>
-                        <div class="p-3 flex flex-col items-center justify-start text-blue-600">
-                            <span class="text-[8px] opacity-70">Time Logged (Mins)</span>
-                            <span class="font-bold text-lg leading-none mt-1">${actualMins}</span>
-                        </div>
-                    </div>
+    <div class="p-3 border-r border-b border-slate-100 flex flex-col items-center justify-start">
+        <span class="text-[8px] text-slate-400">Start Date</span>
+        <span class="text-slate-900 font-bold mt-1">${chStart ? chStart.toLocaleDateString('en-GB') : '--'}</span>
+    </div>
+    <div class="p-3 border-b border-slate-100 flex flex-col items-center justify-start">
+        <span class="text-[8px] text-slate-400">End Date</span>
+        <span class="text-slate-900 font-bold mt-1">${(isCompleted && chEnd) ? chEnd.toLocaleDateString('en-GB') : '--'}</span>
+    </div>
+    <div class="p-3 border-r border-slate-100 flex flex-col items-center justify-start text-rose-500">
+        <span class="text-[8px] opacity-70">Excluded Days</span>
+        ${excludedHtml}
+    </div>
+    <div class="p-3 flex flex-col items-center justify-start text-blue-600">
+        <span class="text-[8px] opacity-70">Actual Days Taken</span>
+        <span class="font-bold text-lg leading-none mt-1">${actualDaysTaken}</span>
+    </div>
+</div>
                         ${contentHTML}
-                        ${embeddedRevisionsHtml}
                     </details>`;
             });
 
-            // 3. Independent / General Revisions Processing
             let activityLogs = window.currentActivityLogs || [];
             let extraActivityDays = 0; let activityMinsTotal = 0;
             let activityHtml = "";
-            let independentRevisionDates = new Set();
-            
-            // Only process logs that have NO chapter tag, or explicitly tagged "GENERAL"
-            let independentLogsForUI = activityLogs.filter(log => !log.chapter || log.chapter === "GENERAL");
 
-            if (independentLogsForUI.length > 0) {
-                independentLogsForUI.forEach(log => {
+            if (activityLogs.length > 0) {
+              let independentRevisionDates = new Set();
+                activityLogs.forEach(log => {
                     let logD = new Date(log.date);
                     logD.setHours(12, 0, 0, 0); 
                     let dStr = logD.toISOString().split('T')[0];
                     
-                    activityMinsTotal += (parseFloat(log.minutes) || 0);
-                    if (isTimetableWorkingDay(logD, cName, sName, subName)) {
-                        if (!independentRevisionDates.has(dStr)) {
-                            extraActivityDays++; 
-                            independentRevisionDates.add(dStr);
-                            uniqueCompletedDays.add(dStr); 
+                    let isInsideChapter = chapterRanges.some(range => {
+                        return logD >= range.start && logD <= range.end;
+                    });
+
+                    if (!isInsideChapter) {
+                        activityMinsTotal += (parseFloat(log.minutes) || 0);
+                        if (isTimetableWorkingDay(logD, cName, sName, subName)) {
+                            if (!independentRevisionDates.has(dStr)) {
+                                extraActivityDays++; 
+                                independentRevisionDates.add(dStr);
+                            }
                         }
                     }
                 });
 
-                let logRows = independentLogsForUI.map(log => `
+                let logRows = activityLogs.map(log => `
                     <div class="flex justify-between items-center p-5 bg-white border-b border-amber-50 last:border-0 hover:bg-amber-50/50 transition-colors">
                         <div class="flex gap-5 items-center">
                             <span class="text-[9px] font-black text-amber-500 bg-amber-100 px-3 py-1.5 rounded-lg uppercase tracking-widest">${new Date(log.date).toLocaleDateString('en-GB')}</span>
@@ -977,9 +932,9 @@ function renderSyllabusExactMath() {
                     <details class="bg-[#fffbeb] border border-amber-200 rounded-[2.5rem] overflow-hidden mb-8 shadow-sm group">
                         <summary class="p-6 bg-[#fffbeb] border-b border-amber-100 flex justify-between items-center cursor-pointer select-none outline-none">
                             <div class="flex items-center gap-4"><span class="text-xl text-2xl mb-1">🎯</span>
-                                <div><h4 class="font-black text-amber-900 uppercase text-lg tracking-tight">General Subject Revisions</h4><div class="text-[10px] sm:text-[11px] font-bold text-amber-600 uppercase mt-1 bg-white px-3 py-1 rounded w-fit border border-amber-200 shadow-sm">Independent Sessions</div></div>
+                                <div><h4 class="font-black text-amber-900 uppercase text-lg tracking-tight">Revision & Activity Logs</h4></div>
                             </div>
-                            <span class="text-[10px] font-black px-6 py-2 rounded-full bg-amber-200 text-amber-800 shadow-sm">${independentLogsForUI.length} LOGS</span>
+                            <span class="text-[10px] font-black px-6 py-2 rounded-full bg-amber-200 text-amber-800 shadow-sm">${activityLogs.length} LOGS</span>
                         </summary>
                         <div class="divide-y divide-amber-100/50">${logRows}</div>
                     </details>`;
@@ -998,25 +953,26 @@ function renderSyllabusExactMath() {
             }
             container.innerHTML = complianceBanner + htmlContent + activityHtml;
 
-            let macroActualDays = uniqueCompletedDays.size;
-            let totalOverallDayGap = completedTargetDays - macroActualDays;
+       // POINT 9: NET VARIANCE CUMULATIVE PACE CHECK
+            let totalOverallDayGap = completedTargetDays - (completedActualDays + extraActivityDays);
             let totalOverallMinGap = completedTargetMins - (completedActualMins + Math.floor(activityMinsTotal));
 
+            // Only show variance if chapters are fully done OR independent revisions exist
             let showVariance = completedTargetDays > 0 || (typeof independentRevisionDates !== 'undefined' && independentRevisionDates.size > 0);
-            const macroBgClass = totalOverallDayGap >= 0 ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700";
 
             document.getElementById('subject-pace-widget').innerHTML = `
                 <b class='text-slate-800 text-sm uppercase tracking-widest'>Subject Overall Pace</b>
                 <div class='text-[10px] sm:text-[11px] mt-3 font-black text-emerald-600 uppercase tracking-widest'>Total Chapters Completed (${completedChapters} out of ${totalChapters} Chapters) - ${progressPct}%</div>
                 <div class='w-full bg-slate-100 h-2 rounded-full mt-2 mb-4 overflow-hidden'><div style='width: ${progressPct}%;' class='bg-emerald-500 h-full'></div></div>
                 
-                <div class='flex items-center gap-3 p-3.5 rounded-xl border ${showVariance ? macroBgClass : "bg-slate-50 border-slate-200 text-slate-500"} shadow-sm'>
+                <div class='flex items-center gap-3 p-3.5 rounded-xl border ${showVariance ? (totalOverallDayGap >= 0 ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700") : "bg-slate-50 border-slate-200 text-slate-500"}'>
                     <div class='text-[10px] sm:text-[11px] font-black uppercase tracking-widest'>
-                        ${showVariance ? `True Variance: ${totalOverallDayGap > 0 ? "+" : ""}${totalOverallDayGap} Days | ${totalOverallMinGap > 0 ? "+" : ""}${totalOverallMinGap} Mins <span class="ml-2 opacity-70">(${totalOverallDayGap >= 0 ? "Ahead/On Time" : "Behind Schedule"})</span>` : `Awaiting Completions for Variance`}
+                        ${showVariance ? `Net Variance: ${totalOverallDayGap > 0 ? "+" : ""}${totalOverallDayGap} Days | ${totalOverallMinGap > 0 ? "+" : ""}${totalOverallMinGap} Mins <span class="ml-2 opacity-70">(${totalOverallDayGap >= 0 ? "Ahead/On Time" : "Behind Schedule"})</span>` : `Awaiting Completions for Variance`}
                     </div>
                 </div>
             `;
         }
+
       function previewTick(cb, idx) {
             if(cb.checked) {
                 const todayISO = new Date().toISOString().split('T')[0];
