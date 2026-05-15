@@ -762,9 +762,7 @@ function renderSyllabusExactMath() {
             let totalActualDaysAll = 0; 
             let completedTargetDays = 0, completedTargetMins = 0;
             let completedActualDays = 0, completedActualMins = 0;
-            let chapterRanges = []; 
             
-            // 🧠 NEW MACRO MATH: The Deduplicator Set
             let uniqueCompletedDays = new Set();
 
             chMap.forEach(v => { totalTargetDaysAll += v.days; totalTargetMinsAll += v.mins; });
@@ -784,19 +782,27 @@ function renderSyllabusExactMath() {
                 const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
                 const targetMins = parseInt(rows[0]?.['Target Minutes For Chapter']) || 0;
 
+                // 1. Calculate Standard Syllabus Lecture Minutes
                 let sessionMap = {}; let extraMins = 0;
                 doneR.forEach(r => {
                     let d = r.completedDate; 
                     let mRaw = parseFloat(r.completedMinutes) || 0;
                     let sessionKey = d + "_" + mRaw;
-                    
                     if(d) { 
                         if(!sessionMap[sessionKey]) sessionMap[sessionKey] = mRaw; 
                     } else {
                         extraMins += mRaw;
                     }
                 });
-                const actualMins = Object.values(sessionMap).reduce((a,b) => a + Math.floor(b), 0) + Math.floor(extraMins);
+                let lecMins = Object.values(sessionMap).reduce((a,b) => a + Math.floor(b), 0) + Math.floor(extraMins);
+
+                // 2. STRICT TAGGING: Fetch Revisions specifically tagged for THIS chapter
+                let chRevs = (window.currentActivityLogs || []).filter(log => log.chapter === ch);
+                let revMins = chRevs.reduce((sum, log) => sum + (parseFloat(log.minutes) || 0), 0);
+
+                // RULE 2: Activities Consume Minutes directly from the budget!
+                const actualMins = lecMins + Math.floor(revMins); 
+
                 let chStartStr = rows[0]?.chapterStartDate; let chStart = chStartStr ? new Date(chStartStr) : null;
                 const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
                 const chEnd = (isCompleted && compDates.length) ? new Date(Math.max(...compDates)) : null;
@@ -807,7 +813,6 @@ function renderSyllabusExactMath() {
                 if (chStart) {
                     let effectiveEnd = chEnd ? new Date(chEnd) : new Date();
                     effectiveEnd.setHours(23,59,59,999);
-                    chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
 
                     let cur = new Date(chStart); let finish = new Date(effectiveEnd);
                     let excludedHolidays = []; 
@@ -821,9 +826,7 @@ function renderSyllabusExactMath() {
                         } else {
                             if(isTimetableWorkingDay(cur, cName, sName, subName)) {
                                 actualDaysTaken++;
-                                // ADD TO DEDUPLICATOR IF COMPLETED
                                 if (isCompleted) {
-                                    // Use offset to safely get local YYYY-MM-DD
                                     const offset = cur.getTimezoneOffset() * 60000;
                                     const localIso = new Date(cur.getTime() - offset).toISOString().split('T')[0];
                                     uniqueCompletedDays.add(localIso);
@@ -840,7 +843,6 @@ function renderSyllabusExactMath() {
                                 <span class="opacity-80 truncate block w-full max-w-[100px]">${h.reason}</span>
                             </div>
                         `).join('');
-                        
                         excludedHtml = `<span class="font-black mt-1 text-lg leading-none text-rose-600">${excludedHolidays.length}</span><div class="flex flex-col gap-1 mt-2 items-center w-full px-2 max-h-24 overflow-y-auto custom-scroll">${holTags}</div>`;
                     }
 
@@ -855,11 +857,10 @@ function renderSyllabusExactMath() {
                         completedActualDays += actualDaysTaken; 
                         completedActualMins += actualMins;
 
-                        // NEW MATH: Badge borders rely on Minutes, not Days.
                         gapHtml = `
                             <div class="flex flex-wrap gap-2 mt-2">
                                 <span class="text-[9px] font-black px-3 py-1 rounded-full border ${dayGap >= 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-600 border-rose-100'}" title="Schedule Adherence">
-                                    ${dayGap >= 0 ? '📅 ON TRACK' : '⚠️ LATE'}: ${dayGap > 0 ? '+' : ''}${dayGap} Days
+                                    ${dayGap >= 0 ? '📅 SPANNED' : '📅 SPANNED'}: ${actualDaysTaken} Days
                                 </span>
                                 <span class="text-[9px] font-black px-3 py-1 rounded-full border ${minGap >= 0 ? 'bg-teal-50 text-teal-600 border-teal-100 shadow-sm' : 'bg-purple-50 text-purple-600 border-purple-100 shadow-sm'}" title="Time Utilization">
                                     ${minGap >= 0 ? '⏱️ EFFICIENT' : '🚨 OVERTIME'}: ${minGap > 0 ? '+' : ''}${minGap}m
@@ -890,67 +891,80 @@ function renderSyllabusExactMath() {
                             </div>`;
                     }).join('') + `</div>`;
                 }
+
                 let startHtml = `<span class="text-slate-900 ml-1 font-bold">${chStart ? chStart.toLocaleDateString('en-GB') : '--'}</span>`;
+                
+                // NEW: Embedded revisions HTML uses the explicitly tagged array
+                let embeddedRevisionsHtml = "";
+                if (chRevs.length > 0) {
+                    embeddedRevisionsHtml = `<div class="bg-amber-50/30 p-4 sm:p-6 border-t border-slate-100"><h5 class="text-[10px] sm:text-[11px] font-black text-amber-600 uppercase tracking-widest mb-3 sm:mb-4">🎯 Activities During This Chapter</h5><div class="grid grid-cols-1 md:grid-cols-2 gap-3">` + chRevs.map(log => `
+                        <div class="flex justify-between items-center bg-white p-3 sm:p-4 rounded-xl border border-amber-100 shadow-sm">
+                            <div class="flex gap-3 items-center">
+                                <span class="text-[9px] sm:text-[10px] font-black text-amber-500 bg-amber-50 px-2 sm:px-3 py-1.5 rounded-lg uppercase tracking-widest border border-amber-100">${new Date(log.date).toLocaleDateString('en-GB')}</span>
+                                <div><div class="text-[10px] sm:text-[11px] font-bold text-slate-800 uppercase leading-snug">${log.reason}</div><div class="text-[8px] sm:text-[9px] text-slate-400 mt-0.5 uppercase font-bold">By: ${log.loggedBy}</div></div>
+                            </div>
+                            <div class="text-[9px] sm:text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-100 px-2 sm:px-3 py-1.5 rounded-lg">${Math.floor(log.minutes)} Mins</div>
+                        </div>
+                    `).join('') + `</div></div>`;
+                }
 
                 htmlContent += `
                     <details ${isCompleted ? '' : 'open'} class="bg-[#f8f9fa] border border-slate-200 rounded-xl mb-4 overflow-hidden shadow-sm group">
                         <summary class="bg-${isCompleted ? 'slate-100' : 'slate-50'} text-slate-800 p-4 flex justify-between items-center cursor-pointer select-none outline-none">
                             <div><span class="font-black text-base uppercase tracking-tight text-slate-900">${ch} <span class="text-sm ml-2 text-slate-500 font-bold">(${Math.round((doneR.length/rows.length)*100)}%)</span></span>
-                                <div class="flex gap-4 mt-1 text-[9px] font-bold text-slate-400 uppercase items-center"><span>Target: ${targetDays} Days / ${targetMins}m</span>${gapHtml}</div>
+                                <div class="flex gap-4 mt-1 text-[9px] font-bold text-slate-400 uppercase items-center"><span>Target: ${targetMins}m</span>${gapHtml}</div>
                             </div>
                             ${badge}
                         </summary>
                       <div class="grid grid-cols-2 bg-white text-[11px] font-black text-slate-500 text-center border-y uppercase">
-    <div class="p-3 border-r border-b border-slate-100 flex flex-col items-center justify-start">
-        <span class="text-[8px] text-slate-400">Start Date</span>
-        <span class="text-slate-900 font-bold mt-1">${chStart ? chStart.toLocaleDateString('en-GB') : '--'}</span>
-    </div>
-    <div class="p-3 border-b border-slate-100 flex flex-col items-center justify-start">
-        <span class="text-[8px] text-slate-400">End Date</span>
-        <span class="text-slate-900 font-bold mt-1">${(isCompleted && chEnd) ? chEnd.toLocaleDateString('en-GB') : '--'}</span>
-    </div>
-    <div class="p-3 border-r border-slate-100 flex flex-col items-center justify-start text-rose-500">
-        <span class="text-[8px] opacity-70">Excluded Days</span>
-        ${excludedHtml}
-    </div>
-    <div class="p-3 flex flex-col items-center justify-start text-blue-600">
-        <span class="text-[8px] opacity-70">Time Logged (Mins)</span>
-        <span class="font-bold text-lg leading-none mt-1">${actualMins}</span>
-    </div>
-</div>
+                        <div class="p-3 border-r border-b border-slate-100 flex flex-col items-center justify-start">
+                            <span class="text-[8px] text-slate-400">Start Date</span>
+                            <span class="text-slate-900 font-bold mt-1">${startHtml}</span>
+                        </div>
+                        <div class="p-3 border-b border-slate-100 flex flex-col items-center justify-start">
+                            <span class="text-[8px] text-slate-400">End Date</span>
+                            <span class="text-slate-900 font-bold mt-1">${(isCompleted && chEnd) ? chEnd.toLocaleDateString('en-GB') : '--'}</span>
+                        </div>
+                        <div class="p-3 border-r border-slate-100 flex flex-col items-center justify-start text-rose-500">
+                            <span class="text-[8px] opacity-70">Excluded Days</span>
+                            ${excludedHtml}
+                        </div>
+                        <div class="p-3 flex flex-col items-center justify-start text-blue-600">
+                            <span class="text-[8px] opacity-70">Time Logged (Mins)</span>
+                            <span class="font-bold text-lg leading-none mt-1">${actualMins}</span>
+                        </div>
+                    </div>
                         ${contentHTML}
+                        ${embeddedRevisionsHtml}
                     </details>`;
             });
 
+            // 3. Independent / General Revisions Processing
             let activityLogs = window.currentActivityLogs || [];
             let extraActivityDays = 0; let activityMinsTotal = 0;
             let activityHtml = "";
-            let independentRevisionDates = new Set(); // Move it up here
+            let independentRevisionDates = new Set();
+            
+            // Only process logs that have NO chapter tag, or explicitly tagged "GENERAL"
+            let independentLogsForUI = activityLogs.filter(log => !log.chapter || log.chapter === "GENERAL");
 
-            if (activityLogs.length > 0) {
-                activityLogs.forEach(log => {
+            if (independentLogsForUI.length > 0) {
+                independentLogsForUI.forEach(log => {
                     let logD = new Date(log.date);
                     logD.setHours(12, 0, 0, 0); 
                     let dStr = logD.toISOString().split('T')[0];
                     
-                    let isInsideChapter = chapterRanges.some(range => {
-                        return logD >= range.start && logD <= range.end;
-                    });
-
-                    if (!isInsideChapter) {
-                        activityMinsTotal += (parseFloat(log.minutes) || 0);
-                        if (isTimetableWorkingDay(logD, cName, sName, subName)) {
-                            if (!independentRevisionDates.has(dStr)) {
-                                extraActivityDays++; 
-                                independentRevisionDates.add(dStr);
-                                // ADD TO DEDUPLICATOR
-                                uniqueCompletedDays.add(dStr);
-                            }
+                    activityMinsTotal += (parseFloat(log.minutes) || 0);
+                    if (isTimetableWorkingDay(logD, cName, sName, subName)) {
+                        if (!independentRevisionDates.has(dStr)) {
+                            extraActivityDays++; 
+                            independentRevisionDates.add(dStr);
+                            uniqueCompletedDays.add(dStr); 
                         }
                     }
                 });
 
-                let logRows = activityLogs.map(log => `
+                let logRows = independentLogsForUI.map(log => `
                     <div class="flex justify-between items-center p-5 bg-white border-b border-amber-50 last:border-0 hover:bg-amber-50/50 transition-colors">
                         <div class="flex gap-5 items-center">
                             <span class="text-[9px] font-black text-amber-500 bg-amber-100 px-3 py-1.5 rounded-lg uppercase tracking-widest">${new Date(log.date).toLocaleDateString('en-GB')}</span>
@@ -963,9 +977,9 @@ function renderSyllabusExactMath() {
                     <details class="bg-[#fffbeb] border border-amber-200 rounded-[2.5rem] overflow-hidden mb-8 shadow-sm group">
                         <summary class="p-6 bg-[#fffbeb] border-b border-amber-100 flex justify-between items-center cursor-pointer select-none outline-none">
                             <div class="flex items-center gap-4"><span class="text-xl text-2xl mb-1">🎯</span>
-                                <div><h4 class="font-black text-amber-900 uppercase text-lg tracking-tight">Revision & Activity Logs</h4></div>
+                                <div><h4 class="font-black text-amber-900 uppercase text-lg tracking-tight">General Subject Revisions</h4><div class="text-[10px] sm:text-[11px] font-bold text-amber-600 uppercase mt-1 bg-white px-3 py-1 rounded w-fit border border-amber-200 shadow-sm">Independent Sessions</div></div>
                             </div>
-                            <span class="text-[10px] font-black px-6 py-2 rounded-full bg-amber-200 text-amber-800 shadow-sm">${activityLogs.length} LOGS</span>
+                            <span class="text-[10px] font-black px-6 py-2 rounded-full bg-amber-200 text-amber-800 shadow-sm">${independentLogsForUI.length} LOGS</span>
                         </summary>
                         <div class="divide-y divide-amber-100/50">${logRows}</div>
                     </details>`;
@@ -984,15 +998,11 @@ function renderSyllabusExactMath() {
             }
             container.innerHTML = complianceBanner + htmlContent + activityHtml;
 
-       // 🧠 NEW MACRO MATH: Net Variance Cumulative Pace Check
             let macroActualDays = uniqueCompletedDays.size;
             let totalOverallDayGap = completedTargetDays - macroActualDays;
             let totalOverallMinGap = completedTargetMins - (completedActualMins + Math.floor(activityMinsTotal));
 
-            // Only show variance if chapters are fully done OR independent revisions exist
             let showVariance = completedTargetDays > 0 || (typeof independentRevisionDates !== 'undefined' && independentRevisionDates.size > 0);
-
-            // Set Macro border color based on DEDUPLICATED days
             const macroBgClass = totalOverallDayGap >= 0 ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700";
 
             document.getElementById('subject-pace-widget').innerHTML = `
@@ -1007,7 +1017,6 @@ function renderSyllabusExactMath() {
                 </div>
             `;
         }
-
       function previewTick(cb, idx) {
             if(cb.checked) {
                 const todayISO = new Date().toISOString().split('T')[0];
