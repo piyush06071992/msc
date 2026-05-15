@@ -840,7 +840,7 @@
             }
         }
 
-      function openDrillDown(cls, sec, sub, fullId) {
+        function openDrillDown(cls, sec, sub, fullId) {
             document.getElementById('edit-toggle-btn').style.display = window.hasEditorRights ? 'block' : 'none';
             lastDrillParams = {cls, sec, sub}; currentUploadId = fullId;
             document.getElementById('drill-title').innerText = sub;
@@ -850,19 +850,22 @@
             const assign = assignments.find(a => a.id === fullId) || {};
             const planner = planners.find(p => p.id === fullId);
 
-            const unlockBtn = document.getElementById('admin-unlock-btn');
+        const unlockBtn = document.getElementById('admin-unlock-btn');
             if (window.hasUnlockRights) {
                 unlockBtn.classList.remove('hidden'); unlockBtn.classList.add('block');
                 
                 if (planner && planner.isUnlocked) {
+                    // It is currently Unlocked - Give Admin option to re-lock it
                     unlockBtn.innerText = "🔒 Re-Lock Planner";
                     unlockBtn.className = "px-4 sm:px-6 py-3 sm:py-4 bg-slate-100 text-slate-700 rounded-full text-[11px] sm:text-xs font-black uppercase tracking-widest border border-slate-300 hover:bg-slate-200 transition-all shadow-sm flex-1 sm:flex-none text-center";
                     unlockBtn.onclick = () => toggleTeacherLock(false);
                 } else if (planner && planner.unlockRequested) {
+                    // Teacher specifically requested an unlock (Flashing Amber)
                     unlockBtn.innerText = "🔑 Approve Unlock";
                     unlockBtn.className = "px-4 sm:px-6 py-3 sm:py-4 bg-amber-100 text-amber-700 rounded-full text-[11px] sm:text-xs font-black uppercase tracking-widest border border-amber-300 hover:bg-amber-200 transition-all shadow-sm animate-pulse flex-1 sm:flex-none text-center";
                     unlockBtn.onclick = () => toggleTeacherLock(true);
                 } else {
+                    // It is locked, but Admin wants to force unlock it early
                     unlockBtn.innerText = "🔑 Force Unlock";
                     unlockBtn.className = "px-4 sm:px-6 py-3 sm:py-4 bg-indigo-50 text-indigo-600 rounded-full text-[11px] sm:text-xs font-black uppercase tracking-widest border border-indigo-200 hover:bg-indigo-100 transition-all shadow-sm flex-1 sm:flex-none text-center";
                     unlockBtn.onclick = () => toggleTeacherLock(true);
@@ -889,9 +892,9 @@
             });
             document.getElementById('stat-prog').innerText = chNames.length > 0 ? Math.round((chDoneCalc / chNames.length) * 100) + "% Done" : "0% Done";
 
-            let completedTargetDays = 0, completedActualDays = 0;
+        let completedTargetDays = 0, completedActualDays = 0;
             let completedTargetMins = 0, completedActualMins = 0;
-            let uniqueCompletedDays = new Set(); 
+            let chapterRanges = []; // Track boundaries to filter independent revisions
             let htmlContent = "";
 
             chNames.forEach(ch => {
@@ -902,7 +905,6 @@
                 const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
                 const targetMins = parseInt(rows[0]?.['Target Minutes For Chapter']) || 0;
                 
-                // 1. Calculate Standard Syllabus Lecture Minutes
                 let sessionMap = {}; let extraMins = 0;
                 doneR.forEach(r => {
                     let d = r.completedDate; 
@@ -914,48 +916,38 @@
                         extraMins += mRaw;
                     }
                 });
-                let lecMins = Object.values(sessionMap).reduce((a,b) => a+Math.floor(b), 0) + Math.floor(extraMins);
+                const actualMins = Object.values(sessionMap).reduce((a,b) => a+Math.floor(b), 0) + Math.floor(extraMins);
                 
-                // 2. STRICT TAGGING: Fetch Revisions specifically tagged for THIS chapter
-                let chRevs = (planner.activityLogs || []).filter(log => log.chapter === ch);
-                let revMins = chRevs.reduce((sum, log) => sum + (parseFloat(log.minutes) || 0), 0);
-
-                // RULE 2: Activities Consume Minutes directly from the budget!
-                const actualMins = lecMins + Math.floor(revMins);
-
                 let chStartStr = rows[0]?.chapterStartDate; let chStart = chStartStr ? new Date(chStartStr) : null;
                 const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
                 const chEnd = (isF && compDates.length) ? new Date(Math.max(...compDates)) : null;
 
                 let gapHtml = "", actualDaysTaken = 0, dayGap = 0, minGap = 0;
-                let excludedHtml = '<span class="font-bold mt-1">None</span>'; 
+
+             let excludedHtml = '<span class="font-bold mt-1">None</span>'; // Default state
 
                 if (chStart) {
                     let effectiveEnd = chEnd ? new Date(chEnd) : new Date();
                     effectiveEnd.setHours(23,59,59,999);
+                    chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
 
                     let cur = new Date(chStart); let finish = new Date(effectiveEnd);
-                    let excludedHolidays = []; 
+                    let excludedHolidays = []; // 🧠 THE SMART COLLECTOR
 
-                    while(cur <= finish) {
+                while(cur <= finish) {
                         const exclusion = checkDateExclusion(cur, cls, sec, sub);
                         
                         if (exclusion.isExcluded) {
+                            // Automatically collect the holiday/exam and reason!
                             const shortDate = cur.toLocaleDateString('en-GB', {day: '2-digit', month: 'short'});
                             excludedHolidays.push({ date: shortDate, reason: exclusion.reason });
                         } else {
-                            if(isTimetableWorkingDay(cur, cls, sec, sub)) {
-                                actualDaysTaken++;
-                                if (isF) {
-                                    const offset = cur.getTimezoneOffset() * 60000;
-                                    const localIso = new Date(cur.getTime() - offset).toISOString().split('T')[0];
-                                    uniqueCompletedDays.add(localIso);
-                                }
-                            }
+                            if(isTimetableWorkingDay(cur, cls, sec, sub)) actualDaysTaken++;
                         }
                         cur.setDate(cur.getDate() + 1);
                     }
 
+                    // Build the dynamic UI badges
                     if (excludedHolidays.length > 0) {
                         let holTags = excludedHolidays.map(h => `
                             <div class="text-[8px] sm:text-[9px] bg-rose-50 text-rose-700 px-2 py-1 rounded-lg border border-rose-200 w-full leading-tight shadow-sm" title="${h.reason}">
@@ -963,9 +955,11 @@
                                 <span class="opacity-80 truncate block w-full max-w-[100px]">${h.reason}</span>
                             </div>
                         `).join('');
+                        
                         excludedHtml = `<span class="font-black mt-1 text-lg md:text-xl leading-none text-rose-600">${excludedHolidays.length}</span><div class="flex flex-col gap-1 mt-2 items-center w-full px-2 max-h-24 overflow-y-auto custom-scroll">${holTags}</div>`;
                     }
 
+                    // NEW DURATION MODEL: No variance locked or shown until 100% Finished
                     if (isF) {
                         dayGap = targetDays - actualDaysTaken; 
                         minGap = targetMins - actualMins;      
@@ -975,14 +969,13 @@
                         completedActualDays += actualDaysTaken; 
                         completedActualMins += actualMins;
 
-                        // NEW MATH: Badge borders rely on Minutes, not Days.
                         gapHtml = `
                             <div class="flex flex-wrap gap-2 mt-2">
                                 <span class="text-[9px] sm:text-[10px] font-black px-3 sm:px-4 py-1.5 rounded-full border shadow-sm ${dayGap >= 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-200' : 'bg-rose-50 text-rose-600 border-rose-200'}">
-                                    ${dayGap >= 0 ? '📅 SPANNED' : '📅 SPANNED'}: ${actualDaysTaken} Days
+                                    ${dayGap >= 0 ? '📅 ON TRACK' : '⚠️ LATE'}: ${dayGap > 0 ? '+' : ''}${dayGap} Days
                                 </span>
                                 <span class="text-[9px] sm:text-[10px] font-black px-3 sm:px-4 py-1.5 rounded-full border shadow-sm ${minGap >= 0 ? 'bg-teal-50 text-teal-600 border-teal-200' : 'bg-purple-50 text-purple-600 border-purple-200'}">
-                                    ${minGap >= 0 ? '⏱️ EFFICIENT' : '🚨 OVERTIME'}: ${minGap > 0 ? '+' : ''}${minGap}m
+                                    ${minGap >= 0 ? '⏱️ EFFICIENT' : '💪 EXTRA EFFORT'}: ${minGap > 0 ? '+' : ''}${minGap}m
                                 </span>
                             </div>`;
                     }
@@ -993,7 +986,7 @@
                     startHtml = `<input type="date" class="ch-start-input text-[11px] sm:text-xs border border-slate-300 px-2 py-1 ml-1 rounded-lg" data-ch="${ch}" value="${rows[0]?.chapterStartDate || ''}"> <button onclick="clearChapterStart('${ch}')" class="text-rose-500 ml-2 hover:underline font-bold text-[10px] sm:text-[11px] uppercase block md:inline mt-2 md:mt-0 bg-rose-50 px-3 py-1 rounded-lg">Clear</button>`;
                 }
 
-                let tops = rows.map((r) => {
+             let tops = rows.map((r) => {
                     const absI = allRows.indexOf(r);
                     const exe = staffList.find(s => s.email === r.tickedBy)?.name || r.tickedBy || '---';
                     
@@ -1033,18 +1026,26 @@
                     </div>`;
                 }).join('');
 
-                // NEW: Embedded revisions HTML uses the explicitly tagged array
-                let embeddedRevisionsHtml = "";
-                if (chRevs.length > 0) {
-                    embeddedRevisionsHtml = `<div class="bg-amber-50/30 p-4 sm:p-6 border-t border-slate-100"><h5 class="text-[10px] sm:text-[11px] font-black text-amber-600 uppercase tracking-widest mb-3 sm:mb-4">🎯 Activities During This Chapter</h5><div class="grid grid-cols-1 md:grid-cols-2 gap-3">` + chRevs.map(log => `
-                        <div class="flex justify-between items-center bg-white p-3 sm:p-4 rounded-xl border border-amber-100 shadow-sm">
-                            <div class="flex gap-3 items-center">
-                                <span class="text-[9px] sm:text-[10px] font-black text-amber-500 bg-amber-50 px-2 sm:px-3 py-1.5 rounded-lg uppercase tracking-widest border border-amber-100">${new Date(log.date).toLocaleDateString('en-GB')}</span>
-                                <div><div class="text-[10px] sm:text-[11px] font-bold text-slate-800 uppercase leading-snug">${log.reason}</div><div class="text-[8px] sm:text-[9px] text-slate-400 mt-0.5 uppercase font-bold">By: ${log.loggedBy}</div></div>
+              let embeddedRevisionsHtml = "";
+                if (chStart) {
+                    let cEndD = chEnd ? new Date(chEnd) : new Date(); 
+                    cEndD.setHours(23,59,59,999);
+                    let chRevs = (planner.activityLogs || []).filter(log => {
+                        let logD = new Date(log.date); logD.setHours(12,0,0,0);
+                        return logD >= chStart && logD <= cEndD;
+                    });
+                    
+                    if (chRevs.length > 0) {
+                        embeddedRevisionsHtml = `<div class="bg-amber-50/30 p-4 sm:p-6 border-t border-slate-100"><h5 class="text-[10px] sm:text-[11px] font-black text-amber-600 uppercase tracking-widest mb-3 sm:mb-4">🎯 Activities During This Chapter</h5><div class="grid grid-cols-1 md:grid-cols-2 gap-3">` + chRevs.map(log => `
+                            <div class="flex justify-between items-center bg-white p-3 sm:p-4 rounded-xl border border-amber-100 shadow-sm">
+                                <div class="flex gap-3 items-center">
+                                    <span class="text-[9px] sm:text-[10px] font-black text-amber-500 bg-amber-50 px-2 sm:px-3 py-1.5 rounded-lg uppercase tracking-widest border border-amber-100">${new Date(log.date).toLocaleDateString('en-GB')}</span>
+                                    <div><div class="text-[10px] sm:text-[11px] font-bold text-slate-800 uppercase leading-snug">${log.reason}</div><div class="text-[8px] sm:text-[9px] text-slate-400 mt-0.5 uppercase font-bold">By: ${log.loggedBy}</div></div>
+                                </div>
+                                <div class="text-[9px] sm:text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-100 px-2 sm:px-3 py-1.5 rounded-lg">${Math.floor(log.minutes)} Mins</div>
                             </div>
-                            <div class="text-[9px] sm:text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-100 px-2 sm:px-3 py-1.5 rounded-lg">${Math.floor(log.minutes)} Mins</div>
-                        </div>
-                    `).join('') + `</div></div>`;
+                        `).join('') + `</div></div>`;
+                    }
                 }
 
                 htmlContent += `
@@ -1053,7 +1054,7 @@
                             <div class="w-full md:w-auto">
                                 <h4 class="font-black text-slate-900 uppercase text-lg sm:text-xl tracking-tight leading-tight">${ch}</h4>
                                 <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 mt-3 text-[10px] sm:text-[11px] font-bold text-slate-500 uppercase sm:items-center">
-                                    <span class="bg-white px-4 py-1.5 rounded-lg border border-slate-200 shadow-sm w-fit">Target: ${targetMins}m</span>${gapHtml}
+                                    <span class="bg-white px-4 py-1.5 rounded-lg border border-slate-200 shadow-sm w-fit">Target: ${targetDays} Days / ${targetMins}m</span>${gapHtml}
                                     <span class="text-[10px] text-blue-600 uppercase tracking-widest group-open:hidden mt-2 sm:mt-0 sm:ml-2 bg-blue-50 px-3 py-1.5 rounded-full border border-blue-100">View Topics ➔</span>
                                 </div>
                             </div>
@@ -1063,66 +1064,85 @@
                             <div class="p-4 border-r border-b md:border-b-0 border-slate-200 flex flex-col items-center justify-start"><span class="text-[9px] opacity-70">Start Date</span><span class="mt-1">${startHtml}</span></div>
                             <div class="p-4 border-b md:border-b-0 md:border-r border-slate-200 flex flex-col items-center justify-start"><span class="text-[9px] opacity-70">End Date</span><span class="text-slate-900 mt-1 font-bold">${(isF && chEnd) ? chEnd.toLocaleDateString('en-GB') : '--'}</span></div>
                             <div class="p-4 border-r border-slate-200 flex flex-col items-center justify-start text-rose-500"><span class="text-[9px] opacity-70">Excluded Days</span>${excludedHtml}</div>
-                            <div class="p-4 flex flex-col items-center justify-start text-blue-600"><span class="text-[9px] opacity-70">Time Logged (Mins)</span><span class="font-bold mt-1 text-lg md:text-xl leading-none">${actualMins}</span></div>
+                            <div class="p-4 flex flex-col items-center justify-start text-blue-600"><span class="text-[9px] opacity-70">Actual Days Taken</span><span class="font-bold mt-1 text-lg md:text-xl leading-none">${actualDaysTaken}</span></div>
                         </div>
                        <div class="divide-y divide-slate-100">${tops}</div>
                         ${embeddedRevisionsHtml}
                     </details>`;
             });
-
-            // 3. Independent / General Revisions Processing
-            let activityLogs = planner.activityLogs || [];
+let activityLogs = planner.activityLogs || [];
             let extraActivityDays = 0; 
             let activityMinsTotal = 0;
             let independentRevisionDates = new Set();
+            let dailyLogSums = {};
             let activityHtml = "";
-            
-            // Only process logs that have NO chapter tag, or explicitly tagged "GENERAL"
-            let independentLogsForUI = activityLogs.filter(log => !log.chapter || log.chapter === "GENERAL");
+            let independentLogsForUI = [];
 
-            if (independentLogsForUI.length > 0) {
-                independentLogsForUI.forEach(log => {
+            if (activityLogs.length > 0) {
+                activityLogs.forEach(log => {
                     let logD = new Date(log.date);
                     logD.setHours(12, 0, 0, 0); 
                     let dStr = logD.toISOString().split('T')[0];
                     
-                    activityMinsTotal += (parseFloat(log.minutes) || 0);
-                    if (isTimetableWorkingDay(logD, cls, sec, sub)) {
-                        if (!independentRevisionDates.has(dStr)) {
-                            extraActivityDays++; 
-                            independentRevisionDates.add(dStr);
-                            uniqueCompletedDays.add(dStr); // Add to macro deduplicator
+                    let isInsideChapter = chapterRanges.some(range => {
+                        return logD >= range.start && logD <= range.end;
+                    });
+
+                  if (!isInsideChapter) {
+                        independentLogsForUI.push(log);
+                        if (isTimetableWorkingDay(logD, cls, sec, sub)) {
+                            let mins = parseFloat(log.minutes) || 0;
+                            dailyLogSums[dStr] = (dailyLogSums[dStr] || 0) + mins;
+
+                            if (!independentRevisionDates.has(dStr)) {
+                                extraActivityDays++; 
+                                independentRevisionDates.add(dStr);
+                            }
                         }
                     }
                 });
 
-                let logRows = independentLogsForUI.map(log => `
-                    <div class="flex flex-col sm:flex-row justify-between sm:items-center p-5 sm:p-6 bg-white border-b border-amber-50 last:border-0 hover:bg-amber-50/50 transition-colors gap-3 sm:gap-0">
-                        <div class="flex gap-4 sm:gap-6 items-start sm:items-center">
-                            <span class="text-[10px] sm:text-[11px] font-black text-amber-600 bg-amber-100 px-4 py-2 rounded-lg uppercase tracking-widest shrink-0 border border-amber-200 shadow-sm">${new Date(log.date).toLocaleDateString('en-GB')}</span>
-                            <div>
-                                <div class="text-xs sm:text-sm font-bold text-slate-800 uppercase leading-snug">${log.reason}</div>
-                                <div class="text-[9px] sm:text-[10px] text-slate-500 mt-1 uppercase font-bold">By: ${log.loggedBy}</div>
-                            </div>
-                        </div>
-                        <div class="text-[11px] sm:text-xs font-black text-amber-700 bg-white border border-amber-200 px-5 py-2.5 rounded-xl self-start sm:self-auto shadow-sm">${Math.floor(log.minutes)} Mins</div>
-                    </div>`).join('');
-                
-                activityHtml = `
-                    <details class="bg-[#fffbeb] border border-amber-200 rounded-[1.5rem] sm:rounded-[2.5rem] overflow-hidden mb-8 shadow-md group">
-                        <summary class="p-6 sm:p-8 bg-amber-100/50 border-b border-amber-200 flex flex-col md:flex-row justify-between md:items-center cursor-pointer select-none outline-none gap-4 md:gap-0 hover:bg-amber-100 transition-colors">
-                            <div class="flex items-start md:items-center gap-4 md:gap-5"><span class="text-2xl sm:text-3xl mt-1 md:mt-0">🎯</span>
-                                <div><h4 class="font-black text-amber-900 uppercase text-lg sm:text-xl tracking-tight leading-tight">General Subject Revisions</h4><div class="text-[10px] sm:text-[11px] font-bold text-amber-600 uppercase mt-1 bg-white px-3 py-1 rounded w-fit border border-amber-200 shadow-sm">Independent Sessions</div></div>
-                            </div>
-                            <span class="text-[11px] sm:text-xs font-black px-6 sm:px-8 py-2.5 sm:py-3 rounded-full bg-amber-500 text-white shadow-md self-start md:self-auto border border-amber-600">${independentLogsForUI.length} LOGS</span>
-                        </summary>
-                        <div class="divide-y divide-amber-100/50">${logRows}</div>
-                    </details>`;
-            }
+                const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                Object.keys(dailyLogSums).forEach(dStr => {
+                    let logD = new Date(dStr);
+                    let dayName = daysArr[logD.getDay()];
+                    let ttMins = 0;
+                    timetableData.forEach(t => {
+                        if(t.day === dayName && t.className === cls && t.section === sec && t.subject === sub) {
+                            ttMins += (parseInt(t.duration) || 0);
+                        }
+                    });
+                    if(isDemoMode) ttMins = 90; 
+                    
+                    activityMinsTotal += Math.min(dailyLogSums[dStr], ttMins > 0 ? ttMins : dailyLogSums[dStr]);
+                });
 
-            // 🧠 NEW MACRO MATH: Net Variance Cumulative Pace Check
-            let macroActualDays = uniqueCompletedDays.size;
-            let totalOverallDayGap = completedTargetDays - macroActualDays;
+              if (independentLogsForUI.length > 0) {
+                    let logRows = independentLogsForUI.map(log => `
+                        <div class="flex flex-col sm:flex-row justify-between sm:items-center p-5 sm:p-6 bg-white border-b border-amber-50 last:border-0 hover:bg-amber-50/50 transition-colors gap-3 sm:gap-0">
+                            <div class="flex gap-4 sm:gap-6 items-start sm:items-center">
+                                <span class="text-[10px] sm:text-[11px] font-black text-amber-600 bg-amber-100 px-4 py-2 rounded-lg uppercase tracking-widest shrink-0 border border-amber-200 shadow-sm">${new Date(log.date).toLocaleDateString('en-GB')}</span>
+                                <div>
+                                    <div class="text-xs sm:text-sm font-bold text-slate-800 uppercase leading-snug">${log.reason}</div>
+                                    <div class="text-[9px] sm:text-[10px] text-slate-500 mt-1 uppercase font-bold">By: ${log.loggedBy}</div>
+                                </div>
+                            </div>
+                            <div class="text-[11px] sm:text-xs font-black text-amber-700 bg-white border border-amber-200 px-5 py-2.5 rounded-xl self-start sm:self-auto shadow-sm">${Math.floor(log.minutes)} Mins</div>
+                        </div>`).join('');
+                    
+                    activityHtml = `
+                        <details class="bg-[#fffbeb] border border-amber-200 rounded-[1.5rem] sm:rounded-[2.5rem] overflow-hidden mb-8 shadow-md group">
+                            <summary class="p-6 sm:p-8 bg-amber-100/50 border-b border-amber-200 flex flex-col md:flex-row justify-between md:items-center cursor-pointer select-none outline-none gap-4 md:gap-0 hover:bg-amber-100 transition-colors">
+                                <div class="flex items-start md:items-center gap-4 md:gap-5"><span class="text-2xl sm:text-3xl mt-1 md:mt-0">🎯</span>
+                                    <div><h4 class="font-black text-amber-900 uppercase text-lg sm:text-xl tracking-tight leading-tight">Between-Chapter Revisions</h4><div class="text-[10px] sm:text-[11px] font-bold text-amber-600 uppercase mt-1 bg-white px-3 py-1 rounded w-fit border border-amber-200 shadow-sm">Independent Sessions</div></div>
+                                </div>
+                                <span class="text-[11px] sm:text-xs font-black px-6 sm:px-8 py-2.5 sm:py-3 rounded-full bg-amber-500 text-white shadow-md self-start md:self-auto border border-amber-600">${independentLogsForUI.length} LOGS</span>
+                            </summary>
+                            <div class="divide-y divide-amber-100/50">${logRows}</div>
+                        </details>`;
+                }
+            }
+          let totalOverallDayGap = completedTargetDays - (completedActualDays + extraActivityDays);
             let totalOverallMinGap = completedTargetMins - (completedActualMins + Math.floor(activityMinsTotal));
 
             // Only show variance if chapters are done OR independent revisions exist
