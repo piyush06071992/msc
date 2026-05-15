@@ -715,7 +715,7 @@
             });
         }
 
-        function renderSyllabusExactMath() {
+function renderSyllabusExactMath() {
             const currSession = mySessions.find(s => s.assignmentId === activeSubjectId) || {};
             const cName = currSession.className || "";
             const sName = currSession.section || "";
@@ -738,11 +738,14 @@
                 if (r.chapterStartDate || r.isDone) chMap.get(r['CHAPTER NAME']).isStarted = true;
             });
             
-        let totalTargetDaysAll = 0, totalTargetMinsAll = 0;
-            let totalActualDaysAll = 0; // CLOCK FIX: Track all days spent
+            let totalTargetDaysAll = 0, totalTargetMinsAll = 0;
+            let totalActualDaysAll = 0; 
             let completedTargetDays = 0, completedTargetMins = 0;
             let completedActualDays = 0, completedActualMins = 0;
-            let chapterRanges = []; // Duration Model: Track active boundaries
+            let chapterRanges = []; 
+            
+            // 🧠 NEW MACRO MATH: The Deduplicator Set
+            let uniqueCompletedDays = new Set();
 
             chMap.forEach(v => { totalTargetDaysAll += v.days; totalTargetMinsAll += v.mins; });
 
@@ -761,7 +764,6 @@
                 const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
                 const targetMins = parseInt(rows[0]?.['Target Minutes For Chapter']) || 0;
 
-                // POINT 1 & 5: MULTI-SESSION MATH (Using parseFloat for Decimal Trick)
                 let sessionMap = {}; let extraMins = 0;
                 doneR.forEach(r => {
                     let d = r.completedDate; 
@@ -774,36 +776,43 @@
                         extraMins += mRaw;
                     }
                 });
-            // Add unique sessions, using Math.floor to hide decimals in final total
                 const actualMins = Object.values(sessionMap).reduce((a,b) => a + Math.floor(b), 0) + Math.floor(extraMins);
                 let chStartStr = rows[0]?.chapterStartDate; let chStart = chStartStr ? new Date(chStartStr) : null;
                 const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
                 const chEnd = (isCompleted && compDates.length) ? new Date(Math.max(...compDates)) : null;
 
-               let gapHtml = "", actualDaysTaken = 0;
-                let excludedHtml = '<span class="font-bold mt-1">None</span>'; // Default state
+                let gapHtml = "", actualDaysTaken = 0;
+                let excludedHtml = '<span class="font-bold mt-1">None</span>'; 
 
-              if (chStart) {
+                if (chStart) {
                     let effectiveEnd = chEnd ? new Date(chEnd) : new Date();
                     effectiveEnd.setHours(23,59,59,999);
                     chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
 
                     let cur = new Date(chStart); let finish = new Date(effectiveEnd);
-                    let excludedHolidays = []; // 🧠 THE SMART COLLECTOR
+                    let excludedHolidays = []; 
 
-                  while(cur <= finish) {
+                    while(cur <= finish) {
                         const exclusion = checkDateExclusion(cur, cName, sName, subName);
                         
                         if (exclusion.isExcluded) {
                             const shortDate = cur.toLocaleDateString('en-GB', {day: '2-digit', month: 'short'});
                             excludedHolidays.push({ date: shortDate, reason: exclusion.reason });
                         } else {
-                            if(isTimetableWorkingDay(cur, cName, sName, subName)) actualDaysTaken++;
+                            if(isTimetableWorkingDay(cur, cName, sName, subName)) {
+                                actualDaysTaken++;
+                                // ADD TO DEDUPLICATOR IF COMPLETED
+                                if (isCompleted) {
+                                    // Use offset to safely get local YYYY-MM-DD
+                                    const offset = cur.getTimezoneOffset() * 60000;
+                                    const localIso = new Date(cur.getTime() - offset).toISOString().split('T')[0];
+                                    uniqueCompletedDays.add(localIso);
+                                }
+                            }
                         }
                         cur.setDate(cur.getDate() + 1);
                     }
 
-                    // Build the dynamic UI badges
                     if (excludedHolidays.length > 0) {
                         let holTags = excludedHolidays.map(h => `
                             <div class="text-[8px] bg-rose-50 text-rose-700 px-2 py-1 rounded-lg border border-rose-200 w-full leading-tight shadow-sm" title="${h.reason}">
@@ -815,9 +824,8 @@
                         excludedHtml = `<span class="font-black mt-1 text-lg leading-none text-rose-600">${excludedHolidays.length}</span><div class="flex flex-col gap-1 mt-2 items-center w-full px-2 max-h-24 overflow-y-auto custom-scroll">${holTags}</div>`;
                     }
 
-                    totalActualDaysAll += actualDaysTaken; // CLOCK FIX: Keeps math synced
+                    totalActualDaysAll += actualDaysTaken; 
 
-                    // NEW DURATION MODEL: No variance locked or shown until 100% Finished
                     if (isCompleted) {
                         let dayGap = targetDays - actualDaysTaken; 
                         let minGap = targetMins - actualMins;      
@@ -827,24 +835,25 @@
                         completedActualDays += actualDaysTaken; 
                         completedActualMins += actualMins;
 
+                        // NEW MATH: Badge borders rely on Minutes, not Days.
                         gapHtml = `
                             <div class="flex flex-wrap gap-2 mt-2">
                                 <span class="text-[9px] font-black px-3 py-1 rounded-full border ${dayGap >= 0 ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-rose-50 text-rose-600 border-rose-100'}" title="Schedule Adherence">
                                     ${dayGap >= 0 ? '📅 ON TRACK' : '⚠️ LATE'}: ${dayGap > 0 ? '+' : ''}${dayGap} Days
                                 </span>
-                                <span class="text-[9px] font-black px-3 py-1 rounded-full border ${minGap >= 0 ? 'bg-teal-50 text-teal-600 border-teal-100' : 'bg-purple-50 text-purple-600 border-purple-100'}" title="Time Utilization">
-                                    ${minGap >= 0 ? '⏱️ EFFICIENT' : '💪 EXTRA EFFORT'}: ${minGap > 0 ? '+' : ''}${minGap}m
+                                <span class="text-[9px] font-black px-3 py-1 rounded-full border ${minGap >= 0 ? 'bg-teal-50 text-teal-600 border-teal-100 shadow-sm' : 'bg-purple-50 text-purple-600 border-purple-100 shadow-sm'}" title="Time Utilization">
+                                    ${minGap >= 0 ? '⏱️ EFFICIENT' : '🚨 OVERTIME'}: ${minGap > 0 ? '+' : ''}${minGap}m
                                 </span>
                             </div>`;
                     }
                 }
-               let badge = isCompleted ? `<span class="bg-emerald-500 text-white px-3 py-1 rounded-md text-[9px] font-black uppercase">✓ COMPLETED</span>` 
+                
+                let badge = isCompleted ? `<span class="bg-emerald-500 text-white px-3 py-1 rounded-md text-[9px] font-black uppercase shadow-sm">✓ COMPLETED</span>` 
                           : (isStarted ? `<span class="bg-blue-100 text-blue-700 px-3 py-1 rounded-md text-[9px] font-black uppercase">ONGOING</span>` 
                           : `<span class="bg-slate-200 text-slate-600 px-3 py-1 rounded-md text-[9px] font-black uppercase">PENDING</span>`);
 
                 let contentHTML = '';
                 if (!isStarted) {
-                    // FIX: Safely escape any apostrophes in the chapter name so it doesn't crash the onclick handler
                     const safeChName = ch.replace(/'/g, "\\'");
                     contentHTML = `<div class="p-6 text-center bg-white border-t border-slate-100"><button onclick="startChapter('${safeChName}')" class="bg-blue-600 text-white px-6 py-2.5 rounded-xl font-black uppercase text-[10px] tracking-widest shadow-md hover:bg-blue-700 transition-all">Start Chapter</button></div>`;
                 } else {
@@ -896,9 +905,9 @@
             let activityLogs = window.currentActivityLogs || [];
             let extraActivityDays = 0; let activityMinsTotal = 0;
             let activityHtml = "";
+            let independentRevisionDates = new Set(); // Move it up here
 
             if (activityLogs.length > 0) {
-              let independentRevisionDates = new Set();
                 activityLogs.forEach(log => {
                     let logD = new Date(log.date);
                     logD.setHours(12, 0, 0, 0); 
@@ -914,6 +923,8 @@
                             if (!independentRevisionDates.has(dStr)) {
                                 extraActivityDays++; 
                                 independentRevisionDates.add(dStr);
+                                // ADD TO DEDUPLICATOR
+                                uniqueCompletedDays.add(dStr);
                             }
                         }
                     }
@@ -953,21 +964,25 @@
             }
             container.innerHTML = complianceBanner + htmlContent + activityHtml;
 
-       // POINT 9: NET VARIANCE CUMULATIVE PACE CHECK
-            let totalOverallDayGap = completedTargetDays - (completedActualDays + extraActivityDays);
+       // 🧠 NEW MACRO MATH: Net Variance Cumulative Pace Check
+            let macroActualDays = uniqueCompletedDays.size;
+            let totalOverallDayGap = completedTargetDays - macroActualDays;
             let totalOverallMinGap = completedTargetMins - (completedActualMins + Math.floor(activityMinsTotal));
 
             // Only show variance if chapters are fully done OR independent revisions exist
             let showVariance = completedTargetDays > 0 || (typeof independentRevisionDates !== 'undefined' && independentRevisionDates.size > 0);
+
+            // Set Macro border color based on DEDUPLICATED days
+            const macroBgClass = totalOverallDayGap >= 0 ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700";
 
             document.getElementById('subject-pace-widget').innerHTML = `
                 <b class='text-slate-800 text-sm uppercase tracking-widest'>Subject Overall Pace</b>
                 <div class='text-[10px] sm:text-[11px] mt-3 font-black text-emerald-600 uppercase tracking-widest'>Total Chapters Completed (${completedChapters} out of ${totalChapters} Chapters) - ${progressPct}%</div>
                 <div class='w-full bg-slate-100 h-2 rounded-full mt-2 mb-4 overflow-hidden'><div style='width: ${progressPct}%;' class='bg-emerald-500 h-full'></div></div>
                 
-                <div class='flex items-center gap-3 p-3.5 rounded-xl border ${showVariance ? (totalOverallDayGap >= 0 ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700") : "bg-slate-50 border-slate-200 text-slate-500"}'>
+                <div class='flex items-center gap-3 p-3.5 rounded-xl border ${showVariance ? macroBgClass : "bg-slate-50 border-slate-200 text-slate-500"} shadow-sm'>
                     <div class='text-[10px] sm:text-[11px] font-black uppercase tracking-widest'>
-                        ${showVariance ? `Net Variance: ${totalOverallDayGap > 0 ? "+" : ""}${totalOverallDayGap} Days | ${totalOverallMinGap > 0 ? "+" : ""}${totalOverallMinGap} Mins <span class="ml-2 opacity-70">(${totalOverallDayGap >= 0 ? "Ahead/On Time" : "Behind Schedule"})</span>` : `Awaiting Completions for Variance`}
+                        ${showVariance ? `True Variance: ${totalOverallDayGap > 0 ? "+" : ""}${totalOverallDayGap} Days | ${totalOverallMinGap > 0 ? "+" : ""}${totalOverallMinGap} Mins <span class="ml-2 opacity-70">(${totalOverallDayGap >= 0 ? "Ahead/On Time" : "Behind Schedule"})</span>` : `Awaiting Completions for Variance`}
                     </div>
                 </div>
             `;
