@@ -1309,11 +1309,66 @@ async function checkAndApplyFutureMaster() {
             sortSectionBlocks(secId);
         }
 
-        // Instantly saves data to UI memory without rebuilding the screen (Stops the blinking!)
+      // --- CLOUD AUTO-SAVE DRAFT ENGINE ---
+        let cloudDraftTimer = null;
+
+        // Instantly updates UI state, then triggers a countdown to save to Firebase
         function triggerInlineSave(blockId) {
             const block = document.getElementById(blockId);
             if(block) block.setAttribute('data-s24', block.querySelector('.tb-s24').value);
             checkGlobalClash();
+            
+            const btnText = document.getElementById('btn-text');
+            if (btnText) btnText.innerHTML = "⏳ Saving Draft...";
+
+            clearTimeout(cloudDraftTimer);
+            cloudDraftTimer = setTimeout(saveCloudDraft, 3000); // Waits 3 seconds after you stop typing
+        }
+
+        async function saveCloudDraft() {
+            const allBlocks = Array.from(document.querySelectorAll('.time-block'));
+            if (allBlocks.length === 0) return;
+            
+            let draftSlots = []; 
+            for (let b of allBlocks) {
+                const className = b.getAttribute('data-class');
+                const sectionName = b.getAttribute('data-section');
+                const s24 = b.querySelector('.tb-s24').value; 
+                const e24 = b.querySelector('.tb-e24').value;
+                const entries = Array.from(b.querySelectorAll('.ent-row'));
+                if (!s24 || !e24) continue;
+                
+                const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
+                const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
+                const dur = `${eMins - sMins} MINS`;
+                const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
+
+                for(let ent of entries) {
+                    const sub = ent.querySelector('.ent-sub').value;
+                    const teacher = ent.querySelector('.ent-tea').value || "NONE"; 
+                    const room = ent.querySelector('.ent-room').value.trim();
+                    const remark = ent.querySelector('.ent-rem').value.trim();
+                    const activeDays = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
+
+                    activeDays.forEach(day => {
+                        draftSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, room, remark, sMins, eMins });
+                    });
+                }
+            }
+            
+            try {
+                // Save safely to a parallel 'drafts' collection tied specifically to the active branch
+                await db.collection("timetable_drafts").doc(activeCenter).set({
+                    lastEdited: Date.now(),
+                    schedule: draftSlots
+                });
+                
+                const btnText = document.getElementById('btn-text');
+                if (btnText) {
+                    btnText.innerHTML = "☁️ Draft Saved";
+                    setTimeout(() => { if(btnText.innerHTML === "☁️ Draft Saved") btnText.innerHTML = "Save Changes"; }, 3000);
+                }
+            } catch(e) { console.error("Draft save failed", e); }
         }
 
       function injectSmartBlock(className, sectionName, secId, blockData) {
