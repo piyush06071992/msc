@@ -2781,114 +2781,35 @@ function handlePrimaryAction() {
         return;
     }
 
-    // 2. Select the three buttons inside the Save Options Modal
+    // 2. Select the buttons inside the Save Options Modal
     const btnImmediate = document.querySelector('button[onclick*="IMMEDIATE"]');
     const btnSpecific = document.querySelector('button[onclick*="SPECIFIC_DATES"]');
     const btnFuture = document.querySelector('button[onclick*="FUTURE_MASTER"]');
+    const btnDraft = document.querySelector('button[onclick*="DRAFT"]');
 
     // 3. SMART UI TOGGLE: Hide/Show based on what the Admin is currently viewing
     if (currentContextMode === 'LIVE') {
-        // Viewing Master: Show everything
         if(btnImmediate) btnImmediate.style.display = 'block';
         if(btnFuture) btnFuture.style.display = 'block';
         if(btnSpecific) btnSpecific.style.display = 'block';
     } else {
-        // Viewing Specific Date: ONLY allow Date-to-Date Replication
         if(btnImmediate) btnImmediate.style.display = 'none';
         if(btnFuture) btnFuture.style.display = 'none';
         if(btnSpecific) btnSpecific.style.display = 'block';
     }
+    
+    // Draft button is always visible!
+    if(btnDraft) btnDraft.style.display = 'block';
 
     document.getElementById('save-options-modal').classList.replace('hidden', 'flex');
 }
 
-async function saveOverrideForSpecificDate() {
-    const overrideCheck = confirm(`🚨 SPECIFIC DATE SAVE: Save this override (Exam/OT) for the ${activeCenter} branch on ${currentContextDate}?\n\nThis will only affect this specific date.`);
-    if (!overrideCheck) return;
-
-    const btn = document.getElementById('main-action-btn'); 
-    const originalHTML = btn.innerHTML;
-    btn.innerHTML = "⌛ Saving..."; btn.disabled = true;
-
-    try {
-        const targetDayName = new Date(currentContextDate).toLocaleDateString('en-US', { weekday: 'long' });
-        const allBlocks = Array.from(document.querySelectorAll('.time-block'));
-        
-        // 1. Merge logic: Start with existing data so we don't erase hidden slots
-        let mergedSlots = [...globalTimetable]; 
-        let conflictMsg = "";
-
-        for (let b of allBlocks) {
-            const className = b.getAttribute('data-class');
-            const sectionName = b.getAttribute('data-section');
-            const s24 = b.querySelector('.tb-s24').value; 
-            const e24 = b.querySelector('.tb-e24').value;
-            const entries = Array.from(b.querySelectorAll('.ent-row'));
-            
-            if (!s24 || !e24) { conflictMsg = `A block in ${sectionName} is missing a time.`; break; }
-            const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
-            const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
-            const dur = `${eMins - sMins} MINS`;
-            const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
-
-            // Remove existing version of THIS specific block from the merge pool
-            mergedSlots = mergedSlots.filter(s => !(s.className === className && s.section === sectionName && s.start24 === s24 && s.end24 === e24));
-
-            for(let ent of entries) {
-                const sub = ent.querySelector('.ent-sub').value;
-                const teacher = ent.querySelector('.ent-tea').value || "NONE"; 
-                const room = ent.querySelector('.ent-room').value.trim();
-                let remark = ent.querySelector('.ent-rem').value.trim();
-                if (remark === "undefined") remark = ""; 
-
-                let teacherEmail = "";
-                if (teacher !== "NONE") {
-                    const tObj = allTeachers.find(t => t.name === teacher);
-                    if (tObj) teacherEmail = tObj.email || ""; 
-                }
-                
-                // Secret tag for Lesson Planner
-                let examTypeTag = (sub === 'OT') ? 'OT' : 'UT';
-
-                mergedSlots.push({ day: targetDayName, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark, sMins, eMins, examType: examTypeTag });
-            }
-        }
-        if (conflictMsg) throw new Error(conflictMsg);
-
-        // 2. SMART OT INJECTOR (Injects "Doubt Session" into non-OT subjects if an OT exists in section)
-        const otTracker = new Set();
-        mergedSlots.forEach(slot => { if (slot.subject === 'OT') otTracker.add(slot.className + '_' + slot.section); });
-        
-        mergedSlots.forEach(slot => {
-            const isRegular = !SPECIAL_SUBJECTS.includes((slot.subject || '').toUpperCase());
-            if (isRegular && otTracker.has(slot.className + '_' + slot.section)) {
-                slot.remark = "Doubt Session";
-            }
-        });
-
-        // 3. Save to History
-        await getCollection("timetable_history").doc(currentContextDate).set({
-            date: currentContextDate,
-            lastUpdated: Date.now(),
-            schedule: mergedSlots,
-            type: "EXAM_OVERRIDE"
-        });
-
-        await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
-
-        alert(`✅ Schedule saved successfully for ${currentContextDate}!`);
-        document.getElementById('view-label').innerHTML = `<span class="text-rose-500">🔴 EXAM/OT MODE:</span> ${currentContextDate}`;
-
-    } catch (err) {
-        alert("Save failed: " + err.message);
-    } finally {
-        btn.innerHTML = originalHTML; btn.disabled = false;
-        renderDirectDashboard();
-    }
-}
-
 function processSave(type) {
     document.getElementById('save-options-modal').classList.replace('flex', 'hidden');
+    
+    if (type === 'DRAFT') {
+        return saveNamedDraft();
+    }
     
     // Strict Safety Block: Prevent Master Schedule corruption
     if (type === 'IMMEDIATE') {
