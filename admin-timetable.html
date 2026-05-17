@@ -1321,26 +1321,25 @@ async function checkAndApplyFutureMaster() {
             sortSectionBlocks(secId);
         }
 
-     // --- CLOUD AUTO-SAVE DRAFT ENGINE ---
-        let cloudDraftTimer = null;
-
-        // Instantly updates UI state, then triggers a countdown to save to Firebase
+   // Instantly updates UI state locally
         function triggerInlineSave(blockId) {
             const block = document.getElementById(blockId);
             if(block) block.setAttribute('data-s24', block.querySelector('.tb-s24').value);
             checkGlobalClash();
-            
-            const btnText = document.getElementById('btn-text');
-            if (btnText) btnText.innerHTML = "⏳ Saving Draft...";
-
-            clearTimeout(cloudDraftTimer);
-            cloudDraftTimer = setTimeout(saveCloudDraft, 3000); // Waits 3 seconds after you stop typing
         }
 
-        async function saveCloudDraft() {
+        // --- MANUAL NAMED DRAFT ENGINE ---
+        async function saveNamedDraft() {
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
-            if (allBlocks.length === 0) return;
+            if (allBlocks.length === 0) return alert("Nothing to save!");
             
+            const draftName = prompt("Enter a name for this draft (e.g., 'Winter Update V2'):");
+            if (!draftName || draftName.trim() === "") return;
+
+            const btnText = document.getElementById('btn-text');
+            const originalText = btnText ? btnText.innerHTML : "Save Changes";
+            if (btnText) btnText.innerHTML = "⏳ Saving Draft...";
+
             let draftSlots = []; 
             for (let b of allBlocks) {
                 const className = b.getAttribute('data-class');
@@ -1363,29 +1362,67 @@ async function checkAndApplyFutureMaster() {
                     const activeDays = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
 
                     activeDays.forEach(day => {
-                        draftSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, room, remark, sMins, eMins });
+                        let teacherEmail = "";
+                        if (teacher !== "NONE") {
+                            const tObj = allTeachers.find(t => t.name === teacher);
+                            if (tObj) teacherEmail = tObj.email || ""; 
+                        }
+                        draftSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark, sMins, eMins });
                     });
                 }
             }
             
             try {
-                // Ensure we separate LIVE drafts from Date-Specific drafts
-                const contextId = currentContextMode === 'LIVE' ? 'LIVE' : currentContextDate;
-                const draftKey = `draft_${activeCenter}_${contextId}`;
+                // Generates a clean URL-friendly ID for Firebase
+                const draftKey = `draft_${activeCenter}_${draftName.replace(/[^a-zA-Z0-9]/g, '_')}`;
                 
                 await db.collection("timetable_drafts").doc(draftKey).set({
+                    name: draftName,
                     lastEdited: Date.now(),
                     schedule: draftSlots,
                     mode: currentContextMode,
                     date: currentContextDate
                 });
                 
-                const btnText = document.getElementById('btn-text');
-                if (btnText) {
-                    btnText.innerHTML = "☁️ Draft Saved";
-                    setTimeout(() => { if(btnText.innerHTML === "☁️ Draft Saved") btnText.innerHTML = "Save Changes"; }, 3000);
-                }
-            } catch(e) { console.error("Draft save failed", e); }
+                alert(`✅ Draft "${draftName}" saved successfully to the cloud!`);
+            } catch(e) { 
+                console.error("Draft save failed", e); 
+                alert("Error saving draft.");
+            } finally {
+                if (btnText) btnText.innerHTML = originalText;
+            }
+        }
+
+        async function loadNamedDraft() {
+            try {
+                const snap = await db.collection("timetable_drafts").get();
+                // Filter drafts so Ghumarwin only sees Ghumarwin drafts, etc.
+                const branchDrafts = snap.docs.filter(d => d.id.startsWith(`draft_${activeCenter}_`)).map(d => d.data());
+                
+                if (branchDrafts.length === 0) return alert("No drafts found for this branch.");
+                
+                let draftList = "Available Drafts:\n\n";
+                branchDrafts.forEach((d, i) => {
+                    const dDate = new Date(d.lastEdited).toLocaleString('en-US', {month: 'short', day: 'numeric', hour: 'numeric', minute: 'numeric'});
+                    draftList += `${i + 1}. ${d.name} (Saved: ${dDate})\n`;
+                });
+                
+                const selection = prompt(draftList + "\nEnter the number of the draft you want to load:");
+                if (!selection || isNaN(selection) || selection < 1 || selection > branchDrafts.length) return;
+                
+                const selectedDraft = branchDrafts[selection - 1];
+                globalTimetable = selectedDraft.schedule;
+                currentContextMode = selectedDraft.mode;
+                currentContextDate = selectedDraft.date;
+                
+                document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING DRAFT: ${selectedDraft.name}</span>`;
+                renderDirectDashboard();
+                alert(`✅ Draft "${selectedDraft.name}" loaded successfully!`);
+                
+            } catch(e) {
+                console.error(e);
+                alert("Error loading drafts.");
+            }
         }
         async function saveCloudDraft() {
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
