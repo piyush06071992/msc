@@ -855,7 +855,7 @@
             }
         }
 
-        function openDrillDown(cls, sec, sub, fullId) {
+       function openDrillDown(cls, sec, sub, fullId) {
             document.getElementById('edit-toggle-btn').style.display = window.hasEditorRights ? 'block' : 'none';
             lastDrillParams = {cls, sec, sub}; currentUploadId = fullId;
             document.getElementById('drill-title').innerText = sub;
@@ -865,22 +865,19 @@
             const assign = assignments.find(a => a.id === fullId) || {};
             const planner = planners.find(p => p.id === fullId);
 
-        const unlockBtn = document.getElementById('admin-unlock-btn');
+            const unlockBtn = document.getElementById('admin-unlock-btn');
             if (window.hasUnlockRights) {
                 unlockBtn.classList.remove('hidden'); unlockBtn.classList.add('block');
                 
                 if (planner && planner.isUnlocked) {
-                    // It is currently Unlocked - Give Admin option to re-lock it
                     unlockBtn.innerText = "🔒 Re-Lock Planner";
                     unlockBtn.className = "px-4 sm:px-6 py-3 sm:py-4 bg-slate-100 text-slate-700 rounded-full text-[11px] sm:text-xs font-black uppercase tracking-widest border border-slate-300 hover:bg-slate-200 transition-all shadow-sm flex-1 sm:flex-none text-center";
                     unlockBtn.onclick = () => toggleTeacherLock(false);
                 } else if (planner && planner.unlockRequested) {
-                    // Teacher specifically requested an unlock (Flashing Amber)
                     unlockBtn.innerText = "🔑 Approve Unlock";
                     unlockBtn.className = "px-4 sm:px-6 py-3 sm:py-4 bg-amber-100 text-amber-700 rounded-full text-[11px] sm:text-xs font-black uppercase tracking-widest border border-amber-300 hover:bg-amber-200 transition-all shadow-sm animate-pulse flex-1 sm:flex-none text-center";
                     unlockBtn.onclick = () => toggleTeacherLock(true);
                 } else {
-                    // It is locked, but Admin wants to force unlock it early
                     unlockBtn.innerText = "🔑 Force Unlock";
                     unlockBtn.className = "px-4 sm:px-6 py-3 sm:py-4 bg-indigo-50 text-indigo-600 rounded-full text-[11px] sm:text-xs font-black uppercase tracking-widest border border-indigo-200 hover:bg-indigo-100 transition-all shadow-sm flex-1 sm:flex-none text-center";
                     unlockBtn.onclick = () => toggleTeacherLock(true);
@@ -907,10 +904,10 @@
             });
             document.getElementById('stat-prog').innerText = chNames.length > 0 ? Math.round((chDoneCalc / chNames.length) * 100) + "% Done" : "0% Done";
 
-        let completedTargetDays = 0, completedActualDays = 0;
+            let completedTargetDays = 0, completedActualDays = 0;
             let completedTargetMins = 0, completedActualMins = 0;
-            let chapterRanges = []; // Track boundaries to filter independent revisions
-           let htmlContent = "";
+            let chapterRanges = []; 
+            let htmlContent = "";
 
             chNames.forEach(ch => {
                 const rows = allRows.filter(r => r["CHAPTER NAME"] === ch);
@@ -933,8 +930,7 @@
                 const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
                 const chEnd = (isF && compDates.length) ? new Date(Math.max(...compDates)) : null;
 
-                let gapHtml = "", actualDaysTaken = 0, dayGap = 0, minGap = 0;
-
+                let gapHtml = "", actualDaysTaken = 0;
                 let excludedHolidaysCount = 0;
 
                 if (chStart) {
@@ -954,8 +950,8 @@
                     }
 
                     if (isF) {
-                        dayGap = targetDays - actualDaysTaken; 
-                        minGap = targetMins - actualMins;      
+                        let dayGap = targetDays - actualDaysTaken; 
+                        let minGap = targetMins - actualMins;      
 
                         completedTargetDays += targetDays; 
                         completedTargetMins += targetMins;
@@ -1153,7 +1149,112 @@
                        <div class="divide-y divide-slate-100 bg-slate-50/50">${timelineEvents.map(e => e.html).join('')}</div>
                     </details>`;
             });
-let activityLogs = planner.activityLogs || [];
+
+            let activityLogs = planner.activityLogs || [];
+            let extraActivityDays = 0; 
+            let activityMinsTotal = 0;
+            let independentRevisionDates = new Set();
+            let dailyLogSums = {};
+            let activityHtml = "";
+            let independentLogsForUI = [];
+
+            if (activityLogs.length > 0) {
+                activityLogs.forEach(log => {
+                    let logD = new Date(log.date);
+                    logD.setHours(12, 0, 0, 0); 
+                    let dStr = logD.toISOString().split('T')[0];
+                    
+                    let isInsideChapter = chapterRanges.some(range => {
+                        return logD >= range.start && logD <= range.end;
+                    });
+
+                  if (!isInsideChapter) {
+                        independentLogsForUI.push(log);
+                        if (isTimetableWorkingDay(logD, cls, sec, sub)) {
+                            let mins = parseFloat(log.minutes) || 0;
+                            dailyLogSums[dStr] = (dailyLogSums[dStr] || 0) + mins;
+
+                            if (!independentRevisionDates.has(dStr)) {
+                                extraActivityDays++; 
+                                independentRevisionDates.add(dStr);
+                            }
+                        }
+                    }
+                });
+
+                const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                Object.keys(dailyLogSums).forEach(dStr => {
+                    let logD = new Date(dStr);
+                    let dayName = daysArr[logD.getDay()];
+                    let ttMins = 0;
+                    timetableData.forEach(t => {
+                        if(t.day === dayName && t.className === cls && t.section === sec && t.subject === sub) {
+                            ttMins += (parseInt(t.duration) || 0);
+                        }
+                    });
+                    if(isDemoMode) ttMins = 90; 
+                    
+                    activityMinsTotal += Math.min(dailyLogSums[dStr], ttMins > 0 ? ttMins : dailyLogSums[dStr]);
+                });
+
+              if (independentLogsForUI.length > 0) {
+                    let logRows = independentLogsForUI.map(log => `
+                        <div class="flex flex-col sm:flex-row justify-between sm:items-center p-5 sm:p-6 bg-white border-b border-amber-50 last:border-0 hover:bg-amber-50/50 transition-colors gap-3 sm:gap-0">
+                            <div class="flex gap-4 sm:gap-6 items-start sm:items-center">
+                                <span class="text-[10px] sm:text-[11px] font-black text-amber-600 bg-amber-100 px-4 py-2 rounded-lg uppercase tracking-widest shrink-0 border border-amber-200 shadow-sm">${new Date(log.date).toLocaleDateString('en-GB')}</span>
+                                <div>
+                                    <div class="text-xs sm:text-sm font-bold text-slate-800 uppercase leading-snug">${log.reason}</div>
+                                    <div class="text-[9px] sm:text-[10px] text-slate-500 mt-1 uppercase font-bold">By: ${log.loggedBy}</div>
+                                </div>
+                            </div>
+                            <div class="text-[11px] sm:text-xs font-black text-amber-700 bg-white border border-amber-200 px-5 py-2.5 rounded-xl self-start sm:self-auto shadow-sm">${Math.floor(log.minutes)} Mins</div>
+                        </div>`).join('');
+                    
+                    activityHtml = `
+                        <details class="bg-[#fffbeb] border border-amber-200 rounded-[1.5rem] sm:rounded-[2.5rem] overflow-hidden mb-8 shadow-md group">
+                            <summary class="p-6 sm:p-8 bg-amber-100/50 border-b border-amber-200 flex flex-col md:flex-row justify-between md:items-center cursor-pointer select-none outline-none gap-4 md:gap-0 hover:bg-amber-100 transition-colors">
+                                <div class="flex items-start md:items-center gap-4 md:gap-5"><span class="text-2xl sm:text-3xl mt-1 md:mt-0">🎯</span>
+                                    <div><h4 class="font-black text-amber-900 uppercase text-lg tracking-tight">Between-Chapter Revisions</h4><div class="text-[10px] sm:text-[11px] font-bold text-amber-600 uppercase mt-1 bg-white px-3 py-1 rounded w-fit border border-amber-200 shadow-sm">Independent Sessions</div></div>
+                                </div>
+                                <span class="text-[11px] sm:text-xs font-black px-6 sm:px-8 py-2.5 sm:py-3 rounded-full bg-amber-500 text-white shadow-md self-start md:self-auto border border-amber-600">${independentLogsForUI.length} LOGS</span>
+                            </summary>
+                            <div class="divide-y divide-amber-100/50">${logRows}</div>
+                        </details>`;
+                }
+            }
+
+            let totalOverallDayGap = completedTargetDays - (completedActualDays + extraActivityDays);
+            let totalOverallMinGap = completedTargetMins - (completedActualMins + Math.floor(activityMinsTotal));
+
+            if (completedTargetDays > 0 || independentRevisionDates.size > 0) {
+                document.getElementById('stat-gap').innerHTML = `
+                    <div class="flex flex-col">
+                        <span class="text-lg sm:text-2xl font-black ${totalOverallDayGap >= 0 ? 'text-emerald-600' : 'text-rose-600'}">
+                            ${totalOverallDayGap >= 0 ? 'Ahead by' : 'Behind by'} ${Math.abs(totalOverallDayGap)} Days
+                        </span>
+                        <span class="text-[10px] sm:text-[11px] font-black ${totalOverallMinGap >= 0 ? 'text-teal-600' : 'text-purple-600'} mt-1 uppercase tracking-widest bg-slate-100 px-3 py-1 rounded w-fit">
+                            ${totalOverallMinGap >= 0 ? 'Time Saved:' : 'Overtime Logged:'} ${Math.abs(totalOverallMinGap)} Mins
+                        </span>
+                    </div>
+                `;
+            } else {
+                document.getElementById('stat-gap').innerText = "PENDING COMPLETIONS";
+                document.getElementById('stat-gap').className = `text-[11px] sm:text-xs font-black text-slate-400 mt-1`;
+            }
+
+            container.innerHTML = htmlContent + activityHtml;
+            openModal('drill-down-modal');
+        }
+
+        // Helper function to format date strings cleanly on the administrative stream timeline
+        function formatDateString(iso) {
+            if(!iso) return '--';
+            const [y, m, d] = iso.split('-');
+            const dObj = new Date(y, m - 1, d);
+            return dObj.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+        }
+
+        function toggleDrillEditMode() {
 let activityLogs = planner.activityLogs || [];
             let extraActivityDays = 0; 
             let activityMinsTotal = 0;
