@@ -910,7 +910,7 @@
         let completedTargetDays = 0, completedActualDays = 0;
             let completedTargetMins = 0, completedActualMins = 0;
             let chapterRanges = []; // Track boundaries to filter independent revisions
-            let htmlContent = "";
+           let htmlContent = "";
 
             chNames.forEach(ch => {
                 const rows = allRows.filter(r => r["CHAPTER NAME"] === ch);
@@ -925,11 +925,7 @@
                     let d = r.completedDate; 
                     let mRaw = parseFloat(r.completedMinutes) || 0;
                     let sessionKey = d + "_" + mRaw;
-                    if(d) { 
-                        if(!sessionMap[sessionKey]) sessionMap[sessionKey] = mRaw; 
-                    } else {
-                        extraMins += mRaw;
-                    }
+                    if(d) { if(!sessionMap[sessionKey]) sessionMap[sessionKey] = mRaw; } else extraMins += mRaw;
                 });
                 const actualMins = Object.values(sessionMap).reduce((a,b) => a+Math.floor(b), 0) + Math.floor(extraMins);
                 
@@ -939,7 +935,7 @@
 
                 let gapHtml = "", actualDaysTaken = 0, dayGap = 0, minGap = 0;
 
-             let excludedHtml = '<span class="font-bold mt-1">None</span>'; // Default state
+                let excludedHolidaysCount = 0;
 
                 if (chStart) {
                     let effectiveEnd = chEnd ? new Date(chEnd) : new Date();
@@ -947,34 +943,16 @@
                     chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
 
                     let cur = new Date(chStart); let finish = new Date(effectiveEnd);
-                    let excludedHolidays = []; // 🧠 THE SMART COLLECTOR
-
-                while(cur <= finish) {
+                    while(cur <= finish) {
                         const exclusion = checkDateExclusion(cur, cls, sec, sub);
-                        
                         if (exclusion.isExcluded) {
-                            // Automatically collect the holiday/exam and reason!
-                            const shortDate = cur.toLocaleDateString('en-GB', {day: '2-digit', month: 'short'});
-                            excludedHolidays.push({ date: shortDate, reason: exclusion.reason });
+                            excludedHolidaysCount++;
                         } else {
                             if(isTimetableWorkingDay(cur, cls, sec, sub)) actualDaysTaken++;
                         }
                         cur.setDate(cur.getDate() + 1);
                     }
 
-                    // Build the dynamic UI badges
-                    if (excludedHolidays.length > 0) {
-                        let holTags = excludedHolidays.map(h => `
-                            <div class="text-[8px] sm:text-[9px] bg-rose-50 text-rose-700 px-2 py-1 rounded-lg border border-rose-200 w-full leading-tight shadow-sm" title="${h.reason}">
-                                <span class="font-black block mb-0.5">${h.date}</span>
-                                <span class="opacity-80 truncate block w-full max-w-[100px]">${h.reason}</span>
-                            </div>
-                        `).join('');
-                        
-                        excludedHtml = `<span class="font-black mt-1 text-lg md:text-xl leading-none text-rose-600">${excludedHolidays.length}</span><div class="flex flex-col gap-1 mt-2 items-center w-full px-2 max-h-24 overflow-y-auto custom-scroll">${holTags}</div>`;
-                    }
-
-                    // NEW DURATION MODEL: No variance locked or shown until 100% Finished
                     if (isF) {
                         dayGap = targetDays - actualDaysTaken; 
                         minGap = targetMins - actualMins;      
@@ -1001,65 +979,156 @@
                     startHtml = `<input type="date" class="ch-start-input text-[11px] sm:text-xs border border-slate-300 px-2 py-1 ml-1 rounded-lg" data-ch="${ch}" value="${rows[0]?.chapterStartDate || ''}"> <button onclick="clearChapterStart('${ch}')" class="text-rose-500 ml-2 hover:underline font-bold text-[10px] sm:text-[11px] uppercase block md:inline mt-2 md:mt-0 bg-rose-50 px-3 py-1 rounded-lg">Clear</button>`;
                 }
 
-             let tops = rows.map((r) => {
+                // --- MASTER DYNAMIC MIXED TIME-STREAM COMPILER ---
+                let timelineEvents = [];
+
+                rows.forEach(r => {
                     const absI = allRows.indexOf(r);
                     const exe = staffList.find(s => s.email === r.tickedBy)?.name || r.tickedBy || '---';
                     
-                    let statusBadge = '';
-                    if (r.isDone) {
+                    if (r.isDone && r.completedDate) {
+                        let statusBadge = '';
                         if (r.isBackdated) {
                             statusBadge = `<div class="flex flex-col md:items-end"><span class="text-[10px] sm:text-[11px] font-black px-4 py-1.5 rounded-full bg-amber-50 text-amber-700 border border-amber-300 shadow-sm tracking-widest">⚠️ BACKDATED</span><span class="text-[8px] sm:text-[9px] font-bold text-slate-400 mt-1 uppercase">Uploaded: ${r.uploadedOn ? new Date(r.uploadedOn).toLocaleDateString('en-GB') : '---'}</span></div>`;
                         } else {
                             statusBadge = `<span class="text-[10px] sm:text-[11px] font-black px-5 py-2 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-200 shadow-sm tracking-widest">✅ LOGGED</span>`;
                         }
+
+                        timelineEvents.push({
+                            type: 'TOPIC',
+                            dateStr: r.completedDate,
+                            sortKey: r.completedDate + "_1_" + r['LECTURE NUMBER'].padStart(4, '0'),
+                            html: `
+                                <div class="flex flex-col md:flex-row items-start md:items-center justify-between p-5 sm:p-6 bg-white border-b last:border-0 hover:bg-slate-50 transition-colors gap-4 md:gap-0">
+                                    <div class="flex flex-col md:flex-row gap-3 md:gap-6 items-start md:items-center w-full md:w-[65%]">
+                                        <span class="text-[11px] md:text-[10px] font-black text-blue-600 md:text-slate-400 w-auto md:w-12 uppercase bg-blue-50 md:bg-transparent px-3 py-1.5 md:p-0 rounded-lg md:rounded-none tracking-widest border border-blue-100 md:border-transparent">Lec ${r['LECTURE NUMBER']}</span>
+                                        <div class="w-full">
+                                            <div class="text-xs sm:text-sm font-bold text-slate-800 uppercase whitespace-normal break-words leading-snug">${r['SUBTOPICS']}</div>
+                                            <div class="text-[9px] sm:text-[10px] text-slate-400 mt-2 uppercase font-bold flex flex-wrap gap-2 md:gap-3">
+                                                <span class="bg-slate-100 px-3 py-1 rounded-md border border-slate-200"><span class="text-slate-400">Date:</span> <span class="text-slate-700">${formatDateString(r.completedDate)}</span></span>
+                                                <span class="bg-slate-100 px-3 py-1 rounded-md border border-slate-200"><span class="text-slate-400">Time:</span> <span class="text-slate-700">${r.completedMinutes || 0}m</span></span>
+                                                <span class="bg-slate-100 px-3 py-1 rounded-md border border-slate-200 truncate max-w-[150px] sm:max-w-[200px]"><span class="text-slate-400">By:</span> <span class="text-slate-700">${exe}</span></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="w-full md:w-[35%] flex justify-start md:justify-end mt-2 md:mt-0">
+                                        ${isDrillEditMode ? `
+                                            <div class="flex flex-wrap gap-2 items-center bg-slate-50 p-2 sm:p-3 rounded-xl border border-slate-200 shadow-inner w-full md:w-auto">
+                                                <input type="checkbox" class="topic-cb w-6 h-6 accent-blue-600 cursor-pointer shrink-0" data-idx="${absI}" checked onchange="handleAdminUntick(this, ${absI})">
+                                                <input type="date" class="dd-date text-xs sm:text-sm p-2 sm:p-2.5 border border-slate-300 rounded-lg outline-none flex-1 md:w-auto" data-idx="${absI}" value="${r.completedDate || ''}">
+                                                <input type="number" class="dd-min w-20 sm:w-24 text-xs sm:text-sm p-2 sm:p-2.5 border border-slate-300 rounded-lg outline-none text-center" data-idx="${absI}" value="${r.completedMinutes || ''}" step="0.1" placeholder="Mins">
+                                            </div>
+                                        ` : `<div class="text-left md:text-right w-full md:w-auto">${statusBadge}</div>`}
+                                    </div>
+                                </div>`
+                        });
                     } else {
-                        statusBadge = `<span class="text-[10px] sm:text-[11px] font-black px-5 py-2 rounded-full bg-slate-100 text-slate-400 border border-slate-200 tracking-widest">⏳ AWAITING</span>`;
+                        timelineEvents.push({
+                            type: 'PENDING',
+                            sortKey: "9999-12-31_1_" + r['LECTURE NUMBER'].padStart(4, '0'),
+                            html: `
+                                <div class="flex flex-col md:flex-row items-start md:items-center justify-between p-5 sm:p-6 bg-white border-b last:border-0 hover:bg-slate-50 transition-colors gap-4 md:gap-0">
+                                    <div class="flex flex-col md:flex-row gap-3 md:gap-6 items-start md:items-center w-full md:w-[65%]">
+                                        <span class="text-[11px] md:text-[10px] font-black text-slate-400 w-auto md:w-12 uppercase tracking-widest border border-transparent">Lec ${r['LECTURE NUMBER']}</span>
+                                        <div class="w-full">
+                                            <div class="text-xs sm:text-sm font-bold text-slate-400 uppercase leading-snug">${r['SUBTOPICS']}</div>
+                                        </div>
+                                    </div>
+                                    <div class="w-full md:w-[35%] flex justify-start md:justify-end mt-2 md:mt-0">
+                                        ${isDrillEditMode ? `
+                                            <div class="flex flex-wrap gap-2 items-center bg-slate-50 p-2 sm:p-3 rounded-xl border border-slate-200 shadow-inner w-full md:w-auto">
+                                                <input type="checkbox" class="topic-cb w-6 h-6 accent-blue-600 cursor-pointer shrink-0" data-idx="${absI}" onchange="handleAdminUntick(this, ${absI})">
+                                                <input type="date" class="dd-date text-xs sm:text-sm p-2 sm:p-2.5 border border-slate-300 rounded-lg outline-none flex-1 md:w-auto" data-idx="${absI}" value="">
+                                                <input type="number" class="dd-min w-20 sm:w-24 text-xs sm:text-sm p-2 sm:p-2.5 border border-slate-300 rounded-lg outline-none text-center" data-idx="${absI}" value="" step="0.1" placeholder="Mins">
+                                            </div>
+                                        ` : `<span class="text-[10px] sm:text-[11px] font-black px-5 py-2 rounded-full bg-slate-100 text-slate-400 border border-slate-200 tracking-widest">⏳ AWAITING</span>`}
+                                    </div>
+                                </div>`
+                        });
                     }
+                });
 
-                    return `
-                    <div class="flex flex-col md:flex-row items-start md:items-center justify-between p-5 sm:p-6 bg-white border-b last:border-0 hover:bg-slate-50 transition-colors gap-4 md:gap-0">
-                        <div class="flex flex-col md:flex-row gap-3 md:gap-6 items-start md:items-center w-full md:w-[65%]">
-                            <span class="text-[11px] md:text-[10px] font-black text-blue-600 md:text-slate-400 w-auto md:w-12 uppercase bg-blue-50 md:bg-transparent px-3 py-1.5 md:p-0 rounded-lg md:rounded-none tracking-widest border border-blue-100 md:border-transparent">Lec ${r['LECTURE NUMBER']}</span>
-                            <div class="w-full">
-                                <div class="text-xs sm:text-sm font-bold text-slate-800 uppercase whitespace-normal break-words leading-snug">${r['SUBTOPICS']}</div>
-                                <div class="text-[9px] sm:text-[10px] text-slate-400 mt-2 uppercase font-bold flex flex-wrap gap-2 md:gap-3">
-                                    <span class="bg-slate-100 px-3 py-1 rounded-md border border-slate-200"><span class="text-slate-400">Date:</span> <span class="text-slate-700">${r.completedDate ? new Date(r.completedDate).toLocaleDateString('en-GB') : '---'}</span></span>
-                                    <span class="bg-slate-100 px-3 py-1 rounded-md border border-slate-200"><span class="text-slate-400">Time:</span> <span class="text-slate-700">${r.completedMinutes || 0}m</span></span>
-                                    <span class="bg-slate-100 px-3 py-1 rounded-md border border-slate-200 truncate max-w-[150px] sm:max-w-[200px]"><span class="text-slate-400">By:</span> <span class="text-slate-700">${exe}</span></span>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="w-full md:w-[35%] flex justify-start md:justify-end mt-2 md:mt-0">
-                            ${isDrillEditMode ? `
-                                <div class="flex flex-wrap gap-2 items-center bg-slate-50 p-2 sm:p-3 rounded-xl border border-slate-200 shadow-inner w-full md:w-auto">
-                                    <input type="checkbox" class="dd-done w-6 h-6 accent-blue-600 cursor-pointer shrink-0" data-idx="${absI}" ${r.isDone ? 'checked' : ''} onchange="handleAdminUntick(this, ${absI})">
-                                    <input type="date" id="dd-date-${absI}" class="dd-date text-xs sm:text-sm p-2 sm:p-2.5 border border-slate-300 rounded-lg outline-none flex-1 md:w-auto" data-idx="${absI}" value="${r.completedDate || ''}">
-                                    <input type="number" id="dd-min-${absI}" class="dd-min w-20 sm:w-24 text-xs sm:text-sm p-2 sm:p-2.5 border border-slate-300 rounded-lg outline-none text-center" data-idx="${absI}" value="${r.completedMinutes || ''}" step="0.1" placeholder="Mins">
-                                </div>
-                            ` : `<div class="text-left md:text-right w-full md:w-auto">${statusBadge}</div>`}
-                        </div>
-                    </div>`;
-                }).join('');
-
-              let embeddedRevisionsHtml = "";
                 if (chStart) {
-                    let cEndD = chEnd ? new Date(chEnd) : new Date(); 
+                    let cEndD = chEnd ? new Date(chEnd) : new Date();
                     cEndD.setHours(23,59,59,999);
-                    let chRevs = (planner.activityLogs || []).filter(log => {
+                    (planner.activityLogs || []).forEach(log => {
                         let logD = new Date(log.date); logD.setHours(12,0,0,0);
-                        return logD >= chStart && logD <= cEndD;
+                        if (logD >= chStart && logD <= cEndD) {
+                            timelineEvents.push({
+                                type: 'REVISION',
+                                sortKey: log.date + "_2_0000",
+                                html: `
+                                    <div class="flex justify-between items-center bg-amber-50/30 p-5 border-b border-slate-100">
+                                        <div class="flex gap-4 items-center">
+                                            <span class="text-[9px] sm:text-[10px] font-black text-amber-500 bg-white border border-amber-200 px-2.5 py-1 rounded-md shadow-sm uppercase">${formatDateString(log.date)}</span>
+                                            <div>
+                                                <div class="text-xs sm:text-sm font-bold text-amber-900 uppercase leading-snug">🎯 Activity: ${log.reason}</div>
+                                                <div class="text-[8px] sm:text-[9px] text-slate-400 font-bold uppercase mt-0.5">Logged By: ${log.loggedBy}</div>
+                                            </div>
+                                        </div>
+                                        <div class="text-[10px] font-black text-amber-600 bg-white border border-amber-200 px-3 py-1.5 rounded-xl shadow-sm">${Math.floor(log.minutes)} Mins</div>
+                                    </div>`
+                            });
+                        }
                     });
-                    
-                    if (chRevs.length > 0) {
-                        embeddedRevisionsHtml = `<div class="bg-amber-50/30 p-4 sm:p-6 border-t border-slate-100"><h5 class="text-[10px] sm:text-[11px] font-black text-amber-600 uppercase tracking-widest mb-3 sm:mb-4">🎯 Activities During This Chapter</h5><div class="grid grid-cols-1 md:grid-cols-2 gap-3">` + chRevs.map(log => `
-                            <div class="flex justify-between items-center bg-white p-3 sm:p-4 rounded-xl border border-amber-100 shadow-sm">
-                                <div class="flex gap-3 items-center">
-                                    <span class="text-[9px] sm:text-[10px] font-black text-amber-500 bg-amber-50 px-2 sm:px-3 py-1.5 rounded-lg uppercase tracking-widest border border-amber-100">${new Date(log.date).toLocaleDateString('en-GB')}</span>
-                                    <div><div class="text-[10px] sm:text-[11px] font-bold text-slate-800 uppercase leading-snug">${log.reason}</div><div class="text-[8px] sm:text-[9px] text-slate-400 mt-0.5 uppercase font-bold">By: ${log.loggedBy}</div></div>
-                                </div>
-                                <div class="text-[9px] sm:text-[10px] font-black text-amber-600 bg-amber-50 border border-amber-100 px-2 sm:px-3 py-1.5 rounded-lg">${Math.floor(log.minutes)} Mins</div>
-                            </div>
-                        `).join('') + `</div></div>`;
+
+                    let scanDate = new Date(chStart);
+                    while (scanDate <= effectiveEnd) {
+                        let scanIso = scanDate.toISOString().split('T')[0];
+                        const exclusion = checkDateExclusion(scanDate, cls, sec, sub);
+                        if (exclusion.isExcluded) {
+                            timelineEvents.push({
+                                type: 'EXCLUSION',
+                                sortKey: scanIso + "_0_0000",
+                                html: `
+                                    <div class="flex items-center gap-4 p-4 bg-rose-50/40 text-rose-700 border-b border-rose-100 text-xs font-bold uppercase tracking-widest pl-10">
+                                        <span class="bg-white border border-rose-200 text-rose-600 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                        <span class="text-rose-500 font-black">🌴 EXCLUDED DAY:</span> ${exclusion.reason}
+                                    </div>`
+                            });
+                        } else if (scanDate.getDay() === 0) {
+                            timelineEvents.push({
+                                type: 'EXCLUSION',
+                                sortKey: scanIso + "_0_0000",
+                                html: `
+                                    <div class="flex items-center gap-4 p-4 bg-slate-50 text-slate-500 border-b border-slate-100 text-xs font-bold uppercase tracking-widest pl-10">
+                                        <span class="bg-white border border-slate-200 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                        <span class="text-slate-400 font-black">🕰️ WEEKLY OFF:</span> Sunday
+                                    </div>`
+                            });
+                        } else {
+                            if (!isTimetableWorkingDay(scanDate, cls, sec, sub)) {
+                                timelineEvents.push({
+                                    type: 'EXCLUSION',
+                                    sortKey: scanIso + "_0_0000",
+                                    html: `
+                                        <div class="flex items-center gap-4 p-4 bg-slate-50 text-slate-400 border-b border-slate-100 text-xs font-bold uppercase tracking-widest pl-10">
+                                            <span class="bg-white border border-slate-200 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                            <span class="opacity-60">🚫 No Alotted Class as per Timetable Routine</span>
+                                        </div>`
+                                });
+                            }
+                        }
+                        scanDate.setDate(scanDate.getDate() + 1);
+                    }
+                }
+
+                timelineEvents.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+                let excludedHtml = '<span class="font-bold mt-1">None</span>';
+                if (chStart) {
+                    let calcDate = new Date(chStart);
+                    let finalLimit = chEnd ? new Date(chEnd) : new Date();
+                    let counterHols = [];
+                    while(calcDate <= finalLimit) {
+                        const exc = checkDateExclusion(calcDate, cls, sec, sub);
+                        if (exc.isExcluded) {
+                            counterHols.push({ date: calcDate.toLocaleDateString('en-GB', {day:'2-digit', month:'short'}), reason: exc.reason });
+                        }
+                        calcDate.setDate(calcDate.getDate() + 1);
+                    }
+                    if (counterHols.length > 0) {
+                        excludedHtml = `<span class="font-black mt-1 text-lg leading-none text-rose-600">${counterHols.length}</span><div class="flex flex-col gap-1 mt-2 items-center w-full px-2 max-h-24 overflow-y-auto custom-scroll">` + counterHols.map(h => `<div class="text-[8px] bg-rose-50 text-rose-700 px-2 py-1 rounded-lg border border-rose-200 w-full leading-tight truncate shadow-sm" title="${h.reason}"><b>${h.date}</b><br><span class="opacity-70">${h.reason}</span></div>`).join('') + `</div>`;
                     }
                 }
 
@@ -1081,10 +1150,10 @@
                             <div class="p-4 border-r border-slate-200 flex flex-col items-center justify-start text-rose-500"><span class="text-[9px] opacity-70">Excluded Days</span>${excludedHtml}</div>
                             <div class="p-4 flex flex-col items-center justify-start text-blue-600"><span class="text-[9px] opacity-70">Actual Days Taken</span><span class="font-bold mt-1 text-lg md:text-xl leading-none">${actualDaysTaken}</span></div>
                         </div>
-                       <div class="divide-y divide-slate-100">${tops}</div>
-                        ${embeddedRevisionsHtml}
+                       <div class="divide-y divide-slate-100 bg-slate-50/50">${timelineEvents.map(e => e.html).join('')}</div>
                     </details>`;
             });
+let activityLogs = planner.activityLogs || [];
 let activityLogs = planner.activityLogs || [];
             let extraActivityDays = 0; 
             let activityMinsTotal = 0;
