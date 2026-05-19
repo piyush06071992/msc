@@ -516,9 +516,17 @@
 
         // --- DASHBOARD SUMMARY (Deep Accordion Hierarchy) ---
         function toggleDemoMode(val) { isDemoMode = val; document.getElementById('demo-mode-indicator').classList.toggle('hidden', !val); renderSummary(); }
-// --- SMART EXCLUSION ENGINE (Holidays + OT Exams) ---
+// --- 🕰️ TIME MACHINE ENGINE ---
+        function getScheduleSnapshotForDate(dateIso) {
+            if (!window.historyOverrides || window.historyOverrides.length === 0) return window.fullTimetable || window.teacherTimetable || [];
+            const sortedHistory = [...window.historyOverrides].sort((a, b) => b.date.localeCompare(a.date));
+            const snapshot = sortedHistory.find(h => h.date <= dateIso);
+            return (snapshot && snapshot.schedule) ? snapshot.schedule : (window.fullTimetable || window.teacherTimetable || []);
+        }
+
+        // --- SMART EXCLUSION ENGINE (Holidays + OT Exams) ---
         function checkDateExclusion(dateObj, className, sectionName, subjectName) {
-            // Precise timezone fixing
+            // Precise timezone fixing (Fixes the date shifting bug!)
             const offset = dateObj.getTimezoneOffset() * 60000;
             const curStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
             const checkDate = new Date(curStr); checkDate.setHours(0,0,0,0);
@@ -538,78 +546,65 @@
                 }
             }
             
-            // 2. Check Timetable History (Exams / OT Doubt Sessions / Replications)
+            // 2. Check Timetable History (Exams / OT Doubt Sessions)
             if (window.historyOverrides) {
                 const override = window.historyOverrides.find(o => o.date === curStr);
                 if (override && override.schedule) {
                     const classSlots = override.schedule.filter(s => norm(s.className) === norm(className) && norm(s.section) === norm(sectionName));
                     if (classSlots.length > 0) {
                         const subSlot = classSlots.find(s => norm(s.subject) === norm(subjectName));
-                        // Check if the remark explicitly says Doubt Session
                         if (!subSlot || (subSlot.remark && subSlot.remark.toLowerCase().includes("doubt session"))) {
                             return { isExcluded: true, reason: subSlot ? "Doubt Session" : "Exam Day (No Class)" };
                         }
                     } else {
-                        // Class wiped out by override
                         return { isExcluded: true, reason: "Class Not Scheduled" };
                     }
                 }
             }
 
             // 3. Check Live Master (If no override exists, maybe the normal day has a Doubt Session!)
-            if (timetableData) {
-                const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                const dayNameStr = daysArr[checkDate.getDay()];
-                const masterSlot = timetableData.find(t => 
-                    t.day === dayNameStr && 
-                    norm(t.className) === norm(className) && 
-                    norm(t.section) === norm(sectionName) && 
-                    norm(t.subject) === norm(subjectName)
-                );
-                if (masterSlot && masterSlot.remark && masterSlot.remark.toLowerCase().includes("doubt session")) {
-                    return { isExcluded: true, reason: "Doubt Session" };
-                }
+            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const masterSlot = (window.fullTimetable || []).find(t => 
+                t.day === daysArr[checkDate.getDay()] && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName)
+            );
+            if (masterSlot && masterSlot.remark && masterSlot.remark.toLowerCase().includes("doubt session")) {
+                return { isExcluded: true, reason: "Doubt Session" };
             }
-            
             return { isExcluded: false, reason: "" };
         }
-        // This function finds the correct schedule snapshot for ANY date in history
-function getScheduleSnapshotForDate(dateIso) {
-    if (!window.historyOverrides || window.historyOverrides.length === 0) return timetableData;
-    
-    // 1. Sort history so the newest snapshots are at the top
-    const sortedHistory = [...window.historyOverrides].sort((a, b) => b.date.localeCompare(a.date));
-    
-    // 2. Find the most recent snapshot that is BEFORE OR ON the date we are checking
-    const snapshot = sortedHistory.find(h => h.date <= dateIso);
-    
-    // 3. If a snapshot exists, use it. Otherwise, fallback to the current live data.
-    return (snapshot && snapshot.schedule) ? snapshot.schedule : timetableData;
-}
-    function isTimetableWorkingDay(dateObj, className, sectionName, subjectName, checkTeacherOnly = false) {
-    if (dateObj.getDay() === 0) return false; 
-    if (isDemoMode) return true; 
 
-    // 1. Get the ISO date for the current day being calculated
-    const offset = dateObj.getTimezoneOffset() * 60000;
-    const dateIsoStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
+        function isTimetableWorkingDay(dateObj, className, sectionName, subjectName, checkTeacherOnly = false) {
+            if (dateObj.getDay() === 0) return false; 
+            if (typeof isDemoMode !== 'undefined' && isDemoMode) return true; 
+            
+            const exclusion = checkDateExclusion(dateObj, className, sectionName, subjectName);
+            if (exclusion.isExcluded) return false;
+            
+            const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const dayName = days[dateObj.getDay()];
+            
+            const offset = dateObj.getTimezoneOffset() * 60000;
+            const dateIsoStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
+            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            
+            // FIX: Safely retrieve activeStaff without crashing Admin portal
+            let safeName = "";
+            try {
+                const storedStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+                if (storedStaff) safeName = (storedStaff.name && storedStaff.name !== 'undefined') ? storedStaff.name : storedStaff.email;
+            } catch(e) {}
 
-    // 2. USE THE TIME MACHINE: Fetch the schedule that was active on this specific date
-    const scheduleToCheck = getScheduleSnapshotForDate(dateIsoStr);
-    
-    // 3. Standard checks
-    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const dayName = days[dateObj.getDay()];
-    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-    const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
+            // 🕰️ TIME MACHINE: Evaluate this date using the schedule that was active ON THAT SPECIFIC DATE
+            const scheduleToCheck = getScheduleSnapshotForDate(dateIsoStr);
 
-    return scheduleToCheck.some(t => {
-        const dayMatch = t.day === dayName; 
-        const classMatch = norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName);
-        const teacherMatch = checkTeacherOnly ? (norm(t.teacherName) === norm(safeName) || norm(t.teacher) === norm(safeName)) : true;
-        return dayMatch && classMatch && teacherMatch;
-    });
-}
+            return scheduleToCheck.some(t => {
+                const dayMatch = t.day === dayName; 
+                const classMatch = norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName);
+                const teacherMatch = checkTeacherOnly ? (norm(t.teacherName) === norm(safeName) || norm(t.teacher) === norm(safeName)) : true;
+                return dayMatch && classMatch && teacherMatch;
+            });
+        }
+      
 
         // Helper function to format date strings cleanly on the administrative stream timeline
         function formatDateString(iso) {
