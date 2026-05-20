@@ -1809,6 +1809,126 @@
             });
         }
 
+       async function executeMigration() {
+            if (!window.hasEditorRights) return alert("Permission denied.");
+            
+            const className = document.getElementById('mig-source-class').value;
+            const srcSec = document.getElementById('mig-source-section').value;
+            const tgtSec = document.getElementById('mig-target-section').value;
+            const subVal = document.getElementById('mig-subject').value;
+            const fromDate = document.getElementById('mig-from-date').value;
+            const toDate = document.getElementById('mig-to-date').value;
+            
+            if (!className || !srcSec || !tgtSec || !toDate) {
+                return alert("Please fill in Source, Target, and To Date.");
+            }
+            if (srcSec === tgtSec) {
+                return alert("Source and Target sections cannot be the same.");
+            }
+            if (!confirm(`Are you sure you want to copy ticks from ${srcSec} to ${tgtSec}? This will overwrite matching topics in the target section.`)) return;
+
+            const btn = event.target;
+            const origText = btn.innerText;
+            btn.innerText = "Syncing Data..."; btn.disabled = true;
+
+            try {
+                const srcStruct = structureData.find(s => s.className === className && s.sectionName === srcSec);
+                const tgtStruct = structureData.find(s => s.className === className && s.sectionName === tgtSec);
+                
+                let subjectsToProcess = subVal === "ALL" 
+                    ? srcStruct.subjects.filter(s => !['BREAK','EVENT','EXAM','ASSEMBLY'].includes(s.toUpperCase()))
+                    : [subVal];
+
+                const batch = db.batch();
+                let hasChanges = false;
+
+                const fDate = fromDate ? new Date(fromDate) : new Date('2000-01-01');
+                const tDate = new Date(toDate);
+                tDate.setHours(23, 59, 59, 999);
+
+                for (let sub of subjectsToProcess) {
+                    const srcId = `${srcStruct.id}_${sub}`.replace(/\s+/g, '_');
+                    const tgtId = `${tgtStruct.id}_${sub}`.replace(/\s+/g, '_');
+                    
+                    const srcPlanner = planners.find(p => p.id === srcId);
+                    const tgtPlanner = planners.find(p => p.id === tgtId);
+                    
+                    if (!srcPlanner || !srcPlanner.syllabusData || srcPlanner.syllabusData.length === 0) continue;
+                    if (!tgtPlanner || !tgtPlanner.syllabusData || tgtPlanner.syllabusData.length === 0) continue; 
+                    
+                    let tgtData = [...tgtPlanner.syllabusData];
+                    let tgtActivityLogs = tgtPlanner.activityLogs ? [...tgtPlanner.activityLogs] : [];
+                    let dataModified = false;
+
+                    // 1. Copy Syllabus Topic Ticks
+                    srcPlanner.syllabusData.forEach(srcRow => {
+                        if (srcRow.isDone && srcRow.completedDate) {
+                            const cDate = new Date(srcRow.completedDate);
+                            if (cDate >= fDate && cDate <= tDate) {
+                                const tgtIndex = tgtData.findIndex(r => 
+                                    r['CHAPTER NAME'] === srcRow['CHAPTER NAME'] && 
+                                    r['SUBTOPICS'] === srcRow['SUBTOPICS'] &&
+                                    r['LECTURE NUMBER'] === srcRow['LECTURE NUMBER']
+                                );
+                                
+                                if (tgtIndex !== -1) {
+                                    tgtData[tgtIndex].isDone = true;
+                                    tgtData[tgtIndex].completedDate = srcRow.completedDate;
+                                    tgtData[tgtIndex].completedMinutes = srcRow.completedMinutes;
+                                    tgtData[tgtIndex].tickedBy = srcRow.tickedBy;
+                                    
+                                    // Carry over Chapter Start Date if it exists
+                                    if (srcRow.chapterStartDate && !tgtData[tgtIndex].chapterStartDate) {
+                                        tgtData.forEach(tr => {
+                                            if (tr['CHAPTER NAME'] === srcRow['CHAPTER NAME']) {
+                                                tr.chapterStartDate = srcRow.chapterStartDate;
+                                            }
+                                        });
+                                    }
+                                    dataModified = true;
+                                }
+                            }
+                        }
+                    });
+
+                    // 2. Copy Extra Activity Logs (Revisions)
+                    if (srcPlanner.activityLogs) {
+                        srcPlanner.activityLogs.forEach(log => {
+                            const lDate = new Date(log.date);
+                            if (lDate >= fDate && lDate <= tDate) {
+                                const exists = tgtActivityLogs.some(tl => tl.date === log.date && tl.reason === log.reason);
+                                if (!exists) {
+                                    tgtActivityLogs.push({...log});
+                                    dataModified = true;
+                                }
+                            }
+                        });
+                    }
+
+                    if (dataModified) {
+                        const tgtRef = getCollection("lesson_planners").doc(tgtId);
+                        batch.update(tgtRef, { syllabusData: tgtData, activityLogs: tgtActivityLogs });
+                        hasChanges = true;
+                    }
+                }
+
+                if (hasChanges) {
+                    await batch.commit();
+                    alert("Migration completed successfully! Target section is now synchronized.");
+                    closeModal('migrate-modal');
+                    window.location.reload(); 
+                } else {
+                    alert("No matching ticks found in the date range, or Target Section has no Syllabus Pasted yet.");
+                }
+            } catch (err) {
+                console.error(err);
+                alert("Migration Failed: " + err.message);
+            } finally {
+                btn.innerText = origText;
+                btn.disabled = false;
+            }
+        }
+
         window.onload = async () => {
             // Set the dropdown to match the active session storage
             const dropdown = document.getElementById('global-center-switch');
