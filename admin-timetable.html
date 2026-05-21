@@ -305,6 +305,24 @@
             </div>
         </div>
     </div>
+    <div id="import-modal" class="fixed inset-0 bg-slate-900/70 z-[400] hidden items-center justify-center p-4 no-print backdrop-blur-sm">
+    <div class="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl flex flex-col border-4 border-emerald-100">
+        <h3 class="font-black text-slate-900 text-xl uppercase tracking-tighter mb-1">Import Schedule</h3>
+        <p id="import-subtitle" class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4">Select date to import from</p>
+        
+        <input type="hidden" id="import-target-id">
+        <input type="hidden" id="import-target-class">
+        <input type="hidden" id="import-target-sec">
+        
+        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Source Date</label>
+        <input type="date" id="import-source-date" class="w-full p-3 bg-slate-50 border-2 border-slate-200 rounded-xl text-sm font-black text-slate-700 outline-none focus:border-emerald-500 cursor-pointer mb-6">
+        
+        <div class="flex gap-2">
+            <button onclick="document.getElementById('import-modal').classList.replace('flex', 'hidden')" class="flex-1 py-3 bg-slate-100 text-slate-600 hover:bg-slate-200 font-black rounded-xl text-[10px] uppercase transition-colors">Cancel</button>
+            <button onclick="executeImport()" class="flex-1 py-3 bg-emerald-600 text-white hover:bg-emerald-500 font-black rounded-xl text-[10px] uppercase shadow-md transition-colors">Import Now</button>
+        </div>
+    </div>
+</div>
 <div id="context-modal" class="fixed inset-0 bg-slate-900/70 z-[250] hidden items-center justify-center p-4 no-print backdrop-blur-sm">
         <div class="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl flex flex-col">
             <div class="flex justify-between items-center mb-6 border-b pb-4">
@@ -1179,7 +1197,7 @@ async function checkAndApplyFutureMaster() {
                                 <div class="text-[9px] font-bold uppercase mt-0.5 opacity-90 tracking-widest text-center px-1">SEC ${sectionName}</div>
                                 <div class="flex gap-2 mt-2">
                                     <button onclick="togglePin('${secId}')" class="text-[10px] px-1.5 py-0.5 bg-black/20 rounded hover:bg-black/40 shadow-sm" title="Pin Section">${isPinned ? '📍' : '📌'}</button>
-                                    <button onclick="openCloneModal('${className}', '${sectionName}', '${secId}')" class="text-[10px] px-1.5 py-0.5 bg-black/20 rounded hover:bg-black/40 shadow-sm" title="Clone">📑</button>
+                                    <button onclick="openCloneModal('${className}', '${sectionName}', '${secId}')" class="text-[10px] px-1.5 py-0.5 bg-black/20 rounded hover:bg-black/40 shadow-sm" title="Clone">📑</button> <button onclick="openImportModal('${className}', '${sectionName}', '${secId}')" class="text-[10px] px-1.5 py-0.5 bg-black/20 rounded hover:bg-black/40 shadow-sm" title="Import from Date">📥</button>
                                 </div>
                             </div>
 
@@ -3260,6 +3278,69 @@ async function confirmMultiDates() {
             
             alert("✅ Cloned successfully! Review the new section below.\n\nRemember to click 'Save Changes' at the top to make this permanent.");
         }
+        function openImportModal(className, sectionName, secId) {
+    document.getElementById('import-target-id').value = secId;
+    document.getElementById('import-target-class').value = className;
+    document.getElementById('import-target-sec').value = sectionName;
+    document.getElementById('import-subtitle').innerText = `Importing into: ${className} (Sec ${sectionName})`;
+    document.getElementById('import-source-date').value = "";
+    document.getElementById('import-modal').classList.replace('hidden', 'flex');
+}
+
+async function executeImport() {
+    const importDate = document.getElementById('import-source-date').value;
+    const secId = document.getElementById('import-target-id').value;
+    const className = document.getElementById('import-target-class').value;
+    const sectionName = document.getElementById('import-target-sec').value;
+
+    if (!importDate) return alert("Please select a date.");
+    if (!confirm(`Import schedule from ${importDate}? This will overwrite the current section's slots.`)) return;
+
+    const btn = event.target;
+    btn.disabled = true; btn.innerText = "Importing...";
+
+    try {
+        const historySnap = await getCollection("timetable_history").doc(importDate).get();
+        let sourceSlots = [];
+        
+        if (historySnap.exists) {
+            sourceSlots = historySnap.data().schedule || [];
+        } else {
+            const dayName = new Date(importDate).toLocaleDateString('en-US', { weekday: 'long' });
+            const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+            sourceSlots = masterSnap.docs.map(d => d.data());
+        }
+        
+        if (sourceSlots.length === 0) throw new Error("No data found for this date.");
+
+        const targetGrid = document.getElementById('grid-' + secId);
+        targetGrid.querySelectorAll('.time-block').forEach(b => b.remove());
+
+        sourceSlots.filter(s => s.className === className && s.section === sectionName).forEach(slot => {
+            const blockData = {
+                start24: slot.start24,
+                end24: slot.end24,
+                entries: [{
+                    subject: slot.subject,
+                    teacher: slot.teacher,
+                    room: slot.room,
+                    remark: slot.remark,
+                    days: [slot.day]
+                }]
+            };
+            injectSmartBlock(className, sectionName, secId, blockData);
+        });
+
+        sortSectionBlocks(secId);
+        checkGlobalClash();
+        document.getElementById('import-modal').classList.replace('flex', 'hidden');
+        alert("✅ Import successful!");
+    } catch (e) {
+        alert("Import Error: " + e.message);
+    } finally {
+        btn.disabled = false; btn.innerText = "Import Now";
+    }
+}
         init();
         // This function converts time strings like "09:00 AM" or "14:30" into total minutes
     function universalTimeToMins(timeStr) {
