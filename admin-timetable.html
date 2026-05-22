@@ -2358,9 +2358,15 @@ function peekTeacher(btn) {
                     commitAndResetIfNeeded();
                 });
                 
-                // 2. Pack New Additions
+                const todayIso = new Date().toISOString().split('T')[0];
+                const versionId = "v_master_" + Date.now(); // Creates a unique version stamp
+
+                // 2. Pack New Additions (Now tagged with Temporal Versioning)
                 newSlots.forEach(slot => {
                     const { sMins, eMins, ...cleanSlot } = slot;
+                    cleanSlot.version_id = versionId;
+                    cleanSlot.effective_from = todayIso;
+                    
                     currentBatch.set(getCollection("timetable").doc(), cleanSlot);
                     operationCount++;
                     commitAndResetIfNeeded();
@@ -2373,16 +2379,22 @@ function peekTeacher(btn) {
 
                 await Promise.all(batchPromises);
 
-              // 4. --- NEW: SAVE TODAY'S SNAPSHOT IN HISTORY (SAFELY) ---
-                const todayIso = new Date().toISOString().split('T')[0];
-                const existingTodaySnap = await getCollection("timetable_history").doc(todayIso).get();
+                // 4. --- TEMPORAL VERSION REGISTRY ---
+                // We log this version permanently. It will NEVER be overwritten.
+                await getCollection("timetable_versions").doc(versionId).set({
+                    version_id: versionId,
+                    start_date: todayIso,
+                    created_at: Date.now(),
+                    type: "LIVE_MASTER_UPDATE"
+                });
                 
-                // Only save the master snapshot if today doesn't have a specific manual override!
+                // Keep the daily history sync for backward compatibility with your planner
+                const existingTodaySnap = await getCollection("timetable_history").doc(todayIso).get();
                 let shouldTakeSnapshot = true;
                 if (existingTodaySnap.exists) {
                     const existingType = existingTodaySnap.data().type;
                     if (existingType === "EXAM_OVERRIDE" || existingType === "DAILY_OVERRIDE") {
-                        shouldTakeSnapshot = false; // Protect the manual override!
+                        shouldTakeSnapshot = false;
                     }
                 }
 
@@ -2391,7 +2403,8 @@ function peekTeacher(btn) {
                         date: todayIso,
                         lastUpdated: Date.now(),
                         schedule: newSlots,
-                        type: "LIVE_MASTER_UPDATE"
+                        type: "LIVE_MASTER_UPDATE",
+                        version_id: versionId
                     });
                 }
            // --- LIVE UPDATE TRIGGER ---
