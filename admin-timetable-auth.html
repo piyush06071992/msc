@@ -15,7 +15,7 @@
 <body class="min-h-screen pb-20">
 
     <header class="bg-[#1e1b4b] text-white p-4 sm:px-8 sm:py-5 flex items-center gap-4 shadow-lg sticky top-0 z-50">
-        <button onclick="window.location.href='admin.html'" class="p-2 bg-indigo-800 hover:bg-indigo-700 rounded-xl transition-colors">
+        <button onclick="window.location.href='admin-timetable.html'" class="p-2 bg-indigo-800 hover:bg-indigo-700 rounded-xl transition-colors">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
         </button>
         <div>
@@ -32,14 +32,23 @@
             
             <div class="space-y-5">
                 <div>
-                    <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">1. Select Department</label>
-                    <select id="dept-select" onchange="populateStaff()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-700 outline-none focus:border-indigo-500 cursor-pointer">
+                    <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">1. Select Center</label>
+                    <select id="center-select" onchange="populateDepartments()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-700 outline-none focus:border-indigo-500 cursor-pointer">
+                        <option value="">-- Choose Center --</option>
+                        <option value="GHUMARWIN">Ghumarwin</option>
+                        <option value="DHARAMSHALA">Dharamshala</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">2. Select Department</label>
+                    <select id="dept-select" disabled onchange="populateStaff()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-700 outline-none focus:border-indigo-500 cursor-pointer disabled:opacity-50">
                         <option value="">-- Choose Department --</option>
                     </select>
                 </div>
                 
                 <div>
-                    <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">2. Select Staff Member</label>
+                    <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">3. Select Staff Member</label>
                     <select id="staff-select" disabled class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-700 outline-none focus:border-indigo-500 cursor-pointer disabled:opacity-50">
                         <option value="">-- Choose Faculty --</option>
                     </select>
@@ -75,7 +84,6 @@
 
         async function fetchStaffData() {
             try {
-                // Fetch only approved staff
                 const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
                 
                 allStaff = snap.docs.map(doc => {
@@ -83,16 +91,25 @@
                     const nameKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('name'));
                     const deptKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
                     
+                    // Identify which center the teacher belongs to
+                    const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                    const teacherCenter = centerKey ? String(data.details[centerKey]).toUpperCase() : "GHUMARWIN";
+                    
                     return { 
                         id: doc.id, 
                         name: nameKey ? data.details[nameKey] : data.email, 
                         dept: deptKey ? data.details[deptKey] : 'General',
+                        center: teacherCenter,
                         canEditTimetable: data.canEditTimetable || false
                     };
                 });
 
-                populateDepartments();
                 renderAuthorizedList();
+                
+                // If a center is currently selected when data refreshes, repopulate the cascades
+                if (document.getElementById('center-select').value) {
+                    populateDepartments();
+                }
             } catch (e) {
                 console.error("Error fetching staff:", e);
                 alert("Failed to load staff data.");
@@ -100,37 +117,55 @@
         }
 
         function populateDepartments() {
+            const centerVal = document.getElementById('center-select').value;
             const deptSelect = document.getElementById('dept-select');
+            const staffSelect = document.getElementById('staff-select');
             
-            // Extract unique departments, handling potential arrays if teachers have multiple subjects
+            // Reset dropdowns
+            deptSelect.innerHTML = '<option value="">-- Choose Department --</option>';
+            staffSelect.innerHTML = '<option value="">-- Choose Faculty --</option>';
+            staffSelect.disabled = true;
+
+            if (!centerVal) {
+                deptSelect.disabled = true;
+                return;
+            }
+            deptSelect.disabled = false;
+            
             let departments = new Set();
             allStaff.forEach(s => {
-                if (Array.isArray(s.dept)) s.dept.forEach(d => departments.add(d.trim()));
-                else departments.add(s.dept.trim());
+                // Only pull departments for teachers inside the selected center
+                if (s.center.includes(centerVal)) {
+                    if (Array.isArray(s.dept)) s.dept.forEach(d => departments.add(d.trim()));
+                    else departments.add(s.dept.trim());
+                }
             });
 
-            deptSelect.innerHTML = '<option value="">-- Choose Department --</option>';
             [...departments].sort().forEach(dept => {
                 deptSelect.innerHTML += `<option value="${dept}">${dept}</option>`;
             });
         }
 
         function populateStaff() {
+            const centerVal = document.getElementById('center-select').value;
             const deptVal = document.getElementById('dept-select').value;
             const staffSelect = document.getElementById('staff-select');
+            
             staffSelect.innerHTML = '<option value="">-- Choose Faculty --</option>';
             
-            if(!deptVal) { staffSelect.disabled = true; return; }
+            if(!deptVal || !centerVal) { staffSelect.disabled = true; return; }
             staffSelect.disabled = false;
 
-            // Filter staff by department AND who don't already have permission
             const availableStaff = allStaff.filter(s => {
+                const matchesCenter = s.center.includes(centerVal);
                 const matchesDept = Array.isArray(s.dept) ? s.dept.includes(deptVal) : s.dept === deptVal;
-                return matchesDept && !s.canEditTimetable;
+                // Check if they already have permission for this exact center
+                const hasPermission = s.canEditTimetable === centerVal || s.canEditTimetable === true; 
+                return matchesCenter && matchesDept && !hasPermission;
             }).sort((a, b) => a.name.localeCompare(b.name));
 
             if(availableStaff.length === 0) {
-                staffSelect.innerHTML = '<option value="">No eligible staff found in this dept</option>';
+                staffSelect.innerHTML = '<option value="">No eligible staff found</option>';
                 staffSelect.disabled = true;
                 return;
             }
@@ -140,20 +175,24 @@
             });
         }
 
-       async function grantAccess() {
+        async function grantAccess() {
+            const centerVal = document.getElementById('center-select').value;
             const staffId = document.getElementById('staff-select').value;
+            if(!centerVal) return alert("Please select a center first.");
             if(!staffId) return alert("Please select a staff member first.");
 
             try {
-                // We save the center name instead of 'true'
+                // Save the actual branch name (e.g. "DHARAMSHALA") so the system knows what they control
                 await db.collection("staff_applications").doc(staffId).update({
-                    canEditTimetable: activeCenter 
+                    canEditTimetable: centerVal
                 });
                 
-                alert("Authorization granted successfully!");
+                alert(`Authorization granted for ${centerVal}!`);
                 
                 // Reset dropdowns and refresh
-                document.getElementById('dept-select').value = "";
+                document.getElementById('center-select').value = "";
+                document.getElementById('dept-select').innerHTML = '<option value="">-- Choose Department --</option>';
+                document.getElementById('dept-select').disabled = true;
                 document.getElementById('staff-select').innerHTML = '<option value="">-- Choose Faculty --</option>';
                 document.getElementById('staff-select').disabled = true;
                 
@@ -187,17 +226,23 @@
                 return;
             }
 
-            listArea.innerHTML = authorizedStaff.map(s => `
+            // We now show a little badge next to their name showing WHICH branch they control
+            listArea.innerHTML = authorizedStaff.map(s => {
+                const branchText = (typeof s.canEditTimetable === 'string') ? s.canEditTimetable : 'Global';
+                return `
                 <div class="bg-white border border-slate-200 p-4 rounded-xl flex justify-between items-center shadow-sm">
                     <div>
-                        <h3 class="font-black text-slate-800 text-sm uppercase tracking-tighter">${s.name}</h3>
-                        <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">${Array.isArray(s.dept) ? s.dept.join(', ') : s.dept}</p>
+                        <div class="flex items-center gap-2">
+                            <h3 class="font-black text-slate-800 text-sm uppercase tracking-tighter">${s.name}</h3>
+                            <span class="bg-indigo-100 text-indigo-700 text-[8px] px-1.5 py-0.5 rounded font-black uppercase">${branchText}</span>
+                        </div>
+                        <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">${Array.isArray(s.dept) ? s.dept.join(', ') : s.dept}</p>
                     </div>
                     <button onclick="revokeAccess('${s.id}', '${s.name}')" class="bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white px-4 py-2 rounded-lg font-black text-[9px] uppercase tracking-widest transition-colors shadow-sm border border-rose-100">
                         Revoke
                     </button>
                 </div>
-            `).join('');
+            `}).join('');
         }
     </script>
 </body>
