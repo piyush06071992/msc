@@ -127,7 +127,7 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-       // --- MULTI-CENTER DYNAMIC DB ROUTER (TEACHER EDITION) ---
+        // --- MULTI-CENTER DYNAMIC DB ROUTER (TEACHER EDITION) ---
         const storedStaff = JSON.parse(localStorage.getItem('minervaActiveStaff')) || {};
         let activeCenter = "GHUMARWIN"; // Will automatically update based on profile
 
@@ -249,7 +249,11 @@
                 }
 
                 allTimetableData = dayData;
-                myTimetableData = allTimetableData.filter(t => t.teacher === safeName || t.teacherName === safeName);
+                const nameMatch = safeName.toLowerCase();
+                myTimetableData = allTimetableData.filter(t => 
+                    (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) || 
+                    (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
+                );
                 
                 renderDashboard();
             } catch(e) {
@@ -275,7 +279,11 @@
             btn.innerText = "⏳...";
 
             await loadAllData();
-            myTimetableData = allTimetableData.filter(t => t.teacher === safeName || t.teacherName === safeName);
+            const nameMatch = safeName.toLowerCase();
+            myTimetableData = allTimetableData.filter(t => 
+                (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) || 
+                (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
+            );
             renderDashboard();
             
             btn.classList.add('hidden');
@@ -286,21 +294,25 @@
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
             if (!activeStaff) return window.location.replace('staff-login.html');
             
-            safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name : activeStaff.email;
+            // Clean up the name to prevent trailing space bugs
+            safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name.trim() : activeStaff.email.trim();
             const safeDept = (activeStaff.dept && activeStaff.dept !== "undefined") ? activeStaff.dept : "General";
             
             document.getElementById('teacher-badge').innerText = `ID: ${safeName} | DEPT: ${safeDept}`;
             document.getElementById('today-badge').innerText = `TODAY: ${TODAY_FULL.toUpperCase()}`;
 
-         try {
+            try {
                 const staffDoc = await db.collection("staff_applications").doc(activeStaff.uid).get();
                 if (staffDoc.exists) {
                     const data = staffDoc.data();
                     
-                    // 1. Dynamically find the teacher's true branch from their profile!
+                    // 1. Bulletproof Branch Detection
                     const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
                     if (centerKey) {
-                        activeCenter = String(data.details[centerKey]).toUpperCase();
+                        const rawCenter = String(data.details[centerKey]).toUpperCase();
+                        if (rawCenter.includes('DHARAMSHALA')) activeCenter = 'DHARAMSHALA';
+                        else if (rawCenter.includes('GHUMARWIN')) activeCenter = 'GHUMARWIN';
+                        else activeCenter = rawCenter.trim();
                     }
 
                     // 2. Setup Edit Master button if authorized
@@ -313,12 +325,17 @@
             } catch (err) { console.error("Auth & Center check failed:", err); }
 
             await fetchStructure(); 
-            await fetchTeachers(); // Fetch staff list
+            await fetchTeachers(); // Fetch branch-specific staff list
             
             // First load everything into memory to detect cross-teacher clashes
             await loadAllData(); 
-            // Extract my data from the all data
-            myTimetableData = allTimetableData.filter(t => t.teacher === safeName || t.teacherName === safeName);
+            
+            // Extract my data using bulletproof matching
+            const nameMatch = safeName.toLowerCase();
+            myTimetableData = allTimetableData.filter(t => 
+                (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) || 
+                (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
+            );
             
             populateFilterDropdowns(); // Populate the dropdowns
             renderDashboard();
@@ -326,19 +343,34 @@
 
         // --- FILTER ENGINE ---
         async function fetchTeachers() {
-            const cached = localStorage.getItem('minerva_teachers');
+            // Include activeCenter in the cache key so it doesn't cross-contaminate
+            const cacheKey = `minerva_teachers_${activeCenter}`;
+            const cached = localStorage.getItem(cacheKey);
             if (cached) {
                 allTeachers = JSON.parse(cached);
                 return;
             }
-            const snap = await getCollection("staff_applications").where("status", "==", "approved").get();
-            allTeachers = snap.docs.map(doc => {
+            const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
+            let tempTeachers = [];
+            
+            snap.docs.forEach(doc => {
                 const data = doc.data();
-                const nameKey = Object.keys(data.details).find(k => k.toLowerCase().includes('name'));
-                const deptKey = Object.keys(data.details).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                return { name: nameKey ? data.details[nameKey] : data.email, email: data.email, dept: deptKey ? data.details[deptKey] : 'General' };
+                // Filter teachers strictly by the branch we are viewing
+                const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                const teacherCenter = centerKey ? String(data.details[centerKey]).toUpperCase() : "GHUMARWIN";
+                
+                if (teacherCenter.includes(activeCenter)) {
+                    const nameKey = Object.keys(data.details).find(k => k.toLowerCase().includes('name'));
+                    const deptKey = Object.keys(data.details).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                    tempTeachers.push({ 
+                        name: nameKey ? data.details[nameKey] : data.email, 
+                        email: data.email, 
+                        dept: deptKey ? data.details[deptKey] : 'General' 
+                    });
+                }
             });
-            localStorage.setItem('minerva_teachers', JSON.stringify(allTeachers));
+            allTeachers = tempTeachers;
+            localStorage.setItem(cacheKey, JSON.stringify(allTeachers));
         }
 
         function populateFilterDropdowns() {
@@ -377,23 +409,27 @@
         }
 
         async function fetchStructure() {
-            const cached = localStorage.getItem('minerva_struct');
+            const cacheKey = `minerva_struct_${activeCenter}`;
+            const cached = localStorage.getItem(cacheKey);
             if (cached) {
                 structureData = JSON.parse(cached);
             } else {
                 const snap = await getCollection("institute_structure").orderBy("className").get();
                 structureData = snap.docs.map(doc => doc.data());
-                localStorage.setItem('minerva_struct', JSON.stringify(structureData));
+                localStorage.setItem(cacheKey, JSON.stringify(structureData));
             }
         }
 
        let holidaysData = [];
 
         async function loadAllData() {
-            // Use today's date in the cache key so it automatically resets tomorrow
-            const todayIso = new Date().toISOString().split('T')[0];
-            const cacheKey = `minerva_timetable_cache_${todayIso}`; 
-            const timeKey = `minerva_tt_last_update`;
+            // 1. Guarantee Local Time Zone for the Date (Fixes night-time bugs in IST)
+            const d = new Date();
+            const todayIso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+            
+            // 2. Branch-Specific Cache Keys (Prevents cross-branch ghost data!)
+            const cacheKey = `minerva_timetable_cache_${activeCenter}_${todayIso}`; 
+            const timeKey = `minerva_tt_last_update_${activeCenter}`;
             
             try {
                 // Fetch holidays every time to ensure live overlay accuracy
@@ -410,6 +446,13 @@
                 // If we have cache AND the Admin hasn't saved a newer version... use memory!
                 if (cached && parseInt(localTime) >= serverTime) {
                     allTimetableData = JSON.parse(cached);
+                    
+                    // Restore UI Badge if cache contains an override
+                    const isExamCached = allTimetableData.some(t => t.remark === "Doubt Session" || t.subject === "EXAM" || t.remark === "Rescaled Class");
+                    if (isExamCached && document.getElementById('today-badge')) {
+                        document.getElementById('today-badge').className = "bg-rose-100 text-rose-800 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-widest shadow-sm border border-rose-200 animate-pulse";
+                        document.getElementById('today-badge').innerText = `🚨 EXAM DAY: ${TODAY_FULL.toUpperCase()}`;
+                    }
                     return;
                 }
 
