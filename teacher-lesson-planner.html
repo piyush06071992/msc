@@ -123,9 +123,9 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        // --- MULTI-CENTER DYNAMIC DB ROUTER (TEACHER EDITION) ---
+      // --- MULTI-CENTER DYNAMIC DB ROUTER (TEACHER EDITION) ---
         const storedStaff = JSON.parse(localStorage.getItem('minervaActiveStaff')) || {};
-        const activeCenter = storedStaff.center || "GHUMARWIN";
+        let activeCenter = "GHUMARWIN"; // Will automatically update based on profile
 
       function getCollection(name) {
             const globalCollections = ['configs', 'staff_applications', 'system_metadata'];
@@ -143,43 +143,54 @@
         let globalAutoLock = true;
         let enableDailyBlock = false; 
 
-       window.onload = async () => {
+window.onload = async () => {
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
             if (!activeStaff) return window.location.replace('staff-login.html');
 
-            // --- SAFETY UI: Theme & Watermark ---
+            const safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name : activeStaff.email;
+            document.getElementById('teacher-badge').innerText = `ID: ${safeName}`;
+
+            const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+            
+            try {
+                const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                if (!staffSnap.empty) {
+                    const data = staffSnap.docs[0].data();
+                    
+                    // 1. Bulletproof Branch Detection
+                    const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                    if (centerKey) {
+                        const rawCenter = String(data.details[centerKey]).toUpperCase();
+                        if (rawCenter.includes('DHARAMSHALA')) activeCenter = 'DHARAMSHALA';
+                        else if (rawCenter.includes('GHUMARWIN')) activeCenter = 'GHUMARWIN';
+                        else activeCenter = rawCenter.trim();
+                    }
+
+                    if (isAdmin) {
+                        document.getElementById('auth-btn')?.classList.remove('hidden');
+                        document.getElementById('admin-hub-btn')?.classList.remove('hidden');
+                    } else {
+                        // Verify string-based branch permissions OR legacy global true
+                        const canEdit = data.canEditLessonPlanner === true || data.canEditLessonPlanner === activeCenter;
+                        const canView = data.canViewLessonPlannerSummary === true || data.canViewLessonPlannerSummary === activeCenter;
+                        if (canEdit || canView) {
+                            document.getElementById('admin-hub-btn')?.classList.remove('hidden');
+                        }
+                    }
+                }
+            } catch (e) { console.error("Permission check failed:", e); }
+
+            // --- SAFETY UI: Theme & Watermark (Loaded AFTER Center Detection) ---
             if (activeCenter === "DHARAMSHALA") {
                 document.querySelector('header').classList.replace('bg-[#1e1b4b]', 'bg-purple-950');
                 document.querySelector('header').classList.replace('border-indigo-900', 'border-purple-800');
                 document.body.style.backgroundColor = '#faf5ff'; // Light Purple Background
             }
-            
-            // Add Background Watermark
             const watermark = document.createElement('div');
             watermark.innerHTML = activeCenter;
             watermark.className = "fixed inset-0 pointer-events-none flex items-center justify-center text-[10vw] font-black opacity-[0.03] text-slate-900 z-[1] tracking-widest uppercase overflow-hidden whitespace-nowrap";
             if(activeCenter === "DHARAMSHALA") watermark.classList.replace('text-slate-900', 'text-purple-900');
             document.body.appendChild(watermark);
-            // ------------------------------------
-            
-            const safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name : activeStaff.email;
-            document.getElementById('teacher-badge').innerText = `ID: ${safeName}`;
-
-            const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
-            if (isAdmin) {
-                document.getElementById('auth-btn')?.classList.remove('hidden');
-                document.getElementById('admin-hub-btn')?.classList.remove('hidden');
-            } else {
-                try {
-                    const staffSnap = await getCollection("staff_applications").where("email", "==", activeStaff.email).get();
-                    if (!staffSnap.empty) {
-                        const data = staffSnap.docs[0].data();
-                        if (data.canEditLessonPlanner || data.canViewLessonPlannerSummary) {
-                            document.getElementById('admin-hub-btn')?.classList.remove('hidden');
-                        }
-                    }
-                } catch (e) { console.error("Permission check failed:", e); }
-            }
 
             await fetchTodayData();
         };
