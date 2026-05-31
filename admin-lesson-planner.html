@@ -1937,53 +1937,90 @@ async function fetchGlobalUnlockRequests() {
             }
         }
 
-        window.onload = async () => {
-            // Set the dropdown to match the active session storage
-            const dropdown = document.getElementById('global-center-switch');
-            if (dropdown) dropdown.value = activeCenter;
+   window.onload = async () => {
+            const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+            window.hasEditorRights = isAdmin; 
+            window.hasUnlockRights = isAdmin; 
+
+            if (!isAdmin) {
+                const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+                if (!activeStaff) return window.location.replace('staff-login.html');
+                
+                try {
+                    const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                    if (staffSnap.empty) throw new Error("No profile");
+                    
+                    const data = staffSnap.docs[0].data();
+                    
+                    // Identify their highest permitted branch across all 3 rights
+                    let authBranch = false;
+                    if (typeof data.canEditLessonPlanner === 'string') authBranch = data.canEditLessonPlanner;
+                    else if (typeof data.canViewLessonPlannerSummary === 'string') authBranch = data.canViewLessonPlannerSummary;
+                    else if (typeof data.canUnlockLessonPlanner === 'string') authBranch = data.canUnlockLessonPlanner;
+                    else if (data.canEditLessonPlanner === true || data.canViewLessonPlannerSummary === true || data.canUnlockLessonPlanner === true) authBranch = true; // Legacy Global
+                    
+                    if (!authBranch) {
+                        alert("Unauthorized Access. Redirecting...");
+                        return window.location.replace('teacher-portal.html');
+                    }
+
+                    // Auto-Router: If they are restricted to a specific branch and it's NOT the one loaded
+                    if (authBranch !== true && authBranch !== activeCenter) {
+                        sessionStorage.setItem('minervaAdminCenter', authBranch);
+                        window.location.reload(); 
+                        return; // Stop execution while it reloads
+                    }
+
+                    window.hasEditorRights = data.canEditLessonPlanner === true || data.canEditLessonPlanner === activeCenter;
+                    window.hasUnlockRights = data.canUnlockLessonPlanner === true || data.canUnlockLessonPlanner === activeCenter;
+                    const canView = data.canViewLessonPlannerSummary === true || data.canViewLessonPlannerSummary === activeCenter;
+
+                    if (!window.hasEditorRights && !canView) return window.location.replace('teacher-portal.html');
+
+                    // Lock the dropdown so they can't change it manually
+                    const dropdown = document.getElementById('global-center-switch');
+                    if (dropdown && authBranch !== true) {
+                        dropdown.disabled = true;
+                        dropdown.className = "text-[10px] font-black text-slate-400 bg-slate-100 border border-slate-200 outline-none rounded px-2 py-0.5 mt-1 uppercase tracking-widest cursor-not-allowed";
+                        dropdown.title = "Restricted to your authorized branch";
+                    }
+
+                } catch(e) { 
+                    console.error(e);
+                    return window.location.replace('teacher-portal.html');
+                }
+            } else {
+                const authBtn = document.getElementById('auth-btn');
+                if (authBtn) authBtn.classList.remove('hidden');
+                
+                const dropdown = document.getElementById('global-center-switch');
+                if (dropdown) dropdown.value = activeCenter;
+            }
 
             // --- SAFETY UI: Theme & Watermark ---
             if (activeCenter === "DHARAMSHALA") {
                 document.querySelector('header').classList.replace('bg-white', 'bg-purple-50');
                 document.querySelector('header').classList.replace('border-b', 'border-purple-200');
-                document.body.style.backgroundColor = '#faf5ff'; // Light Purple Background
+                document.body.style.backgroundColor = '#faf5ff'; 
             }
-            // Add Background Watermark
             const watermark = document.createElement('div');
             watermark.innerHTML = activeCenter;
             watermark.className = "fixed inset-0 pointer-events-none flex items-center justify-center text-[10vw] font-black opacity-5 text-slate-900 z-[1] tracking-widest uppercase overflow-hidden whitespace-nowrap";
             if(activeCenter === "DHARAMSHALA") watermark.classList.replace('text-slate-900', 'text-purple-900');
             document.body.appendChild(watermark);
 
+            // Smart Back Button
             const backBtn = document.querySelector('header button[onclick="handleGlobalBack()"]');
             if(backBtn) {
                 backBtn.onclick = () => {
-                    if (!document.getElementById('menu-view').classList.contains('hidden')) { window.history.back(); } 
+                    if (!document.getElementById('menu-view').classList.contains('hidden')) { 
+                        if (isAdmin) window.location.href = 'admin.html';
+                        else window.location.href = 'teacher-portal.html';
+                    } 
                     else { showMenuView(); }
                 };
             }
 
-            const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
-            window.hasEditorRights = isAdmin; 
-            window.hasUnlockRights = isAdmin; 
-
-            if (isAdmin) {
-                const authBtn = document.getElementById('auth-btn');
-                if (authBtn) authBtn.classList.remove('hidden');
-            } else {
-                const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
-                if (activeStaff) {
-                    try {
-                        const staffSnap = await getCollection("staff_applications").where("email", "==", activeStaff.email).get();
-                        if (!staffSnap.empty) {
-                            const data = staffSnap.docs[0].data();
-                            window.hasEditorRights = data.canEditLessonPlanner === true;
-                            window.hasUnlockRights = data.canUnlockLessonPlanner === true;
-                            if (!data.canEditLessonPlanner && !data.canViewLessonPlannerSummary) window.location.replace('teacher-portal.html');
-                        } else { window.location.replace('teacher-portal.html'); }
-                    } catch(e) { console.error(e); }
-                } else { window.location.replace('staff-login.html'); }
-            }
             await loadAllData(); 
             showMenuView(); 
         };
