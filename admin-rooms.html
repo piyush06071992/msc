@@ -535,9 +535,10 @@
         }
 
         // --- DELEGATION ENGINE (ADMIN ONLY) ---
+       // --- DELEGATION ENGINE (ADMIN ONLY) ---
         async function loadStaffData() {
             try {
-                const snap = await getCollection("staff_applications").where("status", "==", "approved").get();
+                const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
                 staffData = snap.docs.map(doc => {
                     const d = doc.data();
                     const det = d.details || {};
@@ -546,51 +547,103 @@
                     const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('dept'));
                     let rawDept = deptKey ? det[deptKey] : 'General';
                     if (rawDept === undefined || rawDept === null) rawDept = 'General';
+
+                    // Extract center
+                    const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
+                    const teacherCenter = centerKey ? String(det[centerKey]).toUpperCase() : "GHUMARWIN";
                     
-                    return { id: doc.id, email: d.email, name: n, rawDept: rawDept.toString(), canManageRooms: d.canManageRooms || false };
+                    return { 
+                        id: doc.id, 
+                        email: d.email, 
+                        name: n, 
+                        rawDept: rawDept.toString(), 
+                        center: teacherCenter,
+                        canManageRooms: d.canManageRooms || false 
+                    };
                 });
+                
+                if (document.getElementById('auth-center') && document.getElementById('auth-center').value) {
+                    populateAuthDepartments();
+                }
+                renderAuthList();
             } catch (e) { console.error("Error loading staff data"); }
         }
 
         function openAuthModal() {
             document.getElementById('auth-modal').classList.replace('hidden', 'flex');
-            
-            let depts = new Set();
-            staffData.forEach(s => {
-                s.rawDept.split(',').forEach(item => {
-                    const clean = item.trim();
-                    if(clean && clean !== 'General') depts.add(clean);
-                });
-            });
-            const uniqueDepts = ['General', ...Array.from(depts).sort()];
-
-            document.getElementById('auth-dept').innerHTML = `<option value="">-- Choose Department --</option>` + uniqueDepts.map(d => `<option value="${d}">${d}</option>`).join('');
-            document.getElementById('auth-staff').innerHTML = `<option value="">-- Select Dept First --</option>`;
-            document.getElementById('auth-staff').disabled = true;
-            renderAuthList();
         }
 
         function closeAuthModal() { document.getElementById('auth-modal').classList.replace('flex', 'hidden'); }
 
-        function populateAuthStaff() {
-            const dept = document.getElementById('auth-dept').value;
+        function populateAuthDepartments() {
+            const centerVal = document.getElementById('auth-center').value;
+            const deptSelect = document.getElementById('auth-dept');
             const staffSelect = document.getElementById('auth-staff');
-            if (!dept) { staffSelect.innerHTML = `<option value="">-- Select Dept First --</option>`; staffSelect.disabled = true; return; }
             
-            const staffInDept = staffData.filter(s => s.rawDept.includes(dept)).sort((a,b) => a.name.localeCompare(b.name));
-            staffSelect.innerHTML = `<option value="">-- Select Faculty --</option>` + staffInDept.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+            deptSelect.innerHTML = '<option value="">-- Choose Department --</option>';
+            staffSelect.innerHTML = '<option value="">-- Choose Faculty --</option>';
+            staffSelect.disabled = true;
+
+            if (!centerVal) {
+                deptSelect.disabled = true;
+                return;
+            }
+            deptSelect.disabled = false;
+
+            let depts = new Set();
+            staffData.forEach(s => {
+                if (s.center.includes(centerVal)) {
+                    s.rawDept.split(',').forEach(item => {
+                        const clean = item.trim();
+                        if(clean && clean !== 'General') depts.add(clean);
+                    });
+                }
+            });
+
+            deptSelect.innerHTML += '<option value="General">General</option>';
+            [...depts].sort().forEach(d => {
+                deptSelect.innerHTML += `<option value="${d}">${d}</option>`;
+            });
+        }
+
+        function populateAuthStaff() {
+            const centerVal = document.getElementById('auth-center').value;
+            const deptVal = document.getElementById('auth-dept').value;
+            const staffSelect = document.getElementById('auth-staff');
+            
+            staffSelect.innerHTML = '<option value="">-- Choose Faculty --</option>';
+            
+            if(!deptVal || !centerVal) { staffSelect.disabled = true; return; }
             staffSelect.disabled = false;
+
+            staffData.filter(s => s.center.includes(centerVal) && s.rawDept.includes(deptVal))
+                     .sort((a,b) => a.name.localeCompare(b.name))
+                     .forEach(s => {
+                         staffSelect.innerHTML += `<option value="${s.id}">${s.name}</option>`;
+                     });
         }
 
         async function grantRoomAuth() {
+            const centerVal = document.getElementById('auth-center').value;
             const staffId = document.getElementById('auth-staff').value;
+            
+            if(!centerVal) return alert("Select a center.");
             if(!staffId) return alert("Select a staff member.");
+            
             try {
-                await getCollection("staff_applications").doc(staffId).update({ canManageRooms: true });
+                // Save the branch string instead of true!
+                await getCollection("staff_applications").doc(staffId).update({ canManageRooms: centerVal });
                 const staff = staffData.find(s => s.id === staffId);
-                if(staff) staff.canManageRooms = true;
+                if(staff) staff.canManageRooms = centerVal;
                 renderAuthList();
-                alert("Room Management Rights Granted!");
+                alert("Room Management Rights Granted for " + centerVal + "!");
+                
+                // Reset dropdowns
+                document.getElementById('auth-center').value = "";
+                document.getElementById('auth-dept').innerHTML = '<option value="">-- Choose Department --</option>';
+                document.getElementById('auth-dept').disabled = true;
+                document.getElementById('auth-staff').innerHTML = '<option value="">-- Choose Faculty --</option>';
+                document.getElementById('auth-staff').disabled = true;
             } catch(e) { alert("Error granting rights."); }
         }
 
@@ -613,17 +666,21 @@
                 return;
             }
 
-            listArea.innerHTML = authorized.map(s => `
+            listArea.innerHTML = authorized.map(s => {
+                const branchText = (typeof s.canManageRooms === 'string') ? s.canManageRooms : 'GLOBAL';
+                return `
                 <div class="bg-slate-50 border border-slate-200 p-4 rounded-xl flex justify-between items-center shadow-sm">
                     <div>
-                        <h3 class="font-black text-slate-800 text-sm uppercase tracking-tighter">${s.name}</h3>
-                        <span class="text-[8px] font-black bg-sky-100 text-sky-600 px-2 py-0.5 rounded-md uppercase tracking-widest mt-1 inline-block">Infrastructure Admin</span>
+                        <div class="flex items-center gap-2">
+                            <h3 class="font-black text-slate-800 text-sm uppercase tracking-tighter">${s.name}</h3>
+                            <span class="bg-sky-100 text-sky-700 text-[8px] px-1.5 py-0.5 rounded font-black uppercase">${branchText}</span>
+                        </div>
+                        <span class="text-[8px] font-black bg-white text-slate-500 border border-slate-200 px-2 py-0.5 rounded-md uppercase tracking-widest mt-1.5 inline-block">Infrastructure Admin</span>
                     </div>
                     <button onclick="revokeRoomAuth('${s.id}')" class="bg-rose-100 text-rose-700 hover:bg-rose-600 hover:text-white px-4 py-2 rounded-lg font-black text-[9px] uppercase tracking-widest transition-colors shadow-sm">Revoke</button>
                 </div>
-            `).join('');
+            `}).join('');
         }
-
     </script>
 </body>
 </html>
