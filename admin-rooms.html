@@ -222,46 +222,79 @@
         let isUserAdmin = false;
 
         // --- INITIALIZATION & AUTH ---
-       window.onload = async () => {
-            // Set the dropdown to match the active session storage
-            const dropdown = document.getElementById('global-center-switch');
-            if (dropdown) dropdown.value = activeCenter;
+      window.onload = async () => {
+            isUserAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+
+            if (!isUserAdmin) {
+                const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+                if (!activeStaff) return window.location.replace('staff-login.html');
+                
+                try {
+                    const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                    if (staffSnap.empty) throw new Error("No profile");
+                    
+                    const data = staffSnap.docs[0].data();
+                    
+                    // 1. Identify True Branch from Profile
+                    let trueBranch = "GHUMARWIN";
+                    const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                    if (centerKey) {
+                        const rawCenter = String(data.details[centerKey]).toUpperCase();
+                        if (rawCenter.includes('DHARAMSHALA')) trueBranch = 'DHARAMSHALA';
+                        else if (rawCenter.includes('GHUMARWIN')) trueBranch = 'GHUMARWIN';
+                        else trueBranch = rawCenter.trim();
+                    }
+
+                    // 2. Identify Authorization String
+                    let authBranch = false;
+                    if (typeof data.canManageRooms === 'string') authBranch = data.canManageRooms;
+                    else if (data.canManageRooms === true) authBranch = trueBranch; // Legacy fallback
+                    
+                    if (!authBranch) {
+                        alert("Unauthorized Access. Redirecting...");
+                        return window.location.replace('teacher-portal.html');
+                    }
+
+                    // 3. Auto-Router (Lock them into their branch)
+                    if (authBranch !== activeCenter) {
+                        sessionStorage.setItem('minervaAdminCenter', authBranch);
+                        window.location.reload(); 
+                        return; 
+                    }
+
+                    // 4. Lock Dropdown UI
+                    const dropdown = document.getElementById('global-center-switch');
+                    if (dropdown) {
+                        dropdown.value = activeCenter; 
+                        dropdown.disabled = true;
+                        dropdown.className = "text-[10px] font-black text-slate-400 bg-slate-100 border border-slate-200 outline-none rounded px-2 py-0.5 mt-1 uppercase tracking-widest cursor-not-allowed";
+                        dropdown.title = "Restricted to your authorized branch";
+                    }
+
+                    await fetchRooms();
+
+                } catch(e) { 
+                    console.error(e);
+                    return window.location.replace('teacher-portal.html');
+                }
+            } else {
+                document.getElementById('auth-btn').classList.remove('hidden');
+                const dropdown = document.getElementById('global-center-switch');
+                if (dropdown) dropdown.value = activeCenter;
+                await loadStaffData();
+                await fetchRooms();
+            }
 
             // --- SAFETY UI: Theme & Watermark ---
             if (activeCenter === "DHARAMSHALA") {
                 document.querySelector('header').classList.replace('bg-[#0f172a]', 'bg-purple-950');
                 document.body.style.backgroundColor = '#faf5ff';
             }
-            // Add Background Watermark
             const watermark = document.createElement('div');
             watermark.innerHTML = activeCenter;
             watermark.className = "fixed inset-0 pointer-events-none flex items-center justify-center text-[10vw] font-black opacity-[0.03] text-slate-900 z-[1] tracking-widest uppercase overflow-hidden whitespace-nowrap";
             if(activeCenter === "DHARAMSHALA") watermark.classList.replace('text-slate-900', 'text-purple-900');
             document.body.appendChild(watermark);
-            // ------------------------------------
-
-            isUserAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
-            
-            if (isUserAdmin) {
-                document.getElementById('auth-btn').classList.remove('hidden');
-                await loadStaffData();
-                await fetchRooms();
-            } else {
-                const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
-                if(activeStaff) {
-                    try {
-                        const snap = await getCollection("staff_applications").where("email", "==", activeStaff.email).get();
-                        if (!snap.empty && snap.docs[0].data().canManageRooms === true) {
-                            await fetchRooms();
-                        } else {
-                            alert("You are not authorized to map infrastructure.");
-                            window.location.replace('teacher-portal.html');
-                        }
-                    } catch(e) { window.location.replace('teacher-portal.html'); }
-                } else {
-                    window.location.replace('staff-login.html');
-                }
-            }
         };
 
         function handleBack() {
