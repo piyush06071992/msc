@@ -716,22 +716,30 @@ function getScheduleSnapshotForDate(dateIso) {
                                 const tDays = parseInt(chRows[0]?.['Target days for chapter']) || 0;
                                 totalTargetDaysAll += tDays;
 
-                                if (chStart) {
-                                    hasCompletedChapters = true; 
-                                    let effectiveEnd = chEnd ? new Date(chEnd) : new Date();
-                                    effectiveEnd.setHours(23,59,59,999);
-                                    chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
+                                    if (chStart) {
+                                        hasCompletedChapters = true; 
+                                        let effectiveEnd = chEnd ? new Date(chEnd) : new Date();
+                                        effectiveEnd.setHours(23,59,59,999);
+                                        chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
 
-                                    let actDays = 0;
-                                    let cur = new Date(chStart); 
-                                    while(cur <= effectiveEnd) {
-                                        const exclusion = checkDateExclusion(cur, st.className, st.sectionName, sub);
-                                        if (!exclusion.isExcluded) {
-                                            if(isTimetableWorkingDay(cur, st.className, st.sectionName, sub)) actDays++;
+                                        let actDays = 0;
+                                        let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
+                                        let cur = new Date(chStart); 
+                                        while(cur <= effectiveEnd) {
+                                            const offset = cur.getTimezoneOffset() * 60000;
+                                            const curStr = (new Date(cur.getTime() - offset)).toISOString().split('T')[0];
+                                            
+                                            if (validTickDates.has(curStr)) {
+                                                actDays++; 
+                                            } else {
+                                                const exclusion = checkDateExclusion(cur, st.className, st.sectionName, sub);
+                                                if (!exclusion.isExcluded) {
+                                                    if(isTimetableWorkingDay(cur, st.className, st.sectionName, sub)) actDays++;
+                                                }
+                                            }
+                                            cur.setDate(cur.getDate() + 1);
                                         }
-                                        cur.setDate(cur.getDate() + 1);
-                                    }
-                                    totalActualDaysAll += actDays;
+                                        totalActualDaysAll += actDays;
 
                                     if (isF) { 
                                         chDone++;
@@ -990,18 +998,27 @@ function getScheduleSnapshotForDate(dateIso) {
                     effectiveEnd.setHours(23,59,59,999);
                     chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
 
+                    let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
                     let cur = new Date(chStart); let finish = new Date(effectiveEnd);
+                    
                     while(cur <= finish) {
-                        const exclusion = checkDateExclusion(cur, cls, sec, sub);
-                        if (exclusion.isExcluded) {
-                            excludedHolidaysCount++;
+                        const offset = cur.getTimezoneOffset() * 60000;
+                        const curStr = (new Date(cur.getTime() - offset)).toISOString().split('T')[0];
+                        
+                        if (validTickDates.has(curStr)) {
+                            actualDaysTaken++; 
                         } else {
-                            if(isTimetableWorkingDay(cur, cls, sec, sub)) actualDaysTaken++;
+                            const exclusion = checkDateExclusion(cur, cls, sec, sub);
+                            if (exclusion.isExcluded) {
+                                excludedHolidaysCount++;
+                            } else {
+                                if(isTimetableWorkingDay(cur, cls, sec, sub)) actualDaysTaken++;
+                            }
                         }
                         cur.setDate(cur.getDate() + 1);
                     }
 
-                    if (isF) {
+                    if (isF) { 
                         let dayGap = targetDays - actualDaysTaken; 
                         let minGap = targetMins - actualMins;      
 
@@ -1124,41 +1141,50 @@ function getScheduleSnapshotForDate(dateIso) {
                         }
                     });
 
-                   let scanDate = new Date(chStart);
+                    let scanDate = new Date(chStart);
+                    let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
+                    
                     while (scanDate <= cEndD) {
-                        let scanIso = scanDate.toISOString().split('T')[0];
-                        const exclusion = checkDateExclusion(scanDate, cls, sec, sub);
-                        if (exclusion.isExcluded) {
-                            timelineEvents.push({
-                                type: 'EXCLUSION',
-                                sortKey: scanIso + "_0_0000",
-                                html: `
-                                    <div class="flex items-center gap-4 p-4 bg-rose-50/40 text-rose-700 border-b border-rose-100 text-xs font-bold uppercase tracking-widest pl-10">
-                                        <span class="bg-white border border-rose-200 text-rose-600 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
-                                        <span class="text-rose-500 font-black">🌴 EXCLUDED DAY:</span> ${exclusion.reason}
-                                    </div>`
-                            });
-                        } else if (scanDate.getDay() === 0) {
-                            timelineEvents.push({
-                                type: 'EXCLUSION',
-                                sortKey: scanIso + "_0_0000",
-                                html: `
-                                    <div class="flex items-center gap-4 p-4 bg-slate-50 text-slate-500 border-b border-slate-100 text-xs font-bold uppercase tracking-widest pl-10">
-                                        <span class="bg-white border border-slate-200 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
-                                        <span class="text-slate-400 font-black">🕰️ WEEKLY OFF:</span> Sunday
-                                    </div>`
-                            });
-                        } else {
-                            if (!isTimetableWorkingDay(scanDate, cls, sec, sub)) {
+                        const offset = scanDate.getTimezoneOffset() * 60000;
+                        let scanIso = (new Date(scanDate.getTime() - offset)).toISOString().split('T')[0];
+                        const hasTickToday = validTickDates.has(scanIso);
+
+                        if (!hasTickToday) {
+                            const exclusion = checkDateExclusion(scanDate, cls, sec, sub);
+                            if (exclusion.isExcluded) {
                                 timelineEvents.push({
                                     type: 'EXCLUSION',
                                     sortKey: scanIso + "_0_0000",
                                     html: `
-                                        <div class="flex items-center gap-4 p-4 bg-slate-50 text-slate-400 border-b border-slate-100 text-xs font-bold uppercase tracking-widest pl-10">
-                                            <span class="bg-white border border-slate-200 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
-                                            <span class="opacity-60">🚫 No Alotted Class as per Timetable Routine</span>
+                                        <div class="flex items-center gap-4 p-4 bg-rose-50/40 text-rose-700 border-b border-rose-100 text-xs font-bold uppercase tracking-widest pl-10">
+                                            <span class="bg-white border border-rose-200 text-rose-600 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                            <span class="text-rose-500 font-black">🌴 EXCLUDED DAY:</span> ${exclusion.reason}
                                         </div>`
                                 });
+                            } else if (scanDate.getDay() === 0) {
+                                timelineEvents.push({
+                                    type: 'EXCLUSION',
+                                    sortKey: scanIso + "_0_0000",
+                                    html: `
+                                        <div class="flex items-center gap-4 p-4 bg-slate-50 text-slate-500 border-b border-slate-100 text-xs font-bold uppercase tracking-widest pl-10">
+                                            <span class="bg-white border border-slate-200 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                            <span class="text-slate-400 font-black">🕰️ WEEKLY OFF:</span> Sunday
+                                        </div>`
+                                });
+                            } else {
+                                if (!isTimetableWorkingDay(scanDate, cls, sec, sub)) {
+                                    if (scanDate >= new Date('2026-06-02T00:00:00')) {
+                                        timelineEvents.push({
+                                            type: 'EXCLUSION',
+                                            sortKey: scanIso + "_0_0000",
+                                            html: `
+                                                <div class="flex items-center gap-4 p-4 bg-slate-50 text-slate-400 border-b border-slate-100 text-xs font-bold uppercase tracking-widest pl-10">
+                                                    <span class="bg-white border border-slate-200 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                                    <span class="opacity-60">🚫 No Alotted Class as per Timetable Routine</span>
+                                                </div>`
+                                        });
+                                    }
+                                }
                             }
                         }
                         scanDate.setDate(scanDate.getDate() + 1);
