@@ -577,7 +577,7 @@
             return (snapshot && snapshot.schedule) ? snapshot.schedule : (window.fullTimetable || window.teacherTimetable || []);
         }
 
-        // --- SMART EXCLUSION ENGINE (Holidays + OT Exams) ---
+      // --- SMART EXCLUSION ENGINE (Holidays + OT Exams) ---
         function checkDateExclusion(dateObj, className, sectionName, subjectName) {
             // Precise timezone fixing (Fixes the date shifting bug!)
             const offset = dateObj.getTimezoneOffset() * 60000;
@@ -590,11 +590,51 @@
                 if (!h.startDate) continue;
                 const hStart = new Date(h.startDate); hStart.setHours(0,0,0,0);
                 const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23,59,59,999);
+                
                 if (checkDate >= hStart && checkDate <= hEnd) {
                     const targetCls = `${className}|${sectionName}`;
                     const tClasses = h.targetClasses || [];
+                    
                     if (tClasses.includes('ALL') || tClasses.includes(targetCls)) {
-                        if (h.isFullDay) return { isExcluded: true, reason: h.reason };
+                        if (h.isFullDay) {
+                            return { isExcluded: true, reason: h.reason };
+                        } else if (h.startTime && h.endTime) {
+                            // Half-Day Logic: Look into the timetable to see if THIS subject overlaps with the holiday times
+                            const scheduleToCheck = getScheduleSnapshotForDate(curStr);
+                            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                            const dayName = daysArr[dateObj.getDay()];
+                            
+                            const classSlots = scheduleToCheck.filter(t => 
+                                t.day === dayName && 
+                                norm(t.className) === norm(className) && 
+                                norm(t.section) === norm(sectionName) && 
+                                norm(t.subject) === norm(subjectName)
+                            );
+                            
+                            if (classSlots.length > 0) {
+                                const [hsh, hsm] = h.startTime.split(':').map(Number);
+                                const [heh, hem] = h.endTime.split(':').map(Number);
+                                const hStartMins = hsh * 60 + hsm; 
+                                const hEndMins = heh * 60 + hem;
+                                
+                                const isOverlapping = classSlots.some(slot => {
+                                    if (slot.start24 && slot.end24) {
+                                        const [sh, sm] = slot.start24.split(':').map(Number);
+                                        const [eh, em] = slot.end24.split(':').map(Number);
+                                        const cStartMins = sh * 60 + sm;
+                                        const cEndMins = eh * 60 + em;
+                                        
+                                        // Overlap Logic: Class starts before holiday ends AND Class ends after holiday starts
+                                        return (cStartMins < hEndMins && cEndMins > hStartMins);
+                                    }
+                                    return false;
+                                });
+                                
+                                if (isOverlapping) {
+                                    return { isExcluded: true, reason: h.reason + " (Half Day)" };
+                                }
+                            }
+                        }
                     }
                 }
             }
