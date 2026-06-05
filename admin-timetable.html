@@ -341,9 +341,9 @@
                     <div class="text-[10px] font-bold text-emerald-600 mt-1">Edit the default weekly routine currently active for all teachers.</div>
                 </button>
                 
-                <button onclick="setContext('FUTURE_MASTER')" class="w-full text-left p-4 rounded-2xl border-2 border-indigo-200 bg-white hover:border-indigo-400 hover:bg-indigo-50 transition-colors group">
-                    <div class="font-black text-indigo-800 uppercase tracking-widest text-sm group-hover:scale-105 transition-transform transform origin-left">📅 New Future Master</div>
-                    <div class="text-[10px] font-bold text-indigo-500 mt-1">Draft a permanent change that takes effect on a future date.</div>
+               <button onclick="manageFutureMasters(); document.getElementById('context-modal').classList.add('hidden')" class="w-full text-left p-4 rounded-2xl border-2 border-indigo-200 bg-white hover:border-indigo-400 hover:bg-indigo-50 transition-colors group">
+                    <div class="font-black text-indigo-800 uppercase tracking-widest text-sm group-hover:scale-105 transition-transform transform origin-left">📅 Manage Future Masters</div>
+                    <div class="text-[10px] font-bold text-indigo-500 mt-1">View, edit, or cancel scheduled future timetable updates.</div>
                 </button>
 
                 <button onclick="setContext('OVERRIDE')" class="w-full text-left p-4 rounded-2xl border-2 border-amber-200 bg-white hover:border-amber-400 hover:bg-amber-50 transition-colors group">
@@ -355,6 +355,21 @@
                     <div class="font-black text-slate-700 uppercase tracking-widest text-sm group-hover:scale-105 transition-transform transform origin-left">🕰️ Time Machine (History)</div>
                     <div class="text-[10px] font-bold text-slate-500 mt-1">View exactly what the timetable looked like on a past date.</div>
                 </button>
+          </div>
+        </div>
+    </div>
+
+    <div id="future-masters-modal" class="fixed inset-0 bg-slate-900/70 z-[400] hidden items-center justify-center p-4 no-print backdrop-blur-sm">
+        <div class="bg-white rounded-3xl p-6 w-full max-w-lg shadow-2xl flex flex-col max-h-[80vh]">
+            <div class="flex justify-between items-center mb-4 border-b pb-4 shrink-0">
+                <div>
+                    <h3 class="font-black text-indigo-900 text-xl uppercase tracking-tighter">Future Masters</h3>
+                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Scheduled Master Updates</p>
+                </div>
+                <button onclick="document.getElementById('future-masters-modal').classList.replace('flex', 'hidden')" class="bg-slate-100 hover:bg-rose-100 text-slate-500 hover:text-rose-600 w-8 h-8 rounded-full font-black flex items-center justify-center transition-colors">✕</button>
+            </div>
+            <div id="future-masters-list" class="flex-1 overflow-y-auto pr-2 space-y-3 custom-scroll">
+                <p class="text-xs text-slate-400 font-bold italic text-center py-10">Loading...</p>
             </div>
         </div>
     </div>
@@ -1512,11 +1527,156 @@ async function checkAndApplyFutureMaster() {
                 });
                 
                 alert(`✅ Draft "${draftName}" saved successfully to the cloud!`);
-            } catch(e) { 
+           } catch(e) { 
                 console.error("Draft save failed", e); 
                 alert("Error saving draft.");
             } finally {
                 if (btnText) btnText.innerHTML = originalText;
+            }
+        }
+
+        // --- MANAGE FUTURE MASTERS ENGINE ---
+        async function manageFutureMasters() {
+            document.getElementById('future-masters-modal').classList.replace('hidden', 'flex');
+            const listContainer = document.getElementById('future-masters-list');
+            listContainer.innerHTML = '<p class="text-xs text-slate-400 font-bold italic text-center py-10">Loading...</p>';
+
+            try {
+                const snap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+                let masters = [];
+                const todayStr = new Date().toISOString().split('T')[0];
+                
+                snap.docs.forEach(doc => {
+                    const data = doc.data();
+                    if (data.date >= todayStr) masters.push(data);
+                });
+
+                if (masters.length === 0) {
+                    listContainer.innerHTML = '<p class="text-[11px] font-black tracking-widest text-slate-400 uppercase text-center py-10">No pending Future Masters.</p>';
+                    return;
+                }
+
+                masters.sort((a, b) => a.date.localeCompare(b.date));
+
+                listContainer.innerHTML = masters.map(m => {
+                    const prettyDate = new Date(m.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+                    return `
+                    <div class="bg-indigo-50 border border-indigo-100 p-4 rounded-xl flex flex-col sm:flex-row justify-between sm:items-center gap-4">
+                        <div>
+                            <div class="font-black text-indigo-900 text-sm uppercase tracking-tighter">Effective: ${prettyDate}</div>
+                            <div class="text-[10px] font-bold text-indigo-500 uppercase tracking-widest mt-1">${m.date}</div>
+                        </div>
+                        <div class="flex gap-2">
+                            <button onclick="editFutureMaster('${m.date}')" class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase shadow-sm transition-all flex-1 sm:flex-none">Edit</button>
+                            <button onclick="deleteFutureMaster('${m.date}')" class="bg-white border border-rose-200 text-rose-600 hover:bg-rose-50 px-4 py-2.5 rounded-xl text-[10px] font-black uppercase shadow-sm transition-all flex-1 sm:flex-none">Cancel</button>
+                        </div>
+                    </div>`;
+                }).join('');
+
+            } catch (e) {
+                console.error(e);
+                listContainer.innerHTML = '<p class="text-xs text-rose-500 font-bold italic text-center py-10">Error loading Future Masters.</p>';
+            }
+        }
+
+        function editFutureMaster(date) {
+            document.getElementById('future-masters-modal').classList.replace('flex', 'hidden');
+            
+            getCollection("timetable_history").doc(date).get().then(doc => {
+                if(doc.exists) {
+                    globalTimetable = doc.data().schedule || [];
+                    currentContextDate = date;
+                    currentContextMode = 'EDIT_FUTURE';
+                    
+                    const prettyDate = new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                    document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 animate-pulse font-bold">🟡 EDITING FUTURE MASTER (Effective: ${prettyDate})</span>`;
+                    
+                    renderDirectDashboard();
+                }
+            });
+        }
+
+        async function deleteFutureMaster(date) {
+            if(!confirm(`Are you sure you want to completely cancel the Future Master scheduled for ${date}?`)) return;
+            try {
+                await getCollection("timetable_history").doc(date).delete();
+                alert(`Future Master for ${date} cancelled successfully.`);
+                manageFutureMasters(); // Refresh list automatically
+            } catch(e) {
+                alert("Error cancelling: " + e.message);
+            }
+        }
+
+        async function updateFutureMaster() {
+            const allBlocks = Array.from(document.querySelectorAll('.time-block'));
+            if (allBlocks.length === 0) return alert("Nothing to save!");
+
+            const btn = document.getElementById('main-action-btn'); 
+            const originalHTML = btn.innerHTML;
+            btn.innerHTML = "⌛ Updating..."; btn.disabled = true;
+
+            try {
+                let newSlots = []; 
+                for (let b of allBlocks) {
+                    const className = b.getAttribute('data-class');
+                    const sectionName = b.getAttribute('data-section');
+                    const s24 = b.querySelector('.tb-s24').value; 
+                    const e24 = b.querySelector('.tb-e24').value;
+                    const entries = Array.from(b.querySelectorAll('.ent-row'));
+                    if (!s24 || !e24) continue;
+
+                    const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
+                    const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
+                    const dur = `${eMins - sMins} MINS`;
+                    const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
+
+                    for(let ent of entries) {
+                        const sub = ent.querySelector('.ent-sub').value;
+                        const teacher = ent.querySelector('.ent-tea').value || "NONE"; 
+                        const room = ent.querySelector('.ent-room').value.trim();
+                        const remark = ent.querySelector('.ent-rem').value.trim();
+                        const activeDays = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
+
+                        activeDays.forEach(day => {
+                            let teacherEmail = "";
+                            if (teacher !== "NONE") {
+                                const tObj = allTeachers.find(t => t.name === teacher);
+                                if (tObj) teacherEmail = tObj.email || ""; 
+                            }
+                            newSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName: teacher, teacherEmail, room, remark, sMins, eMins });
+                        });
+                    }
+                }
+
+                // Tag it
+                const versionId = "v_future_edit_" + Date.now();
+                const taggedSlots = newSlots.map(slot => ({
+                    ...slot,
+                    version_id: versionId,
+                    effective_from: currentContextDate
+                }));
+
+                await getCollection("timetable_history").doc(currentContextDate).set({
+                    date: currentContextDate,
+                    lastUpdated: Date.now(),
+                    schedule: taggedSlots, 
+                    type: "FUTURE_MASTER",
+                    version_id: versionId
+                }, { merge: true });
+
+                alert(`✅ Future Master for ${currentContextDate} updated successfully!`);
+
+                // Reset back to Live seamlessly
+                currentContextMode = 'LIVE';
+                currentContextDate = null;
+                document.getElementById('view-label').innerHTML = `Showing: Live Master Schedule`;
+                sessionStorage.removeItem('minerva_timetable');
+                fetchTimetable().then(() => renderDirectDashboard());
+
+            } catch (err) {
+                alert("Error updating: " + err.message);
+            } finally {
+                btn.innerHTML = originalHTML; btn.disabled = false;
             }
         }
 
@@ -3083,6 +3243,13 @@ function handlePrimaryAction() {
     // 1. If viewing past records (Time Machine), open the Multi-Date menu to allow Clones
     if (isHistory) {
         openMultiDateModal('CLONE');
+        return;
+    }
+
+    // --- SMART EDIT FUTURE BYPASS ---
+    // If the Admin is actively editing an existing future master, skip the menu and auto-update it!
+    if (currentContextMode === 'EDIT_FUTURE') {
+        updateFutureMaster();
         return;
     }
 
