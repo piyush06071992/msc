@@ -3146,21 +3146,36 @@ async function confirmDateContext() {
             const draftKey = `draft_${activeCenter}_${dateVal}`;
             const draftSnap = await db.collection("timetable_drafts").doc(draftKey).get();
             
-            if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
+           if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
                 globalTimetable = draftSnap.data().schedule;
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED OVERRIDE DRAFT:</span> ${prettyDate}`;
             } else {
-                // 2. Normal fetching logic if no draft exists
+                // 2. Smart Time-Travel Fetching Logic
                 const historySnap = await getCollection("timetable_history").doc(dateVal).get();
-                if (historySnap.exists) {
+                
+                // If there is a 1-day specific override for this exact date, load it!
+                if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
                     const hData = historySnap.data();
                     globalTimetable = (hData.schedule || []).filter(slot => slot.day === dayName);
                     if (nameTagInp) nameTagInp.value = hData.tag || "";
                     document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
                 } else {
-                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                    globalTimetable = masterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                    document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
+                    // Otherwise, scan backwards to find if a Future Master has been activated before this date!
+                    const futureSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+                    let activeMasters = [];
+                    futureSnap.docs.forEach(doc => { if (doc.id <= dateVal) activeMasters.push(doc.data()); });
+                    
+                    if (activeMasters.length > 0) {
+                        // Sort so the most recently scheduled master takes control
+                        activeMasters.sort((a, b) => b.date.localeCompare(a.date));
+                        globalTimetable = (activeMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                        document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 font-bold">📅 FUTURE MASTER (From ${activeMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
+                    } else {
+                        // Fallback to the normal Live Master
+                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                        globalTimetable = masterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                        document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
+                    }
                 }
             }
             // --- THE LIVE LEAVE PATCHER FOR ADMIN ---
