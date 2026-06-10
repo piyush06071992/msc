@@ -1851,8 +1851,9 @@ async function fetchGlobalUnlockRequests() {
 
         function openMigrationModal() {
             if (!window.hasEditorRights) return alert("You do not have permission to run baseline syncs.");
-            if (activeCenter !== "DHARAMSHALA") return alert("This tool can only be executed from the Dharamshala dashboard.");
             
+            // Set source branch default to current active center
+            document.getElementById('mig-source-branch').value = activeCenter;
             fetchSourceBranchData();
             
             const tgtClassSelect = document.getElementById('mig-target-class');
@@ -1863,12 +1864,18 @@ async function fetchGlobalUnlockRequests() {
         }
 
         async function fetchSourceBranchData() {
-            const btn = document.querySelector('#migrate-modal button[onclick="executeMigration()"]');
-            btn.innerText = "Loading Ghumarwin Data..."; btn.disabled = true;
+            const btn = document.getElementById('execute-mig-btn');
+            const sourceBranch = document.getElementById('mig-source-branch').value;
+            btn.innerText = "Loading Source Data..."; btn.disabled = true;
+            
             try {
+                // Determine the correct collections based on the selected branch
+                const structColl = sourceBranch === "GHUMARWIN" ? "institute_structure" : `${sourceBranch.toLowerCase()}_institute_structure`;
+                const plannerColl = sourceBranch === "GHUMARWIN" ? "lesson_planners" : `${sourceBranch.toLowerCase()}_lesson_planners`;
+
                 const [structSnap, plannerSnap] = await Promise.all([
-                    db.collection("institute_structure").get(),
-                    db.collection("lesson_planners").get()
+                    db.collection(structColl).get(),
+                    db.collection(plannerColl).get()
                 ]);
                 
                 crossStructData = structSnap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -1876,9 +1883,9 @@ async function fetchGlobalUnlockRequests() {
                 
                 populateSourceClasses();
             } catch(e) {
-                alert("Error fetching Ghumarwin branch: " + e.message);
+                alert("Error fetching source branch: " + e.message);
             } finally {
-                btn.innerText = "Initialize Dharamshala"; btn.disabled = false;
+                btn.innerText = "Execute Migration"; btn.disabled = false;
             }
         }
 
@@ -1920,21 +1927,23 @@ async function fetchGlobalUnlockRequests() {
         async function executeMigration() {
             if (!window.hasEditorRights) return alert("Permission denied.");
             
+            const srcBranch = document.getElementById('mig-source-branch').value;
             const srcClass = document.getElementById('mig-source-class').value;
             const srcSec = document.getElementById('mig-source-section').value;
             const tgtClass = document.getElementById('mig-target-class').value;
             const tgtSec = document.getElementById('mig-target-section').value;
             const subVal = document.getElementById('mig-subject').value;
+            const cutoffDateRaw = document.getElementById('mig-cutoff-date').value;
             
             if (!srcClass || !srcSec || !tgtClass || !tgtSec) {
                 return alert("Please select all Source and Target details.");
             }
 
-            if (!confirm(`Are you sure you want to initialize ${tgtClass}-${tgtSec} using data from Ghumarwin (${srcClass}-${srcSec})?\n\nAll existing ticks in Dharamshala for these subjects will be cleanly stamped to June 01 with 0 minutes.`)) return;
+            if (!confirm(`Are you sure you want to copy ${tgtClass}-${tgtSec} using data from ${srcBranch} (${srcClass}-${srcSec})?`)) return;
 
-            const btn = event.target;
+            const btn = document.getElementById('execute-mig-btn');
             const origText = btn.innerText;
-            btn.innerText = "Stamping Baseline..."; btn.disabled = true;
+            btn.innerText = "Migrating Data..."; btn.disabled = true;
 
             try {
                 const srcStruct = crossStructData.find(s => s.className === srcClass && s.sectionName === srcSec);
@@ -1947,8 +1956,8 @@ async function fetchGlobalUnlockRequests() {
                 const batch = db.batch();
                 let hasChanges = false;
                 
-                const BASELINE_DATE = "2026-06-01"; // Hardcoded safe date
-                const cutOffDate = new Date("2026-06-02T23:59:59"); // Ghumarwin's ticks after this date are ignored
+                // Set cutoff date to end of selected day, or far future if left blank
+                const cutOffDate = cutoffDateRaw ? new Date(cutoffDateRaw + "T23:59:59") : new Date("2099-12-31T23:59:59");
 
                 for (let sub of subjectsToProcess) {
                     const srcId = `${srcStruct.id}_${sub}`.replace(/\s+/g, '_');
@@ -1963,12 +1972,10 @@ async function fetchGlobalUnlockRequests() {
                     let tgtData = [...tgtPlanner.syllabusData];
                     let dataModified = false;
 
-               // 1. Copy Syllabus Topic Ticks ONLY
                     srcPlanner.syllabusData.forEach(srcRow => {
                         if (srcRow.isDone && srcRow.completedDate) {
                             const srcDateObj = new Date(srcRow.completedDate);
                             
-                            // Only migrate ticks that Ghumarwin completed ON or BEFORE June 02
                             if (srcDateObj <= cutOffDate) {
                                 const tgtIndex = tgtData.findIndex(r => 
                                     r['CHAPTER NAME'] === srcRow['CHAPTER NAME'] && 
@@ -1978,12 +1985,10 @@ async function fetchGlobalUnlockRequests() {
                                 
                                 if (tgtIndex !== -1 && !tgtData[tgtIndex].isDone) {
                                     tgtData[tgtIndex].isDone = true;
-                                    // PRESERVE ORIGINAL DATES AND MINUTES!
                                     tgtData[tgtIndex].completedDate = srcRow.completedDate; 
-                                    tgtData[tgtIndex].completedMinutes = srcRow.completedMinutes;          
-                                    tgtData[tgtIndex].tickedBy = "From Ghumarwin Center";
+                                    tgtData[tgtIndex].completedMinutes = srcRow.completedMinutes;         
+                                    tgtData[tgtIndex].tickedBy = `Migrated from ${srcBranch}`;
                                     
-                                    // Carry over Original Chapter Start Date securely
                                     if (srcRow.chapterStartDate && !tgtData[tgtIndex].chapterStartDate) {
                                         tgtData.forEach(tr => {
                                             if (tr['CHAPTER NAME'] === srcRow['CHAPTER NAME']) tr.chapterStartDate = srcRow.chapterStartDate;
@@ -1994,8 +1999,6 @@ async function fetchGlobalUnlockRequests() {
                             }
                         }
                     });
-
-                    // NO EXTRA LOGS COPIED ACROSS BRANCHES to keep it clean.
                     
                     if (dataModified) {
                         const tgtRef = getCollection("lesson_planners").doc(tgtId);
@@ -2006,15 +2009,15 @@ async function fetchGlobalUnlockRequests() {
 
                 if (hasChanges) {
                     await batch.commit();
-                    alert("Initialization completed successfully! Target section is now cleanly synchronized.");
+                    alert("Migration completed successfully! Target section is now cleanly synchronized.");
                     closeModal('migrate-modal');
                     window.location.reload(); 
                 } else {
-                    alert("No matching ticks found in Ghumarwin prior to June 02.");
+                    alert("No matching un-ticked topics found to migrate within the specified date range.");
                 }
             } catch (err) {
                 console.error(err);
-                alert("Initialization Failed: " + err.message);
+                alert("Migration Failed: " + err.message);
             } finally {
                 btn.innerText = origText;
                 btn.disabled = false;
