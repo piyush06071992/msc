@@ -281,7 +281,7 @@
                 </select>
             </div>
             
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 border-t border-slate-100 pt-4 mt-2">
+           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 border-t border-slate-100 pt-4 mt-2">
                 <div>
                     <label class="text-[10px] sm:text-[11px] font-black text-slate-500 uppercase tracking-widest block mb-1">Start Date (Optional)</label>
                     <input type="date" id="mig-start-date" class="setup-input shadow-sm w-full cursor-pointer border-slate-300" title="Copy progress from this date onward.">
@@ -289,6 +289,20 @@
                 <div>
                     <label class="text-[10px] sm:text-[11px] font-black text-slate-500 uppercase tracking-widest block mb-1">End Date (Optional)</label>
                     <input type="date" id="mig-cutoff-date" class="setup-input shadow-sm w-full cursor-pointer border-slate-300" title="Copy progress up to this date.">
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 border-t border-slate-100 pt-4 mt-2">
+                <div>
+                    <label class="text-[10px] sm:text-[11px] font-black text-slate-500 uppercase tracking-widest block mb-1">Teacher Identity Mode</label>
+                    <select id="mig-teacher-mode" class="setup-input shadow-sm w-full cursor-pointer border-slate-300" onchange="toggleMigrateTeacherSelect()">
+                        <option value="KEEP">Keep Original Teacher Names</option>
+                        <option value="OVERRIDE">Override with Selected Teacher</option>
+                    </select>
+                </div>
+                <div id="mig-teacher-select-wrapper" style="display:none;">
+                    <label class="text-[10px] sm:text-[11px] font-black text-slate-500 uppercase tracking-widest block mb-1">Select Target Teacher</label>
+                    <select id="mig-target-teacher" class="setup-input shadow-sm w-full cursor-pointer border-slate-300"></select>
                 </div>
             </div>
         </div>
@@ -1219,19 +1233,21 @@ function getScheduleSnapshotForDate(dateIso) {
                     let scanDate = new Date(chStart);
                     let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
                     
-               while (scanDate <= cEndD) {
+               // Check if a dynamic historical operational baseline has been established for this cloned record entry
+                    const baselineDateStr = (planner && planner.migrationBaselineDate) ? planner.migrationBaselineDate : "";
+
+                    while (scanDate <= cEndD) {
                         const offset = scanDate.getTimezoneOffset() * 60000;
                         let scanIso = (new Date(scanDate.getTime() - offset)).toISOString().split('T')[0];
                         const hasTickToday = validTickDates.has(scanIso);
 
                         const exclusion = checkDateExclusion(scanDate, cls, sec, sub);
+                        const isHistoricalPeriod = baselineDateStr ? (scanIso <= baselineDateStr) : false;
                         
-                    if (exclusion.isExcluded) {
-                            // Suppress spammy exclusion banners for migrated historical dates (prior to baseline opening)
-                            const isHistorical = scanDate < new Date('2026-06-02T00:00:00');
+                        if (exclusion.isExcluded) {
                             const isSpam = exclusion.reason === "Class Not Scheduled" || exclusion.reason === "Sunday (Weekly Off)";
                             
-                            if (!(isHistorical && isSpam)) {
+                            if (!isHistoricalPeriod || !isSpam) {
                                 timelineEvents.push({
                                     type: 'EXCLUSION',
                                     sortKey: scanIso + "_0_0000",
@@ -1243,19 +1259,17 @@ function getScheduleSnapshotForDate(dateIso) {
                                 });
                             }
                         } else if (!hasTickToday) {
-                            // 2. If it's NOT a holiday, and NO tick exists, check if they missed a scheduled class
-                            if (!isTimetableWorkingDay(scanDate, cls, sec, sub)) {
-                                if (scanDate >= new Date('2026-06-02T00:00:00')) {
-                                    timelineEvents.push({
-                                        type: 'EXCLUSION',
-                                        sortKey: scanIso + "_0_0000",
-                                        html: `
-                                            <div class="flex items-center gap-4 p-4 bg-slate-50 text-slate-400 border-b border-slate-100 text-xs font-bold uppercase tracking-widest pl-10">
-                                                <span class="bg-white border border-slate-200 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
-                                                <span class="opacity-60">🚫 No Alotted Class as per Timetable Routine</span>
-                                            </div>`
-                                    });
-                                }
+                            // Suppress look-ahead routine operational checks entirely during the historical timeline slice
+                            if (!isHistoricalPeriod && !isTimetableWorkingDay(scanDate, cls, sec, sub)) {
+                                timelineEvents.push({
+                                    type: 'EXCLUSION',
+                                    sortKey: scanIso + "_0_0000",
+                                    html: `
+                                        <div class="flex items-center gap-4 p-4 bg-slate-50 text-slate-400 border-b border-slate-100 text-xs font-bold uppercase tracking-widest pl-10">
+                                            <span class="bg-white border border-slate-200 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                            <span class="opacity-60">🚫 No Alotted Class as per Timetable Routine</span>
+                                        </div>`
+                                });
                             }
                         }
                         scanDate.setDate(scanDate.getDate() + 1);
@@ -1859,6 +1873,11 @@ async function fetchGlobalUnlockRequests() {
         let crossStructData = [];
         let crossPlannerData = [];
 
+      function toggleMigrateTeacherSelect() {
+            const mode = document.getElementById('mig-teacher-mode').value;
+            document.getElementById('mig-teacher-select-wrapper').style.display = mode === 'OVERRIDE' ? 'block' : 'none';
+        }
+
         function openMigrationModal() {
             if (!window.hasEditorRights) return alert("You do not have permission to run baseline syncs.");
             
@@ -1869,6 +1888,17 @@ async function fetchGlobalUnlockRequests() {
             const tgtClassSelect = document.getElementById('mig-target-class');
             tgtClassSelect.innerHTML = '<option value="">Select Target Class...</option>';
             [...new Set(structureData.map(s => s.className))].forEach(c => tgtClassSelect.innerHTML += `<option value="${c}">${c}</option>`);
+            
+            // Populate Target Teacher menu options dynamically using current staff directory
+            const tSelect = document.getElementById('mig-target-teacher');
+            if (tSelect) {
+                tSelect.innerHTML = '<option value="">Select Teacher...</option>';
+                staffList.forEach(t => {
+                    tSelect.innerHTML += `<option value="${t.name}">${t.name} (${t.email})</option>`;
+                });
+            }
+            document.getElementById('mig-teacher-mode').value = 'KEEP';
+            document.getElementById('mig-teacher-select-wrapper').style.display = 'none';
             
             openModal('migrate-modal');
         }
@@ -1960,6 +1990,13 @@ async function fetchGlobalUnlockRequests() {
                 const srcStruct = crossStructData.find(s => s.className === srcClass && s.sectionName === srcSec);
                 const tgtStruct = structureData.find(s => s.className === tgtClass && s.sectionName === tgtSec);
                 
+                const tMode = document.getElementById('mig-teacher-mode').value;
+                const chosenTeacher = document.getElementById('mig-target-teacher').value;
+                
+                if (tMode === 'OVERRIDE' && !chosenTeacher) {
+                    return alert("Please select a target teacher to override the name fields.");
+                }
+
                 let subjectsToProcess = subVal === "ALL" 
                     ? srcStruct.subjects.filter(s => !['BREAK','EVENT','EXAM','ASSEMBLY'].includes(s.toUpperCase()))
                     : [subVal];
@@ -1995,12 +2032,17 @@ async function fetchGlobalUnlockRequests() {
                                     r['LECTURE NUMBER'] === srcRow['LECTURE NUMBER']
                                 );
                                 
-                              if (tgtIndex !== -1 && !tgtData[tgtIndex].isDone) {
+                                if (tgtIndex !== -1 && !tgtData[tgtIndex].isDone) {
                                     tgtData[tgtIndex].isDone = true;
                                     tgtData[tgtIndex].completedDate = srcRow.completedDate; 
                                     tgtData[tgtIndex].completedMinutes = srcRow.completedMinutes;         
-                                    // Preserves the actual teacher name who signed off on the topic
-                                    tgtData[tgtIndex].tickedBy = srcRow.tickedBy || `Migrated from ${srcBranch}`;
+                                    
+                                    // Map identity credentials according to selected parameter parameters
+                                    if (tMode === 'OVERRIDE') {
+                                        tgtData[tgtIndex].tickedBy = chosenTeacher;
+                                    } else {
+                                        tgtData[tgtIndex].tickedBy = srcRow.tickedBy || `Migrated from ${srcBranch}`;
+                                    }
                                     
                                     if (srcRow.chapterStartDate && !tgtData[tgtIndex].chapterStartDate) {
                                         tgtData.forEach(tr => {
@@ -2015,7 +2057,11 @@ async function fetchGlobalUnlockRequests() {
                     
                     if (dataModified) {
                         const tgtRef = getCollection("lesson_planners").doc(tgtId);
-                        batch.update(tgtRef, { syllabusData: tgtData });
+                        // Imprints the specific cutoff parameter date directly to the target record document metadata
+                        batch.update(tgtRef, { 
+                            syllabusData: tgtData,
+                            migrationBaselineDate: cutoffDateRaw || "" 
+                        });
                         hasChanges = true;
                     }
                 }
