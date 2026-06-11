@@ -810,23 +810,33 @@
                                         chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
 
                                         let actDays = 0;
-                                        let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
-                                       let cur = new Date(chStart); 
-                                        while(cur <= effectiveEnd) {
-                                            const offset = cur.getTimezoneOffset() * 60000;
-                                            const curStr = (new Date(cur.getTime() - offset)).toISOString().split('T')[0];
-                                            
-                                            const exclusion = checkDateExclusion(cur, st.className, st.sectionName, sub);
-                                            if (!exclusion.isExcluded) {
-                                                // Only count days that are NOT holidays
-                                                if (validTickDates.has(curStr)) {
-                                                    actDays++; 
-                                                } else if(isTimetableWorkingDay(cur, st.className, st.sectionName, sub)) {
-                                                    actDays++;
-                                                }
-                                            }
-                                            cur.setDate(cur.getDate() + 1);
-                                        }
+let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
+                    let cur = new Date(chStart); let finish = new Date(effectiveEnd);
+
+                    while(cur <= finish) {
+                        const offset = cur.getTimezoneOffset() * 60000;
+                        const curStr = (new Date(cur.getTime() - offset)).toISOString().split('T')[0];
+                        
+                        const tickToday = Array.from(validTickDates).find(d => d === curStr);
+                        const exclusion = checkDateExclusion(cur, cls, sec, sub);
+                        const isHistoricalPeriod = baselineDateStr ? (curStr <= baselineDateStr) : false;
+                        
+                        if (exclusion.isExcluded) {
+                            const isSpam = exclusion.reason === "Class Not Scheduled" || exclusion.reason === "Sunday (Weekly Off)";
+                            // Do not count spam as an excluded holiday if it's in the historical past
+                            if (!(isHistoricalPeriod && isSpam)) {
+                                excludedHolidaysCount++;
+                            }
+                        } else if (!tickToday) {
+                            // Only add actual days taken if missing a class in the LIVE period
+                            if (!isHistoricalPeriod && isTimetableWorkingDay(cur, cls, sec, sub)) {
+                                actualDaysTaken++;
+                            }
+                        } else {
+                             actualDaysTaken++; 
+                        }
+                        cur.setDate(cur.getDate() + 1);
+                    }
                                         totalActualDaysAll += actDays;
 
                                     if (isF) { 
@@ -1042,8 +1052,13 @@
                 return;
             } 
             
-            const allRows = isDemoMode ? getMockRows() : (planner.syllabusData || []);
+           const allRows = isDemoMode ? getMockRows() : (planner.syllabusData || []);
             const chNames = [...new Set(allRows.map(r => r["CHAPTER NAME"]))];
+            
+            // Auto-detect migration boundaries if admin left cutoff date blank
+            const migratedTicks = allRows.filter(r => r.isDone && r.tickedBy && r.tickedBy.includes("Copied from"));
+            const autoBaseline = migratedTicks.length > 0 ? migratedTicks.map(r => r.completedDate).sort().pop() : "";
+            const baselineDateStr = (planner && planner.migrationBaselineDate) ? planner.migrationBaselineDate : autoBaseline;
             
             let chDoneCalc = 0;
             chNames.forEach(ch => {
@@ -1246,23 +1261,16 @@
                         }
                     });
 
-                    let scanDate = new Date(chStart);
+                   let scanDate = new Date(chStart);
                     let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
-                    
-                    // Check if a dynamic historical operational baseline has been established for this cloned record entry
-                    const baselineDateStr = (planner && planner.migrationBaselineDate) ? planner.migrationBaselineDate : "";
 
                     while (scanDate <= cEndD) {
                         const offset = scanDate.getTimezoneOffset() * 60000;
                         let scanIso = (new Date(scanDate.getTime() - offset)).toISOString().split('T')[0];
+                        const hasTickToday = validTickDates.has(scanIso);
                         
-                        // Check if a tick exists today, and if it does, see if it was a migrated tick
-                        const tickToday = Array.from(validTickDates).find(d => d === scanIso);
-                        const isMigratedData = tickToday && rows.some(r => r.completedDate === scanIso && r.tickedBy && r.tickedBy.includes("Copied from"));
-
-                       const exclusion = checkDateExclusion(scanDate, cls, sec, sub);
-                        // Treat anything before June 02, 2026 OR before the custom migration cutoff as historical
-                        const isHistoricalPeriod = (scanIso < "2026-06-02") || (baselineDateStr ? (scanIso <= baselineDateStr) : false);
+                        const exclusion = checkDateExclusion(scanDate, cls, sec, sub);
+                        const isHistoricalPeriod = baselineDateStr ? (scanIso <= baselineDateStr) : false;
                         
                         if (exclusion.isExcluded) {
                             const isSpam = exclusion.reason === "Class Not Scheduled" || exclusion.reason === "Sunday (Weekly Off)";
@@ -1279,7 +1287,7 @@
                                         </div>`
                                 });
                             }
-                        } else if (!tickToday) {
+                        } else if (!hasTickToday) {
                             // Only flag "No Alotted Class" if we are in the LIVE tracking period
                             if (!isHistoricalPeriod && !isTimetableWorkingDay(scanDate, cls, sec, sub)) {
                                 timelineEvents.push({
@@ -1299,15 +1307,23 @@
 
                 timelineEvents.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 
-              let excludedHtml = '<span class="font-bold mt-1">None</span>';
+           let excludedHtml = '<span class="font-bold mt-1">None</span>';
                 if (chStart) {
                     let calcDate = new Date(chStart);
                     let finalLimit = chEnd ? new Date(chEnd) : new Date();
                     let counterHols = [];
                     while(calcDate <= finalLimit) {
+                        const offset = calcDate.getTimezoneOffset() * 60000;
+                        let calcIso = (new Date(calcDate.getTime() - offset)).toISOString().split('T')[0];
+                        
                         const exc = checkDateExclusion(calcDate, cls, sec, sub);
+                        const isHistoricalPeriod = baselineDateStr ? (calcIso <= baselineDateStr) : false;
+                        
                         if (exc.isExcluded) {
-                            counterHols.push({ date: calcDate.toLocaleDateString('en-GB', {day:'2-digit', month:'short'}), reason: exc.reason });
+                            const isSpam = exc.reason === "Class Not Scheduled" || exc.reason === "Sunday (Weekly Off)";
+                            if (!(isHistoricalPeriod && isSpam)) {
+                                counterHols.push({ date: calcDate.toLocaleDateString('en-GB', {day:'2-digit', month:'short'}), reason: exc.reason });
+                            }
                         }
                         calcDate.setDate(calcDate.getDate() + 1);
                     }
