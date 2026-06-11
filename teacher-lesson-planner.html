@@ -110,15 +110,8 @@
                             <span class="bg-amber-100 text-amber-600 p-2 rounded-xl shadow-sm">🎯</span> Log Independent Activity
                         </div>
                         
-                        <div id="revision-date-wrapper" class="hidden">
-                            <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Backdate Entry (Unlocked)</label>
-                            <input type="date" id="revision-date" class="w-full text-xs font-black text-slate-700 bg-white border border-slate-300 rounded-xl px-3 py-2 outline-none focus:border-amber-500 cursor-pointer shadow-sm">
-                        </div>
-                        
-                        <div class="flex-1 flex flex-col">
-                            <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Mandatory Details</label>
-                            <textarea id="revision-reason" class="w-full bg-white border border-slate-300 rounded-xl p-3 text-xs font-bold text-slate-700 outline-none focus:border-amber-500 shadow-sm flex-1 resize-none" placeholder="Describe the revision topic, test, or activity..."></textarea>
-                        </div>
+                        <div id="revision-batch-container" class="flex-1 overflow-y-auto custom-scroll space-y-3 pr-2 pb-2">
+                            </div>
                     </div>
                 </div>
             </div>
@@ -482,21 +475,10 @@
             document.getElementById('syll-class-title').innerText = document.getElementById('mode-class-title').innerText;
             document.getElementById('syll-session-badge').innerText = `Allocating Timetable Session: ${activeSessionMins} Mins`;
             
-            // Set up the Revision UI defaults
-            document.getElementById('revision-reason').value = '';
-            const offset = new Date().getTimezoneOffset() * 60000;
+const offset = new Date().getTimezoneOffset() * 60000;
             const todayISO = new Date(Date.now() - offset).toISOString().split('T')[0];
-            const revDateInput = document.getElementById('revision-date');
-            const revDateWrapper = document.getElementById('revision-date-wrapper');
+            window.catchUpDates = []; // Will hold valid dates for dropdowns
             
-            if(revDateInput) {
-                revDateInput.value = todayISO;
-                revDateInput.max = todayISO;
-            }
-            if (revDateWrapper) {
-                revDateWrapper.style.display = 'none'; // Force hide on init
-            }
-
             // Always open modal to Syllabus tab by default
             switchSyllabusTab('syllabus');
             openModal('syllabus-modal');
@@ -594,36 +576,63 @@
                 const confBtn = document.getElementById('confirm-day-btn');
                 const revBlock = document.getElementById('unified-revision-block');
                 
-                if (window.isSubjectUnlocked || !globalAutoLock) {
+               if (window.isSubjectUnlocked || !globalAutoLock) {
                     reqBtn.innerText = "🔓 Unlocked! You can make corrections.";
                     reqBtn.className = "w-full bg-emerald-50 text-emerald-600 font-black py-3 rounded-xl uppercase tracking-widest text-[10px] border border-emerald-200 cursor-default";
                     reqBtn.disabled = true;
                     reqBtn.style.display = 'block';
                     if(confBtn) confBtn.style.display = 'block';
                     
-                    // Golden Ticket is active! Show the date picker.
-                    if (revDateWrapper) revDateWrapper.style.display = 'block';
-                    
-                    // Enforce strict limit down to the lock date
                     let minDate = window.lwdDateStr || todayISO;
-                    if (window.lockedDateStr && window.lockedDateStr < minDate) {
-                        minDate = window.lockedDateStr;
+                    if (window.lockedDateStr && window.lockedDateStr < minDate) minDate = window.lockedDateStr;
+
+                    // BUILD THE BATCH CATCH-UP MATRIX
+                    let iterDate = new Date(minDate); const endD = new Date(todayISO);
+                    let revHtml = ""; const dArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+                    while(iterDate <= endD) {
+                        const curStr = iterDate.toISOString().split('T')[0];
+                        const dayName = dArr[iterDate.getDay()];
+                        const shortDate = iterDate.toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
+                        const exclusion = checkDateExclusion(iterDate, cName, sName, subName);
+                        
+                        let isValidWorkingDay = false; let reason = exclusion.reason; let mins = 0;
+                        if (!exclusion.isExcluded) {
+                            if (isTimetableWorkingDay(iterDate, cName, sName, subName)) {
+                                isValidWorkingDay = true; reason = "Working Day";
+                                const fullDayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][iterDate.getDay()];
+                                const tMatch = (window.teacherTimetable || []).find(t => t.day === fullDayName && t.className === cName && t.section === sName && t.subject === subName);
+                                mins = tMatch ? parseInt(tMatch.duration) || activeSessionMins : activeSessionMins;
+                            } else reason = "No Class Scheduled";
+                        }
+
+                        const alreadySyllabus = currentPlannerData.some(r => r.isDone && r.completedDate === curStr);
+                        const alreadyRev = window.currentActivityLogs.some(l => l.date === curStr);
+                        if (alreadySyllabus || alreadyRev) { isValidWorkingDay = false; reason = "Already Logged"; }
+
+                        if (isValidWorkingDay) {
+                            window.catchUpDates.push({ date: curStr, label: `${shortDate} (${dayName})`, mins: mins });
+                            revHtml += `
+                                <div class="bg-white border border-amber-200 rounded-xl p-3 shadow-sm transition-all hover:border-amber-400">
+                                    <div class="flex justify-between items-center mb-2">
+                                        <span class="text-[10px] font-black text-amber-700 uppercase tracking-widest bg-amber-50 px-2 py-1 rounded border border-amber-100">${shortDate} (${dayName})</span>
+                                        <span class="text-[9px] font-bold text-emerald-600 uppercase bg-emerald-50 px-2 py-0.5 rounded shadow-sm border border-emerald-100">🟢 ${mins} Mins</span>
+                                    </div>
+                                    <textarea class="batch-rev-input w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs font-bold text-slate-700 outline-none focus:border-amber-500 focus:bg-white resize-none h-14 placeholder-slate-300 transition-all" placeholder="Optional details (leave blank to skip)..." data-date="${curStr}" data-mins="${mins}"></textarea>
+                                </div>`;
+                        } else {
+                            revHtml += `
+                                <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 opacity-60 pointer-events-none">
+                                    <div class="flex justify-between items-center">
+                                        <span class="text-[10px] font-black text-slate-500 uppercase tracking-widest">${shortDate} (${dayName})</span>
+                                        <span class="text-[9px] font-bold text-rose-500 uppercase">🚫 ${reason}</span>
+                                    </div>
+                                </div>`;
+                        }
+                        iterDate.setDate(iterDate.getDate() + 1);
                     }
-                    
-                    if(revDateInput) {
-                        revDateInput.min = minDate;
-                        // Add strict exclusion validator to the picker
-                        revDateInput.onchange = function(e) {
-                            const newDateStr = e.target.value;
-                            if (!newDateStr) return;
-                            const dObj = new Date(newDateStr);
-                            const exclusion = checkDateExclusion(dObj, cName, sName, subName);
-                            if (exclusion.isExcluded) {
-                                alert(`Cannot select ${newDateStr}: ${exclusion.reason}`);
-                                e.target.value = todayISO; // Revert
-                            }
-                        };
-                    }
+                    const revContainer = document.getElementById('revision-batch-container');
+                    if (revContainer) revContainer.innerHTML = revHtml || `<div class="text-center text-[10px] font-bold text-slate-400 p-4">No pending dates to log.</div>`;
                 } 
                 else if (window.complianceLocked) {
                     reqBtn.disabled = true;
@@ -639,13 +648,26 @@
                         autoRequestUnlock(window.lwdDateStr);
                     }
                 } 
-                else {
+             else {
                     reqBtn.innerText = "Made a Mistake? Request Admin Unlock";
                     reqBtn.className = "w-full bg-rose-50 text-rose-600 font-black py-3 rounded-2xl uppercase tracking-widest text-[10px] border border-rose-200 hover:bg-rose-100 transition-all";
                     reqBtn.disabled = false;
                     reqBtn.style.display = 'block';
                     if(confBtn) confBtn.style.display = 'block';
-                    if(revDateInput) revDateInput.min = todayISO;
+                    
+                    window.catchUpDates = [{ date: todayISO, label: "Today", mins: activeSessionMins }];
+                    const shortDate = new Date().toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
+                    const revContainer = document.getElementById('revision-batch-container');
+                    if (revContainer) {
+                        revContainer.innerHTML = `
+                            <div class="bg-white border border-amber-200 rounded-xl p-4 shadow-sm h-full flex flex-col transition-all hover:border-amber-400">
+                                <div class="flex justify-between items-center mb-3">
+                                    <span class="text-[10px] font-black text-amber-700 uppercase tracking-widest bg-amber-50 px-2.5 py-1.5 rounded-lg border border-amber-100">Today (${shortDate})</span>
+                                    <span class="text-[9px] font-bold text-emerald-600 uppercase bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-100 shadow-sm">🟢 ${activeSessionMins} Mins</span>
+                                </div>
+                                <textarea class="batch-rev-input w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold text-slate-700 outline-none focus:border-amber-500 focus:bg-white resize-none flex-1 placeholder-slate-300 transition-all" placeholder="Describe today's revision activity (Optional)..." data-date="${todayISO}" data-mins="${activeSessionMins}"></textarea>
+                            </div>`;
+                    }
                 }
                 
                 renderSyllabusExactMath();
@@ -1167,24 +1189,24 @@
                 
                 const container = document.getElementById(`tick-container-${idx}`);
                 
-              if (window.isSubjectUnlocked) {
-                    // Show restricted Date Picker if Admin Unlocked them
-                    // SMART LIMIT: Allow going back to the exact date the system locked them out
-                    let minDate = window.lwdDateStr || todayISO;
-                    if (window.lockedDateStr && window.lockedDateStr < minDate) {
-                        minDate = window.lockedDateStr;
-                    }
+            if (window.isSubjectUnlocked) {
+                    let dateOptions = window.catchUpDates.map(d => `<option value="${d.date}" data-mins="${d.mins}">${d.label}</option>`).join('');
+                    if (!dateOptions) dateOptions = `<option value="${todayISO}" data-mins="${activeSessionMins}">Today (Fallback)</option>`;
                     
                     container.innerHTML = `
                         <div class="flex flex-col items-end gap-1.5">
                             <span class="text-amber-500 font-black text-[10px] uppercase tracking-widest">PENDING SYNC...</span>
                             <div class="flex items-center gap-2">
-                                <input type="date" class="text-[10px] p-1.5 border border-blue-300 rounded-lg outline-none cursor-pointer font-bold text-slate-700 shadow-sm" 
-                                    value="${todayISO}" min="${minDate}" max="${todayISO}" 
-                                    onchange="updateTopicDate(${idx}, this.value)">
-                                <span id="sync-mins-${idx}" class="text-[9px] font-black text-slate-500 bg-slate-100 border border-slate-200 px-2 py-1.5 rounded-lg shadow-sm">${activeSessionMins}m</span>
+                                <select class="text-[10px] p-1.5 border border-blue-300 rounded-lg outline-none cursor-pointer font-bold text-slate-700 shadow-sm bg-white" 
+                                    onchange="updateTopicDate(${idx}, this.options[this.selectedIndex].value, this.options[this.selectedIndex].dataset.mins)">
+                                    ${dateOptions}
+                                </select>
+                                <span id="sync-mins-${idx}" class="text-[9px] font-black text-slate-500 bg-slate-100 border border-slate-200 px-2 py-1.5 rounded-lg shadow-sm">${window.catchUpDates[0] ? window.catchUpDates[0].mins : activeSessionMins}m</span>
                             </div>
                         </div>`;
+                    
+                    // Safely initialize with the first valid date available
+                    updateTopicDate(idx, window.catchUpDates[0] ? window.catchUpDates[0].date : todayISO, window.catchUpDates[0] ? window.catchUpDates[0].mins : activeSessionMins);
                 } else {
                     // Standard tick (Normal Locked Day)
                     const todayStrGB = new Date().toLocaleDateString('en-GB');
@@ -1193,28 +1215,11 @@
             }
         }
 
-        function updateTopicDate(idx, newDateVal) {
+      function updateTopicDate(idx, newDateVal, predefinedMins) {
             if (!newDateVal) return;
-            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-            const selectedDayName = daysArr[new Date(newDateVal).getDay()];
-            
-            const curr = mySessions.find(s => s.assignmentId === activeSubjectId);
-            let dynamicMins = 0;
-            
-            if (curr && window.teacherTimetable) {
-                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                const matchedClass = window.teacherTimetable.find(t => 
-                    t.day === selectedDayName && 
-                    norm(t.className) === norm(curr.className) && 
-                    norm(t.section) === norm(curr.section) && 
-                    norm(t.subject) === norm(curr.subject)
-                );
-                if (matchedClass) dynamicMins = parseInt(matchedClass.duration) || 0;
-            }
-            
+            let dynamicMins = parseInt(predefinedMins) || activeSessionMins;
             currentPlannerData[idx].completedDate = newDateVal;
             currentPlannerData[idx].completedMinutes = dynamicMins;
-            
             const minBadge = document.getElementById(`sync-mins-${idx}`);
             if (minBadge) minBadge.innerText = `${dynamicMins}m`;
         }
@@ -1238,25 +1243,34 @@
             try { await getCollection("lesson_planners").doc(activeSubjectId).update({ syllabusData: currentPlannerData }); renderSyllabusExactMath(); } catch(e) { alert("Error."); }
         }
 
-      async function confirmDaySubmission() {
-            const reasonBox = document.getElementById('revision-reason');
-            // Only capture the reason if we are currently on the Revision Tab, to prevent empty string overwrites
-            const reason = (window.activeSyllabusTab === 'revision' && reasonBox) ? reasonBox.value.trim() : '';
-            const selectedRevDate = document.getElementById('revision-date') ? document.getElementById('revision-date').value : '';
+ async function confirmDaySubmission() {
+            const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
+            
+            // Build the revision array from batch inputs
+            const revInputs = document.querySelectorAll('.batch-rev-input');
+            let newActivityLogs = [];
+            revInputs.forEach(input => {
+                const val = input.value.trim();
+                if (val) {
+                    newActivityLogs.push({
+                        date: input.dataset.date,
+                        reason: val,
+                        minutes: parseInt(input.dataset.mins) || activeSessionMins,
+                        loggedBy: safeName,
+                        timestamp: new Date().getTime()
+                    });
+                }
+            });
             
             const stagedTopics = currentPlannerData.filter(r => r.isDone && !r.savedToDb);
             
-            if (window.activeSyllabusTab === 'syllabus' && stagedTopics.length === 0) {
-                alert("Please tick at least one syllabus topic before confirming.");
-                return;
-            }
-            if (window.activeSyllabusTab === 'revision' && !reason) {
-                alert("Please provide a reason/details for the activity.");
+            if (stagedTopics.length === 0 && newActivityLogs.length === 0) {
+                alert("Please tick at least one syllabus topic OR type a revision activity before confirming.");
                 return;
             }
 
             if(isDemoMode) {
-                alert(`Simulation Success: Data locked.\nTopics: ${stagedTopics.length}\nRevision: ${reason || 'None'}`);
+                alert(`Simulation Success: Batch Data Locked.\nTopics Ticked: ${stagedTopics.length}\nRevisions Logged: ${newActivityLogs.length}`);
                 closeModal('syllabus-modal'); return;
             }
 
@@ -1293,18 +1307,12 @@
                     }
                 };
 
-                // Process Revision Log (if any)
-                if (reason) {
-                    const revDateStr = selectedRevDate ? selectedRevDate : todayISO;
-                    const logEntry = {
-                        date: revDateStr,
-                        reason: reason,
-                        minutes: activeSessionMins,
-                        loggedBy: safeName,
-                        timestamp: new Date().getTime()
-                    };
-                    updatePayload.activityLogs = firebase.firestore.FieldValue.arrayUnion(logEntry);
+                // Process Bundle Revision Logs 
+                if (newActivityLogs.length > 0) {
+                    updatePayload.activityLogs = firebase.firestore.FieldValue.arrayUnion(...newActivityLogs);
                 }
+                
+                try {
                 
                 try {
                     await getCollection("lesson_planners").doc(activeSubjectId).update(updatePayload);
