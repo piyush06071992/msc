@@ -1307,11 +1307,55 @@ function renderGeneratedGrid(forceOpenRoom = null) {
             
             document.getElementById('edit-modal-subtitle').innerText = `${roomName} | ${colKey} (${data.timing})`;
             
-            if(data.rawStart) document.getElementById('edit-shift-start').value = minsTo24(data.rawStart);
+          if(data.rawStart) document.getElementById('edit-shift-start').value = minsTo24(data.rawStart);
             if(data.rawEnd) document.getElementById('edit-shift-end').value = minsTo24(data.rawEnd);
             
+            let bStart = data.rawStart || timeToMins(data.timing.split(' - ')[0]);
+            let bEnd = data.rawEnd || timeToMins(data.timing.split(' - ')[1]);
+
+            let scheduleToCheck = timetableData; 
+            let targetDay;
+            if (currentMode === 'LUNCH') {
+                targetDay = colKey;
+                scheduleToCheck = timetableData.filter(t => t.day === targetDay);
+            } else {
+                const eDate = document.getElementById('dutyTargetDate').value;
+                targetDay = DAYS_OF_WEEK[new Date(eDate).getDay()];
+                if(activeDateSchedule && activeDateSchedule.length > 0) scheduleToCheck = activeDateSchedule;
+            }
+
             const depts = getUniqueDepartments();
-            document.getElementById('edit-dept').innerHTML = `<option value="">-- Choose Department --</option>` + depts.map(d => `<option value="${d}">${d}</option>`).join('');
+            let deptOptions = `<option value="">-- Choose Department --</option>`;
+
+            depts.forEach(d => {
+                const staffInDept = staffData.filter(s => s.rawDept.includes(d));
+                let freeCount = 0;
+                
+                staffInDept.forEach(s => {
+                    const sTt = scheduleToCheck.filter(t => t.teacherName === s.name || t.teacher === s.name);
+                    const isBusyInClass = sTt.some(cls => {
+                        if(!cls.timeRange && (!cls.start24 || !cls.end24)) return false;
+                        const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
+                        const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
+                        return (bStart < clsE && bEnd > clsS);
+                    });
+
+                    let alreadyOnDuty = false;
+                    Object.keys(generatedRoster).forEach(rKey => {
+                        Object.values(generatedRoster[rKey].columns).forEach(colData => {
+                            if (colData.status === 'ASSIGNED' && colData.staff && colData.staff.email === s.email) {
+                                if (!(rKey === roomName && colData.timing === data.timing)) alreadyOnDuty = true;
+                            }
+                        });
+                    });
+
+                    if (!isBusyInClass && !alreadyOnDuty) freeCount++;
+                });
+
+                deptOptions += `<option value="${d}">${d} (${freeCount} Free)</option>`;
+            });
+
+            document.getElementById('edit-dept').innerHTML = deptOptions;
             
             document.getElementById('edit-staff').innerHTML = `<option value="">-- Select Dept First --</option>`;
             document.getElementById('edit-staff').disabled = true;
@@ -1363,29 +1407,38 @@ function renderGeneratedGrid(forceOpenRoom = null) {
             let availableGroup = '';
             let busyGroup = '';
 
-            staffInDept.forEach(s => {
+          staffInDept.forEach(s => {
                 const sTt = scheduleToCheck.filter(t => t.teacherName === s.name || t.teacher === s.name);
+                
+                let classConflictDetails = "";
                 const isBusyInClass = sTt.some(cls => {
                     if(!cls.timeRange && (!cls.start24 || !cls.end24)) return false;
                     const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
                     const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
-                    return (bStart < clsE && bEnd > clsS);
+                    if (bStart < clsE && bEnd > clsS) {
+                        classConflictDetails = `${cls.className} ${cls.section || ''}`.trim();
+                        return true;
+                    }
+                    return false;
                 });
 
                 let alreadyOnDuty = false;
+                let dutyConflictDetails = "";
                 Object.keys(generatedRoster).forEach(rKey => {
-                    Object.values(generatedRoster[rKey].columns).forEach(colData => {
+                    Object.keys(generatedRoster[rKey].columns).forEach(colKey => {
+                        const colData = generatedRoster[rKey].columns[colKey];
                         if (colData.status === 'ASSIGNED' && colData.staff && colData.staff.email === s.email) {
                             if (!(rKey === currentEditParams.roomName && colData.timing === data.timing)) {
                                 alreadyOnDuty = true;
+                                dutyConflictDetails = `${rKey} (${colKey})`;
                             }
                         }
                     });
                 });
 
                 let reason = "";
-                if (isBusyInClass) reason = " (In Class)";
-                else if (alreadyOnDuty) reason = " (On Duty)";
+                if (isBusyInClass) reason = ` | ❌ Class: ${classConflictDetails}`;
+                else if (alreadyOnDuty) reason = ` | ⚠️ Duty: ${dutyConflictDetails}`;
 
                 const loadMins = getTeacherLoadFromSchedule(scheduleToCheck, s.name).mins;
                 const optionHtml = `<option value="${s.email}">${s.name}${reason} (Load: ${loadMins}m)</option>`;
