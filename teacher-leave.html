@@ -128,9 +128,14 @@
         let selectedAdjustments = {};
         let assignedExtraDuties = []; // <-- NEW: Array to hold extra duties
 
-        window.onload = async () => {
+     window.onload = async () => {
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
             if (!activeStaff) return window.location.replace('staff-login.html');
+            
+            // Check database for Leave Incharge authorization
+            const staffDoc = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+            if(!staffDoc.empty) activeStaff.isLeaveIncharge = staffDoc.docs[0].data().isLeaveIncharge === true;
+
             document.getElementById('pref-name').innerText = activeStaff.name || activeStaff.email;
             document.getElementById('pref-center').innerText = activeStaff.center || "GHUMARWIN";
             await loadDatabases();
@@ -489,17 +494,21 @@
                   let html = "";
                   let hasPending = false;
 
-                  snap.forEach(doc => {
-                      const req = doc.data();
-                      if(req.adjustments) {
-                          req.adjustments.forEach(adj => {
-                              if(adj.adjustedEmail && adj.adjustedEmail.toLowerCase() === myEmail && !adj.substituteResponse) {
-                                  hasPending = true;
-                                  html += `
+                snap.forEach(doc => {
+                    const req = doc.data();
+                    if(req.adjustments) {
+                        req.adjustments.forEach(adj => {
+                            const isMySub = adj.adjustedEmail && adj.adjustedEmail.toLowerCase() === myEmail && !adj.substituteResponse;
+                            const isInchargeReq = activeStaff.isLeaveIncharge && adj.isEmergency && !adj.substituteResponse;
+
+                            if(isMySub || isInchargeReq) {
+                                hasPending = true;
+                                let cardHtml = `
                                     <div class="bg-white p-4 rounded-2xl shadow-sm border border-rose-100 flex flex-col gap-3">
                                         <div class="flex justify-between items-start border-b border-rose-50 pb-2">
                                             <div>
                                                 <span class="text-[9px] font-black bg-rose-100 text-rose-700 px-2 py-0.5 rounded uppercase tracking-widest">${adj.date}</span>
+                                                ${isInchargeReq ? `<span class="text-[9px] font-black bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded uppercase tracking-widest ml-1 shadow-sm border border-indigo-200">Incharge Duty</span>` : ''}
                                                 <h4 class="font-black text-slate-800 text-sm uppercase mt-1">${adj.title}</h4>
                                                 <p class="text-[10px] font-bold text-slate-500 uppercase">${adj.sub} | ${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}</p>
                                             </div>
@@ -508,16 +517,55 @@
                                                 <span class="text-[10px] font-black text-rose-600 uppercase">${req.teacherName}</span>
                                             </div>
                                         </div>
+                                `;
+
+                                if(isMySub) {
+                                    cardHtml += `
                                         <div class="flex gap-2">
                                             <button onclick="handleAdjustmentResponse('${doc.id}', '${adj.id}', 'DECLINED')" class="flex-1 py-2 bg-slate-50 text-slate-500 hover:bg-rose-50 hover:text-rose-600 font-black rounded-xl text-[10px] uppercase tracking-widest transition-colors border border-slate-200">Decline</button>
                                             <button onclick="handleAdjustmentResponse('${doc.id}', '${adj.id}', 'ACCEPTED', '${encodeURIComponent(JSON.stringify(adj))}', '${req.teacherName}')" class="flex-1 py-2 bg-rose-600 text-white hover:bg-rose-500 font-black rounded-xl text-[10px] uppercase tracking-widest shadow-md transition-colors">Accept & Inject</button>
                                         </div>
-                                    </div>
-                                  `;
-                              }
-                          });
-                      }
-                  });
+                                    `;
+                                } else if(isInchargeReq) {
+                                    const dParts = adj.date.split('-');
+                                    const localDateObj = new Date(dParts[0], dParts[1] - 1, dParts[2]);
+                                    const dayName = localDateObj.toLocaleDateString('en-US', { weekday: 'long' });
+                                    
+                                    const override = historyData.find(o => o.date === adj.date);
+                                    let activeSchedule = (override && override.schedule) ? override.schedule : timetableData.filter(t => t.day === dayName);
+
+                                    const subs = staffData.filter(staff => {
+                                        if ((staff.name || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase() === (req.teacherName || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase()) return false;
+                                        const staffTt = activeSchedule.filter(s => (s.teacherName || s.teacher || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase() === (staff.name || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase());
+                                        return !staffTt.some(slot => {
+                                            const s = timeToMins(slot.start24 || (slot.timeRange ? slot.timeRange.split(' - ')[0] : "00:00"));
+                                            const e = timeToMins(slot.end24 || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00"));
+                                            return (adj.start < e && adj.end > s);
+                                        });
+                                    });
+
+                                    let deptMap = {};
+                                    subs.forEach(s => { let d = s.dept.split(',')[0].trim(); if(!deptMap[d]) deptMap[d] = []; deptMap[d].push(s); });
+                                    
+                                    let staffOptions = `<option value="">-- Assign Force Replacement --</option>`;
+                                    Object.keys(deptMap).sort().forEach(dN => {
+                                        staffOptions += `<optgroup label="${dN} (${deptMap[dN].length} Free)">`;
+                                        deptMap[dN].forEach(s => { staffOptions += `<option value="${s.email}|${s.name}">${s.name}</option>`; });
+                                        staffOptions += `</optgroup>`;
+                                    });
+
+                                    cardHtml += `
+                                        <div class="flex flex-col gap-2 bg-indigo-50 border border-indigo-100 p-3 rounded-xl">
+                                            <select id="incharge-assign-${adj.id}" class="w-full p-2 bg-white border border-indigo-200 rounded-lg text-xs font-bold outline-none shadow-sm cursor-pointer">${staffOptions}</select>
+                                            <button onclick="forceAssignIncharge('${doc.id}', '${adj.id}', '${encodeURIComponent(JSON.stringify(adj))}', '${req.teacherName}')" class="w-full py-3 bg-indigo-600 text-white hover:bg-indigo-500 font-black rounded-lg text-[10px] uppercase tracking-widest shadow-sm transition-colors">Force Assign & Update Timetable</button>
+                                        </div>
+                                    `;
+                                }
+                                html += cardHtml + `</div>`;
+                            }
+                        });
+                    }
+                });
 
                   list.innerHTML = html;
                   if (hasPending) box.classList.remove('hidden');
@@ -575,12 +623,95 @@
             }
         }
 
-      async function applyTimetableOverride(adj, originalTeacherName) {
-            // We no longer inject a full timetable snapshot here to prevent "freezing" the day.
-            // The patching now happens live in the Teacher Portal and Daily Work Report.
-            // We just need to ensure the adjustment is marked as accepted (done in processResponse).
-            console.log("Adjustment ready for live patching:", adj);
-            return true; 
+   async function forceAssignIncharge(docId, clashId, adjDataEncoded, requesterName) {
+            const selectEl = document.getElementById(`incharge-assign-${clashId}`);
+            if(!selectEl || !selectEl.value) return alert("Select a replacement teacher from the dropdown first.");
+            
+            const [selectedEmail, selectedName] = selectEl.value.split('|');
+            if(!confirm(`Force assign ${selectedName}? This will permanently update the master timetable for that day.`)) return;
+
+            const btn = event.target;
+            const orig = btn.innerText;
+            btn.innerText = "Assigning..."; btn.disabled = true;
+
+            try {
+                const adjData = JSON.parse(decodeURIComponent(adjDataEncoded));
+                
+                // 1. Force the Timetable Override
+                await applyTimetableOverride(adjData, requesterName, selectedName, selectedEmail);
+
+                // 2. Mark the Leave Request as resolved
+                const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
+                const docRef = db.collection(prefix + "leave_requests").doc(docId);
+                
+                await db.runTransaction(async (transaction) => {
+                    const docSnap = await transaction.get(docRef);
+                    if (!docSnap.exists) throw new Error("Request missing.");
+                    
+                    let data = docSnap.data();
+                    let adjIndex = data.adjustments.findIndex(a => a.id === clashId);
+                    if(adjIndex > -1) {
+                        data.adjustments[adjIndex].adjustedTo = selectedName;
+                        data.adjustments[adjIndex].adjustedEmail = selectedEmail;
+                        data.adjustments[adjIndex].substituteResponse = 'ACCEPTED';
+                        data.adjustments[adjIndex].substituteMessage = 'Force Assigned by Leave Incharge';
+                        transaction.update(docRef, { adjustments: data.adjustments });
+                    }
+                });
+
+                alert(`✅ ${selectedName} assigned! The timetable has been successfully updated.`);
+            } catch(e) {
+                alert("Error: " + e.message);
+                btn.innerText = orig; btn.disabled = false;
+            }
+        }
+
+        async function applyTimetableOverride(adj, originalTeacherName, newTeacherName = activeStaff.name, newTeacherEmail = activeStaff.email) {
+            const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
+            const dateIso = adj.date;
+            const dParts = dateIso.split('-');
+            const localDateObj = new Date(dParts[0], dParts[1] - 1, dParts[2]);
+            const dayName = localDateObj.toLocaleDateString('en-US', { weekday: 'long' });
+
+            const historyRef = db.collection(prefix + "timetable_history").doc(dateIso);
+            const historySnap = await historyRef.get();
+            
+            let activeSchedule = [];
+            if (historySnap.exists && historySnap.data().schedule) {
+                activeSchedule = historySnap.data().schedule;
+            } else {
+                const ttSnap = await db.collection(prefix + "timetable").where("day", "==", dayName).get();
+                activeSchedule = ttSnap.docs.map(d => d.data());
+            }
+
+            const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            let patched = false;
+
+            activeSchedule = activeSchedule.map(slot => {
+                const sT = norm(slot.teacherName || slot.teacher || "");
+                if (sT === norm(originalTeacherName)) {
+                    const s = timeToMins(slot.start24 || (slot.timeRange ? slot.timeRange.split(' - ')[0] : "00:00"));
+                    const e = timeToMins(slot.end24 || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00"));
+                    
+                    if (s === adj.start && e === adj.end) {
+                        slot.teacher = newTeacherName;
+                        slot.teacherName = newTeacherName;
+                        slot.teacherEmail = newTeacherEmail;
+                        slot.isSubstituted = true;
+                        patched = true;
+                    }
+                }
+                return slot;
+            });
+
+            if (patched) {
+                await historyRef.set({ date: dateIso, schedule: activeSchedule }, { merge: true });
+                // Update local memory so UI stays fast
+                const hIdx = historyData.findIndex(h => h.date === dateIso);
+                if(hIdx > -1) historyData[hIdx].schedule = activeSchedule;
+                else historyData.push({ date: dateIso, schedule: activeSchedule });
+            }
+            return true;
         }
     </script>
 </body>
