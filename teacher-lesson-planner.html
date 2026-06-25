@@ -236,12 +236,17 @@
                 window.historyOverrides = histSnap.docs.map(d => d.data());
             } catch(e) { console.error("Error fetching exclusions:", e); }
 
-            try {
+          try {
                 const snap = await getCollection("timetable").get();
                 window.fullTimetable = snap.docs.map(d => d.data());
                 
-                // Isolate this specific teacher's normal schedule
-                window.teacherTimetable = window.fullTimetable.filter(t => t.teacherName === safeName || t.teacher === safeName);
+                const mySafeNameMatch = safeName.trim().toLowerCase();
+
+                // Isolate this specific teacher's normal schedule (Case Insensitive)
+                window.teacherTimetable = window.fullTimetable.filter(t => 
+                    (t.teacherName && t.teacherName.trim().toLowerCase() === mySafeNameMatch) || 
+                    (t.teacher && t.teacher.trim().toLowerCase() === mySafeNameMatch)
+                );
 
                 // --- OVERRIDE ENGINE FOR TEACHER DASHBOARD ---
                 const todayDateObj = new Date();
@@ -251,15 +256,14 @@
                 const todayDocsRaw = getScheduleSnapshotForDate(todayIsoStr, todayName);
                 
                 let todayDocs = todayDocsRaw.filter(s => {
-                    const isException = s.type === 'EXCLUSION' || s.isOverride === true;
-                    const nameMatch = (s.teacherName === safeName || s.teacher === safeName);
+                    const nameMatch = (s.teacherName && s.teacherName.trim().toLowerCase() === mySafeNameMatch) || 
+                                      (s.teacher && s.teacher.trim().toLowerCase() === mySafeNameMatch);
                     const dayMatch = !s.day || s.day === todayName; 
-                    return isException || (nameMatch && dayMatch);
+                    return nameMatch && dayMatch;
                 });
                 
-                const masterCheck = window.teacherTimetable.filter(t => t.day === todayName);
-                if (todayDocs.length === 0 && masterCheck.length > 0) {
-                    todayDocs = masterCheck;
+                if (todayDocs.length === 0 && window.teacherTimetable.some(t => t.day === todayName)) {
+                    todayDocs = window.teacherTimetable.filter(t => t.day === todayName);
                 }
 
                 function minsTo12H(m) { 
@@ -267,6 +271,11 @@
                     return `${h.toString().padStart(2,'0')}:${mn.toString().padStart(2,'0')} ${mod}`; 
                 }
                 
+                function format12Hour(time24) {
+                    if(!time24) return ""; let [h, m] = time24.split(':');
+                    let ampm = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+                    return `${h.toString().padStart(2, '0')}:${m} ${ampm}`;
+                }
                 const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
                const leaveSnap = await db.collection(prefix + "leave_requests").get();
                 leaveSnap.forEach(doc => {
@@ -298,13 +307,24 @@
                     }
                 });
                                      
-                if(todayDocs.length > 0) {
+               if(todayDocs.length > 0) {
                     const structSnap = await getCollection("institute_structure").get();
                     const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
 
                     mySessions = todayDocs.map((data, index) => {
                         const docId = data.id || `override_${index}`; 
-                        const times = data.timeRange ? data.timeRange.split(' - ') : ['00:00 AM', '00:00 AM'];
+                        
+                        // Extract precise times from Timetable (start24/end24) instead of old timeRange
+                        let startTime = "00:00 AM", endTime = "00:00 AM";
+                        if (data.start24 && data.end24) {
+                            startTime = format12Hour(data.start24);
+                            endTime = format12Hour(data.end24);
+                        } else if (data.timeRange) {
+                            const times = data.timeRange.split(' - ');
+                            startTime = times[0] || "00:00 AM";
+                            endTime = times[1] || "00:00 AM";
+                        }
+                        
                         const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
                         const structMatch = structures.find(s => 
@@ -320,20 +340,16 @@
                             if (matchedSub) exactSubjectCasing = matchedSub; 
                         }
                         
-                        return { 
+                      return { 
                             id: docId, 
                             assignmentId: `${structId}_${exactSubjectCasing}`.replace(/\s+/g, '_'),
                             className: data.className, section: data.section, 
-                            subject: data.subject, start: times[0], end: times[1], duration: parseInt(data.duration) || 0,
+                            subject: data.subject, start: startTime, end: endTime, duration: parseInt(data.duration) || 0,
                             remark: data.remark || ""
                         };
                     });
                 } else {
-                    const assignSnap = await getCollection("lesson_planner_assignments").where("assignedTo", "==", activeStaff.email).get();
-                    mySessions = assignSnap.docs.map(d => ({ 
-                        id: d.id, assignmentId: d.id, className: d.data().className, section: d.data().section, 
-                        subject: d.data().subject, start: '09:00 AM', end: '10:30 AM', duration: 90 
-                    }));
+                    mySessions = []; // Do NOT invent a fake schedule. Follow Timetable strictly.
                 }
                 myDuties = [];
                 
