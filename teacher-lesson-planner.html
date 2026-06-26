@@ -276,12 +276,31 @@
                     let ampm = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
                     return `${h.toString().padStart(2, '0')}:${m} ${ampm}`;
                 }
-                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+              const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
                const leaveSnap = await db.collection(prefix + "leave_requests").get();
+               window.myAbsences = [];
                 leaveSnap.forEach(doc => {
                     const leaveData = doc.data();
+                    
+                    if (leaveData.status === "APPROVED" && leaveData.teacherEmail === activeStaff.email) {
+                        if (leaveData.type === 'FULL') {
+                            let currDate = new Date(leaveData.startDate + "T00:00:00");
+                            let endObj = new Date((leaveData.endDate || leaveData.startDate) + "T00:00:00");
+                            while(currDate <= endObj) {
+                                window.myAbsences.push({ date: currDate.toISOString().split('T')[0], isFullDay: true });
+                                currDate.setDate(currDate.getDate() + 1);
+                            }
+                        } else if (leaveData.adjustments) {
+                            leaveData.adjustments.forEach(adj => {
+                                let cNameAdj = adj.className || (adj.sub ? adj.sub.split('|')[0].trim() : "");
+                                let sNameAdj = adj.section || (adj.sub && adj.sub.split('|')[1] ? adj.sub.split('|')[1].replace('Sec', '').trim() : "");
+                                window.myAbsences.push({ date: adj.date, isFullDay: false, className: cNameAdj, section: sNameAdj, subject: adj.title });
+                            });
+                        }
+                    }
+
                     if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
-                        // WE ARE NO LONGER PUSHING LEAVE TO holidaysData. 
+                        // WE ARE NO LONGER PUSHING LEAVE TO holidaysData.
                         // This forces the system to treat these days as working days.
 
                         if (leaveData.adjustments) {
@@ -569,11 +588,22 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 const offsetLwd = lwd.getTimezoneOffset() * 60000;
                 const lwdDateStr = new Date(lwd.getTime() - offsetLwd).toISOString().split('T')[0];
 
-                let loggedOnLWD = false;
+             let loggedOnLWD = false;
                 if (foundValidLWD) {
                     const tickedTopic = currentPlannerData.find(r => r.completedDate === lwdDateStr);
                     const loggedActivity = window.currentActivityLogs.find(l => l.date === lwdDateStr);
                     if (tickedTopic || loggedActivity) loggedOnLWD = true;
+                }
+
+                const normStr = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                let wasOnLeaveLWD = window.myAbsences && window.myAbsences.some(a => {
+                    if (a.date !== lwdDateStr) return false;
+                    if (a.isFullDay) return true;
+                    return normStr(a.className) === normStr(cName) && normStr(a.section) === normStr(sName) && normStr(a.subject) === normStr(subName);
+                });
+
+                if (wasOnLeaveLWD) {
+                    loggedOnLWD = true; // Spoof the log to completely bypass the lock
                 }
                 
                 window.complianceLocked = enableDailyBlock ? (foundValidLWD && !loggedOnLWD) : false;
@@ -1057,7 +1087,7 @@ const offset = new Date().getTimezoneOffset() * 60000;
                                 });
                             }
                         } else if (!hasTickToday) {
-                            if (!isTimetableWorkingDay(scanDate, cName, sName, subName)) {
+                          if (!isTimetableWorkingDay(scanDate, cName, sName, subName)) {
                                 if (scanDate >= new Date('2026-06-02T00:00:00')) {
                                     timelineEvents.push({
                                         type: 'EXCLUSION',
@@ -1066,6 +1096,25 @@ const offset = new Date().getTimezoneOffset() * 60000;
                                             <div class="flex items-center gap-4 p-3 bg-slate-50 text-slate-400 border-b border-slate-100 text-xs font-bold uppercase tracking-widest pl-6">
                                                 <span class="bg-white border border-slate-200 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
                                                 <span class="opacity-60">🚫 No Alotted Class as per Timetable Routine</span>
+                                            </div>`
+                                    });
+                                }
+                            } else {
+                                const normStr2 = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                                let wasOnLeaveScan = window.myAbsences && window.myAbsences.some(a => {
+                                    if (a.date !== scanIso) return false;
+                                    if (a.isFullDay) return true;
+                                    return normStr2(a.className) === normStr2(cName) && normStr2(a.section) === normStr2(sName) && normStr2(a.subject) === normStr2(subName);
+                                });
+
+                                if (wasOnLeaveScan) {
+                                    timelineEvents.push({
+                                        type: 'LEAVE',
+                                        sortKey: scanIso + "_0_0001",
+                                        html: `
+                                            <div class="flex items-center gap-4 p-3 bg-amber-50/40 text-amber-700 border-b border-amber-100 text-xs font-bold uppercase tracking-widest pl-6">
+                                                <span class="bg-white border border-amber-200 text-amber-600 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                                <span class="text-amber-500 font-black">⏸️ ON LEAVE:</span> Substitute Did Not Log Activity
                                             </div>`
                                     });
                                 }
