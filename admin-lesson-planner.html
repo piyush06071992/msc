@@ -380,19 +380,21 @@
                     }
                 }
 
-               const [structSnap, assignSnap, plannerSnap, staffSnap, ttSnap, holSnap, histSnap] = await Promise.all([
+            const [structSnap, assignSnap, plannerSnap, staffSnap, ttSnap, holSnap, histSnap, leaveSnap] = await Promise.all([
                     getCollection("institute_structure").get(),
                     getCollection("lesson_planner_assignments").get(),
                     getCollection("lesson_planners").get(),
                     getCollection("staff_applications").where("status", "==", "approved").get(),
                     getCollection("timetable").get(),
                     getCollection("school_holidays").get(),
-                    getCollection("timetable_history").get()
+                    getCollection("timetable_history").get(),
+                    getCollection("leave_requests").get()
                 ]);
                 
                 timetableData = ttSnap.docs.map(d => d.data());
                 holidaysData = holSnap.docs.map(d => d.data());
                 window.historyOverrides = histSnap.docs.map(d => d.data());
+                window.allLeaveRequests = leaveSnap.docs.map(d => d.data());
                 structureData = structSnap.docs.map(d => ({ id: d.id, ...d.data() }));
                 structureData.sort((a, b) => a.className.localeCompare(b.className) || a.sectionName.localeCompare(b.sectionName));
                 assignments = assignSnap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -704,6 +706,40 @@ function getScheduleSnapshotForDate(dateIso) {
     
     return timetableData;
 }
+
+       function isTeacherOnLeave(dateIso, className, sectionName, subjectName) {
+            if (!window.allLeaveRequests) return false;
+            const schedule = getScheduleSnapshotForDate(dateIso);
+            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const dObj = new Date(dateIso);
+            const dayName = daysArr[dObj.getDay()];
+            
+            const slot = schedule.find(t => t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName));
+            if (!slot) return false;
+            
+            const teacherEmail = (slot.teacherEmail || "").toLowerCase();
+            const teacherName = norm(slot.teacherName || slot.teacher || "");
+
+            return window.allLeaveRequests.some(lr => {
+                if (lr.status !== "APPROVED") return false;
+                const reqEmail = (lr.teacherEmail || "").toLowerCase();
+                const reqName = norm(lr.teacherName || "");
+                if (reqEmail !== teacherEmail && reqName !== teacherName) return false;
+                
+                if (lr.type === 'FULL') {
+                    return dateIso >= lr.startDate && dateIso <= (lr.endDate || lr.startDate);
+                } else if (lr.adjustments) {
+                    return lr.adjustments.some(adj => {
+                        if (adj.date !== dateIso) return false;
+                        const cNameAdj = adj.className || (adj.sub ? adj.sub.split('|')[0].trim() : "");
+                        const sNameAdj = adj.section || (adj.sub && adj.sub.split('|')[1] ? adj.sub.split('|')[1].replace('Sec', '').trim() : "");
+                        return norm(cNameAdj) === norm(className) && norm(sNameAdj) === norm(sectionName) && norm(adj.title) === norm(subjectName);
+                    });
+                }
+                return false;
+            });
+        }
 
         function isTimetableWorkingDay(dateObj, className, sectionName, subjectName) {
     if (dateObj.getDay() === 0) return false; 
@@ -1236,7 +1272,7 @@ function getScheduleSnapshotForDate(dateIso) {
                                     </div>`
                             });
                         } else if (!hasTickToday) {
-                            // 2. If it's NOT a holiday, and NO tick exists, check if they missed a scheduled class
+                         // 2. If it's NOT a holiday, and NO tick exists, check if they missed a scheduled class
                             if (!isTimetableWorkingDay(scanDate, cls, sec, sub)) {
                                 if (scanDate >= new Date('2026-06-02T00:00:00')) {
                                     timelineEvents.push({
@@ -1249,6 +1285,16 @@ function getScheduleSnapshotForDate(dateIso) {
                                             </div>`
                                     });
                                 }
+                            } else if (isTeacherOnLeave(scanIso, cls, sec, sub)) {
+                                timelineEvents.push({
+                                    type: 'LEAVE',
+                                    sortKey: scanIso + "_0_0001",
+                                    html: `
+                                        <div class="flex items-center gap-4 p-4 bg-amber-50/40 text-amber-700 border-b border-amber-100 text-xs font-bold uppercase tracking-widest pl-10">
+                                            <span class="bg-white border border-amber-200 text-amber-600 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                            <span class="text-amber-500 font-black">⏸️ ON LEAVE:</span> Substitute Did Not Log Activity
+                                        </div>`
+                                });
                             }
                         }
                         scanDate.setDate(scanDate.getDate() + 1);
