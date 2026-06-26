@@ -71,19 +71,12 @@
         </div>
 
         <div id="view-ledger" class="space-y-6 hidden">
-            <div class="bg-white p-6 rounded-[2rem] border border-slate-200 shadow-sm">
-                <div class="flex justify-between items-center mb-4">
+            <div class="bg-white p-4 sm:p-6 rounded-[2rem] border border-slate-200 shadow-sm">
+                <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-3">
                     <h3 class="font-black text-slate-900 uppercase text-lg">Staff Balances</h3>
-                    <input type="text" id="staff-search" placeholder="Search staff..." class="text-xs font-bold p-2.5 bg-slate-50 border border-slate-200 rounded-lg outline-none" onkeyup="renderLedger()">
+                    <input type="text" id="staff-search" placeholder="Search staff..." class="text-xs font-bold p-2.5 bg-slate-50 border border-slate-200 rounded-lg outline-none w-full sm:w-auto shadow-inner" onkeyup="renderLedger()">
                 </div>
-                <div class="overflow-x-auto">
-                    <table class="w-full text-left border-collapse min-w-[600px]">
-                        <thead class="bg-slate-100 text-[10px] font-black uppercase text-slate-500 tracking-widest">
-                            <tr><th class="p-4 rounded-tl-xl">Staff Member</th><th class="p-4 text-center">Initial Baseline</th><th class="p-4 text-center text-emerald-600">Earned (+)</th><th class="p-4 text-center text-rose-600">Consumed (-)</th><th class="p-4 text-center text-slate-900 rounded-tr-xl">Current Balance</th></tr>
-                        </thead>
-                        <tbody id="ledger-body" class="divide-y divide-slate-100 text-sm font-bold text-slate-700"></tbody>
-                    </table>
-                </div>
+                <div id="ledger-accordion-container" class="space-y-4"></div>
             </div>
             <div class="bg-white p-6 rounded-[2rem] border border-slate-200 shadow-sm">
                 <h3 class="font-black text-slate-900 uppercase text-lg mb-4">Chronological Transaction Log</h3>
@@ -264,13 +257,25 @@
         function openModal(id) { document.getElementById(id).classList.replace('hidden', 'flex'); }
         function closeModal(id) { document.getElementById(id).classList.replace('flex', 'hidden'); }
 
-        async function fetchData() {
+     async function fetchData() {
             db.collection("staff_applications").where("status", "==", "approved").get().then(snap => {
-                allStaff = snap.docs.map(d => {
+                let tempStaff = [];
+                snap.docs.forEach(d => {
                     const data = d.data(); const det = data.details || {};
-                    const nameKey = Object.keys(det).find(k => k.toLowerCase().includes('name'));
-                    return { email: data.email, name: nameKey ? det[nameKey] : data.email, dept: det.Department || "General" };
-                }).sort((a,b) => a.name.localeCompare(b.name));
+                    const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
+                    const staffCenter = centerKey ? String(det[centerKey]).toUpperCase() : "GHUMARWIN";
+                    
+                    // Only load staff for the currently active branch
+                    if (staffCenter === activeCenter) {
+                        const nameKey = Object.keys(det).find(k => k.toLowerCase().includes('name'));
+                        let rawDept = det.Department || det.Subject || "General";
+                        // Take only the first word/subject to prevent duplicates
+                        let cleanDept = String(rawDept).split(',')[0].trim().toUpperCase(); 
+                        tempStaff.push({ email: data.email, name: nameKey ? det[nameKey] : data.email, dept: cleanDept });
+                    }
+                });
+                
+                allStaff = tempStaff.sort((a,b) => a.name.localeCompare(b.name));
                 
                 const depts = [...new Set(allStaff.map(s => s.dept))].sort();
                 let deptHtml = `<option value="ALL">All Departments</option>` + depts.map(d => `<option value="${d}">${d}</option>`).join('');
@@ -293,16 +298,16 @@
             });
         }
 
-        function filterStaffList(modalPrefix) {
+ function filterStaffList(modalPrefix) {
             const dept = document.getElementById(modalPrefix + '-dept').value;
             const staffSelect = document.getElementById(modalPrefix + '-staff');
             
             let filtered = allStaff;
             if (dept !== "ALL") filtered = allStaff.filter(s => s.dept === dept);
             
-            staffSelect.innerHTML = filtered.map(s => `<option value="${s.email}">${s.name} (${s.dept})</option>`).join('');
+            // Removed department tag so names fit perfectly on mobile
+            staffSelect.innerHTML = filtered.map(s => `<option value="${s.email}">${s.name}</option>`).join('');
         }
-
         async function logTransaction(email, amount, type, reason) {
             await db.collection(collPrefix + "leave_transactions").add({
                 staffEmail: email, amount: parseFloat(amount), type: type, reason: reason, managedBy: activeAdminName,
@@ -403,17 +408,63 @@
                 return { ...staff, base, earned, consumed, current: base + earned - consumed };
             });
 
-            document.getElementById('metric-comp').innerText = compTotal;
+          document.getElementById('metric-comp').innerText = compTotal;
 
-            document.getElementById('ledger-body').innerHTML = balances.filter(b => b.name.toLowerCase().includes(filter)).map(b => `
-                <tr class="hover:bg-slate-50 border-b border-slate-100 transition-colors">
-                    <td class="p-4"><p class="uppercase font-black text-slate-800">${b.name}</p><p class="text-[9px] uppercase tracking-widest text-slate-400">${b.dept}</p></td>
-                    <td class="p-4 text-center font-bold text-slate-500">${b.base}</td>
-                    <td class="p-4 text-center font-black text-emerald-600">+${b.earned}</td>
-                    <td class="p-4 text-center font-black text-rose-600">-${b.consumed}</td>
-                    <td class="p-4 text-center font-black text-lg text-slate-900">${b.current}</td>
-                </tr>
-            `).join('');
+            const filteredBalances = balances.filter(b => b.name.toLowerCase().includes(filter));
+            const deptGroups = {};
+            
+            filteredBalances.forEach(b => {
+                if(!deptGroups[b.dept]) deptGroups[b.dept] = [];
+                deptGroups[b.dept].push(b);
+            });
+
+            let accordionHtml = "";
+            Object.keys(deptGroups).sort().forEach(deptName => {
+                const staffList = deptGroups[deptName];
+                const deptTotalEarned = staffList.reduce((sum, s) => sum + s.earned, 0);
+                const deptTotalConsumed = staffList.reduce((sum, s) => sum + s.consumed, 0);
+                
+                accordionHtml += `
+                    <details class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden group mb-4">
+                        <summary class="p-4 bg-slate-50 flex justify-between items-center cursor-pointer outline-none hover:bg-slate-100 transition-colors">
+                            <div class="flex items-center gap-3">
+                                <span class="bg-indigo-100 text-indigo-600 w-8 h-8 rounded-full flex items-center justify-center font-black text-xs shrink-0">👥</span>
+                                <div>
+                                    <h4 class="font-black text-slate-800 uppercase tracking-widest text-xs sm:text-sm">${deptName}</h4>
+                                    <p class="text-[10px] font-bold text-slate-400 uppercase mt-0.5">${staffList.length} Staff Members</p>
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-4">
+                                <div class="hidden sm:flex items-center gap-3 text-[10px] font-black uppercase tracking-widest">
+                                    <span class="text-emerald-600 bg-emerald-50 px-2 py-1 rounded border border-emerald-100">+${deptTotalEarned} Earned</span>
+                                    <span class="text-rose-600 bg-rose-50 px-2 py-1 rounded border border-rose-100">-${deptTotalConsumed} Consumed</span>
+                                </div>
+                                <span class="text-slate-400 group-open:rotate-180 transition-transform">▼</span>
+                            </div>
+                        </summary>
+                        <div class="overflow-x-auto bg-white border-t border-slate-200 custom-scroll">
+                            <table class="w-full text-left border-collapse min-w-[500px]">
+                                <thead class="bg-slate-50 text-[9px] font-black uppercase text-slate-400 tracking-widest">
+                                    <tr><th class="p-3 border-r border-slate-100">Staff Member</th><th class="p-3 text-center border-r border-slate-100">Baseline</th><th class="p-3 text-center text-emerald-600 border-r border-slate-100">Earned (+)</th><th class="p-3 text-center text-rose-600 border-r border-slate-100">Consumed (-)</th><th class="p-3 text-center text-slate-900">Balance</th></tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100 text-sm font-bold text-slate-700">
+                                    ${staffList.map(b => `
+                                        <tr class="hover:bg-slate-50 transition-colors">
+                                            <td class="p-3 border-r border-slate-100"><p class="uppercase font-black text-slate-800 text-xs">${b.name}</p></td>
+                                            <td class="p-3 text-center font-bold text-slate-500 text-xs border-r border-slate-100">${b.base}</td>
+                                            <td class="p-3 text-center font-black text-emerald-600 text-xs border-r border-slate-100">+${b.earned}</td>
+                                            <td class="p-3 text-center font-black text-rose-600 text-xs border-r border-slate-100">-${b.consumed}</td>
+                                            <td class="p-3 text-center font-black text-sm text-slate-900 bg-slate-50/50">${b.current}</td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    </details>
+                `;
+            });
+            
+            document.getElementById('ledger-accordion-container').innerHTML = accordionHtml || '<p class="text-xs font-bold text-slate-400 p-4 text-center bg-slate-50 rounded-xl">No staff found.</p>';
 
             allTransactions.forEach(t => {
                 const sName = allStaff.find(s => s.email === t.staffEmail)?.name || t.staffEmail;
