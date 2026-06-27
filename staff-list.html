@@ -731,14 +731,29 @@
             else openHODReportGenerator();
         }
 
-        // Router: Catches clicks from the individual Teacher profile cards
+      // Router: Catches clicks from the individual Teacher profile cards
         function viewWorkReports(staffEmail, staffName) {
+            const tObj = allStaff.find(s => s.email === staffEmail);
+            const dept = tObj ? getPrimaryDept(tObj.rawDept).split(',')[0].trim() : '';
+
             if(currentUserRole === 'ADMIN') {
                 openAdminReportViewer();
-                alert(`Please select the department for ${staffName} from the dropdown to view their reports.`);
+                // Smart auto-routing for Admins
+                setTimeout(() => { 
+                    const deptDropdown = document.getElementById('view-dept');
+                    if(deptDropdown && dept) {
+                        deptDropdown.value = dept;
+                        updateAdminTeacherList();
+                        setTimeout(() => {
+                            const staffDropdown = document.getElementById('view-teacher');
+                            if(staffDropdown) staffDropdown.value = staffEmail;
+                            fetchAdminReports(); // Instantly fetch!
+                        }, 50);
+                    }
+                }, 50);
             } else {
                 openHODReportGenerator();
-                // Auto-select the teacher in the dropdown for the HOD
+                // Smart auto-routing for HODs
                 setTimeout(() => { 
                     const staffDropdown = document.getElementById('gen-staff');
                     if(staffDropdown) staffDropdown.value = staffEmail; 
@@ -749,8 +764,8 @@
         let currentExtractedSections = {}; 
         let rawSectionLogsForDraft = [];
         let adminReportsList = [];
-        // --- HOD FLOW: GENERATE REPORTS ---
-       function openHODReportGenerator() {
+       // --- HOD FLOW: GENERATE REPORTS ---
+        function openHODReportGenerator() {
             document.getElementById('rm-title').innerText = "Generate Section Report";
             document.getElementById('rm-subtitle').innerText = "Fetch teacher data and compile a section-specific evaluation";
             
@@ -758,25 +773,30 @@
             const lastWeek = new Date(); lastWeek.setDate(lastWeek.getDate() - 7);
             const lastWeekIso = lastWeek.toISOString().split('T')[0];
 
-            let staffOptions = `<option value="">-- Select Teacher --</option>`;
-            let allowedStaff = currentUserRole === 'HOD' ? allStaff.filter(s => s.rawDept.includes(currentUserDept)) : allStaff;
+            let deptOptions = `<option value="">-- Select Dept --</option>`;
+            let depts = new Set();
+            allStaff.forEach(s => getPrimaryDept(s.rawDept).split(',').forEach(d => depts.add(d.trim())));
             
-            allowedStaff.sort((a,b) => {
-                const na = Object.keys(a.details).find(k=>k.toLowerCase().includes('name')) ? a.details[Object.keys(a.details).find(k=>k.toLowerCase().includes('name'))] : a.email;
-                const nb = Object.keys(b.details).find(k=>k.toLowerCase().includes('name')) ? b.details[Object.keys(b.details).find(k=>k.toLowerCase().includes('name'))] : b.email;
-                return na.localeCompare(nb);
-            }).forEach(s => {
-                const name = Object.keys(s.details).find(k=>k.toLowerCase().includes('name')) ? s.details[Object.keys(s.details).find(k=>k.toLowerCase().includes('name'))] : s.email;
-                staffOptions += `<option value="${s.email}">${name}</option>`;
-            });
+            if (currentUserRole === 'HOD') {
+                deptOptions = `<option value="${currentUserDept}">${currentUserDept}</option>`;
+            } else {
+                Array.from(depts).sort().forEach(d => deptOptions += `<option value="${d}">${d}</option>`);
+            }
 
-            // UI FIX: Compact Grid Layout for Mobile (Prevents screen freezing)
             document.getElementById('rm-dynamic-controls').className = "p-4 bg-slate-50 border-b border-slate-200 shrink-0";
             document.getElementById('rm-dynamic-controls').innerHTML = `
-                <div class="w-full grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
+                <div class="w-full grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
+                    <div class="col-span-2 md:col-span-1">
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Department</label>
+                        <select id="gen-dept" onchange="updateGenTeacherList()" class="w-full p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold outline-none shadow-sm cursor-pointer" ${currentUserRole === 'HOD' ? 'disabled' : ''}>
+                            ${deptOptions}
+                        </select>
+                    </div>
                     <div class="col-span-2 md:col-span-1">
                         <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Staff Member</label>
-                        <select id="gen-staff" class="w-full p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold outline-none shadow-sm">${staffOptions}</select>
+                        <select id="gen-staff" class="w-full p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold outline-none shadow-sm cursor-pointer">
+                            <option value="">-- Select Dept First --</option>
+                        </select>
                     </div>
                     <div>
                         <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">From</label>
@@ -793,6 +813,33 @@
             `;
             document.getElementById('rm-feed').innerHTML = `<div class="text-center py-32 text-slate-400 font-black uppercase tracking-widest text-sm">Select criteria and fetch sections.</div>`;
             document.getElementById('reports-modal').classList.remove('hidden');
+
+            if (currentUserRole === 'HOD') updateGenTeacherList();
+        }
+
+        function updateGenTeacherList() {
+            const dept = document.getElementById('gen-dept').value;
+            const staffSelect = document.getElementById('gen-staff');
+            
+            if (!dept) {
+                staffSelect.innerHTML = `<option value="">-- Select Dept First --</option>`;
+                return;
+            }
+
+            let staffInDept = allStaff.filter(s => getPrimaryDept(s.rawDept).includes(dept));
+            staffInDept.sort((a,b) => {
+                const na = Object.keys(a.details).find(k=>k.toLowerCase().includes('name')) ? a.details[Object.keys(a.details).find(k=>k.toLowerCase().includes('name'))] : a.email;
+                const nb = Object.keys(b.details).find(k=>k.toLowerCase().includes('name')) ? b.details[Object.keys(b.details).find(k=>k.toLowerCase().includes('name'))] : b.email;
+                return na.localeCompare(nb);
+            });
+
+            let opts = `<option value="">-- Select Teacher --</option>`;
+            staffInDept.forEach(s => {
+                const name = Object.keys(s.details).find(k=>k.toLowerCase().includes('name')) ? s.details[Object.keys(s.details).find(k=>k.toLowerCase().includes('name'))] : s.email;
+                opts += `<option value="${s.email}">${name}</option>`;
+            });
+            
+            staffSelect.innerHTML = opts;
         }
 
        async function fetchTeacherSectionsForRange() {
