@@ -944,7 +944,7 @@ function getScheduleSnapshotForDate(dateIso) {
                                         let mins = parseFloat(log.minutes) || 0;
                                         dailyLogSums[dStr] = (dailyLogSums[dStr] || 0) + mins;
                                         if (!independentRevisionDates.has(dStr)) {
-                                            extraActivityDays++; 
+                                            if(!completedGlobalDays.has(dStr)) extraActivityDays++; 
                                             independentRevisionDates.add(dStr);
                                         }
                                     }
@@ -1124,9 +1124,9 @@ function getScheduleSnapshotForDate(dateIso) {
                 return;
             } 
             
-            const allRows = isDemoMode ? getMockRows() : (planner.syllabusData || []);
+          const allRows = isDemoMode ? getMockRows() : (planner.syllabusData || []);
             const chNames = [...new Set(allRows.map(r => r["CHAPTER NAME"]))];
-
+            
             // MAP for Timeline UI Parallel Exemption visual
             let allSubjectTicks = new Map();
             allRows.forEach(r => {
@@ -1136,7 +1136,7 @@ function getScheduleSnapshotForDate(dateIso) {
                     allSubjectTicks.set(r.completedDate, chSet);
                 }
             });
-            
+
             let chDoneCalc = 0;
             chNames.forEach(ch => {
                 const rws = allRows.filter(r => r["CHAPTER NAME"] === ch);
@@ -1146,6 +1146,7 @@ function getScheduleSnapshotForDate(dateIso) {
 
             let completedTargetDays = 0, completedActualDays = 0;
             let completedTargetMins = 0, completedActualMins = 0;
+            let completedGlobalDays = new Set();
             let chapterRanges = []; 
             let htmlContent = "";
 
@@ -1178,8 +1179,9 @@ function getScheduleSnapshotForDate(dateIso) {
                     effectiveEnd.setHours(23,59,59,999);
                     chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
 
-                    let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
-                    let cur = new Date(chStart); let finish = new Date(effectiveEnd);
+               let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
+    let cur = new Date(chStart); let finish = new Date(effectiveEnd);
+                    let chGlobalDays = new Set();
                     
                   while(cur <= finish) {
                         const offset = cur.getTimezoneOffset() * 60000;
@@ -1191,8 +1193,10 @@ function getScheduleSnapshotForDate(dateIso) {
                         } else {
                             if (validTickDates.has(curStr)) {
                                 actualDaysTaken++; 
+                                chGlobalDays.add(curStr);
                             } else if(isTimetableWorkingDay(cur, cls, sec, sub)) {
                                 actualDaysTaken++;
+                                chGlobalDays.add(curStr);
                             }
                         }
                         cur.setDate(cur.getDate() + 1);
@@ -1205,7 +1209,7 @@ function getScheduleSnapshotForDate(dateIso) {
 
                         completedTargetDays += targetDays; 
                         completedTargetMins += targetMins;
-                        completedActualDays += actualDaysTaken; 
+                        chGlobalDays.forEach(d => completedGlobalDays.add(d));
                         completedActualMins += actualMins;
 
                         gapHtml = `
@@ -1343,7 +1347,7 @@ function getScheduleSnapshotForDate(dateIso) {
                                         <span class="text-rose-500 font-black">🌴 EXCLUDED DAY:</span> ${exclusion.reason}
                                     </div>`
                             });
-                       } else if (!hasTickToday) {
+                } else if (!hasTickToday) {
                             let activeChsToday = allSubjectTicks.get(scanIso) || new Set();
 
                             if (activeChsToday.size > 0) {
@@ -1353,6 +1357,18 @@ function getScheduleSnapshotForDate(dateIso) {
                                     let parallelNamesString = parallelNamesArray.join(' & ');
     
                                     // PARALLEL EXEMPTION UI TAG
+                                    timelineEvents.push({
+                                        type: 'PARALLEL',
+                                        sortKey: scanIso + "_0_0000",
+                                        html: `
+                                            <div class="flex items-center gap-4 p-4 bg-indigo-50/40 text-indigo-700 border-b border-indigo-100 text-xs font-bold uppercase tracking-widest pl-10">
+                                                <span class="bg-white border border-indigo-200 text-indigo-600 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                                <span class="opacity-70">🔀 PARALLEL: ${parallelNamesString}</span>
+                                            </div>`
+                                    });
+                                }
+                            } else if (!isTimetableWorkingDay(scanDate, cls, sec, sub)) {
+                                if (scanDate >= new Date('2026-06-02T00:00:00')) {
                                     timelineEvents.push({
                                         type: 'PARALLEL',
                                         sortKey: scanIso + "_0_0000",
@@ -1502,8 +1518,9 @@ function getScheduleSnapshotForDate(dateIso) {
                                         </summary>
                                         <div class="divide-y divide-amber-100/50">${logRows}</div>
                                     </details>`;
-                            }
+                          }
 
+            completedActualDays = completedGlobalDays.size;
             let totalOverallDayGap = completedTargetDays - (completedActualDays + extraActivityDays);
             let totalOverallMinGap = completedTargetMins - (completedActualMins + Math.floor(activityMinsTotal));
 
