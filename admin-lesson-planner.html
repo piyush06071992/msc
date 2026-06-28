@@ -580,10 +580,47 @@
         async function confirmUploadToDatabase() {
             const btn = event.target; btn.innerText = "Syncing..."; btn.disabled = true;
             try {
+                // 1. Fetch the corrupted data so we can rescue the progress
+                const doc = await getCollection("lesson_planners").doc(currentUploadId).get();
+                const oldData = doc.exists ? (doc.data().syllabusData || []) : [];
+
+                // 2. Loop through the freshly pasted clean Excel data
+                pendingSyllabusRows.forEach(newRow => {
+                    const newSubtopic = (newRow['SUBTOPICS'] || "").toLowerCase().trim();
+                    
+                    // Fuzzy Match: Hunt through the scrambled old data to find the matching subtopic
+                    const matchedOldRow = oldData.find(old => {
+                        return Object.values(old).some(val => 
+                            typeof val === 'string' && val.toLowerCase().trim() === newSubtopic
+                        );
+                    });
+
+                    // 3. If we found the old progress, stitch it onto the clean row!
+                    if (matchedOldRow && matchedOldRow.isDone) {
+                        newRow.isDone = true;
+                        newRow.completedDate = matchedOldRow.completedDate || "";
+                        newRow.completedMinutes = matchedOldRow.completedMinutes || 0;
+                        newRow.tickedBy = matchedOldRow.tickedBy || "";
+                        newRow.savedToDb = true;
+                        if (matchedOldRow.chapterStartDate) newRow.chapterStartDate = matchedOldRow.chapterStartDate;
+                        if (matchedOldRow.isBackdated) newRow.isBackdated = matchedOldRow.isBackdated;
+                        if (matchedOldRow.uploadedOn) newRow.uploadedOn = matchedOldRow.uploadedOn;
+                        if (matchedOldRow.questions) newRow.questions = matchedOldRow.questions;
+                    }
+                });
+
+                // 4. Save the repaired data back to Firebase
                 await getCollection("lesson_planners").doc(currentUploadId).set({ syllabusData: pendingSyllabusRows }, { merge: true });
                 await getCollection("lesson_planner_assignments").doc(currentUploadId).set({ isUploaded: true }, { merge: true });
-                closeModal('preview-modal'); alert("Syllabus Engine Synced Successfully!"); await showEditView();
-            } catch (err) { alert("Database Save Error: " + err.message); } finally { btn.innerText = "Confirm Math & Synchronize Data"; btn.disabled = false; }
+                
+                closeModal('preview-modal'); 
+                alert("✅ Syllabus Restored & Progress Preserved Successfully!"); 
+                await showEditView();
+            } catch (err) { 
+                alert("Database Save Error: " + err.message); 
+            } finally { 
+                btn.innerText = "Confirm Math & Synchronize Data"; btn.disabled = false; 
+            }
         }
 
         // --- DASHBOARD SUMMARY (Deep Accordion Hierarchy) ---
