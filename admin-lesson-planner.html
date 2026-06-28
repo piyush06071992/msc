@@ -859,14 +859,23 @@ function getScheduleSnapshotForDate(dateIso) {
 
                         if(isDemoMode) { sPct = 70; tPct = 65; chTotal = 12; chDone = 8; totalDayGap = -2; totalMinGap = 40; hasCompletedChapters = true; sectionHasLateSubjects = true; classHasLateSubjects = true; }
                         else if(planner && planner.syllabusData) {
-                            const rows = planner.syllabusData;
+                          const rows = planner.syllabusData;
                             sPct = rows.length ? Math.round((rows.filter(r => r.isDone).length / rows.length) * 100) : 0;
                             const chNames = [...new Set(rows.map(r => r["CHAPTER NAME"]))];
                             chTotal = chNames.length;
                             
-                            let totalTargetDaysAll = 0, totalActualDaysAll = 0;
-                            let chapterRanges = []; 
+                            // NEW: Build the Parallel Teaching Map
+                            let allSubjectTicks = new Map();
+                            rows.forEach(r => {
+                                if(r.isDone && r.completedDate) {
+                                    let chSet = allSubjectTicks.get(r.completedDate) || new Set();
+                                    chSet.add(r['CHAPTER NAME']);
+                                    allSubjectTicks.set(r.completedDate, chSet);
+                                }
+                            });
 
+                            let totalTargetDaysAll = 0, totalActualDaysAll = 0;
+                            let chapterRanges = [];
                             chNames.forEach(ch => {
                                 const chRows = rows.filter(r => r["CHAPTER NAME"] === ch);
                                 const doneR = chRows.filter(r => r.isDone);
@@ -887,17 +896,20 @@ function getScheduleSnapshotForDate(dateIso) {
                                         let actDays = 0;
                                         let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
                                        let cur = new Date(chStart); 
-                                        while(cur <= effectiveEnd) {
+                                       while(cur <= effectiveEnd) {
                                             const offset = cur.getTimezoneOffset() * 60000;
                                             const curStr = (new Date(cur.getTime() - offset)).toISOString().split('T')[0];
                                             
                                             const exclusion = checkDateExclusion(cur, st.className, st.sectionName, sub);
                                             if (!exclusion.isExcluded) {
-                                                // Only count days that are NOT holidays
+                                                let activeChsToday = allSubjectTicks.get(curStr) || new Set();
+
                                                 if (validTickDates.has(curStr)) {
-                                                    actDays++; 
+                                                    actDays++; // Normal 1 day credit
+                                                } else if (activeChsToday.size > 0) {
+                                                    // PARALLEL EXEMPTION: Taught another chapter today. Do NOT penalize.
                                                 } else if(isTimetableWorkingDay(cur, st.className, st.sectionName, sub)) {
-                                                    actDays++;
+                                                    actDays++; // Normal Idle Penalty
                                                 }
                                             }
                                             cur.setDate(cur.getDate() + 1);
@@ -1125,6 +1137,16 @@ function getScheduleSnapshotForDate(dateIso) {
             const allRows = isDemoMode ? getMockRows() : (planner.syllabusData || []);
             const chNames = [...new Set(allRows.map(r => r["CHAPTER NAME"]))];
             
+            // NEW: Build the Parallel Teaching Map
+            let allSubjectTicks = new Map();
+            allRows.forEach(r => {
+                if(r.isDone && r.completedDate) {
+                    let chSet = allSubjectTicks.get(r.completedDate) || new Set();
+                    chSet.add(r['CHAPTER NAME']);
+                    allSubjectTicks.set(r.completedDate, chSet);
+                }
+            });
+
             let chDoneCalc = 0;
             chNames.forEach(ch => {
                 const rws = allRows.filter(r => r["CHAPTER NAME"] === ch);
@@ -1169,7 +1191,7 @@ function getScheduleSnapshotForDate(dateIso) {
                     let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
     let cur = new Date(chStart); let finish = new Date(effectiveEnd);
                     
-                    while(cur <= finish) {
+                  while(cur <= finish) {
                         const offset = cur.getTimezoneOffset() * 60000;
                         const curStr = (new Date(cur.getTime() - offset)).toISOString().split('T')[0];
                         
@@ -1177,15 +1199,18 @@ function getScheduleSnapshotForDate(dateIso) {
                         if (exclusion.isExcluded) {
                             excludedHolidaysCount++;
                         } else {
-                            // Only count days that are NOT holidays
+                            let activeChsToday = allSubjectTicks.get(curStr) || new Set();
+
                             if (validTickDates.has(curStr)) {
                                 actualDaysTaken++; 
+                            } else if (activeChsToday.size > 0) {
+                                // PARALLEL EXEMPTION: Do not penalize
                             } else if(isTimetableWorkingDay(cur, cls, sec, sub)) {
                                 actualDaysTaken++;
                             }
                         }
                         cur.setDate(cur.getDate() + 1);
-                    }               
+                    }            
                     
 
                     if (isF) { 
@@ -1332,9 +1357,21 @@ function getScheduleSnapshotForDate(dateIso) {
                                         <span class="text-rose-500 font-black">🌴 EXCLUDED DAY:</span> ${exclusion.reason}
                                     </div>`
                             });
-                        } else if (!hasTickToday) {
-                         // 2. If it's NOT a holiday, and NO tick exists, check if they missed a scheduled class
-                            if (!isTimetableWorkingDay(scanDate, cls, sec, sub)) {
+                       } else if (!hasTickToday) {
+                            let activeChsToday = allSubjectTicks.get(scanIso) || new Set();
+
+                            if (activeChsToday.size > 0) {
+                                // PARALLEL EXEMPTION UI TAG
+                                timelineEvents.push({
+                                    type: 'PARALLEL',
+                                    sortKey: scanIso + "_0_0000",
+                                    html: `
+                                        <div class="flex items-center gap-4 p-4 bg-indigo-50/40 text-indigo-700 border-b border-indigo-100 text-xs font-bold uppercase tracking-widest pl-10">
+                                            <span class="bg-white border border-indigo-200 text-indigo-600 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                            <span class="opacity-70">🔀 PARALLEL: Focused on another chapter</span>
+                                        </div>`
+                                });
+                            } else if (!isTimetableWorkingDay(scanDate, cls, sec, sub)) {
                                 if (scanDate >= new Date('2026-06-02T00:00:00')) {
                                     timelineEvents.push({
                                         type: 'EXCLUSION',
