@@ -773,7 +773,7 @@ function getScheduleSnapshotForDate(dateIso) {
             return dObj.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
         }
 
-      function renderSummary() {
+        function renderSummary() {
             const container = document.getElementById('summary-accordion-container');
             if(!container) return; container.innerHTML = '';
             const list = isDemoMode ? [{className:"Sample Data", sectionName:"Warrior Batch", subjects:["Mathematics", "Physics"]}] : structureData;
@@ -787,12 +787,12 @@ function getScheduleSnapshotForDate(dateIso) {
           for (const [className, sections] of Object.entries(classGroups)) {
                 let classHtml = '';
                 let classHasLateSubjects = false; 
-                let clsMissSyll = 0; let clsNotStart = 0; 
+                let clsMissSyll = 0; let clsNotStart = 0; // NEW: Class Counters
 
                 sections.forEach(st => {
                     let sectionHtml = '';
                     let sectionHasLateSubjects = false;
-                    let secMissSyll = 0; let secNotStart = 0; 
+                    let secMissSyll = 0; let secNotStart = 0; // NEW: Section Counters
 
                     st.subjects.filter(s => !['BREAK','EVENT','EXAM','ASSEMBLY'].includes(s.toUpperCase())).forEach((sub, i) => {
                         const id = `${st.id}_${sub}`.replace(/\s+/g, '_');
@@ -803,6 +803,7 @@ function getScheduleSnapshotForDate(dateIso) {
                         let totalDayGap = 0, totalMinGap = 0;
                         let hasCompletedChapters = false;
 
+                        // NEW LOGIC: Subject, Section, and Class Alerts
                         let hasSyllabus = planner && planner.syllabusData && planner.syllabusData.length > 0;
                         let isStartedAny = hasSyllabus && planner.syllabusData.some(topic => topic.isDone || topic.chapterStartDate);
                         let needsRedAlert = !isDemoMode && (!hasSyllabus || !isStartedAny);
@@ -817,24 +818,14 @@ function getScheduleSnapshotForDate(dateIso) {
 
                         if(isDemoMode) { sPct = 70; tPct = 65; chTotal = 12; chDone = 8; totalDayGap = -2; totalMinGap = 40; hasCompletedChapters = true; sectionHasLateSubjects = true; classHasLateSubjects = true; }
                         else if(planner && planner.syllabusData) {
-                          const rows = planner.syllabusData;
+                            const rows = planner.syllabusData;
                             sPct = rows.length ? Math.round((rows.filter(r => r.isDone).length / rows.length) * 100) : 0;
                             const chNames = [...new Set(rows.map(r => r["CHAPTER NAME"]))];
                             chTotal = chNames.length;
                             
-                            let allSubjectTicks = new Map();
-                            rows.forEach(r => {
-                                if(r.isDone && r.completedDate) {
-                                    let chSet = allSubjectTicks.get(r.completedDate) || new Set();
-                                    chSet.add(r['CHAPTER NAME']);
-                                    allSubjectTicks.set(r.completedDate, chSet);
-                                }
-                            });
-
                             let totalTargetDaysAll = 0, totalActualDaysAll = 0;
                             let chapterRanges = []; 
-                            let subjectGlobalDays = new Set();
-                            
+
                             chNames.forEach(ch => {
                                 const chRows = rows.filter(r => r["CHAPTER NAME"] === ch);
                                 const doneR = chRows.filter(r => r.isDone);
@@ -861,14 +852,16 @@ function getScheduleSnapshotForDate(dateIso) {
                                             
                                             const exclusion = checkDateExclusion(cur, st.className, st.sectionName, sub);
                                             if (!exclusion.isExcluded) {
+                                                // Only count days that are NOT holidays
                                                 if (validTickDates.has(curStr)) {
-                                                    actDays++; subjectGlobalDays.add(curStr);
+                                                    actDays++; 
                                                 } else if(isTimetableWorkingDay(cur, st.className, st.sectionName, sub)) {
-                                                    actDays++; subjectGlobalDays.add(curStr);
+                                                    actDays++;
                                                 }
                                             }
                                             cur.setDate(cur.getDate() + 1);
                                         }
+                                        totalActualDaysAll += actDays;
 
                                     if (isF) { 
                                         chDone++;
@@ -882,6 +875,8 @@ function getScheduleSnapshotForDate(dateIso) {
                                             else { extraMins += mRaw; }
                                         });
                                         let actMins = Object.values(sessionMap).reduce((a,b) => a+Math.floor(b), 0) + Math.floor(extraMins);
+                                        
+                                        totalDayGap += (tDays - actDays);
                                         totalMinGap += (targetMins - actMins);
                                     }
                                 }
@@ -907,7 +902,7 @@ function getScheduleSnapshotForDate(dateIso) {
                                         let mins = parseFloat(log.minutes) || 0;
                                         dailyLogSums[dStr] = (dailyLogSums[dStr] || 0) + mins;
                                         if (!independentRevisionDates.has(dStr)) {
-                                            if(!subjectGlobalDays.has(dStr)) extraActivityDays++; 
+                                            extraActivityDays++; 
                                             independentRevisionDates.add(dStr);
                                         }
                                     }
@@ -925,14 +920,13 @@ function getScheduleSnapshotForDate(dateIso) {
                                     }
                                 });
                                 if(isDemoMode) ttMins = 90; 
-                                
                                 activityMinsTotal += Math.min(dailyLogSums[dStr], ttMins > 0 ? ttMins : dailyLogSums[dStr]);
                             });
 
-                            totalActualDaysAll = subjectGlobalDays.size + extraActivityDays;
-                            totalDayGap = totalTargetDaysAll - totalActualDaysAll;
+                            totalActualDaysAll += extraActivityDays;
                             
                             if(chDone > 0 || independentRevisionDates.size > 0) {
+                                totalDayGap -= extraActivityDays; 
                                 totalMinGap -= Math.floor(activityMinsTotal);
                                 hasCompletedChapters = true; 
                             }
@@ -947,7 +941,7 @@ function getScheduleSnapshotForDate(dateIso) {
 
                         let subStatusColor = 'slate'; 
                         let subStatusBg = 'bg-white border-slate-100';
-                        let gapDisplayHtml = `<span class="text-[10px] sm:text-[xs font-black text-slate-400 tracking-widest bg-slate-100 px-4 py-1.5 rounded-full shadow-inner">PENDING</span>`;
+                        let gapDisplayHtml = `<span class="text-[10px] sm:text-xs font-black text-slate-400 tracking-widest bg-slate-100 px-4 py-1.5 rounded-full shadow-inner">PENDING</span>`;
                         
                         if (hasCompletedChapters) {
                             subStatusColor = totalDayGap < 0 ? 'rose' : 'emerald';
@@ -1090,15 +1084,6 @@ function getScheduleSnapshotForDate(dateIso) {
             const allRows = isDemoMode ? getMockRows() : (planner.syllabusData || []);
             const chNames = [...new Set(allRows.map(r => r["CHAPTER NAME"]))];
             
-            let allSubjectTicks = new Map();
-            allRows.forEach(r => {
-                if(r.isDone && r.completedDate) {
-                    let chSet = allSubjectTicks.get(r.completedDate) || new Set();
-                    chSet.add(r['CHAPTER NAME']);
-                    allSubjectTicks.set(r.completedDate, chSet);
-                }
-            });
-
             let chDoneCalc = 0;
             chNames.forEach(ch => {
                 const rws = allRows.filter(r => r["CHAPTER NAME"] === ch);
@@ -1108,7 +1093,6 @@ function getScheduleSnapshotForDate(dateIso) {
 
             let completedTargetDays = 0, completedActualDays = 0;
             let completedTargetMins = 0, completedActualMins = 0;
-            let completedGlobalDays = new Set();
             let chapterRanges = []; 
             let htmlContent = "";
 
@@ -1142,10 +1126,9 @@ function getScheduleSnapshotForDate(dateIso) {
                     chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
 
                     let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
-                    let cur = new Date(chStart); let finish = new Date(effectiveEnd);
-                    let chGlobalDays = new Set();
+    let cur = new Date(chStart); let finish = new Date(effectiveEnd);
                     
-                  while(cur <= finish) {
+                    while(cur <= finish) {
                         const offset = cur.getTimezoneOffset() * 60000;
                         const curStr = (new Date(cur.getTime() - offset)).toISOString().split('T')[0];
                         
@@ -1153,10 +1136,11 @@ function getScheduleSnapshotForDate(dateIso) {
                         if (exclusion.isExcluded) {
                             excludedHolidaysCount++;
                         } else {
+                            // Only count days that are NOT holidays
                             if (validTickDates.has(curStr)) {
-                                actualDaysTaken++; completedGlobalDays.add(curStr); chGlobalDays.add(curStr);
+                                actualDaysTaken++; 
                             } else if(isTimetableWorkingDay(cur, cls, sec, sub)) {
-                                actualDaysTaken++; completedGlobalDays.add(curStr); chGlobalDays.add(curStr);
+                                actualDaysTaken++;
                             }
                         }
                         cur.setDate(cur.getDate() + 1);
@@ -1165,10 +1149,11 @@ function getScheduleSnapshotForDate(dateIso) {
 
                     if (isF) { 
                         let dayGap = targetDays - actualDaysTaken; 
-                        let minGap = targetMins - actualMins;       
+                        let minGap = targetMins - actualMins;      
 
                         completedTargetDays += targetDays; 
                         completedTargetMins += targetMins;
+                        completedActualDays += actualDaysTaken; 
                         completedActualMins += actualMins;
 
                         gapHtml = `
@@ -1188,12 +1173,14 @@ function getScheduleSnapshotForDate(dateIso) {
                     startHtml = `<input type="date" class="ch-start-input text-[11px] sm:text-xs border border-slate-300 px-2 py-1 ml-1 rounded-lg" data-ch="${ch}" value="${rows[0]?.chapterStartDate || ''}"> <button onclick="clearChapterStart('${ch}')" class="text-rose-500 ml-2 hover:underline font-bold text-[10px] sm:text-[11px] uppercase block md:inline mt-2 md:mt-0 bg-rose-50 px-3 py-1 rounded-lg">Clear</button>`;
                 }
 
+                // --- MASTER DYNAMIC MIXED TIME-STREAM COMPILER ---
                 let timelineEvents = [];
 
                 rows.forEach(r => {
                     const absI = allRows.indexOf(r);
                     const exe = staffList.find(s => s.email === r.tickedBy)?.name || r.tickedBy || '---';
                     
+                    // SAFELY HANDLE EXCEL NUMBERS (CRASH FIX)
                     const safeLec = r['LECTURE NUMBER'] != null ? String(r['LECTURE NUMBER']).padStart(4, '0') : '0000';
                     const displayLec = r['LECTURE NUMBER'] || '--';
                     
@@ -1294,6 +1281,7 @@ function getScheduleSnapshotForDate(dateIso) {
                         const exclusion = checkDateExclusion(scanDate, cls, sec, sub);
                         
                         if (exclusion.isExcluded) {
+                            // 1. ALWAYS print the red banner if the day is an official exclusion (Holiday/Sunday)
                             timelineEvents.push({
                                 type: 'EXCLUSION',
                                 sortKey: scanIso + "_0_0000",
@@ -1304,11 +1292,8 @@ function getScheduleSnapshotForDate(dateIso) {
                                     </div>`
                             });
                         } else if (!hasTickToday) {
-                            let activeChsToday = allSubjectTicks.get(scanIso) || new Set();
-                            let parallelArr = Array.from(activeChsToday).filter(n => n !== ch);
-                            if (parallelArr.length > 0) {
-                                timelineEvents.push({ type: 'PARALLEL', sortKey: scanIso + "_0_0000", html: `<div class="flex items-center gap-4 p-4 bg-indigo-50/40 text-indigo-700 border-b border-indigo-100 text-xs font-bold uppercase tracking-widest pl-10"><span class="bg-white border border-indigo-200 text-indigo-600 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span><span class="opacity-70">🔀 PARALLEL: ${parallelArr.join(' & ')}</span></div>` });
-                            } else if (!isTimetableWorkingDay(scanDate, cls, sec, sub)) {
+                         // 2. If it's NOT a holiday, and NO tick exists, check if they missed a scheduled class
+                            if (!isTimetableWorkingDay(scanDate, cls, sec, sub)) {
                                 if (scanDate >= new Date('2026-06-02T00:00:00')) {
                                     timelineEvents.push({
                                         type: 'EXCLUSION',
@@ -1334,145 +1319,6 @@ function getScheduleSnapshotForDate(dateIso) {
                         }
                         scanDate.setDate(scanDate.getDate() + 1);
                     }
-                }
-
-                timelineEvents.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
-
-              let excludedHtml = '<span class="font-bold mt-1">None</span>';
-                if (chStart) {
-                    let calcDate = new Date(chStart);
-                    let finalLimit = chEnd ? new Date(chEnd) : new Date();
-                    let counterHols = [];
-                    while(calcDate <= finalLimit) {
-                        const exc = checkDateExclusion(calcDate, cls, sec, sub);
-                        if (exc.isExcluded) {
-                            counterHols.push({ date: calcDate.toLocaleDateString('en-GB', {day:'2-digit', month:'short'}), reason: exc.reason });
-                        }
-                        calcDate.setDate(calcDate.getDate() + 1);
-                    }
-                    if (counterHols.length > 0) {
-                        excludedHtml = `<span class="font-black mt-1 text-lg leading-none text-rose-600">${counterHols.length}</span><div class="flex flex-col gap-1 mt-2 items-center w-full px-2 max-h-32 overflow-y-auto custom-scroll">` + counterHols.map(h => `<div class="text-[9px] bg-rose-50 text-rose-700 px-2 py-1.5 rounded-lg border border-rose-200 w-full leading-tight shadow-sm" title="${h.reason}"><b>${h.date}</b><br><span class="opacity-70">${h.reason}</span></div>`).join('') + `</div>`;
-                    }
-                }
-
-                htmlContent += `
-                    <details class="bg-white rounded-[1.5rem] sm:rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden mb-6 sm:mb-8 group">
-                        <summary class="p-6 sm:p-8 bg-slate-50/50 border-b flex flex-col md:flex-row justify-between items-start md:items-center cursor-pointer select-none outline-none hover:bg-slate-100 transition-colors gap-4 md:gap-0">
-                            <div class="w-full md:w-auto">
-                                <h4 class="font-black text-slate-900 uppercase text-lg sm:text-xl tracking-tight leading-tight">${ch}</h4>
-                                <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 mt-3 text-[10px] sm:text-[11px] font-bold text-slate-500 uppercase sm:items-center">
-                                    <span class="bg-white px-4 py-1.5 rounded-lg border border-slate-200 shadow-sm w-fit">Target: ${targetDays} Days / ${targetMins}m</span>${gapHtml}
-                                    <span class="text-[10px] text-blue-600 uppercase tracking-widest group-open:hidden mt-2 sm:mt-0 sm:ml-2 bg-blue-50 px-3 py-1.5 rounded-full border border-blue-100">View Topics ➔</span>
-                                </div>
-                            </div>
-                            <span class="text-[10px] sm:text-[11px] font-black px-5 sm:px-8 py-2.5 sm:py-3 rounded-full self-start md:self-auto border ${isF ? 'bg-emerald-500 text-white shadow-md border-emerald-600' : (chStart ? 'bg-blue-100 text-blue-700 border-blue-200 shadow-sm' : 'bg-slate-100 text-slate-500 border-slate-200')}">${isF ? '100% COMPLETE' : (chStart ? 'ONGOING' : 'PENDING')}</span>
-                        </summary>
-                     <div class="grid grid-cols-2 md:grid-cols-4 bg-slate-100 text-[10px] md:text-[11px] font-black text-slate-500 text-center border-b uppercase">
-                            <div class="p-4 border-r border-b md:border-b-0 border-slate-200 flex flex-col items-center justify-start"><span class="text-[9px] opacity-70">Start Date</span><span class="mt-1">${startHtml}</span></div>
-                            <div class="p-4 border-b md:border-b-0 md:border-r border-slate-200 flex flex-col items-center justify-start"><span class="text-[9px] opacity-70">End Date</span><span class="text-slate-900 mt-1 font-bold">${(isF && chEnd) ? chEnd.toLocaleDateString('en-GB') : '--'}</span></div>
-                            <div class="p-4 border-r border-slate-200 flex flex-col items-center justify-start text-rose-500"><span class="text-[9px] opacity-70">Excluded Days</span>${excludedHtml}</div>
-                            <div class="p-4 flex flex-col items-center justify-start text-blue-600"><span class="text-[9px] opacity-70">Actual Time Taken</span><span class="font-bold mt-1 text-lg md:text-xl leading-none">${actualDaysTaken}d | ${actualMins}m</span></div>
-                        </div>
-                       <div class="divide-y divide-slate-100 bg-slate-50/50">${timelineEvents.map(e => e.html).join('')}</div>
-                    </details>`;
-            });
-
-            let activityLogs = planner.activityLogs || [];
-            let extraActivityDays = 0; 
-            let activityMinsTotal = 0;
-            let independentRevisionDates = new Set();
-            let dailyLogSums = {};
-            let activityHtml = "";
-            let independentLogsForUI = [];
-
-            if (activityLogs.length > 0) {
-                activityLogs.forEach(log => {
-                    let logD = new Date(log.date);
-                    logD.setHours(12, 0, 0, 0); 
-                    let dStr = logD.toISOString().split('T')[0];
-                    
-                    let isInsideChapter = chapterRanges.some(range => {
-                        return logD >= range.start && logD <= range.end;
-                    });
-
-                  if (!isInsideChapter) {
-                        independentLogsForUI.push(log);
-                        if (isTimetableWorkingDay(logD, cls, sec, sub)) {
-                            let mins = parseFloat(log.minutes) || 0;
-                            dailyLogSums[dStr] = (dailyLogSums[dStr] || 0) + mins;
-
-                            if (!independentRevisionDates.has(dStr)) {
-                                if(!completedGlobalDays.has(dStr)) extraActivityDays++; 
-                                independentRevisionDates.add(dStr);
-                            }
-                        }
-                    }
-                });
-
-                const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                Object.keys(dailyLogSums).forEach(dStr => {
-                    let logD = new Date(dStr);
-                    let dayName = daysArr[logD.getDay()];
-                    let ttMins = 0;
-                    timetableData.forEach(t => {
-                        if(t.day === dayName && t.className === cls && t.section === sec && t.subject === sub) {
-                            ttMins += (parseInt(t.duration) || 0);
-                        }
-                    });
-                    if(isDemoMode) ttMins = 90; 
-                    
-                    activityMinsTotal += Math.min(dailyLogSums[dStr], ttMins > 0 ? ttMins : dailyLogSums[dStr]);
-                });
-
-              if (independentLogsForUI.length > 0) {
-                    let logRows = independentLogsForUI.map(log => `
-                        <div class="flex flex-col sm:flex-row justify-between sm:items-center p-5 sm:p-6 bg-white border-b border-amber-50 last:border-0 hover:bg-amber-50/50 transition-colors gap-3 sm:gap-0">
-                            <div class="flex gap-4 sm:gap-6 items-start sm:items-center">
-                                <span class="text-[10px] sm:text-[11px] font-black text-amber-600 bg-amber-100 px-4 py-2 rounded-lg uppercase tracking-widest shrink-0 border border-amber-200 shadow-sm">${new Date(log.date).toLocaleDateString('en-GB')}</span>
-                                <div>
-                                    <div class="text-xs sm:text-sm font-bold text-slate-800 uppercase leading-snug">${log.reason}</div>
-                                    <div class="text-[9px] sm:text-[10px] text-slate-500 mt-1 uppercase font-bold">By: ${log.loggedBy}</div>
-                                </div>
-                            </div>
-                            <div class="text-[11px] sm:text-xs font-black text-amber-700 bg-white border border-amber-200 px-5 py-2.5 rounded-xl self-start sm:self-auto shadow-sm">${Math.floor(log.minutes)} Mins</div>
-                        </div>`).join('');
-                    
-                    activityHtml = `
-                        <details class="bg-[#fffbeb] border border-amber-200 rounded-[1.5rem] sm:rounded-[2.5rem] overflow-hidden mb-8 shadow-md group">
-                            <summary class="p-6 sm:p-8 bg-amber-100/50 border-b border-amber-200 flex flex-col md:flex-row justify-between md:items-center cursor-pointer select-none outline-none gap-4 md:gap-0 hover:bg-amber-100 transition-colors">
-                                <div class="flex items-start md:items-center gap-4 md:gap-5"><span class="text-2xl sm:text-3xl mt-1 md:mt-0">🎯</span>
-                                    <div><h4 class="font-black text-amber-900 uppercase text-lg tracking-tight">Between-Chapter Revisions</h4><div class="text-[10px] sm:text-[11px] font-bold text-amber-600 uppercase mt-1 bg-white px-3 py-1 rounded w-fit border border-amber-200 shadow-sm">Independent Sessions</div></div>
-                                </div>
-                                <span class="text-[11px] sm:text-xs font-black px-6 sm:px-8 py-2.5 sm:py-3 rounded-full bg-amber-500 text-white shadow-md self-start md:self-auto border border-amber-600">${independentLogsForUI.length} LOGS</span>
-                            </summary>
-                            <div class="divide-y divide-amber-100/50">${logRows}</div>
-                        </details>`;
-                }
-            }
-
-            completedActualDays = completedGlobalDays.size;
-            let totalOverallDayGap = completedTargetDays - (completedActualDays + extraActivityDays);
-            let totalOverallMinGap = completedTargetMins - (completedActualMins + Math.floor(activityMinsTotal));
-
-            if (completedTargetDays > 0 || independentRevisionDates.size > 0) {
-                document.getElementById('stat-gap').innerHTML = `
-                    <div class="flex flex-col">
-                        <span class="text-lg sm:text-2xl font-black ${totalOverallDayGap >= 0 ? 'text-emerald-600' : 'text-rose-600'}">
-                            ${totalOverallDayGap >= 0 ? 'Ahead by' : 'Behind by'} ${Math.abs(totalOverallDayGap)} Days
-                        </span>
-                        <span class="text-[10px] sm:text-[11px] font-black ${totalOverallMinGap >= 0 ? 'text-teal-600' : 'text-purple-600'} mt-1 uppercase tracking-widest bg-slate-100 px-3 py-1 rounded w-fit">
-                            ${totalOverallMinGap >= 0 ? 'Time Saved:' : 'Overtime Logged:'} ${Math.abs(totalOverallMinGap)} Mins
-                        </span>
-                    </div>
-                `;
-            } else {
-                document.getElementById('stat-gap').innerText = "PENDING COMPLETIONS";
-                document.getElementById('stat-gap').className = `text-[11px] sm:text-xs font-black text-slate-400 mt-1`;
-            }
-
-            container.innerHTML = htmlContent + activityHtml;
-            openModal('drill-down-modal');
-        }
                 }
 
                 timelineEvents.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
