@@ -1277,16 +1277,29 @@ const offset = new Date().getTimezoneOffset() * 60000;
             container.innerHTML = htmlContent + activityHtml;
         }
 
-     function previewTick(cb, idx) {
+    function previewTick(cb, idx) {
             if(cb.checked) {
                 const todayISO = new Date().toISOString().split('T')[0];
                 const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
                 
-                // --- NEW: Chapter Start Date Validation ---
-                let initialDate = window.isSubjectUnlocked && window.catchUpDates && window.catchUpDates[0] ? window.catchUpDates[0].date : todayISO;
                 let chStartDate = currentPlannerData[idx].chapterStartDate;
 
-                if (chStartDate && initialDate < chStartDate) {
+                // --- FIX: Filter dates to ensure we don't start the dropdown on a date before chapter started ---
+                let validDates = window.isSubjectUnlocked && window.catchUpDates 
+                    ? window.catchUpDates.filter(d => !chStartDate || d.date >= chStartDate) 
+                    : [];
+
+                let initialDate = window.isSubjectUnlocked && validDates.length > 0 ? validDates[0].date : todayISO;
+
+                // If unlocked but NO valid dates exist after filtering
+                if (window.isSubjectUnlocked && validDates.length === 0 && window.catchUpDates && window.catchUpDates.length > 0) {
+                    alert(`⚠️ ACTION BLOCKED: All your pending catch-up dates are BEFORE this chapter's official start date (${chStartDate}).\n\nYou cannot log topics backwards in time before the chapter began.`);
+                    cb.checked = false;
+                    return;
+                }
+                
+                // Normal day validation
+                if (!window.isSubjectUnlocked && chStartDate && initialDate < chStartDate) {
                     alert(`⚠️ ACTION BLOCKED: You are trying to log this topic on ${initialDate}, but the chapter officially started on ${chStartDate}.\n\nTopics cannot be logged on dates before the chapter was started.`);
                     cb.checked = false;
                     return;
@@ -1294,15 +1307,15 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 // ------------------------------------------
 
                 currentPlannerData[idx].isDone = true;
-                currentPlannerData[idx].completedDate = todayISO;
-              currentPlannerData[idx].completedMinutes = activeSessionMins;
+                currentPlannerData[idx].completedDate = initialDate; 
+                currentPlannerData[idx].completedMinutes = window.isSubjectUnlocked && validDates.length > 0 ? validDates[0].mins : activeSessionMins;
                 currentPlannerData[idx].tickedBy = safeName;
                 currentPlannerData[idx].savedToDb = false;
                 
                 const container = document.getElementById(`tick-container-${idx}`);
                 
             if (window.isSubjectUnlocked) {
-                    let dateOptions = window.catchUpDates.map(d => `<option value="${d.date}" data-mins="${d.mins}">${d.label}</option>`).join('');
+                    let dateOptions = validDates.map(d => `<option value="${d.date}" data-mins="${d.mins}">${d.label}</option>`).join('');
                     if (!dateOptions) dateOptions = `<option value="${todayISO}" data-mins="${activeSessionMins}">Today (Fallback)</option>`;
                     
                     container.innerHTML = `
@@ -1313,12 +1326,12 @@ const offset = new Date().getTimezoneOffset() * 60000;
                                     onchange="updateTopicDate(${idx}, this.options[this.selectedIndex].value, this.options[this.selectedIndex].dataset.mins, this)">
                                     ${dateOptions}
                                 </select>
-                                <span id="sync-mins-${idx}" class="text-[9px] font-black text-slate-500 bg-slate-100 border border-slate-200 px-2 py-1.5 rounded-lg shadow-sm">${window.catchUpDates[0] ? window.catchUpDates[0].mins : activeSessionMins}m</span>
+                                <span id="sync-mins-${idx}" class="text-[9px] font-black text-slate-500 bg-slate-100 border border-slate-200 px-2 py-1.5 rounded-lg shadow-sm">${validDates[0] ? validDates[0].mins : activeSessionMins}m</span>
                             </div>
                         </div>`;
                     
                     // Safely initialize with the first valid date available
-                    updateTopicDate(idx, window.catchUpDates[0] ? window.catchUpDates[0].date : todayISO, window.catchUpDates[0] ? window.catchUpDates[0].mins : activeSessionMins);
+                    updateTopicDate(idx, validDates[0] ? validDates[0].date : todayISO, validDates[0] ? validDates[0].mins : activeSessionMins);
                 } else {
                     // Standard tick (Normal Locked Day)
                     const todayStrGB = new Date().toLocaleDateString('en-GB');
@@ -1326,7 +1339,6 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 }
             }
         }
-
    function updateTopicDate(idx, newDateVal, predefinedMins, selectEl) {
             if (!newDateVal) return;
 
