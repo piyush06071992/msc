@@ -1406,10 +1406,57 @@ const offset = new Date().getTimezoneOffset() * 60000;
           // Check for ANY ticked topic
             const stagedTopics = currentPlannerData.filter(r => r.isDone);
             
-            if (stagedTopics.length === 0 && newActivityLogs.length === 0) {
-                alert("Please tick at least one syllabus topic OR type a revision activity before confirming.");
+            // Allow submission if they just clicked "Start Chapter" without ticking a topic
+            const hasNewChapterStart = currentPlannerData.some(r => r.chapterStartDate && !r.isDone && !r.savedToDb); 
+            
+            if (stagedTopics.length === 0 && newActivityLogs.length === 0 && !hasNewChapterStart) {
+                alert("Please tick at least one syllabus topic, start a chapter, OR type a revision activity before confirming.");
                 return;
             }
+
+            // --- OPTION B: STRICT CHRONOLOGICAL AUDITOR ---
+            if (window.isSubjectUnlocked && window.catchUpDates && window.catchUpDates.length > 0) {
+                let accountedDates = new Set();
+
+                // 1. Gather all dates that have data (historical or newly inputted)
+                if (window.currentActivityLogs) window.currentActivityLogs.forEach(log => accountedDates.add(log.date));
+                newActivityLogs.forEach(log => accountedDates.add(log.date));
+
+                currentPlannerData.forEach(r => {
+                    if (r.chapterStartDate) accountedDates.add(r.chapterStartDate); // Chapter start clears a day
+                    if (r.isDone && r.completedDate) accountedDates.add(r.completedDate); // Topics clear a day
+                });
+
+                // 2. Find the absolute latest date the user is actively trying to submit right now
+                let latestSubmittedDate = "";
+                let activeSubmitDates = new Set();
+                newActivityLogs.forEach(log => activeSubmitDates.add(log.date));
+                currentPlannerData.forEach(r => {
+                    if (r.isDone && !r.savedToDb && r.completedDate) activeSubmitDates.add(r.completedDate);
+                });
+
+                window.catchUpDates.forEach(cd => {
+                    if (activeSubmitDates.has(cd.date)) {
+                        if (cd.date > latestSubmittedDate) latestSubmittedDate = cd.date;
+                    }
+                });
+
+                // 3. Verify no required working days were skipped before the latest submitted date
+                if (latestSubmittedDate) {
+                    for (let cd of window.catchUpDates) {
+                        if (cd.date > latestSubmittedDate) break; // Stop checking after the latest submission
+                        
+                        if (!accountedDates.has(cd.date)) {
+                            const formattedGap = new Date(cd.date).toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
+                            const formattedLatest = new Date(latestSubmittedDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
+                            
+                            alert(`🚨 CHRONOLOGY ERROR:\n\nYou are trying to log data for ${formattedLatest}, but you left ${formattedGap} completely blank.\n\nYou must log a syllabus topic, a chapter start, or an independent revision activity for ${formattedGap} before you can log future dates.`);
+                            return; // Halt the save!
+                        }
+                    }
+                }
+            }
+            // ----------------------------------------------
 
             if(isDemoMode) {
                 alert(`Simulation Success: Batch Data Locked.\nTopics Ticked: ${stagedTopics.length}\nRevisions Logged: ${newActivityLogs.length}`);
