@@ -2732,9 +2732,72 @@ function peekTeacher(teacherName) {
             return `${h.toString().padStart(2, '0')}:${m} ${ampm}`;
         }
 
-        // ============================================================================
+     // ============================================================================
         // === SAVE ENGINE & EMAIL NOTIFICATION                                     ===
         // ============================================================================
+        
+        async function auditBrokenLeaves(targetDateStr, newSchedule) {
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            const leaveSnap = await db.collection(prefix + "leave_requests").get();
+            let brokenCount = 0;
+            const batch = db.batch();
+
+            leaveSnap.forEach(doc => {
+                const leave = doc.data();
+                if (leave.status !== "PENDING" && leave.status !== "APPROVED") return;
+                if (!leave.adjustments) return;
+
+                let needsUpdate = false;
+                let updatedAdjustments = [...leave.adjustments];
+
+                updatedAdjustments.forEach(adj => {
+                    if (adj.date !== targetDateStr || adj.substituteResponse !== "ACCEPTED") return;
+
+                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                    
+                    let stillExists = false;
+                    let subIsBusy = false;
+
+                    newSchedule.forEach(slot => {
+                        const sMins = parseInt((slot.start24||"0:0").split(':')[0])*60 + parseInt((slot.start24||"0:0").split(':')[1]);
+                        const eMins = parseInt((slot.end24||"0:0").split(':')[0])*60 + parseInt((slot.end24||"0:0").split(':')[1]);
+
+                        const cNameMatch = norm(slot.className) === norm((adj.sub || "").split('|')[0]);
+                        const sNameMatch = norm(slot.section) === norm(((adj.sub || "").split('|')[1] || "").replace('Sec', ''));
+                        const subMatch = norm(slot.subject) === norm(adj.title);
+                        
+                        if (cNameMatch && sNameMatch && subMatch && Math.abs(sMins - adj.start) <= 15) {
+                            stillExists = true;
+                        }
+
+                        if (norm(slot.teacherName || slot.teacher) === norm(adj.adjustedTo)) {
+                            if (adj.start < eMins && adj.end > sMins) {
+                                subIsBusy = true;
+                            }
+                        }
+                    });
+
+                    if (adj.type === "OTHER" || (adj.sub || "").includes("Custom")) stillExists = true; 
+
+                    if (!stillExists || subIsBusy) {
+                        adj.substituteResponse = "BROKEN_BY_ADMIN";
+                        adj.substituteMessage = stillExists ? "Double-booked by Admin Timetable update" : "Class was moved or deleted by Admin";
+                        needsUpdate = true;
+                        brokenCount++;
+                    }
+                });
+
+                if (needsUpdate) {
+                    batch.update(doc.ref, { adjustments: updatedAdjustments });
+                }
+            });
+
+            if (brokenCount > 0) {
+                await batch.commit();
+                alert(`🚨 WARNING: Schedule saved, BUT ${brokenCount} approved leave substitution(s) were broken by your changes!\n\nPlease visit the Leave Manager to assign new substitutes.`);
+            }
+        }
+
       async function saveAllChanges() {
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             
@@ -2905,13 +2968,14 @@ function peekTeacher(teacherName) {
                 oldTimetableState = [];
                 await fetchTimetable();
 
-                if (teachersToNotify.length > 0) {
+              if (teachersToNotify.length > 0) {
                     sendEmailNotification(teachersToNotify);
                 } else {
                     alert("✅ Timetable Saved Successfully! No teacher schedules were changed.");
                 }
-
-                renderDirectDashboard(); 
+                
+                await auditBrokenLeaves(todayIso, newSlots);
+                renderDirectDashboard();
             } catch (err) { 
                 alert("Error saving: " + err.message); 
             } finally { 
@@ -3496,6 +3560,8 @@ function processSave(type) {
                 } else {
                     alert(`✅ Success! New master schedule will apply starting ${dateVal}. No teacher schedules were changed.`);
                 }
+                
+                await auditBrokenLeaves(dateVal, newSlots);
 
                 document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
                 document.getElementById('view-label').innerHTML = `Showing: Live Master Schedule <span class="text-indigo-500 font-bold">(Future Update Queued for ${dateVal})</span>`;
@@ -3625,7 +3691,8 @@ async function confirmMultiDates() {
                     return `${norm(c)}|${norm(s)}`;
                 });
 
-                const batch = db.batch();
+               const batch = db.batch();
+                const auditPayloads = [];
                 for (const dateIso of selectedDates) {
                     const [y, m_val, d_val] = dateIso.split('-');
                     const localDate = new Date(y, m_val - 1, d_val);
@@ -3667,18 +3734,24 @@ async function confirmMultiDates() {
                         finalMergedSchedule = [...normalPortion, ...overridePortion];
                     }
 
-                    batch.set(getCollection("timetable_history").doc(dateIso), {
+                  batch.set(getCollection("timetable_history").doc(dateIso), {
                         date: dateIso,
                         lastUpdated: Date.now(),
                         schedule: finalMergedSchedule,
                         type: "DAILY_OVERRIDE",
                         tag: schedName
                     });
+                    auditPayloads.push({ date: dateIso, schedule: finalMergedSchedule });
                 }
 
                 await batch.commit();
                 await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
                 alert(`✅ Successfully Replicated. The remaining sections now correctly show the Master Schedule.`);
+                
+                for (const payload of auditPayloads) {
+                    await auditBrokenLeaves(payload.date, payload.schedule);
+                }
+                
                 document.getElementById('multi-date-modal').classList.replace('flex', 'hidden');
             } catch (error) {
                 alert("Critical Merge Error: " + error.message);
