@@ -509,14 +509,21 @@
         }
         function minsTo12H(m) { let h=Math.floor(m/60)%24; let mn=m%60; let mod=h>=12?'PM':'AM'; h=h%12||12; return `${h.toString().padStart(2,'0')}:${mn.toString().padStart(2,'0')} ${mod}`; }
 
-        function selectReplacement(clashId, name, email, rowEl, calcSMins, calcEMins, calcTimeStr) {
+      function selectReplacement(clashId, name, email, rowEl, calcSMins, calcEMins, calcTimeStr, isCustomMode) {
             const container = document.getElementById('clash-' + clashId);
             if (!container) return;
             
             const clashData = JSON.parse(container.getAttribute('data-clash'));
-            const customTime = prompt("Assign " + name + " for: " + clashData.title + "\nEnter exact time window:", calcTimeStr);
             
-            if(!customTime) return;
+            let finalTimeStr = calcTimeStr;
+
+            if (isCustomMode) {
+                const customTime = prompt("Assign " + name + " for: " + clashData.title + "\nEnter exact time window:", calcTimeStr);
+                if(!customTime) return;
+                finalTimeStr = customTime;
+            } else {
+                if(!confirm(`Add ${name} to your request as substitute for the full duration (${calcTimeStr})?`)) return;
+            }
 
             container.querySelectorAll('.sub-row').forEach(r => r.classList.remove('selected-sub'));
             rowEl.classList.add('selected-sub');
@@ -524,8 +531,17 @@
             const inchargeCheck = document.getElementById('incharge-' + clashId);
             if(inchargeCheck) inchargeCheck.checked = false;
             
-            selectedAdjustments[clashId] = { name, email, requestIncharge: false, customTime: customTime, originalSub: clashData.sub };
+            selectedAdjustments[clashId] = { name, email, requestIncharge: false, customTime: finalTimeStr, originalSub: clashData.sub };
             
+            // Reset all buttons in container
+            container.querySelectorAll('button').forEach(btn => {
+                if (btn.innerText === "Selected") {
+                    btn.innerText = "Assign";
+                    btn.classList.replace('bg-indigo-600', 'bg-indigo-50');
+                    btn.classList.replace('text-white', 'text-indigo-600');
+                }
+            });
+
             const assignBtn = rowEl.querySelector('button');
             if (assignBtn) {
                 assignBtn.innerText = "Selected";
@@ -653,7 +669,7 @@
 
                 analysisHtml += `<div class="mb-10"><div class="flex items-center gap-3 mb-6"><span class="bg-indigo-600 text-white px-4 py-1.5 rounded-xl font-black text-xs uppercase shadow-md">${localDateObj.toLocaleDateString('en-GB', {day:'2-digit', month:'short'})}</span><div class="h-1 flex-1 bg-slate-700/50 rounded-full"></div></div>`;
                 if (userConflicts.length > 0) {
-                    userConflicts.forEach(con => {
+             userConflicts.forEach(con => {
                         const allowSplit = document.getElementById('allow-split-cb') && document.getElementById('allow-split-cb').checked;
                         let deptMap = {};
 
@@ -671,26 +687,26 @@
                                 const eStr = slot.end24 || slot.endTime || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00");
                                 const s = timeToMins(sStr);
                                 const e = timeToMins(eStr);
-                                busySpans.push({ s, e, isDuty: false });
+                                busySpans.push({ s, e, cls: slot.className || 'Duty', sec: slot.section || '' });
                                 if (s < lEnd && e > lStart) windowClasses.push({ s, e });
                             });
 
-                            const staffVirtual = virtualSchedule.filter(v => norm(v.teacherName) === norm(staff.name));
+                            const staffVirtual = virtualSchedule.filter(v => v.date === tDate && norm(v.teacherName) === norm(staff.name));
                             staffVirtual.forEach(v => {
                                 const vs = timeToMins(v.start24);
                                 const ve = timeToMins(v.end24);
-                                busySpans.push({ s: vs, e: ve, isDuty: true });
+                                busySpans.push({ s: vs, e: ve, cls: v.className || 'Duty', sec: v.section || '' });
                                 if (vs < lEnd && ve > lStart) windowClasses.push({ s: vs, e: ve });
                             });
 
                             busySpans.sort((a, b) => a.s - b.s);
                             let mergedBusy = [];
                             busySpans.forEach(b => {
-                                if (mergedBusy.length === 0) mergedBusy.push(b);
+                                if (mergedBusy.length === 0) mergedBusy.push({...b});
                                 else {
                                     let last = mergedBusy[mergedBusy.length - 1];
                                     if (b.s <= last.e) last.e = Math.max(last.e, b.e);
-                                    else mergedBusy.push(b);
+                                    else mergedBusy.push({...b});
                                 }
                             });
 
@@ -714,7 +730,7 @@
                             }
 
                             if (validSpans.length > 0) {
-                                let lunchStatus = "❌";
+                                let lunchStatus = "✅";
                                 let lastT = lStart; let maxGap = 0;
                                 windowClasses.sort((a,b) => a.s - b.s);
                                 windowClasses.forEach(c => {
@@ -728,6 +744,10 @@
                                 if (!deptMap[d]) deptMap[d] = [];
                                 
                                 validSpans.forEach(span => {
+                                    let overlapS = Math.max(span.s, lStart);
+                                    let overlapE = Math.min(span.e, lEnd);
+                                    let lunchOverlap = overlapE > overlapS ? overlapE - overlapS : 0;
+
                                     let beforeAlert = "None";
                                     let afterAlert = "None";
                                     let lb = null, fa = null;
@@ -737,10 +757,16 @@
                                         if (b.s >= span.e) { if (!fa || b.s < fa.s) fa = b; }
                                     });
 
-                                    if (lb && (span.s - lb.e) <= 30) beforeAlert = `${span.s - lb.e}m gap`;
-                                    if (fa && (fa.s - span.e) <= 30) afterAlert = `${fa.s - span.e}m gap`;
+                                    if (lb && (span.s - lb.e) <= 30) {
+                                        const secStr = lb.sec ? ` (Sec ${lb.sec})` : '';
+                                        beforeAlert = `Class ended before ${span.s - lb.e} minutes in ${lb.cls}${secStr}`;
+                                    }
+                                    if (fa && (fa.s - span.e) <= 30) {
+                                        const secStr = fa.sec ? ` (Sec ${fa.sec})` : '';
+                                        afterAlert = `Class starts after ${fa.s - span.e} minutes in ${fa.cls}${secStr}`;
+                                    }
 
-                                    deptMap[d].push({ staff, span, lunchStatus, beforeAlert, afterAlert });
+                                    deptMap[d].push({ staff, span, lunchStatus, lunchOverlap, beforeAlert, afterAlert });
                                 });
                             }
                         });
@@ -748,12 +774,12 @@
                         let deptHtml = "";
                         Object.keys(deptMap).sort().forEach(dN => {
                             deptHtml += `
-                                <details class="mb-2 border border-slate-100 rounded-xl overflow-hidden bg-white">
-                                    <summary class="p-3 flex justify-between items-center cursor-pointer hover:bg-slate-50 font-black text-[10px] uppercase text-slate-700">
-                                        <span>${dN} <span class="text-indigo-500 ml-1">(${deptMap[dN].length} Options)</span></span>
+                                <details class="mb-2 border border-slate-100 rounded-xl overflow-hidden bg-white shadow-sm">
+                                    <summary class="p-3 flex justify-between items-center cursor-pointer hover:bg-sky-50 font-black text-[10px] uppercase text-slate-700 transition-colors">
+                                        <span>${dN} <span class="text-sky-600 ml-1">(${deptMap[dN].length} Options)</span></span>
                                         <span class="text-slate-300">▼</span>
                                     </summary>
-                                    <div class="p-2 space-y-1 bg-slate-50 border-t border-slate-100">
+                                    <div class="p-2 space-y-2 bg-slate-50 border-t border-slate-100">
                             `;
                             deptMap[dN].forEach(item => {
                                 const s = item.staff;
@@ -763,30 +789,32 @@
                                 const isPartial = (dur < (con.end - con.start));
                                 
                                 const typeTag = isPartial 
-                                    ? `<span class="text-amber-500 font-bold ml-1" title="${timeStr}">(Partial)</span>` 
-                                    : `<span class="text-emerald-500 font-bold ml-1" title="${timeStr}">(Full)</span>`;
+                                    ? `<span class="text-amber-700 font-black ml-2 border border-amber-300 bg-amber-100 px-1.5 py-0.5 rounded text-[9px] tracking-widest whitespace-nowrap shadow-sm">Partial: ${timeStr} (${dur}m)</span>` 
+                                    : `<span class="text-emerald-700 font-black ml-2 border border-emerald-300 bg-emerald-100 px-1.5 py-0.5 rounded text-[9px] tracking-widest whitespace-nowrap shadow-sm">Full: ${timeStr} (${dur}m)</span>`;
 
                                 const lunchBadge = item.lunchStatus === "✅" 
-                                    ? `<span class="bg-emerald-100 text-emerald-600 px-1.5 py-0.5 rounded text-[8px] uppercase border border-emerald-200 shrink-0" title="Lunch Available">🍽️ ✅</span>`
-                                    : `<span class="bg-rose-100 text-rose-600 px-1.5 py-0.5 rounded text-[8px] uppercase border border-rose-200 shrink-0" title="Lunch Skipped">🍽️ ❌</span>`;
+                                    ? `<span class="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded text-[9px] uppercase border border-emerald-200 shrink-0 shadow-sm" title="Lunch Available">✅ Lunch Intact</span>`
+                                    : `<span class="bg-rose-100 text-rose-700 px-2 py-0.5 rounded text-[9px] uppercase border border-rose-200 shrink-0 shadow-sm" title="Lunch Skipped">⚠️ Warning: Skips Lunch${item.lunchOverlap > 0 ? ` (Overlaps ${item.lunchOverlap}m)` : ''}</span>`;
                                     
-                                const beforeBadge = item.beforeAlert !== "None" ? `<span class="bg-amber-100 text-amber-600 px-1.5 py-0.5 rounded text-[8px] uppercase border border-amber-200 shrink-0">⏮ ${item.beforeAlert}</span>` : '';
-                                const afterBadge = item.afterAlert !== "None" ? `<span class="bg-indigo-100 text-indigo-600 px-1.5 py-0.5 rounded text-[8px] uppercase border border-indigo-200 shrink-0">⏭ ${item.afterAlert}</span>` : '';
+                                const beforeBadge = item.beforeAlert !== "None" ? `<span class="bg-amber-100 text-amber-800 px-2 py-0.5 rounded text-[9px] uppercase border border-amber-200 shrink-0 shadow-sm">⏮ ${item.beforeAlert}</span>` : '';
+                                const afterBadge = item.afterAlert !== "None" ? `<span class="bg-sky-100 text-sky-800 px-2 py-0.5 rounded text-[9px] uppercase border border-sky-200 shrink-0 shadow-sm">⏭ ${item.afterAlert}</span>` : '';
 
                                 deptHtml += `
-                                    <div class="sub-row flex flex-col sm:flex-row sm:items-center justify-between p-2 sm:p-3 bg-white border border-slate-200 rounded-xl hover:border-indigo-400 transition-all gap-2">
+                                    <div class="sub-row flex flex-col sm:flex-row sm:items-center justify-between p-2.5 bg-white border border-slate-200 rounded-lg hover:border-indigo-400 transition-all shadow-sm gap-2">
                                         <div class="flex-1 flex flex-col">
-                                            <span class="text-[11px] font-bold text-slate-800 uppercase leading-tight">${s.name} ${typeTag}</span>
-                                            <div class="flex gap-1 mt-1">
+                                            <div class="truncate text-[11px] font-bold text-slate-800 uppercase leading-tight flex items-center">
+                                                ${s.name} ${typeTag}
+                                            </div>
+                                            <div class="flex flex-wrap gap-1.5 mt-2">
+                                                ${lunchBadge}
                                                 ${beforeBadge}
                                                 ${afterBadge}
-                                                ${lunchBadge}
                                             </div>
                                         </div>
-                                        <div class="flex items-center gap-2 shrink-0">
+                                        <div class="flex items-center gap-2 shrink-0 mt-2 sm:mt-0">
                                             <a href="tel:${s.mobile}" onclick="event.stopPropagation()" class="bg-slate-100 text-slate-600 p-1.5 rounded-lg hover:bg-blue-100 hover:text-blue-600 transition-colors" title="Call">📞</a>
                                             <a href="https://wa.me/91${(s.mobile || '').replace(/[^0-9]/g, '')}" target="_blank" onclick="event.stopPropagation()" class="bg-slate-100 text-slate-600 p-1.5 rounded-lg hover:bg-emerald-100 hover:text-emerald-600 transition-colors" title="WhatsApp">💬</a>
-                                            <button onclick="selectReplacement('${con.id}', '${s.name.replace(/'/g, "\\'")}', '${s.email}', this.closest('.sub-row'), ${span.s}, ${span.e}, '${timeStr}')" class="text-[8px] bg-indigo-50 text-indigo-600 px-2 py-1.5 rounded-md font-black uppercase hover:bg-indigo-100 transition-colors border border-indigo-100 shadow-sm">Assign</button>
+                                            <button onclick="selectReplacement('${con.id}', '${s.name.replace(/'/g, "\\'")}', '${s.email}', this.closest('.sub-row'), ${span.s}, ${span.e}, '${timeStr}', ${allowSplit})" class="text-[10px] bg-indigo-50 text-indigo-600 px-4 py-2 rounded-lg font-black uppercase hover:bg-indigo-100 transition-colors border border-indigo-100 shadow-sm w-full sm:w-auto">Assign</button>
                                         </div>
                                     </div>
                                 `;
@@ -795,28 +823,41 @@
                         });
 
                         if(Object.keys(deptMap).length === 0) {
-                            deptHtml = `<p class="text-center text-[10px] py-4 text-slate-400 font-bold">No free staff available</p>`;
+                            deptHtml = `
+                                <div class="p-6 text-center bg-rose-50 rounded-xl border border-rose-100">
+                                    <p class="text-xs font-black text-rose-600 uppercase tracking-widest mb-1">No full covers available</p>
+                                    <p class="text-[10px] text-rose-400 font-bold">Check the "Enable Custom / Split Assignments" box at the top to view fragmented availability.</p>
+                                </div>
+                            `;
                         }
 
+                        const timeStr = `${minsTo12H(con.start).replace(/ (AM|PM)/i,"")} - ${minsTo12H(con.end)}`;
+
                         analysisHtml += `
-                            <div id="clash-${con.id}" class="clash-item bg-white rounded-3xl overflow-hidden shadow-lg border border-slate-200 mb-4" data-clash='${JSON.stringify(con)}'>
-                                <div class="p-3 sm:p-4 flex justify-between items-center bg-rose-50/50 border-b border-rose-100">
-                                    <div><p class="text-[8px] font-black text-rose-500 uppercase tracking-widest">${con.type}</p><p class="font-black text-slate-900 text-sm uppercase">${con.title}</p><p class="text-[9px] font-bold text-slate-400 uppercase">${con.sub}</p></div>
-                                    <div class="text-right"><p class="font-black text-slate-700 text-xs">${minsTo12H(con.start).replace(/ (AM|PM)/i,"")} - ${minsTo12H(con.end)}</p><p class="text-[9px] font-bold text-slate-400 lowercase">(${con.end - con.start} mins)</p></div>
+                            <div id="clash-${con.id}" class="clash-item bg-white rounded-[1.5rem] overflow-hidden shadow-md border-2 border-rose-100 mb-4" data-clash='${JSON.stringify(con)}'>
+                                <div class="p-3 flex justify-between items-center bg-rose-50 border-b border-rose-100">
+                                    <div>
+                                        <p class="clash-title font-black text-slate-800 text-xs uppercase">${con.title}</p>
+                                        <p class="clash-sub text-[9px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">${con.sub}</p>
+                                    </div>
+                                    <div class="text-right">
+                                        <p class="clash-time font-black text-rose-600 text-[11px] bg-rose-100 px-2 py-0.5 rounded-md inline-block">${timeStr}</p>
+                                        <p class="text-[8px] font-bold text-slate-400 uppercase mt-1"><span class="clash-dur">${con.end - con.start}</span> mins</p>
+                                    </div>
                                 </div>
-                                <div class="p-3 sm:p-4">
+                                <div class="p-3 bg-white flex flex-col gap-2 transition-opacity duration-300">
                                     <div class="max-h-64 overflow-y-auto custom-scroll pr-1">${deptHtml}</div>
-                                    <div class="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
+                                    <div class="mt-2 pt-3 border-t border-slate-100 flex items-center justify-between">
                                         <label class="flex items-center gap-2 cursor-pointer">
                                             <input type="checkbox" id="incharge-${con.id}" onchange="toggleIncharge('${con.id}', this)" class="w-4 h-4 accent-indigo-600">
                                             <span class="text-[10px] font-black text-indigo-600 uppercase">Emergency: Request Incharge</span>
                                         </label>
                                     </div>
                                 </div>
-                            </div>`;
+                            </div>
+                        `;
                     });
-                } else { analysisHtml += `<div id="no-clash-msg" class="bg-emerald-500/10 text-emerald-400 p-5 rounded-2xl font-bold text-center text-xs uppercase border border-emerald-500/20 mb-6">✅ No classes detected</div>`; }
-                analysisHtml += `</div>`;
+                    analysisHtml += `</div>`;
             }
             feed.innerHTML = analysisHtml;
         }
