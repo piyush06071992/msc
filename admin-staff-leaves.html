@@ -923,12 +923,13 @@
                     totalUncovered += userConflicts.length;
                     analysisHtml += `<div class="mb-8"><div class="flex items-center gap-3 mb-4"><span class="bg-indigo-600/20 text-indigo-400 border border-indigo-500/50 px-3 py-1 rounded-lg font-black text-[10px] uppercase tracking-widest">${localDateObj.toLocaleDateString('en-GB', {day:'2-digit', month:'short'})}</span><div class="h-px flex-1 bg-slate-700/50"></div></div>`;
                     
-                    userConflicts.forEach(con => {
+               userConflicts.forEach(con => {
                         let deptMap = {};
 
                         allStaff.forEach(staff => {
                             if (norm(staff.name) === teacherName) return;
 
+                            // 1. Gather all busy times for this staff member today
                             let busySpans = [];
                             let windowClasses = [];
                             let lStart = 720; 
@@ -940,16 +941,17 @@
                                 const eStr = slot.end24 || slot.endTime || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00");
                                 const s = timeToMins(sStr);
                                 const e = timeToMins(eStr);
-                                busySpans.push({ s, e, isDuty: false });
+                                busySpans.push({ s, e, isDuty: false, cls: slot.className || 'Duty', sec: slot.section || '' });
                                 if (s < lEnd && e > lStart) windowClasses.push({ s, e });
                             });
 
                             const staffVirtual = virtualSchedule.filter(v => v.date === tDate && norm(v.teacherName) === norm(staff.name));
                             staffVirtual.forEach(v => {
-                                busySpans.push({ s: v.sMins, e: v.eMins, isDuty: true });
+                                busySpans.push({ s: v.sMins, e: v.eMins, isDuty: true, cls: v.className || 'Duty', sec: v.section || '' });
                                 if (v.sMins < lEnd && v.eMins > lStart) windowClasses.push({ s: v.sMins, e: v.eMins });
                             });
 
+                            // 2. Merge overlapping busy spans so the math is clean
                             busySpans.sort((a, b) => a.s - b.s);
                             let mergedBusy = [];
                             busySpans.forEach(b => {
@@ -961,27 +963,33 @@
                                 }
                             });
 
+                            // 3. Subtract busy spans from the clash window to find EXACT FREE spans
                             let freeSpans = [];
                             let cursor = con.start;
                             for (let b of mergedBusy) {
-                                if (b.e <= cursor) continue; 
-                                if (b.s >= con.end) break;   
+                                if (b.e <= cursor) continue; // Past
+                                if (b.s >= con.end) break;   // Future
                                 if (cursor < b.s) freeSpans.push({ s: cursor, e: b.s });
                                 cursor = Math.max(cursor, b.e);
                             }
                             if (cursor < con.end) freeSpans.push({ s: cursor, e: con.end });
 
+                            // 4. Filter based on Split settings
                             let validSpans = [];
                             if (allowSplit) {
+                                // Accept any free chunk >= 10 minutes
                                 validSpans = freeSpans.filter(span => span.e - span.s >= 10);
                             } else {
+                                // Must be free for the ENTIRE clash block
                                 if (freeSpans.length === 1 && freeSpans[0].s <= con.start && freeSpans[0].e >= con.end) {
                                     validSpans = [{ s: con.start, e: con.end }];
                                 }
                             }
 
+                            // 5. Add to Dept Map with Plain English Badges
                             if (validSpans.length > 0) {
-                                let lunchStatus = "❌";
+                                // Calculate Lunch Status for this staff member
+                                let lunchStatus = "✅";
                                 let lastT = lStart; let maxGap = 0;
                                 windowClasses.sort((a,b) => a.s - b.s);
                                 windowClasses.forEach(c => {
@@ -995,6 +1003,11 @@
                                 if (!deptMap[d]) deptMap[d] = [];
                                 
                                 validSpans.forEach(span => {
+                                    let overlapS = Math.max(span.s, lStart);
+                                    let overlapE = Math.min(span.e, lEnd);
+                                    let lunchOverlap = overlapE > overlapS ? overlapE - overlapS : 0;
+
+                                    // Calculate Proximity based on this specific free span
                                     let beforeAlert = "None";
                                     let afterAlert = "None";
                                     let lb = null, fa = null;
@@ -1004,10 +1017,16 @@
                                         if (b.s >= span.e) { if (!fa || b.s < fa.s) fa = b; }
                                     });
 
-                                    if (lb && (span.s - lb.e) <= 30) beforeAlert = `${span.s - lb.e}m gap`;
-                                    if (fa && (fa.s - span.e) <= 30) afterAlert = `${fa.s - span.e}m gap`;
+                                    if (lb && (span.s - lb.e) <= 30) {
+                                        const secStr = lb.sec ? ` (Sec ${lb.sec})` : '';
+                                        beforeAlert = `Class: ${lb.cls}${secStr} • ${span.s - lb.e}m gap`;
+                                    }
+                                    if (fa && (fa.s - span.e) <= 30) {
+                                        const secStr = fa.sec ? ` (Sec ${fa.sec})` : '';
+                                        afterAlert = `Class: ${fa.cls}${secStr} • ${fa.s - span.e}m gap`;
+                                    }
 
-                                    deptMap[d].push({ staff, span, lunchStatus, beforeAlert, afterAlert });
+                                    deptMap[d].push({ staff, span, lunchStatus, lunchOverlap, beforeAlert, afterAlert });
                                 });
                             }
                         });
@@ -1025,7 +1044,7 @@
                             accordionHtml += `
                                 <details class="bg-slate-800 rounded-lg overflow-hidden group/dept border border-slate-700">
                                     <summary class="p-2.5 text-[10px] font-black text-slate-300 uppercase tracking-widest cursor-pointer hover:bg-slate-700 transition-colors flex justify-between items-center">
-                                        <span>${dN} <span class="ml-1 text-emerald-400">(${deptMap[dN].length} Options)</span></span>
+                                        <span>${dN} <span class="ml-1 text-indigo-400">(${deptMap[dN].length} Options)</span></span>
                                         <span class="text-[8px] opacity-50 group-open/dept:rotate-180 transition-transform">▼</span>
                                     </summary>
                                     <div class="p-1.5 space-y-1 bg-slate-800/50">
@@ -1038,34 +1057,44 @@
                                 const isPartial = (dur < (con.end - con.start));
                                 
                                 const typeTag = isPartial 
-                                    ? `<span class="text-amber-400 font-bold ml-1" title="${timeStr}">(Partial)</span>` 
-                                    : `<span class="text-emerald-400 font-bold ml-1" title="${timeStr}">(Full)</span>`;
+                                    ? `<span class="text-amber-500 font-bold ml-1" title="${timeStr}">(Partial Match)</span>` 
+                                    : `<span class="text-emerald-500 font-bold ml-1" title="${timeStr}">(Perfect Match)</span>`;
 
                                 const lunchBadge = item.lunchStatus === "✅" 
-                                    ? `<span class="bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded text-[8px] uppercase border border-emerald-500/30 shrink-0" title="Lunch Available">🍽️ ✅</span>`
-                                    : `<span class="bg-rose-500/20 text-rose-400 px-1.5 py-0.5 rounded text-[8px] uppercase border border-rose-500/30 shrink-0" title="Lunch Skipped">🍽️ ❌</span>`;
+                                    ? `<span class="bg-emerald-100 text-emerald-600 px-2 py-0.5 rounded text-[9px] uppercase border border-emerald-200 shrink-0">✅ Lunch Intact</span>`
+                                    : `<span class="bg-rose-100 text-rose-600 px-2 py-0.5 rounded text-[9px] uppercase border border-rose-200 shrink-0">⚠️ Warning: Skips Lunch${item.lunchOverlap > 0 ? ` (Overlaps ${item.lunchOverlap}m)` : ''}</span>`;
                                     
-                                const beforeBadge = item.beforeAlert !== "None" ? `<span class="bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded text-[8px] uppercase border border-amber-500/30 shrink-0">⏮ ${item.beforeAlert}</span>` : '';
-                                const afterBadge = item.afterAlert !== "None" ? `<span class="bg-indigo-500/20 text-indigo-400 px-1.5 py-0.5 rounded text-[8px] uppercase border border-indigo-500/30 shrink-0">⏭ ${item.afterAlert}</span>` : '';
+                                const beforeBadge = item.beforeAlert !== "None" ? `<span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[9px] uppercase border border-amber-200 shrink-0">⏮ ${item.beforeAlert}</span>` : '';
+                                const afterBadge = item.afterAlert !== "None" ? `<span class="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-[9px] uppercase border border-indigo-200 shrink-0">⏭ ${item.afterAlert}</span>` : '';
 
                                 accordionHtml += `
-                                    <button onclick="adminAssignSub('${reqId}', '${con.id}', '${s.email}', '${s.name.replace(/'/g, "\\'")}', ${span.s}, ${span.e}, '${timeStr}')" class="w-full text-left p-2 rounded-lg hover:bg-indigo-600 hover:text-white transition-all flex flex-col sm:flex-row sm:items-center justify-between group/btn border border-transparent hover:border-indigo-500 shadow-sm bg-slate-900 gap-2">
-                                        <div class="truncate text-[11px] font-bold text-slate-200 group-hover/btn:text-white uppercase leading-tight">
-                                            ${s.name} ${typeTag}
+                                    <div class="flex flex-col sm:flex-row sm:items-center justify-between p-2 rounded-lg hover:bg-slate-700 transition-all group/btn border border-transparent hover:border-slate-500 bg-slate-900 gap-2">
+                                        <div class="flex flex-col">
+                                            <div class="truncate text-[11px] font-bold text-slate-200 uppercase leading-tight">
+                                                ${s.name} ${typeTag}
+                                            </div>
+                                            <div class="flex flex-wrap gap-1 mt-1.5">
+                                                ${lunchBadge}
+                                                ${beforeBadge}
+                                                ${afterBadge}
+                                            </div>
                                         </div>
-                                        <div class="flex gap-1">
-                                            ${beforeBadge}
-                                            ${afterBadge}
-                                            ${lunchBadge}
+                                        <div class="flex items-center gap-2 shrink-0">
+                                            <button onclick="adminAssignSub('${reqId}', '${con.id}', '${s.email}', '${s.name.replace(/'/g, "\\'")}', ${span.s}, ${span.e}, '${timeStr}', ${allowSplit})" class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-black uppercase hover:bg-indigo-500 transition-colors shadow-sm text-[10px]">Assign</button>
                                         </div>
-                                    </button>
+                                    </div>
                                 `; 
                             });
                             accordionHtml += `</div></details>`;
                         });
                         
                         if(Object.keys(deptMap).length === 0) {
-                            accordionHtml += `<div class="p-4 text-center text-xs font-bold text-rose-400 uppercase tracking-widest">No free staff available</div>`;
+                            accordionHtml += `
+                                <div class="p-6 text-center">
+                                    <p class="text-xs font-bold text-rose-400 uppercase tracking-widest mb-2">No full covers available</p>
+                                    <p class="text-[10px] text-slate-400 font-bold">Check the "Enable Custom / Split Assignments" box at the top to view fragmented availability.</p>
+                                </div>
+                            `;
                         }
                         
                         accordionHtml += `</div></details>`;
