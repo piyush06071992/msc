@@ -225,7 +225,7 @@
     </div>
 
     <!-- NEW: Coordination Dashboard Modal -->
-   <div id="manage-subs-modal" class="fixed inset-0 bg-slate-900/90 backdrop-blur-md z-[100] hidden items-center justify-center p-2 sm:p-4">
+    <div id="manage-subs-modal" class="fixed inset-0 bg-slate-900/90 backdrop-blur-md z-[100] hidden items-center justify-center p-2 sm:p-4">
         <div class="bg-[#0f172a] rounded-[2rem] p-4 sm:p-6 w-full max-w-5xl shadow-2xl flex flex-col h-[95vh] border-t-8 border-indigo-500">
             <div class="flex justify-between items-center mb-2 shrink-0 border-b border-slate-700 pb-2">
                 <div>
@@ -865,14 +865,13 @@
             let analysisHtml = "";
             let totalUncovered = 0;
 
-           allDates.forEach(tDate => {
+            allDates.forEach(tDate => {
                 const dParts = tDate.split('-');
                 const localDateObj = new Date(dParts[0], dParts[1] - 1, dParts[2]);
                 const dayName = localDateObj.toLocaleDateString('en-US', { weekday: 'long' });
                 if(dayName === 'Sunday') return;
 
                 const override = historyData.find(o => o.date === tDate);
-                // FIX 1: Ensure override schedules are ALSO filtered by the specific day of the week!
                 let activeSchedule = (override && override.schedule) 
                     ? override.schedule.filter(t => (t.day || "").trim() === dayName)
                     : timetableData.filter(t => (t.day || "").trim() === dayName);
@@ -918,7 +917,6 @@
                     }
                 });
 
-                // FIX 2: Deduplicate identically timed classes (in case of merged sections sharing the same block)
                 userConflicts = userConflicts.filter((v, i, a) => a.findIndex(t => (t.start === v.start && t.end === v.end && t.sub === v.sub && t.title === v.title)) === i);
 
                 if (userConflicts.length > 0) {
@@ -926,34 +924,93 @@
                     analysisHtml += `<div class="mb-8"><div class="flex items-center gap-3 mb-4"><span class="bg-indigo-600/20 text-indigo-400 border border-indigo-500/50 px-3 py-1 rounded-lg font-black text-[10px] uppercase tracking-widest">${localDateObj.toLocaleDateString('en-GB', {day:'2-digit', month:'short'})}</span><div class="h-px flex-1 bg-slate-700/50"></div></div>`;
                     
                     userConflicts.forEach(con => {
-                        const freeStaff = allStaff.filter(staff => {
-                            if (norm(staff.name) === teacherName) return false;
+                        let deptMap = {};
+
+                        allStaff.forEach(staff => {
+                            if (norm(staff.name) === teacherName) return;
+
+                            let busySpans = [];
+                            let windowClasses = [];
+                            let lStart = 720; 
+                            let lEnd = 840;   
                             
                             const staffTt = activeSchedule.filter(s => norm(s.teacherName || s.teacher) === norm(staff.name));
-                            const isBusyRoutine = staffTt.some(slot => {
+                            staffTt.forEach(slot => {
                                 const sStr = slot.start24 || slot.startTime || (slot.timeRange ? slot.timeRange.split(' - ')[0] : "00:00");
                                 const eStr = slot.end24 || slot.endTime || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00");
                                 const s = timeToMins(sStr);
                                 const e = timeToMins(eStr);
-                                const hasOverlap = (con.start < e && con.end > s);
-                                if (!hasOverlap) return false;
-                                return allowSplit ? (s <= con.start && e >= con.end) : true;
+                                busySpans.push({ s, e, isDuty: false });
+                                if (s < lEnd && e > lStart) windowClasses.push({ s, e });
                             });
-
-                            if (isBusyRoutine) return false;
 
                             const staffVirtual = virtualSchedule.filter(v => v.date === tDate && norm(v.teacherName) === norm(staff.name));
-                            const isBusyVirtual = staffVirtual.some(v => {
-                                const hasOverlap = (con.start < v.eMins && con.end > v.sMins);
-                                if (!hasOverlap) return false;
-                                return allowSplit ? (v.sMins <= con.start && v.eMins >= con.end) : true;
+                            staffVirtual.forEach(v => {
+                                busySpans.push({ s: v.sMins, e: v.eMins, isDuty: true });
+                                if (v.sMins < lEnd && v.eMins > lStart) windowClasses.push({ s: v.sMins, e: v.eMins });
                             });
 
-                            return !isBusyVirtual;
-                        });
+                            busySpans.sort((a, b) => a.s - b.s);
+                            let mergedBusy = [];
+                            busySpans.forEach(b => {
+                                if (mergedBusy.length === 0) mergedBusy.push(b);
+                                else {
+                                    let last = mergedBusy[mergedBusy.length - 1];
+                                    if (b.s <= last.e) last.e = Math.max(last.e, b.e);
+                                    else mergedBusy.push(b);
+                                }
+                            });
 
-                        let deptMap = {};
-                        freeStaff.forEach(s => { let d = s.dept.split(',')[0].trim(); if(!deptMap[d]) deptMap[d] = []; deptMap[d].push(s); });
+                            let freeSpans = [];
+                            let cursor = con.start;
+                            for (let b of mergedBusy) {
+                                if (b.e <= cursor) continue; 
+                                if (b.s >= con.end) break;   
+                                if (cursor < b.s) freeSpans.push({ s: cursor, e: b.s });
+                                cursor = Math.max(cursor, b.e);
+                            }
+                            if (cursor < con.end) freeSpans.push({ s: cursor, e: con.end });
+
+                            let validSpans = [];
+                            if (allowSplit) {
+                                validSpans = freeSpans.filter(span => span.e - span.s >= 10);
+                            } else {
+                                if (freeSpans.length === 1 && freeSpans[0].s <= con.start && freeSpans[0].e >= con.end) {
+                                    validSpans = [{ s: con.start, e: con.end }];
+                                }
+                            }
+
+                            if (validSpans.length > 0) {
+                                let lunchStatus = "❌";
+                                let lastT = lStart; let maxGap = 0;
+                                windowClasses.sort((a,b) => a.s - b.s);
+                                windowClasses.forEach(c => {
+                                    if (c.s - lastT > maxGap) maxGap = c.s - lastT;
+                                    lastT = Math.max(lastT, c.e);
+                                });
+                                if (lEnd - lastT > maxGap) maxGap = lEnd - lastT;
+                                if (maxGap >= 45) lunchStatus = "✅";
+
+                                let d = staff.dept.split(',')[0].trim();
+                                if (!deptMap[d]) deptMap[d] = [];
+                                
+                                validSpans.forEach(span => {
+                                    let beforeAlert = "None";
+                                    let afterAlert = "None";
+                                    let lb = null, fa = null;
+                                    
+                                    busySpans.forEach(b => {
+                                        if (b.e <= span.s) { if (!lb || b.e > lb.e) lb = b; }
+                                        if (b.s >= span.e) { if (!fa || b.s < fa.s) fa = b; }
+                                    });
+
+                                    if (lb && (span.s - lb.e) <= 30) beforeAlert = `${span.s - lb.e}m gap`;
+                                    if (fa && (fa.s - span.e) <= 30) afterAlert = `${fa.s - span.e}m gap`;
+
+                                    deptMap[d].push({ staff, span, lunchStatus, beforeAlert, afterAlert });
+                                });
+                            }
+                        });
                         
                         let accordionHtml = `
                             <details class="w-full bg-slate-900 border border-slate-600 rounded-xl overflow-hidden group/main shadow-inner">
@@ -968,15 +1025,39 @@
                             accordionHtml += `
                                 <details class="bg-slate-800 rounded-lg overflow-hidden group/dept border border-slate-700">
                                     <summary class="p-2.5 text-[10px] font-black text-slate-300 uppercase tracking-widest cursor-pointer hover:bg-slate-700 transition-colors flex justify-between items-center">
-                                        <span>${dN} <span class="ml-1 text-emerald-400">(${deptMap[dN].length} Free)</span></span>
+                                        <span>${dN} <span class="ml-1 text-emerald-400">(${deptMap[dN].length} Options)</span></span>
                                         <span class="text-[8px] opacity-50 group-open/dept:rotate-180 transition-transform">▼</span>
                                     </summary>
                                     <div class="p-1.5 space-y-1 bg-slate-800/50">
                             `;
-                            deptMap[dN].forEach(s => { 
+                            deptMap[dN].forEach(item => { 
+                                const s = item.staff;
+                                const span = item.span;
+                                const timeStr = `${minsTo12H(span.s).replace(/ (AM|PM)/i,"")} - ${minsTo12H(span.e)}`;
+                                const dur = span.e - span.s;
+                                const isPartial = (dur < (con.end - con.start));
+                                
+                                const typeTag = isPartial 
+                                    ? `<span class="text-amber-400 font-bold ml-1" title="${timeStr}">(Partial)</span>` 
+                                    : `<span class="text-emerald-400 font-bold ml-1" title="${timeStr}">(Full)</span>`;
+
+                                const lunchBadge = item.lunchStatus === "✅" 
+                                    ? `<span class="bg-emerald-500/20 text-emerald-400 px-1.5 py-0.5 rounded text-[8px] uppercase border border-emerald-500/30 shrink-0" title="Lunch Available">🍽️ ✅</span>`
+                                    : `<span class="bg-rose-500/20 text-rose-400 px-1.5 py-0.5 rounded text-[8px] uppercase border border-rose-500/30 shrink-0" title="Lunch Skipped">🍽️ ❌</span>`;
+                                    
+                                const beforeBadge = item.beforeAlert !== "None" ? `<span class="bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded text-[8px] uppercase border border-amber-500/30 shrink-0">⏮ ${item.beforeAlert}</span>` : '';
+                                const afterBadge = item.afterAlert !== "None" ? `<span class="bg-indigo-500/20 text-indigo-400 px-1.5 py-0.5 rounded text-[8px] uppercase border border-indigo-500/30 shrink-0">⏭ ${item.afterAlert}</span>` : '';
+
                                 accordionHtml += `
-                                    <button onclick="adminAssignSub('${reqId}', '${con.id}', '${s.email}', '${s.name.replace(/'/g, "\\'")}')" class="w-full text-left p-2.5 rounded-lg hover:bg-indigo-600 hover:text-white transition-all flex items-center group/btn border border-transparent hover:border-indigo-500 shadow-sm bg-slate-900">
-                                        <span class="text-[11px] font-bold text-slate-200 group-hover/btn:text-white uppercase">${s.name}</span>
+                                    <button onclick="adminAssignSub('${reqId}', '${con.id}', '${s.email}', '${s.name.replace(/'/g, "\\'")}', ${span.s}, ${span.e}, '${timeStr}')" class="w-full text-left p-2 rounded-lg hover:bg-indigo-600 hover:text-white transition-all flex flex-col sm:flex-row sm:items-center justify-between group/btn border border-transparent hover:border-indigo-500 shadow-sm bg-slate-900 gap-2">
+                                        <div class="truncate text-[11px] font-bold text-slate-200 group-hover/btn:text-white uppercase leading-tight">
+                                            ${s.name} ${typeTag}
+                                        </div>
+                                        <div class="flex gap-1">
+                                            ${beforeBadge}
+                                            ${afterBadge}
+                                            ${lunchBadge}
+                                        </div>
                                     </button>
                                 `; 
                             });
@@ -1020,33 +1101,38 @@
             feed.innerHTML = analysisHtml;
         }
 
-     async function adminAssignSub(reqId, clashId, subEmail, subName) {
+        async function adminAssignSub(reqId, clashId, subEmail, subName, calcSMins, calcEMins, calcTimeStr) {
             const parts = clashId.split('_'); 
             const dateVal = parts[1];
-            const sMins = parseInt(parts[2]);
             
             const container = document.getElementById(`admin-clash-box-${clashId}`);
             if (!container) return;
 
             const title = container.querySelector('.clash-title').innerText;
             const sub = container.querySelector('.clash-sub').innerText;
-            const timeStr = container.querySelector('.clash-time').innerText;
-            const durationMins = parseInt(container.querySelector('.clash-dur').innerText);
-            const eMins = sMins + durationMins; 
             
-            const customTime = prompt(`Confirm time window for ${subName}:`, timeStr);
+            const customTime = prompt(`Confirm time window for ${subName}:`, calcTimeStr);
             if(!customTime) return;
+
+            let startMins = calcSMins, endMins = calcEMins;
+            if (customTime.includes('-')) {
+                startMins = timeToMins(customTime.split('-')[0]);
+                endMins = timeToMins(customTime.split('-')[1]);
+            }
 
             container.style.opacity = '0.5';
             container.style.pointerEvents = 'none';
+
+            const btn = event.target; const orig = btn.innerText;
+            btn.innerText = "Saving..."; btn.disabled = true;
 
             const newAdj = {
                 id: 'adj_' + Math.random().toString(36).substr(2,9),
                 date: dateVal,
                 title: title,
                 sub: sub,
-                start: sMins,
-                end: eMins,
+                start: startMins,
+                end: endMins,
                 adjustedTo: subName,
                 adjustedEmail: subEmail,
                 substituteResponse: 'ACCEPTED',
@@ -1062,7 +1148,6 @@
                 
                 await getCollection("leave_requests").doc(reqId).update({ adjustments: currentAdj });
                 
-                // Keep modal open and instantly refresh the UI
                 req.adjustments = currentAdj; 
                 runAdminAnalysis();
                 
