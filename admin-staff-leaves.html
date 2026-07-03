@@ -923,13 +923,14 @@
                     totalUncovered += userConflicts.length;
                     analysisHtml += `<div class="mb-8"><div class="flex items-center gap-3 mb-4"><span class="bg-indigo-600/20 text-indigo-400 border border-indigo-500/50 px-3 py-1 rounded-lg font-black text-[10px] uppercase tracking-widest">${localDateObj.toLocaleDateString('en-GB', {day:'2-digit', month:'short'})}</span><div class="h-px flex-1 bg-slate-700/50"></div></div>`;
                     
-               userConflicts.forEach(con => {
+              userConflicts.forEach(con => {
+                        const allowSplit = document.getElementById('admin-allow-split') && document.getElementById('admin-allow-split').checked;
                         let deptMap = {};
 
-                        allStaff.forEach(staff => {
+                        staffData.forEach(staff => {
                             if (norm(staff.name) === teacherName) return;
 
-                            // 1. Gather all busy times for this staff member today
+                            // 1. Gather all busy times for this staff member today, capturing Class and Section!
                             let busySpans = [];
                             let windowClasses = [];
                             let lStart = 720; 
@@ -941,25 +942,27 @@
                                 const eStr = slot.end24 || slot.endTime || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00");
                                 const s = timeToMins(sStr);
                                 const e = timeToMins(eStr);
-                                busySpans.push({ s, e, isDuty: false, cls: slot.className || 'Duty', sec: slot.section || '' });
+                                busySpans.push({ s, e, cls: slot.className || 'Duty', sec: slot.section || '' });
                                 if (s < lEnd && e > lStart) windowClasses.push({ s, e });
                             });
 
                             const staffVirtual = virtualSchedule.filter(v => v.date === tDate && norm(v.teacherName) === norm(staff.name));
                             staffVirtual.forEach(v => {
-                                busySpans.push({ s: v.sMins, e: v.eMins, isDuty: true, cls: v.className || 'Duty', sec: v.section || '' });
-                                if (v.sMins < lEnd && v.eMins > lStart) windowClasses.push({ s: v.sMins, e: v.eMins });
+                                const vs = timeToMins(v.start24);
+                                const ve = timeToMins(v.end24);
+                                busySpans.push({ s: vs, e: ve, cls: v.className || 'Duty', sec: v.section || '' });
+                                if (vs < lEnd && ve > lStart) windowClasses.push({ s: vs, e: ve });
                             });
 
                             // 2. Merge overlapping busy spans so the math is clean
                             busySpans.sort((a, b) => a.s - b.s);
                             let mergedBusy = [];
                             busySpans.forEach(b => {
-                                if (mergedBusy.length === 0) mergedBusy.push(b);
+                                if (mergedBusy.length === 0) mergedBusy.push({...b});
                                 else {
                                     let last = mergedBusy[mergedBusy.length - 1];
                                     if (b.s <= last.e) last.e = Math.max(last.e, b.e);
-                                    else mergedBusy.push(b);
+                                    else mergedBusy.push({...b});
                                 }
                             });
 
@@ -977,18 +980,14 @@
                             // 4. Filter based on Split settings
                             let validSpans = [];
                             if (allowSplit) {
-                                // Accept any free chunk >= 10 minutes
                                 validSpans = freeSpans.filter(span => span.e - span.s >= 10);
                             } else {
-                                // Must be free for the ENTIRE clash block
                                 if (freeSpans.length === 1 && freeSpans[0].s <= con.start && freeSpans[0].e >= con.end) {
                                     validSpans = [{ s: con.start, e: con.end }];
                                 }
                             }
 
-                            // 5. Add to Dept Map with Plain English Badges
                             if (validSpans.length > 0) {
-                                // Calculate Lunch Status for this staff member
                                 let lunchStatus = "✅";
                                 let lastT = lStart; let maxGap = 0;
                                 windowClasses.sort((a,b) => a.s - b.s);
@@ -1007,23 +1006,24 @@
                                     let overlapE = Math.min(span.e, lEnd);
                                     let lunchOverlap = overlapE > overlapS ? overlapE - overlapS : 0;
 
-                                    // Calculate Proximity based on this specific free span
                                     let beforeAlert = "None";
                                     let afterAlert = "None";
                                     let lb = null, fa = null;
                                     
+                                    // Evaluate against ORIGINAL UNMERGED busySpans to keep class names!
                                     busySpans.forEach(b => {
                                         if (b.e <= span.s) { if (!lb || b.e > lb.e) lb = b; }
                                         if (b.s >= span.e) { if (!fa || b.s < fa.s) fa = b; }
                                     });
 
+                                    // Print highly legible warnings
                                     if (lb && (span.s - lb.e) <= 30) {
                                         const secStr = lb.sec ? ` (Sec ${lb.sec})` : '';
-                                        beforeAlert = `Class: ${lb.cls}${secStr} • ${span.s - lb.e}m gap`;
+                                        beforeAlert = `Class ended before ${span.s - lb.e}m in ${lb.cls}${secStr}`;
                                     }
                                     if (fa && (fa.s - span.e) <= 30) {
                                         const secStr = fa.sec ? ` (Sec ${fa.sec})` : '';
-                                        afterAlert = `Class: ${fa.cls}${secStr} • ${fa.s - span.e}m gap`;
+                                        afterAlert = `Class starts after ${fa.s - span.e}m in ${fa.cls}${secStr}`;
                                     }
 
                                     deptMap[d].push({ staff, span, lunchStatus, lunchOverlap, beforeAlert, afterAlert });
@@ -1057,12 +1057,12 @@
                                 const isPartial = (dur < (con.end - con.start));
                                 
                                 const typeTag = isPartial 
-                                    ? `<span class="text-amber-500 font-bold ml-1" title="${timeStr}">(Partial Match)</span>` 
-                                    : `<span class="text-emerald-500 font-bold ml-1" title="${timeStr}">(Perfect Match)</span>`;
+                                    ? `<span class="text-amber-400 font-black ml-2 border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 rounded text-[9px] tracking-widest whitespace-nowrap">Partial: ${timeStr} (${dur}m)</span>` 
+                                    : `<span class="text-emerald-400 font-black ml-2 border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 rounded text-[9px] tracking-widest whitespace-nowrap">Full: ${timeStr} (${dur}m)</span>`;
 
                                 const lunchBadge = item.lunchStatus === "✅" 
-                                    ? `<span class="bg-emerald-100 text-emerald-600 px-2 py-0.5 rounded text-[9px] uppercase border border-emerald-200 shrink-0">✅ Lunch Intact</span>`
-                                    : `<span class="bg-rose-100 text-rose-600 px-2 py-0.5 rounded text-[9px] uppercase border border-rose-200 shrink-0">⚠️ Warning: Skips Lunch${item.lunchOverlap > 0 ? ` (Overlaps ${item.lunchOverlap}m)` : ''}</span>`;
+                                    ? `<span class="bg-emerald-100 text-emerald-600 px-2 py-0.5 rounded text-[9px] uppercase border border-emerald-200 shrink-0" title="Lunch Available">✅ Lunch Intact</span>`
+                                    : `<span class="bg-rose-100 text-rose-600 px-2 py-0.5 rounded text-[9px] uppercase border border-rose-200 shrink-0" title="Lunch Skipped">⚠️ Warning: Skips Lunch${item.lunchOverlap > 0 ? ` (Overlaps ${item.lunchOverlap}m)` : ''}</span>`;
                                     
                                 const beforeBadge = item.beforeAlert !== "None" ? `<span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[9px] uppercase border border-amber-200 shrink-0">⏮ ${item.beforeAlert}</span>` : '';
                                 const afterBadge = item.afterAlert !== "None" ? `<span class="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-[9px] uppercase border border-indigo-200 shrink-0">⏭ ${item.afterAlert}</span>` : '';
@@ -1070,7 +1070,7 @@
                                 accordionHtml += `
                                     <div class="flex flex-col sm:flex-row sm:items-center justify-between p-2 rounded-lg hover:bg-slate-700 transition-all group/btn border border-transparent hover:border-slate-500 bg-slate-900 gap-2">
                                         <div class="flex flex-col">
-                                            <div class="truncate text-[11px] font-bold text-slate-200 uppercase leading-tight">
+                                            <div class="truncate text-[11px] font-bold text-slate-200 uppercase leading-tight flex items-center">
                                                 ${s.name} ${typeTag}
                                             </div>
                                             <div class="flex flex-wrap gap-1 mt-1.5">
@@ -1130,7 +1130,7 @@
             feed.innerHTML = analysisHtml;
         }
 
-       async function adminAssignSub(reqId, clashId, subEmail, subName, calcSMins, calcEMins, calcTimeStr, isCustomMode) {
+     async function adminAssignSub(reqId, clashId, subEmail, subName, calcSMins, calcEMins, calcTimeStr, isCustomMode) {
             const parts = clashId.split('_'); 
             const dateVal = parts[1];
             
@@ -1175,7 +1175,7 @@
                 adjustedEmail: subEmail,
                 substituteResponse: 'ACCEPTED',
                 substituteMessage: 'Force Assigned by Admin',
-                assignedTimeWindow: customTime,
+                assignedTimeWindow: finalTimeStr,
                 isEmergency: true
             };
 
