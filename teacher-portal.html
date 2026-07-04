@@ -400,51 +400,102 @@
             }
         }
 
-       function listenForPendingAdjustments(staffObj) {
+      function listenForPendingAdjustments(staffObj) {
             const center = staffObj.center || "GHUMARWIN";
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
             const myEmail = (staffObj.email || "").trim().toLowerCase();
+            
+            // Get today's local date string
+            const offset = new Date().getTimezoneOffset() * 60000;
+            const todayIsoStr = (new Date(Date.now() - offset)).toISOString().split('T')[0];
 
-            // FIX: Listen to both PENDING and APPROVED to prevent Admin early-approval bug
             db.collection(prefix + "leave_requests")
               .where("status", "in", ["PENDING", "APPROVED"])
               .onSnapshot(snapshot => {
                   let pendingCount = 0;
+                  let todayDuties = [];
+                  let ackSubs = JSON.parse(sessionStorage.getItem('minervaAckSubs')) || [];
+
                   snapshot.forEach(doc => {
                       const data = doc.data();
                       if(data.adjustments) {
                           data.adjustments.forEach(adj => {
                               const adjEmail = (adj.adjustedEmail || "").trim().toLowerCase();
-                              // Count every single class they are assigned to sub for that hasn't been answered
-                              if (adjEmail === myEmail && (!adj.substituteResponse || adj.substituteResponse === "PENDING")) {
-                                  pendingCount++;
+                              if (adjEmail === myEmail) {
+                                  if (!adj.substituteResponse || adj.substituteResponse === "PENDING") {
+                                      pendingCount++;
+                                  } else if (adj.substituteResponse === "ACCEPTED" && adj.date === todayIsoStr) {
+                                      // It is accepted (forced by admin or previously accepted by teacher) AND it is happening TODAY
+                                      const dutyId = `duty_${doc.id}_${adj.start}`;
+                                      if (!ackSubs.includes(dutyId)) {
+                                          todayDuties.push({ ...adj, dutyId: dutyId, originalTeacher: data.teacherName });
+                                      }
+                                  }
                               }
                           });
                       }
                   });
                   
-                  // 1. Update the tiny badge on the button
-                  const badge = document.getElementById('leave-badge');
+                  // 1. Update the tiny badge on the sidebar
+                  const badge = document.getElementById('sidebar-leave-badge');
+                  const totalAlerts = pendingCount + todayDuties.length;
                   if (badge) {
-                      if (pendingCount > 0) {
-                          badge.innerText = pendingCount;
+                      if (totalAlerts > 0) {
+                          badge.innerText = totalAlerts;
                           badge.classList.remove('hidden');
                       } else {
                           badge.classList.add('hidden');
                       }
                   }
 
-                  // 2. Update the giant emergency banner at the top of the screen
-                  const banner = document.getElementById('emergency-sub-banner');
-                  const countSpan = document.getElementById('sub-req-count');
-                  if (banner && countSpan) {
-                      if (pendingCount > 0) {
-                          countSpan.innerText = pendingCount;
-                          banner.classList.remove('hidden');
-                      } else {
-                          banner.classList.add('hidden');
-                      }
+                  // 2. Render the Feed Banners
+                  const container = document.getElementById('feed-urgent-subs');
+                  let html = '';
+
+                  // Banner A: Action Required (Pending Requests)
+                  if (pendingCount > 0) {
+                      html += `
+                          <div class="bg-rose-600 text-white p-5 rounded-2xl shadow-md flex flex-col sm:flex-row items-center justify-between gap-4 animate-fade-in border border-rose-500 mb-3">
+                              <div class="flex items-center gap-4 w-full">
+                                  <div class="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center text-xl shadow-inner backdrop-blur-sm animate-pulse shrink-0">🚨</div>
+                                  <div>
+                                      <p class="text-[9px] font-black uppercase tracking-widest text-rose-200 mb-0.5">Action Required</p>
+                                      <h4 class="font-black text-sm uppercase leading-tight">${pendingCount} Pending Request(s)</h4>
+                                  </div>
+                              </div>
+                              <button onclick="window.location.href='teacher-leave.html'" class="w-full sm:w-auto bg-white text-rose-600 px-5 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-md hover:bg-rose-50 transition-colors whitespace-nowrap">
+                                  Review ➔
+                              </button>
+                          </div>
+                      `;
                   }
+
+                  // Banner B: Today's Assigned Duties (Unacknowledged)
+                  todayDuties.forEach(duty => {
+                      const timeStr = `${minsTo12H(duty.start).replace(/ (AM|PM)/i,"")} - ${minsTo12H(duty.end)}`;
+                      const subParts = (duty.sub || "").split('|');
+                      const clsName = subParts[0] ? subParts[0].trim() : "Class";
+                      const secName = subParts[1] ? subParts[1].replace('Sec', '').trim() : "";
+                      
+                      html += `
+                          <div id="${duty.dutyId}" class="bg-rose-500 text-white p-5 rounded-2xl shadow-md flex flex-col sm:flex-row items-center justify-between gap-4 animate-fade-in border border-rose-400 mb-3">
+                              <div class="flex items-center gap-4 w-full">
+                                  <div class="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center text-xl shadow-inner backdrop-blur-sm animate-pulse shrink-0">⚠️</div>
+                                  <div>
+                                      <p class="text-[9px] font-black uppercase tracking-widest text-rose-100 mb-0.5">Substitution Duty Today</p>
+                                      <h4 class="font-black text-sm uppercase leading-tight">${clsName} <span class="opacity-80">${secName}</span> <span class="text-rose-200 ml-1 font-bold text-[10px]">(${duty.title})</span></h4>
+                                      <p class="text-[10px] font-bold text-rose-50 mt-0.5">${timeStr} • Sub for ${duty.originalTeacher.split(' ')[0]}</p>
+                                  </div>
+                              </div>
+                              <button onclick="ackDuty('${duty.dutyId}')" class="w-full sm:w-auto bg-white text-rose-600 px-5 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-md hover:bg-rose-50 transition-colors whitespace-nowrap">
+                                  Acknowledge ✓
+                              </button>
+                          </div>
+                      `;
+                  });
+
+                  if (container) container.innerHTML = html;
+                  checkEmptyState();
               }, error => console.error("Adjustment listener failed:", error));
         }
 
