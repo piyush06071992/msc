@@ -890,6 +890,21 @@
                 }
             }
 
+            // SMART TIME FILTER: Capture the exact bounds of short/half leaves
+            let leaveStart = 0, leaveEnd = 1440;
+            if (req.type !== 'FULL') {
+                if (req.startTime && req.endTime) {
+                    leaveStart = timeToMins(req.startTime);
+                    leaveEnd = timeToMins(req.endTime);
+                } else if (req.adjustments && req.adjustments.length > 0) {
+                    // Fallback for older leave requests missing time data
+                    leaveStart = Math.min(...req.adjustments.map(a => a.start));
+                    leaveEnd = Math.max(...req.adjustments.map(a => a.end));
+                } else {
+                    leaveStart = -1; leaveEnd = -1; // If no classes, ignore all
+                }
+            }
+
             let virtualSchedule = [];
             allLeaves.forEach(l => {
                 if (l.status === "APPROVED" || l.status === "PENDING") {
@@ -929,33 +944,36 @@
                         const s = timeToMins(sStr);
                         const e = timeToMins(eStr);
                         
-                        let uncoveredSpans = [{ s: s, e: e }];
-                        const adjs = (req.adjustments || []).filter(a => a.date === tDate && norm((a.sub||"").split('|')[0]) === norm(slot.className) && a.substituteResponse === 'ACCEPTED');
-                        
-                        adjs.forEach(adj => {
-                            let newSpans = [];
+                   // ONLY generate conflicts if the class time physically overlaps with the leave time!
+                        if (leaveStart < e && leaveEnd > s) {
+                            let uncoveredSpans = [{ s: s, e: e }];
+                            const adjs = (req.adjustments || []).filter(a => a.date === tDate && norm((a.sub||"").split('|')[0]) === norm(slot.className) && a.substituteResponse === 'ACCEPTED');
+                            
+                            adjs.forEach(adj => {
+                                let newSpans = [];
+                                uncoveredSpans.forEach(span => {
+                                    if (adj.start < span.e && adj.end > span.s) {
+                                        if (span.s < adj.start) newSpans.push({ s: span.s, e: adj.start });
+                                        if (span.e > adj.end) newSpans.push({ s: adj.end, e: span.e });
+                                    } else {
+                                        newSpans.push(span);
+                                    }
+                                });
+                                uncoveredSpans = newSpans;
+                            });
+
                             uncoveredSpans.forEach(span => {
-                                if (adj.start < span.e && adj.end > span.s) {
-                                    if (span.s < adj.start) newSpans.push({ s: span.s, e: adj.start });
-                                    if (span.e > adj.end) newSpans.push({ s: adj.end, e: span.e });
-                                } else {
-                                    newSpans.push(span);
+                                if (span.e - span.s > 5) {
+                                    const cleanSec = (slot.section || '').replace(/[^a-zA-Z0-9]/g, '');
+                                    userConflicts.push({ 
+                                        id: `clash_${tDate}_${span.s}_${cleanSec}`, 
+                                        title: slot.subject || "Duty", 
+                                        sub: `${slot.className || ''} | Sec ${slot.section || ''}`.trim(), 
+                                        start: span.s, end: span.e, date: tDate 
+                                    });
                                 }
                             });
-                            uncoveredSpans = newSpans;
-                        });
-
-                        uncoveredSpans.forEach(span => {
-                            if (span.e - span.s > 5) {
-                                const cleanSec = (slot.section || '').replace(/[^a-zA-Z0-9]/g, '');
-                                userConflicts.push({ 
-                                    id: `clash_${tDate}_${span.s}_${cleanSec}`, 
-                                    title: slot.subject || "Duty", 
-                                    sub: `${slot.className || ''} | Sec ${slot.section || ''}`.trim(), 
-                                    start: span.s, end: span.e, date: tDate 
-                                });
-                            }
-                        });
+                        }
                     }
                 });
 
