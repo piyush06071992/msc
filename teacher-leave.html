@@ -1098,8 +1098,77 @@
                     }
                 });
 
-                alert(`✅ ${selectedName} assigned!`);
+             alert(`✅ ${selectedName} assigned!`);
             } catch(e) { alert("Error: " + e.message); btn.innerText = orig; btn.disabled = false; }
+        }
+
+        function viewTeacherDay(teacherName, dateIso) {
+            const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const tNameNorm = norm(teacherName);
+            
+            const dParts = dateIso.split('-');
+            const localDateObj = new Date(dParts[0], dParts[1] - 1, dParts[2]);
+            const dayName = localDateObj.toLocaleDateString('en-US', { weekday: 'long' });
+            
+            // 1. Grab Base Schedule
+            const override = historyData.find(o => o.date === dateIso);
+            const baseSchedule = (override && override.schedule) 
+                ? override.schedule.filter(t => (t.day || "").trim() === dayName)
+                : timetableData.filter(t => (t.day || "").trim() === dayName);
+                
+            let teacherClasses = baseSchedule.filter(s => norm(s.teacherName || s.teacher) === tNameNorm);
+            
+            // 2. Overlay any active substitutions they already accepted for this date
+            allLeaves.forEach(l => {
+                if (l.status === "APPROVED" || l.status === "PENDING") {
+                    (l.adjustments || []).forEach(adj => {
+                        if (adj.date === dateIso && adj.substituteResponse === "ACCEPTED" && norm(adj.adjustedTo) === tNameNorm) {
+                            teacherClasses.push({
+                                sMins: adj.start,
+                                eMins: adj.end,
+                                subject: adj.title || "Extra Duty",
+                                className: (adj.sub || "").split('|')[0] || "Cover",
+                                section: (adj.sub || "").split('|')[1] || "",
+                                isSub: true
+                            });
+                        }
+                    });
+                }
+            });
+            
+            // 3. Sort Chronologically
+            teacherClasses.forEach(c => {
+                if(c.sMins === undefined && c.start24) c.sMins = timeToMins(c.start24);
+                if(c.eMins === undefined && c.end24) c.eMins = timeToMins(c.end24);
+            });
+            teacherClasses.sort((a,b) => a.sMins - b.sMins);
+            
+            // 4. Render to UI
+            document.getElementById('tsm-name').innerText = teacherName;
+            document.getElementById('tsm-date').innerText = new Date(localDateObj).toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short', year:'numeric'});
+            
+            const feed = document.getElementById('tsm-feed');
+            if (teacherClasses.length === 0) {
+                feed.innerHTML = `<div class="p-6 text-center bg-slate-50 rounded-xl border border-slate-100"><p class="text-2xl mb-2">🌴</p><p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">No classes scheduled.</p></div>`;
+            } else {
+                feed.innerHTML = teacherClasses.map(c => {
+                    const tStr = `${minsTo12H(c.sMins)} - ${minsTo12H(c.eMins)}`;
+                    const tag = c.isSub ? `<span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[8px] uppercase tracking-widest font-black ml-2 shadow-sm border border-amber-200">Sub/Duty</span>` : '';
+                    return `
+                        <div class="bg-slate-50 border border-slate-200 p-3 rounded-xl flex justify-between items-center shadow-sm hover:border-sky-300 transition-colors">
+                            <div>
+                                <h4 class="font-black text-slate-800 text-xs uppercase">${c.className} <span class="text-slate-400 font-bold ml-1">${c.section}</span> ${tag}</h4>
+                                <p class="text-[10px] font-bold text-sky-600 uppercase mt-0.5">${c.subject}</p>
+                            </div>
+                            <div class="text-[10px] font-black bg-white px-2 py-1 rounded-lg border border-slate-200 text-slate-600 shadow-sm whitespace-nowrap">
+                                ${tStr.replace(/ (AM|PM)/g, '')}
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+            
+            openModal('teacher-schedule-modal');
         }
 
     </script>
