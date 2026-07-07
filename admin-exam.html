@@ -584,9 +584,15 @@
                     }
                 });
 
-                await batch.commit();
+               await batch.commit();
 
                 alert(`✅ Selected sections successfully saved to database!`);
+                
+                // NEW: Trigger the Auto-Timetable Generator
+                if (confirm(`Would you like to automatically generate and apply the Bell Timetable for this ${type} on ${date}?`)) {
+                    await generateExamTimetable(date, type, checkedRows);
+                }
+
                 document.querySelectorAll('.master-sub-cb').forEach(cb => cb.checked = false);
                 generateStagingTable();
 
@@ -894,6 +900,154 @@
                     <button onclick="revokeExamAuth('${s.id}')" class="bg-rose-50 text-rose-600 px-5 py-3 rounded-xl font-black text-xs uppercase tracking-widest border border-rose-200 shadow-sm hover:bg-rose-600 hover:text-white transition-colors">Revoke</button>
                 </div>
             `}).join('');
+        }
+        // --- DYNAMIC SKELETON ALGORITHM ---
+        async function generateExamTimetable(date, type, checkedRows) {
+            const btn = document.getElementById('save-btn');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = "⏳ Generating Timetable...";
+            btn.disabled = true;
+            
+            try {
+                // 1. Get the Skeleton Draft (e.g., "draft_GHUMARWIN_UT_TEMPLATE")
+                const draftKey = `draft_${activeCenter}_${type}_TEMPLATE`;
+                const draftSnap = await db.collection("timetable_drafts").doc(draftKey).get();
+                if (!draftSnap.exists || !draftSnap.data().schedule) {
+                    alert(`⚠️ SKELETON MISSING: To use this feature, go to the Timetable Manager, create a schedule with your perfect Exam timings, click "Save as Cloud Draft", and name it exactly "${type}_TEMPLATE".`);
+                    return;
+                }
+                const skeletonSlots = draftSnap.data().schedule;
+
+                // 2. Get the target day of week
+                const dayName = new Date(date).toLocaleDateString('en-US', { weekday: 'long' });
+
+                // 3. Get existing schedule for the date (In case other classes already have an override)
+                const historySnap = await getCollection("timetable_history").doc(date).get();
+                let baseSchedule = [];
+                if (historySnap.exists && historySnap.data().schedule) {
+                    baseSchedule = historySnap.data().schedule;
+                } else {
+                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                    baseSchedule = masterSnap.docs.map(d => d.data());
+                }
+
+                // 4. Find which classes are being affected
+                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                let targetKeys = [];
+                checkedRows.forEach(cb => {
+                    const safeId = cb.id.replace('cb_', '');
+                    const dataInput = document.getElementById(`data_${safeId}`);
+                    targetKeys.push(`${norm(dataInput.getAttribute('data-class'))}|${norm(dataInput.getAttribute('data-sec'))}`);
+                });
+
+                // 5. Keep unaffected classes completely untouched
+                let newSchedule = baseSchedule.filter(slot => {
+                    return !targetKeys.includes(`${norm(slot.className)}|${norm(slot.section)}`);
+                });
+
+                // 6. Pour subjects into the Skeleton
+                const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                const liveMaster = masterSnap.docs.map(d => d.data());
+                const SPECIAL = ['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM', 'EVENT'];
+
+                checkedRows.forEach(cb => {
+                    const safeId = cb.id.replace('cb_', '');
+                    const dataInput = document.getElementById(`data_${safeId}`);
+                    const cName = dataInput.getAttribute('data-class');
+                    const sName = dataInput.getAttribute('data-sec');
+
+                    // A: Get normal classes for this section on this weekday
+                    const normalClasses = liveMaster.filter(slot => norm(slot.className) === norm(cName) && norm(slot.section) === norm(sName));
+                    normalClasses.sort((a, b) => {
+                        const [ah, am] = (a.start24||"00:00").split(':').map(Number);
+                        const [bh, bm] = (b.start24||"00:00").split(':').map(Number);
+                        return (ah*60+am) - (bh*60+bm);
+                    });
+
+                    // B: Get skeleton classes
+                    let skeletonClasses = skeletonSlots.filter(slot => norm(slot.className) === norm(cName) && norm(slot.section) === norm(sName));
+                    
+                    // IF admin didn't build a skeleton for every section, intelligently fallback to the first one available
+                    if (skeletonClasses.length === 0 && skeletonSlots.length > 0) {
+                        const firstClass = skeletonSlots[0].className;
+                        const firstSec = skeletonSlots[0].section;
+                        skeletonClasses = skeletonSlots.filter(slot => slot.className === firstClass && slot.section === firstSec);
+                    }
+                    
+                    skeletonClasses.sort((a, b) => {
+                        const [ah, am] = (a.start24||"00:00").split(':').map(Number);
+                        const [bh, bm] = (b.start24||"00:00").split(':').map(Number);
+                        return (ah*60+am) - (bh*60+bm);
+                    });
+
+                    // C: Pouring Algorithm
+                    let normalIndex = 0;
+
+                    skeletonClasses.forEach(skelSlot => {
+                        let subjectToAssign = skelSlot.subject;
+                        let teacherToAssign = skelSlot.teacher;
+                        let roomToAssign = skelSlot.room;
+                        const skelSubUpper = (skelSlot.subject || "").toUpperCase();
+
+                        if (SPECIAL.includes(skelSubUpper)) {
+                            // Keep Exam/Break/Lunch blocks exactly as they are in the skeleton
+                        } else {
+                            // It's an empty teaching slot! Pour the next normal subject into it.
+                            while (normalIndex < normalClasses.length && SPECIAL.includes((normalClasses[normalIndex].subject || "").toUpperCase())) {
+                                normalIndex++; // Skip breaks that were in the normal schedule
+                            }
+
+                            if (normalIndex < normalClasses.length) {
+                                const normalSlot = normalClasses[normalIndex];
+                                subjectToAssign = normalSlot.subject;
+                                teacherToAssign = normalSlot.teacher;
+                                roomToAssign = normalSlot.room;
+                                normalIndex++;
+                            } else {
+                                // Failsafe: Ran out of normal subjects to pour
+                                subjectToAssign = "SELF STUDY";
+                                teacherToAssign = "NONE";
+                            }
+                        }
+
+                        newSchedule.push({
+                            day: dayName,
+                            className: cName,
+                            section: sName,
+                            start24: skelSlot.start24,
+                            end24: skelSlot.end24,
+                            subject: subjectToAssign,
+                            teacher: teacherToAssign,
+                            teacherName: teacherToAssign,
+                            teacherEmail: "", 
+                            room: roomToAssign,
+                            remark: type === 'OT' && !SPECIAL.includes((subjectToAssign||"").toUpperCase()) ? "Doubt Session" : "",
+                            sMins: skelSlot.sMins || 0,
+                            eMins: skelSlot.eMins || 0,
+                            timeRange: skelSlot.timeRange || `${skelSlot.start24} - ${skelSlot.end24}`
+                        });
+                    });
+                });
+
+                // 7. Save the fully generated day to history
+                await getCollection("timetable_history").doc(date).set({
+                    date: date,
+                    lastUpdated: Date.now(),
+                    schedule: newSchedule,
+                    type: "DAILY_OVERRIDE",
+                    tag: `${type} Exam Day`
+                });
+                await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
+
+                alert("✅ Timetable successfully generated and saved for " + date + "!");
+
+            } catch (e) {
+                console.error(e);
+                alert("Error generating timetable: " + e.message);
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+            }
         }
     </script>
 </body>
