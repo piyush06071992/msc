@@ -618,7 +618,43 @@
                     <div id="active-holidays-list" class="space-y-3">
                         <p class="text-xs text-slate-400 font-bold italic">Loading...</p>
                     </div>
+               </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="smart-sync-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-[500] hidden items-center justify-center p-4 no-print transition-all duration-300 opacity-0 scale-95" style="transition: opacity 0.3s ease, transform 0.3s ease;">
+        <div class="bg-gradient-to-br from-indigo-900 via-slate-900 to-purple-900 rounded-[2.5rem] p-1 w-full max-w-2xl shadow-[0_0_50px_-12px_rgba(99,102,241,0.5)] border border-indigo-500/30">
+            <div class="bg-slate-900/50 backdrop-blur-xl rounded-[2.4rem] p-6 sm:p-8 flex flex-col max-h-[85vh]">
+                
+                <div class="flex items-start justify-between mb-6 border-b border-white/10 pb-6 shrink-0">
+                    <div class="flex gap-4 items-center">
+                        <div class="w-14 h-14 rounded-2xl bg-gradient-to-tr from-fuchsia-500 to-indigo-500 flex items-center justify-center text-2xl shadow-lg border border-white/20 animate-pulse">✨</div>
+                        <div>
+                            <h3 class="font-black text-white text-2xl uppercase tracking-tighter bg-clip-text text-transparent bg-gradient-to-r from-white to-indigo-200">Smart Sync Detected</h3>
+                            <p class="text-[10px] font-bold text-indigo-300 uppercase tracking-widest mt-1">Upcoming Overrides Found</p>
+                        </div>
+                    </div>
+                    <button onclick="closeSmartSync()" class="text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 w-8 h-8 rounded-full flex items-center justify-center transition-colors">✕</button>
                 </div>
+
+                <div class="text-sm text-slate-300 mb-4 font-bold leading-relaxed shrink-0">
+                    You just updated the Master Schedule. The system found <span id="sync-date-count" class="text-fuchsia-400 font-black px-1">0</span> upcoming special dates (Exam Days/Overrides) that might need these teacher/room changes.
+                </div>
+
+                <div class="flex-1 overflow-y-auto custom-scroll pr-2 space-y-4 relative">
+                    <div class="sticky top-0 bg-slate-900/90 backdrop-blur-md py-2 z-10 border-b border-white/5">
+                        <span class="text-[9px] font-black text-slate-500 uppercase tracking-widest">Detected Master Changes</span>
+                    </div>
+                    <div id="sync-changes-list" class="space-y-2">
+                        </div>
+                </div>
+
+                <div class="mt-6 pt-6 border-t border-white/10 shrink-0 flex flex-col sm:flex-row gap-3">
+                    <button onclick="closeSmartSync()" class="flex-1 py-4 rounded-xl font-black text-[10px] uppercase tracking-widest text-slate-400 hover:text-white hover:bg-white/5 transition-all border border-white/10">No, Keep Them As-Is</button>
+                    <button onclick="executeSmartSync()" id="sync-confirm-btn" class="flex-[2] py-4 rounded-xl font-black text-[11px] uppercase tracking-widest text-white bg-gradient-to-r from-indigo-500 to-fuchsia-500 hover:from-indigo-400 hover:to-fuchsia-400 shadow-lg shadow-indigo-500/25 transition-all border border-white/20">⚡ Sync Changes to Future Dates</button>
+                </div>
+
             </div>
         </div>
     </div>
@@ -1731,12 +1767,173 @@ async function checkAndApplyFutureMaster() {
                 // If they are currently looking at the date they just deleted, force a refresh!
                 if (currentContextDate === date) {
                     currentContextDate = null;
-                    currentContextMode = 'LIVE';
+                  currentContextMode = 'LIVE';
                     document.getElementById('context-date-input').value = new Date().toISOString().split('T')[0];
                     confirmDateContext();
                 }
             } catch(e) {
                 alert("Error reverting: " + e.message);
+            }
+        }
+
+        // --- SMART SYNC ENGINE ---
+        let pendingSyncChanges = [];
+        let pendingSyncDates = [];
+
+        function getDeltaChanges(oldData, newData) {
+            let changes = [];
+            let oldMap = {};
+            const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+            // Map the old state by Class + Section + Subject
+            oldData.forEach(s => {
+                if(s.subject !== "NONE" && s.subject !== "BREAK") {
+                    oldMap[`${norm(s.className)}|${norm(s.section)}|${norm(s.subject)}`] = s;
+                }
+            });
+
+            // Compare new state against the old map
+            newData.forEach(newSlot => {
+                if(newSlot.subject === "NONE" || newSlot.subject === "BREAK") return;
+                
+                let key = `${norm(newSlot.className)}|${norm(newSlot.section)}|${norm(newSlot.subject)}`;
+                let oldSlot = oldMap[key];
+                
+                if (oldSlot) {
+                    const teaChanged = norm(oldSlot.teacher) !== norm(newSlot.teacher);
+                    const rmChanged = norm(oldSlot.room) !== norm(newSlot.room);
+                    
+                    if (teaChanged || rmChanged) {
+                        changes.push({
+                            className: newSlot.className,
+                            section: newSlot.section,
+                            subject: newSlot.subject,
+                            oldTeacher: oldSlot.teacher,
+                            newTeacher: newSlot.teacher,
+                            oldRoom: oldSlot.room,
+                            newRoom: newSlot.room,
+                            teaChanged, rmChanged
+                        });
+                    }
+                }
+            });
+
+            // Filter out duplicates (since subjects happen on multiple days)
+            return changes.filter((v, i, a) => a.findIndex(t => (t.className === v.className && t.section === v.section && t.subject === v.subject)) === i);
+        }
+
+        async function checkForSmartSync(changes, effectiveDate) {
+            if (changes.length === 0) return; // No teachers or rooms changed
+
+            try {
+                // Find all special dates AFTER the effective date
+                const snap = await getCollection("timetable_history").get();
+                let affectedDates = [];
+                
+                snap.docs.forEach(doc => {
+                    const data = doc.data();
+                    if ((data.type === "DAILY_OVERRIDE" || data.type === "EXAM_OVERRIDE") && data.date >= effectiveDate) {
+                        affectedDates.push(data);
+                    }
+                });
+
+                if (affectedDates.length === 0) return; // No future overrides to worry about
+
+                // Setup the UI
+                pendingSyncChanges = changes;
+                pendingSyncDates = affectedDates;
+                
+                document.getElementById('sync-date-count').innerText = affectedDates.length;
+                
+                const list = document.getElementById('sync-changes-list');
+                list.innerHTML = changes.map(c => {
+                    let badgeHtml = "";
+                    if (c.teaChanged) badgeHtml += `<div class="flex items-center gap-2 bg-indigo-500/20 border border-indigo-400/30 px-3 py-2 rounded-lg text-[10px] text-indigo-200"><span class="w-12 text-slate-400">STAFF:</span> <span class="line-through opacity-50">${c.oldTeacher}</span> <span class="text-fuchsia-400">➔</span> <span class="font-black">${c.newTeacher}</span></div>`;
+                    if (c.rmChanged) badgeHtml += `<div class="flex items-center gap-2 bg-emerald-500/20 border border-emerald-400/30 px-3 py-2 rounded-lg text-[10px] text-emerald-200"><span class="w-12 text-slate-400">ROOM:</span> <span class="line-through opacity-50">${c.oldRoom || 'None'}</span> <span class="text-emerald-400">➔</span> <span class="font-black">${c.newRoom || 'None'}</span></div>`;
+
+                    return `
+                    <div class="bg-white/5 border border-white/10 p-4 rounded-2xl flex flex-col gap-3">
+                        <div class="flex items-center gap-2">
+                            <span class="bg-white/10 text-white px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest">${c.className} - SEC ${c.section}</span>
+                            <span class="text-amber-400 font-black text-[11px] uppercase tracking-widest">${c.subject}</span>
+                        </div>
+                        <div class="flex flex-col gap-1.5">${badgeHtml}</div>
+                    </div>`;
+                }).join('');
+
+                const modal = document.getElementById('smart-sync-modal');
+                modal.classList.replace('hidden', 'flex');
+                // Trigger animation frame
+                setTimeout(() => {
+                    modal.classList.remove('opacity-0', 'scale-95');
+                    modal.classList.add('opacity-100', 'scale-100');
+                }, 10);
+
+            } catch (e) {
+                console.error("Smart Sync Check Failed:", e);
+            }
+        }
+
+        function closeSmartSync() {
+            const modal = document.getElementById('smart-sync-modal');
+            modal.classList.remove('opacity-100', 'scale-100');
+            modal.classList.add('opacity-0', 'scale-95');
+            setTimeout(() => { modal.classList.replace('flex', 'hidden'); }, 300);
+            pendingSyncChanges = [];
+            pendingSyncDates = [];
+        }
+
+        async function executeSmartSync() {
+            const btn = document.getElementById('sync-confirm-btn');
+            const origHTML = btn.innerHTML;
+            btn.innerHTML = "⏳ Syncing Cosmos..."; btn.disabled = true;
+
+            const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const batch = db.batch();
+            let syncCount = 0;
+
+            try {
+                for (let dateObj of pendingSyncDates) {
+                    let scheduleChanged = false;
+                    let schedule = dateObj.schedule;
+
+                    // Scan the special date's schedule
+                    schedule.forEach(slot => {
+                        // See if this slot matches one of our changes
+                        const change = pendingSyncChanges.find(c => 
+                            norm(c.className) === norm(slot.className) && 
+                            norm(c.section) === norm(slot.section) && 
+                            norm(c.subject) === norm(slot.subject)
+                        );
+
+                        if (change) {
+                            if (change.teaChanged) {
+                                slot.teacher = change.newTeacher;
+                                slot.teacherName = change.newTeacher;
+                                const tObj = allTeachers.find(t => t.name === change.newTeacher);
+                                slot.teacherEmail = tObj ? tObj.email : "";
+                            }
+                            if (change.rmChanged) slot.room = change.newRoom;
+                            scheduleChanged = true;
+                        }
+                    });
+
+                    if (scheduleChanged) {
+                        batch.update(getCollection("timetable_history").doc(dateObj.date), { schedule: schedule });
+                        syncCount++;
+                    }
+                }
+
+                if (syncCount > 0) await batch.commit();
+                
+                alert(`✨ Cosmos Aligned! Successfully synced teacher/room changes across ${syncCount} upcoming special dates.`);
+                closeSmartSync();
+
+            } catch(e) {
+                alert("Sync Error: " + e.message);
+                console.error(e);
+            } finally {
+                btn.innerHTML = origHTML; btn.disabled = false;
             }
         }
         async function updateFutureMaster() {
@@ -3065,7 +3262,7 @@ function peekTeacher(teacherName) {
                 oldTimetableState = [];
                 await fetchTimetable();
 
-              if (teachersToNotify.length > 0) {
+             if (teachersToNotify.length > 0) {
                     sendEmailNotification(teachersToNotify);
                 } else {
                     alert("✅ Timetable Saved Successfully! No teacher schedules were changed.");
@@ -3073,9 +3270,15 @@ function peekTeacher(teacherName) {
                 
                 await auditBrokenLeaves(todayIso, newSlots);
                 renderDirectDashboard();
+
+                // 🌟 TRIGGER SMART SYNC FOR LIVE MASTER
+                // Effective from Today onwards
+                const deltaChanges = getDeltaChanges(oldTimetableState, newSlots);
+                checkForSmartSync(deltaChanges, todayIso);
+
             } catch (err) { 
                 alert("Error saving: " + err.message); 
-            } finally { 
+            } finally {
                 btn.innerHTML = originalHTML; btn.disabled = false; 
             }
         }
@@ -3658,7 +3861,7 @@ function processSave(type) {
                     type: "FUTURE_MASTER"
                 });
 
-               // 4. Send the Emails!
+              // 4. Send the Emails!
                 if (teachersToNotify.length > 0) {
                     sendEmailNotification(teachersToNotify);
                 } else {
@@ -3669,6 +3872,11 @@ function processSave(type) {
 
                 document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
                 document.getElementById('view-label').innerHTML = `Showing: Live Master Schedule <span class="text-indigo-500 font-bold">(Future Update Queued for ${dateVal})</span>`;
+                
+                // 🌟 TRIGGER SMART SYNC FOR FUTURE MASTER
+                // Effective from the specific Future Date onwards
+                const deltaChanges = getDeltaChanges(oldTimetableState, newSlots);
+                checkForSmartSync(deltaChanges, dateVal);
                 
                 // Return to clean Live Master view
                 currentContextMode = 'LIVE';
