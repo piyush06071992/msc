@@ -616,9 +616,9 @@
                             </div>
                         </div>
                         <p class="text-xs text-amber-800 font-bold mb-3 bg-white p-2.5 rounded-lg border border-amber-100 shadow-sm">Reason: ${mod.reason}</p>
-                        <div class="flex flex-col sm:flex-row gap-2">
-                            <button onclick="approveMod('${req.id}', '${mod.newType}', ${refundAmt})" class="flex-1 bg-amber-600 text-white font-black text-[10px] py-3 rounded-lg shadow-sm hover:bg-amber-700 uppercase tracking-widest">${btnLabel}</button>
-                            <button onclick="rejectMod('${req.id}')" class="bg-white text-slate-500 border border-slate-200 px-4 py-3 rounded-lg font-black text-[10px] uppercase hover:bg-slate-50 w-full sm:w-auto">Keep Original</button>
+                       <div class="flex flex-col sm:flex-row gap-2">
+                            <button onclick="approveMod('${req.id}', '${mod.newType}', ${refundAmt}, '${mod.newEndDate || ''}')" class="flex-1 bg-amber-600 text-white font-black text-[10px] py-3 rounded-lg shadow-sm hover:bg-amber-700 uppercase tracking-widest">${btnLabel}</button>
+                            <button onclick="rejectMod('${req.id}')" class="bg-white text-slate-500 border border-slate-200 px-4 py-3 rounded-lg font-black text-[10px] uppercase hover:bg-slate-50 w-full sm:w-auto">Keep Original (Reject)</button>
                         </div>
                     </div>`;
                 }).join('');
@@ -871,35 +871,35 @@
             alert("Substitute force-assigned!");
         }
 
-async function approveMod(id, newType, autoRefundAmt) {
+async function approveMod(id, newType, finalRefund, newEndDate) {
             const req = allLeaves.find(l => l.id === id);
             if (!req) return;
 
             const isCurrentlyApproved = req.status === "APPROVED";
             const isCurrentlyPending = req.status === "PENDING";
-            
-            let finalRefund = autoRefundAmt;
             let finalDeduction = 0;
 
-            // SCENARIO 1: Leave was ALREADY APPROVED (Admin overrides refund)
+            // Confirmations
             if (isCurrentlyApproved && finalRefund > 0) {
-                let promptMsg = `This teacher is requesting a modification to ${newType}.\n\nThe system auto-calculated a refund of +${autoRefundAmt}.\n\nIf they returned early from a multi-day leave, you must manually adjust this. Enter the FINAL amount to refund to their ledger:`;
-                
-                let adminInput = prompt(promptMsg, autoRefundAmt);
-                if (adminInput === null) return; // Admin clicked Cancel
-                
-                finalRefund = parseFloat(adminInput);
-                if (isNaN(finalRefund) || finalRefund < 0) return alert("Invalid refund amount. Action aborted.");
+                if(!confirm(`Approving this modification will instantly refund +${finalRefund} to the ledger. Proceed?`)) return;
             } 
-            // SCENARIO 2: Leave is PENDING and being reduced (Admin must DEDUCT)
             else if (isCurrentlyPending && newType !== 'CANCEL') {
-                const cost = Math.abs(leaveValues[newType] || 0);
-                if(!confirm(`This leave is currently PENDING.\n\nApproving this modification will officially approve the leave as a ${newType} day and DEDUCT -${cost} from their ledger. Proceed?`)) return;
+                // Calculate exact new cost based on the newAmt logic
+                let cost = 0;
+                if (newType === 'EARLY_RETURN') {
+                    let sd = new Date(req.startDate); let ed = new Date(newEndDate);
+                    let validDays = 0; let curr = new Date(sd);
+                    while (curr <= ed) { if (curr.getDay() !== 0) validDays++; curr.setDate(curr.getDate() + 1); }
+                    cost = validDays; // Positive number for deduction
+                } else {
+                    cost = Math.abs(leaveValues[newType] || 0);
+                }
+                
+                if(!confirm(`This leave is currently PENDING.\n\nApproving this modification will officially approve the leave and DEDUCT -${cost} from their ledger. Proceed?`)) return;
                 
                 finalDeduction = cost;
                 finalRefund = 0; 
             }
-            // SCENARIO 3: Leave is PENDING and being CANCELED
             else if (isCurrentlyPending && newType === 'CANCEL') {
                 if(!confirm(`Approve cancellation of this PENDING leave? (No ledger math required).`)) return;
                 finalRefund = 0;
@@ -913,16 +913,21 @@ async function approveMod(id, newType, autoRefundAmt) {
                 // Full cancellation removes it from active feeds, otherwise approve the reduction
                 const newStatus = newType === 'CANCEL' ? 'CANCELED' : 'APPROVED';
                 
-                await getCollection("leave_requests").doc(id).update({ 
-                    type: newType, 
+                let dbUpdatePayload = { 
+                    type: newType === 'EARLY_RETURN' ? 'FULL' : newType, 
                     status: newStatus, 
                     modificationRequest: { status: "APPROVED" } 
-                });
+                };
+
+                if (newType === 'EARLY_RETURN' && newEndDate) {
+                    dbUpdatePayload.endDate = newEndDate;
+                }
+                
+                await getCollection("leave_requests").doc(id).update(dbUpdatePayload);
                 
                 // EXECUTE LEDGER MATH
                 if (isCurrentlyApproved && finalRefund > 0) {
-                    const overrideNote = finalRefund !== autoRefundAmt ? ` (Admin Overrode Math: Was ${autoRefundAmt})` : '';
-                    await logTransaction(req.teacherEmail, finalRefund, 'REFUND', `Leave modified from ${req.type} to ${newType}${overrideNote}`);
+                    await logTransaction(req.teacherEmail, finalRefund, 'REFUND', `Leave modified from ${req.type} to ${newType}`);
                     alert(`Modification approved! Ledger refunded by +${finalRefund}.`);
                 } 
                 else if (isCurrentlyPending && finalDeduction > 0) {
@@ -940,8 +945,17 @@ async function approveMod(id, newType, autoRefundAmt) {
         }
 
         async function rejectMod(id) {
-            if(!confirm("Reject modification? Original leave deduction will remain.")) return;
-            await getCollection("leave_requests").doc(id).update({ "modificationRequest.status": "REJECTED" });
+            const reason = prompt("Mandatory: Please provide a reason for rejecting this modification so the teacher knows what to correct.");
+            if (!reason || reason.trim() === "") {
+                return alert("Action aborted. You must provide a reason to reject.");
+            }
+            if(!confirm("Reject modification? Original leave status will remain active.")) return;
+            
+            await getCollection("leave_requests").doc(id).update({ 
+                "modificationRequest.status": "REJECTED",
+                "modificationRequest.adminRemarks": reason 
+            });
+            alert("Modification rejected and returned to normal status.");
         }
 
         async function executeCompensatory() {
