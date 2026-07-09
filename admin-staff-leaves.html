@@ -852,16 +852,36 @@
             alert("Substitute force-assigned!");
         }
 
-  async function approveMod(id, newType, refundAmt) {
-            const isRefund = refundAmt > 0;
-            const msg = isRefund 
-                ? `Approve reduction to ${newType}? This will refund +${refundAmt} to the ledger.`
-                : `Approve cancellation of this PENDING leave? (No ledger refund required).`;
-                
-            if(!confirm(msg)) return;
-            
+ async function approveMod(id, newType, autoRefundAmt) {
             const req = allLeaves.find(l => l.id === id);
+            if (!req) return;
+
+            let finalRefund = autoRefundAmt;
+            const isCurrentlyApproved = req.status === "APPROVED";
+
+            // If it's a refund for an already deducted leave, give Admin the power to override the math
+            if (isCurrentlyApproved && finalRefund > 0) {
+                let promptMsg = `This teacher is requesting a modification to ${newType}.\n\nThe system auto-calculated a refund of +${autoRefundAmt}.\n\nIf they returned early from a multi-day leave, you must adjust this. Enter the FINAL amount to refund to their ledger:`;
+                
+                let adminInput = prompt(promptMsg, autoRefundAmt);
+                if (adminInput === null) return; // Admin clicked Cancel
+                
+                finalRefund = parseFloat(adminInput);
+                if (isNaN(finalRefund) || finalRefund < 0) return alert("Invalid refund amount entered. Action aborted.");
+            } else {
+                // Pending leave (no refund needed) or zero refund
+                const msg = finalRefund > 0 
+                    ? `Approve reduction to ${newType}? This will refund +${finalRefund} to the ledger.`
+                    : `Approve cancellation of this PENDING leave? (No ledger refund required).`;
+                if(!confirm(msg)) return;
+            }
+
+            const isRefund = finalRefund > 0;
+            const btn = event.target; const orig = btn.innerText;
+
             try {
+                btn.innerText = "Processing..."; btn.disabled = true;
+
                 // If it is a full cancellation, change the overall status to CANCELED so it leaves the active calendar feeds
                 const newStatus = newType === 'CANCEL' ? 'CANCELED' : 'APPROVED';
                 
@@ -873,12 +893,17 @@
                 
                 // ONLY log a ledger transaction if actual money/balance is owed!
                 if (isRefund) {
-                    await logTransaction(req.teacherEmail, refundAmt, 'REFUND', `Leave modified from ${req.type} to ${newType}`);
-                    alert("Modification approved and Ledger refunded!");
+                    const overrideNote = finalRefund !== autoRefundAmt ? ` (Admin Overrode Math: Was ${autoRefundAmt})` : '';
+                    await logTransaction(req.teacherEmail, finalRefund, 'REFUND', `Leave modified from ${req.type} to ${newType}${overrideNote}`);
+                    alert(`Modification approved! Ledger refunded by +${finalRefund}.`);
                 } else {
                     alert("Leave cancelled successfully.");
                 }
-            } catch(e) { alert("Error: " + e.message); }
+            } catch(e) { 
+                alert("Error: " + e.message); 
+            } finally {
+                btn.innerText = orig; btn.disabled = false;
+            }
         }
 
         async function rejectMod(id) {
