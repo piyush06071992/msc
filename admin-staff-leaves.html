@@ -582,9 +582,10 @@
                     
                     const refundAmt = isPending ? 0 : Math.abs(origAmt) - Math.abs(leaveValues[mod.newType] || 0);
                     
-                    const btnLabel = isPending 
-                        ? `Approve Cancel (No Refund)` 
-                        : `Approve & Refund (+${refundAmt})`;
+                    let btnLabel = `Approve & Refund (+${refundAmt})`;
+                    if (isPending) {
+                        btnLabel = (mod.newType === 'CANCEL') ? `Approve Cancel (No Math)` : `Approve & Deduct New Amount`;
+                    }
 
                     return `
                     <div class="bg-amber-50 p-4 rounded-xl border border-amber-200 shadow-sm">
@@ -852,37 +853,46 @@
             alert("Substitute force-assigned!");
         }
 
- async function approveMod(id, newType, autoRefundAmt) {
+async function approveMod(id, newType, autoRefundAmt) {
             const req = allLeaves.find(l => l.id === id);
             if (!req) return;
 
-            let finalRefund = autoRefundAmt;
             const isCurrentlyApproved = req.status === "APPROVED";
+            const isCurrentlyPending = req.status === "PENDING";
+            
+            let finalRefund = autoRefundAmt;
+            let finalDeduction = 0;
 
-            // If it's a refund for an already deducted leave, give Admin the power to override the math
+            // SCENARIO 1: Leave was ALREADY APPROVED (Admin overrides refund)
             if (isCurrentlyApproved && finalRefund > 0) {
-                let promptMsg = `This teacher is requesting a modification to ${newType}.\n\nThe system auto-calculated a refund of +${autoRefundAmt}.\n\nIf they returned early from a multi-day leave, you must adjust this. Enter the FINAL amount to refund to their ledger:`;
+                let promptMsg = `This teacher is requesting a modification to ${newType}.\n\nThe system auto-calculated a refund of +${autoRefundAmt}.\n\nIf they returned early from a multi-day leave, you must manually adjust this. Enter the FINAL amount to refund to their ledger:`;
                 
                 let adminInput = prompt(promptMsg, autoRefundAmt);
                 if (adminInput === null) return; // Admin clicked Cancel
                 
                 finalRefund = parseFloat(adminInput);
-                if (isNaN(finalRefund) || finalRefund < 0) return alert("Invalid refund amount entered. Action aborted.");
-            } else {
-                // Pending leave (no refund needed) or zero refund
-                const msg = finalRefund > 0 
-                    ? `Approve reduction to ${newType}? This will refund +${finalRefund} to the ledger.`
-                    : `Approve cancellation of this PENDING leave? (No ledger refund required).`;
-                if(!confirm(msg)) return;
+                if (isNaN(finalRefund) || finalRefund < 0) return alert("Invalid refund amount. Action aborted.");
+            } 
+            // SCENARIO 2: Leave is PENDING and being reduced (Admin must DEDUCT)
+            else if (isCurrentlyPending && newType !== 'CANCEL') {
+                const cost = Math.abs(leaveValues[newType] || 0);
+                if(!confirm(`This leave is currently PENDING.\n\nApproving this modification will officially approve the leave as a ${newType} day and DEDUCT -${cost} from their ledger. Proceed?`)) return;
+                
+                finalDeduction = cost;
+                finalRefund = 0; 
+            }
+            // SCENARIO 3: Leave is PENDING and being CANCELED
+            else if (isCurrentlyPending && newType === 'CANCEL') {
+                if(!confirm(`Approve cancellation of this PENDING leave? (No ledger math required).`)) return;
+                finalRefund = 0;
             }
 
-            const isRefund = finalRefund > 0;
             const btn = event.target; const orig = btn.innerText;
 
             try {
                 btn.innerText = "Processing..."; btn.disabled = true;
 
-                // If it is a full cancellation, change the overall status to CANCELED so it leaves the active calendar feeds
+                // Full cancellation removes it from active feeds, otherwise approve the reduction
                 const newStatus = newType === 'CANCEL' ? 'CANCELED' : 'APPROVED';
                 
                 await getCollection("leave_requests").doc(id).update({ 
@@ -891,12 +901,17 @@
                     modificationRequest: { status: "APPROVED" } 
                 });
                 
-                // ONLY log a ledger transaction if actual money/balance is owed!
-                if (isRefund) {
+                // EXECUTE LEDGER MATH
+                if (isCurrentlyApproved && finalRefund > 0) {
                     const overrideNote = finalRefund !== autoRefundAmt ? ` (Admin Overrode Math: Was ${autoRefundAmt})` : '';
                     await logTransaction(req.teacherEmail, finalRefund, 'REFUND', `Leave modified from ${req.type} to ${newType}${overrideNote}`);
                     alert(`Modification approved! Ledger refunded by +${finalRefund}.`);
-                } else {
+                } 
+                else if (isCurrentlyPending && finalDeduction > 0) {
+                    await logTransaction(req.teacherEmail, -finalDeduction, 'LEAVE_TAKEN', `Approved directly via modification to ${newType}`);
+                    alert(`Modification approved! Leave is now active and -${finalDeduction} was deducted.`);
+                } 
+                else {
                     alert("Leave cancelled successfully.");
                 }
             } catch(e) { 
