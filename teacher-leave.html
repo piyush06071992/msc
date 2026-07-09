@@ -185,15 +185,20 @@
             
             <input type="hidden" id="mod-req-id">
             
-            <div class="space-y-4">
+        <div class="space-y-4">
                 <div>
                     <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Select New Type</label>
-                    <select id="mod-new-type" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm font-bold outline-none cursor-pointer">
+                    <select id="mod-new-type" onchange="toggleEarlyReturnDate()" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm font-bold outline-none cursor-pointer">
                         <option value="CANCEL">Cancel Leave Entirely (Full Refund)</option>
+                        <option value="EARLY_RETURN">Return Early (Change End Date)</option>
                         <option value="THREE_QUARTER">Downgrade to 3/4th Leave (-0.75)</option>
                         <option value="HALF">Downgrade to Half Day (-0.50)</option>
                         <option value="SHORT">Downgrade to Short Leave (-0.25)</option>
                     </select>
+                </div>
+                <div id="mod-early-return-wrap" class="hidden">
+                    <label class="text-[10px] font-black text-indigo-600 uppercase tracking-widest block mb-1">New End Date</label>
+                    <input type="date" id="mod-new-end-date" class="w-full bg-indigo-50 border border-indigo-200 rounded-xl p-3 text-sm font-black text-indigo-700 outline-none focus:border-indigo-500 shadow-sm cursor-pointer">
                 </div>
                 <div>
                     <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Reason for Modification</label>
@@ -335,9 +340,9 @@
 
             container.innerHTML = valid.map(l => {
                 const isModPending = l.modificationRequest && l.modificationRequest.status === "PENDING";
-                const modBtn = isModPending 
+               const modBtn = isModPending 
                     ? `<span class="text-[9px] font-black bg-amber-100 text-amber-700 px-3 py-1.5 rounded-lg border border-amber-200 uppercase tracking-widest shadow-sm">Mod Pending...</span>`
-                    : `<button onclick="openModModal('${l.id}', '${l.type}')" class="text-[9px] font-black bg-slate-900 text-white hover:bg-slate-800 px-3 py-1.5 rounded-lg uppercase tracking-widest shadow-md transition-all">Modify/Cancel</button>`;
+                    : `<button onclick="openModModal('${l.id}', '${l.type}', '${l.startDate}', '${l.endDate || l.startDate}')" class="text-[9px] font-black bg-slate-900 text-white hover:bg-slate-800 px-3 py-1.5 rounded-lg uppercase tracking-widest shadow-md transition-all">Modify/Cancel</button>`;
 
                 return `
                     <div class="bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col gap-3">
@@ -354,31 +359,71 @@
             }).join('');
         }
 
-        function openModModal(id, currentType) {
+      function toggleEarlyReturnDate() {
+            const select = document.getElementById('mod-new-type');
+            const dateWrap = document.getElementById('mod-early-return-wrap');
+            if (select.value === 'EARLY_RETURN') {
+                dateWrap.classList.remove('hidden');
+            } else {
+                dateWrap.classList.add('hidden');
+            }
+        }
+
+        function openModModal(id, currentType, startDate, endDate) {
             document.getElementById('mod-req-id').value = id;
             const select = document.getElementById('mod-new-type');
             Array.from(select.options).forEach(opt => opt.disabled = false);
             
+            const earlyReturnOpt = Array.from(select.options).find(opt => opt.value === 'EARLY_RETURN');
+
             if (currentType === 'SHORT') {
                 Array.from(select.options).forEach(opt => { if (opt.value !== 'CANCEL') opt.disabled = true; });
-            } else if (currentType === 'HALF') {
-                Array.from(select.options).forEach(opt => { if (opt.value === 'FULL') opt.disabled = true; });
+            } else if (currentType === 'HALF' || currentType === 'THREE_QUARTER') {
+                Array.from(select.options).forEach(opt => { if (opt.value === 'FULL' || opt.value === 'EARLY_RETURN') opt.disabled = true; });
+            } else if (currentType === 'FULL') {
+                // Only allow Early Return if it is actually a multi-day leave!
+                if (startDate === endDate) {
+                    if (earlyReturnOpt) earlyReturnOpt.disabled = true;
+                } else {
+                    // Lock the date input so they CANNOT extend their leave past original End Date
+                    const dateInput = document.getElementById('mod-new-end-date');
+                    dateInput.min = startDate;
+                    
+                    let maxDateObj = new Date(endDate);
+                    maxDateObj.setDate(maxDateObj.getDate() - 1);
+                    let yyyy = maxDateObj.getFullYear();
+                    let mm = String(maxDateObj.getMonth() + 1).padStart(2, '0');
+                    let dd = String(maxDateObj.getDate()).padStart(2, '0');
+                    dateInput.max = `${yyyy}-${mm}-${dd}`;
+                    dateInput.value = `${yyyy}-${mm}-${dd}`; // Default to one day less
+                }
             }
+
             select.value = 'CANCEL';
+            toggleEarlyReturnDate();
             document.getElementById('mod-reason').value = '';
             document.getElementById('mod-request-modal').classList.replace('hidden', 'flex');
         }
 
-        async function submitModification() {
+     async function submitModification() {
             const id = document.getElementById('mod-req-id').value;
             const newType = document.getElementById('mod-new-type').value;
             const reason = document.getElementById('mod-reason').value.trim();
             if (!reason) return alert("Please provide a reason for the modification.");
 
+            let newEndDate = null;
+            if (newType === 'EARLY_RETURN') {
+                newEndDate = document.getElementById('mod-new-end-date').value;
+                if (!newEndDate) return alert("Please select your new return date.");
+            }
+
             const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
             try {
+                let payload = { status: "PENDING", newType: newType, reason: reason, requestedAt: Date.now() };
+                if (newEndDate) payload.newEndDate = newEndDate; // Attach the custom date!
+
                 await db.collection(prefix + "leave_requests").doc(id).update({
-                    modificationRequest: { status: "PENDING", newType: newType, reason: reason, requestedAt: Date.now() }
+                    modificationRequest: payload
                 });
                 alert("Modification request sent to Admin successfully!");
                 document.getElementById('mod-request-modal').classList.replace('flex', 'hidden');
