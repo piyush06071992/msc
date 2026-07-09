@@ -167,16 +167,6 @@
             <input type="hidden" id="approve-req-id">
             
            <div class="space-y-4">
-                <div class="grid grid-cols-2 gap-4 hidden" id="approve-date-adjust-wrapper">
-                    <div>
-                        <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1">Start Date</label>
-                        <input type="date" id="approve-start-date" class="w-full bg-slate-100 border border-slate-200 rounded-xl p-3 text-xs font-bold text-slate-400 outline-none cursor-not-allowed" disabled>
-                    </div>
-                    <div>
-                        <label class="text-[10px] font-black text-indigo-600 uppercase tracking-widest block mb-1">Truncate End Date</label>
-                        <input type="date" id="approve-end-date" onchange="recalculateApproveMath()" class="w-full bg-indigo-50 border border-indigo-200 rounded-xl p-3 text-xs font-black text-indigo-700 outline-none focus:border-indigo-500 shadow-sm cursor-pointer transition-colors">
-                    </div>
-                </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div>
                         <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Deduction Amount (-)</label>
@@ -587,7 +577,7 @@
                     
                     const isPending = req.status === "PENDING";
                     
-                    let origAmt = leaveValues[req.type] || 0;
+                let origAmt = leaveValues[req.type] || 0;
                     if (req.type === 'FULL') {
                         let sd = new Date(req.startDate); let ed = new Date(req.endDate || req.startDate);
                         let validDays = 0; let curr = new Date(sd);
@@ -595,7 +585,18 @@
                         origAmt = validDays * -1;
                     }
                     
-                    const refundAmt = isPending ? 0 : Math.abs(origAmt) - Math.abs(leaveValues[mod.newType] || 0);
+                    // NEW: Automatically calculate the cost of the NEW date range if they return early
+                    let newAmt = 0;
+                    if (mod.newType === 'EARLY_RETURN') {
+                        let sd = new Date(req.startDate); let ed = new Date(mod.newEndDate);
+                        let validDays = 0; let curr = new Date(sd);
+                        while (curr <= ed) { if (curr.getDay() !== 0) validDays++; curr.setDate(curr.getDate() + 1); }
+                        newAmt = validDays * -1;
+                    } else if (mod.newType !== 'CANCEL') {
+                        newAmt = leaveValues[mod.newType] || 0;
+                    }
+
+                    const refundAmt = isPending ? 0 : Math.abs(origAmt) - Math.abs(newAmt);
                     
                     let btnLabel = `Approve & Refund (+${refundAmt})`;
                     if (isPending) {
@@ -805,43 +806,8 @@
             document.getElementById('approve-remarks').value = "";
             document.getElementById('approve-target-name').innerText = `Approve ${req.type} for ${req.teacherName}`;
             
-            // Setup the new Date Truncator logic
-            document.getElementById('approve-start-date').value = req.startDate;
-            document.getElementById('approve-end-date').value = req.endDate || req.startDate;
-            document.getElementById('approve-end-date').min = req.startDate;
-            
-            // Only show the date adjuster for FULL multi-day leaves
-            const dateWrap = document.getElementById('approve-date-adjust-wrapper');
-            if (dateWrap) {
-                dateWrap.style.display = req.type === 'FULL' ? 'grid' : 'none';
-            }
-            
             openModal('approve-modal');
         }
-
-        function recalculateApproveMath() {
-            const id = document.getElementById('approve-req-id').value;
-            const req = allLeaves.find(l => l.id === id);
-            if (!req || req.type !== 'FULL') return;
-
-            const sd = new Date(document.getElementById('approve-start-date').value);
-            const ed = new Date(document.getElementById('approve-end-date').value);
-            
-            let validDays = 0; let curr = new Date(sd);
-            while (curr <= ed) {
-                if (curr.getDay() !== 0) validDays++; // Skip Sundays
-                curr.setDate(curr.getDate() + 1);
-            }
-            
-            // Update the Deduction Amount box automatically
-            const amtBox = document.getElementById('approve-amt');
-            amtBox.value = validDays * -1;
-            
-            // Add a visual pulse so the admin knows the math updated
-            amtBox.classList.add('bg-indigo-100', 'border-indigo-300');
-            setTimeout(() => amtBox.classList.remove('bg-indigo-100', 'border-indigo-300'), 500);
-        }
-
         function handleApproveMethodChange() {
             const method = document.getElementById('approve-method').value;
             const amtInput = document.getElementById('approve-amt');
@@ -869,14 +835,8 @@
             const btn = event.target; const origText = btn.innerText;
             btn.innerText = "Processing..."; btn.disabled = true;
 
-            try {
-               const newEndDate = document.getElementById('approve-end-date').value;
-                
-                // Save the truncated date so the calendar accurately frees up the teacher!
-                await getCollection("leave_requests").doc(id).update({ 
-                    status: "APPROVED",
-                    endDate: req.type === 'FULL' ? newEndDate : req.endDate
-                });
+           try {
+                await getCollection("leave_requests").doc(id).update({ status: "APPROVED" });
                 
                 let logMsg = `Approved ${req.type} Leave (${req.startDate})`;
                 if (method === "COMPENSATORY") logMsg = `Pardoned/Compensated ${req.type} Leave (${req.startDate})`;
