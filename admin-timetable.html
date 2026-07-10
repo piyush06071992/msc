@@ -117,11 +117,23 @@
             </button>
         </div>
     </header>
-  <main class="p-4 sm:p-6 overflow-visible transition-all duration-300 no-print" id="main-content">
+<main class="p-4 sm:p-6 overflow-visible transition-all duration-300 no-print" id="main-content">
         
 <div id="global-lunch-warning" class="hidden mb-6 w-full max-w-[1600px] mx-auto"></div>
 
-     
+        <!-- NEW: STAGED EXAM REFERENCE HUD -->
+        <div id="staged-exam-helper" class="hidden mb-8 bg-indigo-50 border border-indigo-200 p-4 sm:p-6 rounded-[2rem] shadow-sm w-full mx-auto flex-col sm:flex-row gap-4 items-start sm:items-center relative overflow-hidden">
+            <div class="absolute top-0 right-0 w-32 h-32 bg-white rounded-bl-full opacity-30 pointer-events-none"></div>
+            <div class="bg-white p-3 rounded-2xl shadow-sm border border-indigo-100 shrink-0 z-10">
+                <span class="text-3xl">📋</span>
+            </div>
+            <div class="flex-1 z-10 w-full min-w-0">
+                <h3 class="font-black text-indigo-900 text-lg uppercase tracking-tight">Exam Requirements for <span id="seh-date" class="text-indigo-600">This Date</span></h3>
+                <p class="text-[10px] font-bold text-indigo-500 uppercase tracking-widest mt-0.5 mb-3">Ensure your timetable accommodates these staged exams:</p>
+                <div id="staged-exam-list" class="flex flex-wrap gap-2 w-full"></div>
+            </div>
+            <button onclick="document.getElementById('staged-exam-helper').classList.replace('flex', 'hidden')" class="z-10 text-indigo-400 hover:text-indigo-600 bg-white px-5 py-2.5 rounded-xl border border-indigo-100 text-[10px] font-black uppercase tracking-widest shadow-sm transition-colors active:scale-95 shrink-0 w-full sm:w-auto">Dismiss</button>
+        </div>
 
       <div class="flex flex-col sm:flex-row gap-4 mb-8 bg-white p-4 rounded-2xl shadow-sm border border-slate-200 max-w-4xl w-full">
             <div class="flex-1">
@@ -3706,19 +3718,82 @@ async function confirmDateContext() {
                                             }
                                         }
                                     }
-                            }
-                        });
+                                }
+                            });
+                        }
                     }
                 }
             });
 
             renderDirectDashboard();
+            await fetchStagedExamsForHelper(dateVal); // <-- TRIGGER THE HUD
 
         } catch (error) {
             alert("Error loading schedule: " + error.message);
             console.error(error);
         }
     }
+
+    // --- NEW: STAGED EXAM REFERENCE HUD LOGIC ---
+    async function fetchStagedExamsForHelper(dateStr) {
+        const helper = document.getElementById('staged-exam-helper');
+        const list = document.getElementById('staged-exam-list');
+        const dateLbl = document.getElementById('seh-date');
+        
+        // Hide if we are on the normal Live Weekly master
+        if (!dateStr || currentContextMode === 'LIVE') {
+            helper.classList.replace('flex', 'hidden');
+            return;
+        }
+
+        try {
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            const snap = await db.collection(prefix + "exam_schedules").where("date", "==", dateStr).get();
+            
+            if (snap.empty) {
+                helper.classList.replace('flex', 'hidden');
+                return;
+            }
+
+            dateLbl.innerText = new Date(dateStr).toLocaleDateString('en-GB', { month: 'short', day: 'numeric', year: 'numeric' });
+
+            let html = "";
+            const grouped = {};
+            
+            // Group by Class for neatness
+            snap.docs.forEach(doc => {
+                const data = doc.data();
+                if (!grouped[data.className]) grouped[data.className] = [];
+                grouped[data.className].push(data);
+            });
+
+            Object.keys(grouped).sort().forEach(cName => {
+                const exams = grouped[cName];
+                exams.sort((a,b) => a.section.localeCompare(b.section)).forEach(data => {
+                    const typeColor = data.type === 'OT' ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-blue-700 bg-blue-50 border-blue-200';
+                    const prettySubs = data.subjects.length > 2 ? data.subjects.slice(0,2).join(', ') + '...' : data.subjects.join(', ');
+                    
+                    html += `
+                        <div class="flex items-center gap-2 bg-white border border-slate-200 px-3 py-2 rounded-xl shadow-sm">
+                            <span class="${typeColor} px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest border shadow-sm shrink-0">${data.type}</span>
+                            <span class="font-black text-slate-800 text-[11px] sm:text-xs uppercase shrink-0">${data.className} (Sec ${data.section})</span>
+                            <span class="text-slate-200 shrink-0">|</span>
+                            <span class="text-[9px] sm:text-[10px] font-bold text-slate-500 uppercase truncate max-w-[120px] sm:max-w-[200px]" title="${data.subjects.join(', ')}">${prettySubs}</span>
+                        </div>
+                    `;
+                });
+            });
+
+            list.innerHTML = html;
+            helper.classList.remove('hidden');
+            helper.classList.add('flex');
+
+        } catch (e) {
+            console.error("Helper fetch failed:", e);
+            helper.classList.replace('flex', 'hidden');
+        }
+    }
+
     // Helper to convert minutes back to 24hr string for the UI
     function minsTo24(totalMinutes) {
         const h = Math.floor(totalMinutes / 60) % 24;
