@@ -29,7 +29,23 @@
                 Logout
             </button>
         </div>
-  </header>
+ </header>
+
+    <!-- NEW: LESSON PLANNER SOFT-LOCK WARNING BANNER -->
+    <div id="lesson-compliance-banner" class="hidden bg-amber-400 text-amber-900 p-4 sm:p-6 shadow-2xl relative z-[101] border-b-4 border-amber-600 animate-bounce-short">
+        <div class="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div class="flex items-center gap-4 text-center sm:text-left">
+                <span class="text-4xl animate-pulse">🚨</span>
+                <div>
+                    <h2 class="font-black text-lg sm:text-xl uppercase tracking-widest text-amber-900">Pending Lesson Logs</h2>
+                    <p class="font-bold text-sm text-amber-800 mt-1">You forgot to log <span id="compliance-class-list" class="font-black text-rose-700 bg-amber-100 px-2 py-0.5 rounded shadow-sm"></span>. Please mark your syllabus/revision activity by today evening to avoid an automatic system lockout tomorrow.</p>
+                </div>
+            </div>
+            <button onclick="window.location.href='teacher-lesson-planner.html'" class="bg-amber-900 text-amber-400 hover:text-amber-300 px-6 py-3 rounded-xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all w-full sm:w-auto whitespace-nowrap border border-amber-700">
+                Go To Planner ➔
+            </button>
+        </div>
+    </div>
 
     <div id="emergency-sub-banner" class="hidden bg-rose-600 text-white p-4 sm:p-6 shadow-2xl relative z-[100] animate-bounce-short">
         <div class="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
@@ -238,11 +254,14 @@
                 });
             }, 2000);
 
-            document.getElementById('current-date').innerText = `Date: ${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
+         document.getElementById('current-date').innerText = `Date: ${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`;
             await loadTodaysScheduleForAlerts(safeName);
             
             listenForPendingAdjustments(activeStaff);
             loadLeaveNoticeBoard();
+            
+            // Trigger Silent Background Compliance Scan
+            checkLessonCompliance(safeName);
         };
 
         async function checkNotifStatus() {
@@ -654,8 +673,107 @@ window.ackDuty = function(dutyId) {
                       `;
                   });
 
-                  board.innerHTML = html;
+             board.innerHTML = html;
               }, error => console.error("Notice board error:", error));
+        }
+
+        // --- SILENT BACKGROUND COMPLIANCE AUDITOR ---
+        async function checkLessonCompliance(safeName) {
+            try {
+                const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+                const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
+                
+                // Fetch the data required to build the teacher's profile mathematically
+                const [ttSnap, structSnap, holSnap, plannerSnap] = await Promise.all([
+                    db.collection(prefix + "timetable").where("teacherName", "==", safeName).get(),
+                    getCollection("institute_structure").get(),
+                    getCollection("school_holidays").get(),
+                    getCollection("lesson_planners").get()
+                ]);
+
+                let myClasses = [];
+                const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const holidays = holSnap.docs.map(d => d.data());
+                const allPlanners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+                ttSnap.docs.forEach(d => {
+                    const data = d.data();
+                    if(!myClasses.some(c => norm(c.c)===norm(data.className) && norm(c.s)===norm(data.section) && norm(c.sub)===norm(data.subject))) {
+                        myClasses.push({ c: data.className, s: data.section, sub: data.subject });
+                    }
+                });
+
+                const today = new Date();
+                const offset = today.getTimezoneOffset() * 60000;
+                const todayISO = new Date(today - offset).toISOString().split('T')[0];
+                let missingLogs = [];
+
+                // Map timetable to planner Assignment IDs
+                let uniqueAssignments = new Map();
+                myClasses.forEach(cls => {
+                    const structMatch = structures.find(st => norm(st.className) === norm(cls.c) && norm(st.sectionName) === norm(cls.s));
+                    if(structMatch) {
+                        let exactSub = cls.sub;
+                        if(structMatch.subjects) {
+                            const mSub = structMatch.subjects.find(s => norm(s) === norm(cls.sub));
+                            if(mSub) exactSub = mSub;
+                        }
+                        const assignmentId = `${structMatch.id}_${exactSub}`.replace(/\s+/g, '_');
+                        uniqueAssignments.set(assignmentId, `[${cls.c} ${cls.s} - ${exactSub}]`);
+                    }
+                });
+
+                // Audit each connected Planner
+                uniqueAssignments.forEach((displayName, assignmentId) => {
+                    const planner = allPlanners.find(p => p.id === assignmentId);
+                    if(planner && planner.syllabusData && planner.syllabusData.length > 0) {
+                        let lastLog = null;
+                        planner.syllabusData.forEach(r => {
+                            if (r.chapterStartDate && (!lastLog || r.chapterStartDate > lastLog)) lastLog = r.chapterStartDate;
+                            if (r.isDone && r.completedDate && (!lastLog || r.completedDate > lastLog)) lastLog = r.completedDate;
+                        });
+                        if (planner.activityLogs) {
+                            planner.activityLogs.forEach(log => {
+                                if (!lastLog || log.date > lastLog) lastLog = log.date;
+                            });
+                        }
+                        
+                        if (lastLog && lastLog < todayISO) {
+                            let scanDate = new Date(lastLog);
+                            scanDate.setDate(scanDate.getDate() + 1); // Start scanning day after last log
+                            let missedDays = 0;
+                            const endD = new Date(todayISO);
+                            endD.setDate(endD.getDate() - 1); // Audit stops at yesterday
+
+                            // Mathematical Loop
+                            while(scanDate <= endD) {
+                                if(scanDate.getDay() !== 0) { // Skip Sundays
+                                    let isHol = false;
+                                    for(let h of holidays) {
+                                        if(h.startDate && h.isFullDay) {
+                                            let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
+                                            let he = new Date(h.endDate || h.startDate); he.setHours(23,59,59,999);
+                                            if(scanDate >= hs && scanDate <= he) { isHol = true; break; }
+                                        }
+                                    }
+                                    if(!isHol) missedDays++;
+                                }
+                                scanDate.setDate(scanDate.getDate() + 1);
+                            }
+                            
+                            // If they missed at least 1 working day, flag them for the banner warning
+                            if(missedDays > 0) missingLogs.push(displayName);
+                        }
+                    }
+                });
+
+                if (missingLogs.length > 0) {
+                    document.getElementById('compliance-class-list').innerText = missingLogs.join(', ');
+                    document.getElementById('lesson-compliance-banner').classList.remove('hidden');
+                }
+
+            } catch(e) { console.error("Compliance Check Error:", e); }
         }
     </script>
 </body>
