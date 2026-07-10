@@ -89,8 +89,24 @@
                         </div>
                     </div>
                 </div>
-            </header>
-           <main class="p-4 sm:p-6 lg:p-8 flex-1">
+          </header>
+           <main class="p-4 sm:p-6 lg:p-8 flex-1 relative z-10">
+
+                <div id="unconfigured-exams-banner" class="hidden bg-rose-600 text-white rounded-3xl p-5 shadow-2xl mb-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-2 border-rose-400 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-32 h-32 bg-white rounded-bl-full opacity-10 pointer-events-none"></div>
+                    <div class="flex items-center gap-4 relative z-10 w-full">
+                        <div class="bg-white/20 p-3 rounded-2xl shadow-inner animate-pulse shrink-0"><span class="text-3xl">🚨</span></div>
+                        <div class="flex-1">
+                            <h3 class="font-black text-lg sm:text-xl uppercase tracking-widest text-rose-50 leading-none">Missing Exam Timetables</h3>
+                            <p class="text-[10px] sm:text-xs font-bold text-rose-200 mt-1.5 uppercase tracking-widest">Exams are staged, but the Timetable Master hasn't been updated for:</p>
+                            <div id="unconfigured-exams-list" class="text-[11px] font-black uppercase text-white bg-rose-900/40 px-3 py-2 rounded-xl mt-2 flex flex-wrap gap-2 items-center border border-rose-500/50"></div>
+                        </div>
+                    </div>
+                    <button onclick="window.location.href='admin-timetable.html'" class="w-full sm:w-auto bg-white text-rose-600 hover:bg-rose-50 px-6 py-4 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest shadow-lg transition-colors whitespace-nowrap relative z-10 active:scale-95 shrink-0 border border-rose-200">
+                        Fix Timetables ➔
+                    </button>
+                </div>
+
                <style>details > summary { list-style: none; } details > summary::-webkit-details-marker { display: none; }</style>
                 <details class="bg-white border-2 border-sky-100 rounded-2xl shadow-sm overflow-hidden flex flex-col mb-8 max-w-4xl group">
                     <summary class="bg-sky-50 p-4 border-b border-sky-100 flex items-center justify-between shrink-0 cursor-pointer outline-none select-none hover:bg-sky-100/50 transition-colors">
@@ -396,10 +412,79 @@ let html = "";
                       `;
                   });
 
-                  board.innerHTML = html;
+                board.innerHTML = html;
               }, error => console.error("Notice board error:", error));
         }
         loadLeaveNoticeBoard();
+
+        // --- NEW: THE EXAM WATCHTOWER ---
+        function listenForUnconfiguredExams() {
+            const center = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
+            const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
+
+            const offset = new Date().getTimezoneOffset() * 60000;
+            const todayIso = new Date(Date.now() - offset).toISOString().split('T')[0];
+
+            // 1. Listen for any upcoming exams that have been staged
+            db.collection(prefix + "exam_schedules").where("date", ">=", todayIso).onSnapshot(async (examSnap) => {
+                const banner = document.getElementById('unconfigured-exams-banner');
+                if (examSnap.empty) {
+                    if(banner) banner.classList.add('hidden');
+                    return;
+                }
+
+                // Group exams by date
+                const examsByDate = {};
+                examSnap.docs.forEach(doc => {
+                    const data = doc.data();
+                    if (!examsByDate[data.date]) examsByDate[data.date] = [];
+                    examsByDate[data.date].push(data);
+                });
+
+                let unconfiguredAlerts = [];
+                const SPECIAL_EXAMS = ['EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM'];
+                const norm = str => (str||"").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+                // 2. Cross-reference each date with the Timetable History
+                for (const date of Object.keys(examsByDate)) {
+                    try {
+                        const historyDoc = await db.collection(prefix + "timetable_history").doc(date).get();
+                        let historySchedule = [];
+                        
+                        if (historyDoc.exists) {
+                            historySchedule = historyDoc.data().schedule || [];
+                        }
+
+                        // Check if the specific sections scheduled for the exam actually have "EXAM" or "UT/OT" slots on that day
+                        examsByDate[date].forEach(examReq => {
+                            const secSlots = historySchedule.filter(s => norm(s.className) === norm(examReq.className) && norm(s.section) === norm(examReq.section));
+                            const hasExamSlot = secSlots.some(s => SPECIAL_EXAMS.includes((s.subject || "").toUpperCase()));
+
+                            // If no exam slot exists, the timetable hasn't been generated for this section!
+                            if (!hasExamSlot) {
+                                const shortDate = new Date(date).toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+                                unconfiguredAlerts.push(`<span class="bg-rose-500 text-white px-2 py-1 rounded shadow-sm">${shortDate}: ${examReq.className} (${examReq.section})</span>`);
+                            }
+                        });
+                    } catch(e) { console.error("Watchtower Error:", e); }
+                }
+
+                // 3. Trigger the Banner UI
+                const list = document.getElementById('unconfigured-exams-list');
+                if (banner && list) {
+                    if (unconfiguredAlerts.length > 0) {
+                        list.innerHTML = unconfiguredAlerts.join('');
+                        banner.classList.remove('hidden');
+                        banner.classList.add('flex');
+                    } else {
+                        banner.classList.add('hidden');
+                        banner.classList.remove('flex');
+                    }
+                }
+            });
+        }
+        listenForUnconfiguredExams();
+        // --------------------------------
 
         function logout() { 
             sessionStorage.clear(); 
