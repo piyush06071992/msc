@@ -594,107 +594,119 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 const sName = currSession ? currSession.section : "";
                 const subName = currSession ? currSession.subject : "";
 
-                const today = new Date();
-                let lwd = new Date(today);
-                lwd.setDate(today.getDate() - 1); 
-
-                // SMART LWD CALCULATOR
-                let foundValidLWD = false;
-                while (true) {
-                    const exclusion = checkDateExclusion(lwd, cName, sName, subName);
-                    
-                    if (!exclusion.isExcluded) {
-                        foundValidLWD = isTimetableWorkingDay(lwd, cName, sName, subName, true); 
-                        if (foundValidLWD) break;
-                    }
-                    
-                    lwd.setDate(lwd.getDate() - 1);
-                    if (today.getTime() - lwd.getTime() > 14 * 24 * 60 * 60 * 1000) break; 
-                }
-                const offsetLwd = lwd.getTimezoneOffset() * 60000;
-                const lwdDateStr = new Date(lwd.getTime() - offsetLwd).toISOString().split('T')[0];
-
-             let loggedOnLWD = false;
-                if (foundValidLWD) {
-                    const tickedTopic = currentPlannerData.find(r => r.completedDate === lwdDateStr);
-                    const loggedActivity = window.currentActivityLogs.find(l => l.date === lwdDateStr);
-                    if (tickedTopic || loggedActivity) loggedOnLWD = true;
-                }
-
-                const normStr = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                let wasOnLeaveLWD = window.myAbsences && window.myAbsences.some(a => {
-                    if (a.date !== lwdDateStr) return false;
-                    if (a.isFullDay) return true;
-                    return normStr(a.className) === normStr(cName) && normStr(a.section) === normStr(sName) && normStr(a.subject) === normStr(subName);
-                });
-
-                if (wasOnLeaveLWD) {
-                    loggedOnLWD = true; // Spoof the log to completely bypass the lock
-                }
+                // --- CONTINUOUS FORWARD CHAIN ANCHOR ---
+                let lastLoggedDateStr = null;
                 
-                window.complianceLocked = enableDailyBlock ? (foundValidLWD && !loggedOnLWD) : false;
-                window.lwdDateStr = lwdDateStr;
+                // Scan the database for the absolute latest date logged
+                currentPlannerData.forEach(r => {
+                    if (r.chapterStartDate && (!lastLoggedDateStr || r.chapterStartDate > lastLoggedDateStr)) lastLoggedDateStr = r.chapterStartDate;
+                    if (r.isDone && r.completedDate && (!lastLoggedDateStr || r.completedDate > lastLoggedDateStr)) lastLoggedDateStr = r.completedDate;
+                });
+                if (window.currentActivityLogs) {
+                    window.currentActivityLogs.forEach(log => {
+                        if (!lastLoggedDateStr || log.date > lastLoggedDateStr) lastLoggedDateStr = log.date;
+                    });
+                }
+
+                const today = new Date();
+                const offset = today.getTimezoneOffset() * 60000;
+                const todayISO = new Date(today - offset).toISOString().split('T')[0];
+
+                // Determine where to start building our forward chain
+                let scanStartDate = new Date(todayISO);
+                if (lastLoggedDateStr) {
+                    // Include the last logged day so teachers can log multiple topics on the same day if needed
+                    scanStartDate = new Date(lastLoggedDateStr);
+                } else {
+                    scanStartDate.setDate(scanStartDate.getDate() - 14); // Fallback for brand new subjects
+                }
+
+                window.catchUpDates = [];
+                let iterDate = new Date(scanStartDate); 
+                const endD = new Date(todayISO);
+                let revHtml = ""; 
+                const dArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+                const normStr = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+                // Build the timeline forward to today
+                while(iterDate <= endD) {
+                    const curStr = iterDate.toISOString().split('T')[0];
+                    const dayName = dArr[iterDate.getDay()];
+                    const shortDate = iterDate.toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
+                    
+                    const exclusion = checkDateExclusion(iterDate, cName, sName, subName);
+                    
+                    let wasOnLeaveScan = window.myAbsences && window.myAbsences.some(a => {
+                        if (a.date !== curStr) return false;
+                        if (a.isFullDay) return true;
+                        return normStr(a.className) === normStr(cName) && normStr(a.section) === normStr(sName) && normStr(a.subject) === normStr(subName);
+                    });
+
+                    let isWorkingDay = false;
+                    let reason = "";
+                    let mins = 0;
+
+                    if (wasOnLeaveScan) {
+                        reason = "Approved Leave";
+                    } else if (exclusion.isExcluded) {
+                        reason = exclusion.reason;
+                    } else if (!isTimetableWorkingDay(iterDate, cName, sName, subName)) {
+                        reason = "No Class Scheduled";
+                    } else {
+                        isWorkingDay = true;
+                        const fullDayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][iterDate.getDay()];
+                        const tMatch = (window.teacherTimetable || []).find(t => t.day === fullDayName && normStr(t.className) === normStr(cName) && normStr(t.section) === normStr(sName) && normStr(t.subject) === normStr(subName));
+                        mins = tMatch ? parseInt(tMatch.duration) || activeSessionMins : activeSessionMins;
+                    }
+
+                    if (isWorkingDay) {
+                        window.catchUpDates.push({ date: curStr, label: `${shortDate} (${dayName})`, mins: mins });
+                        
+                        // Visually label if this valid day has ALREADY been partially logged
+                        let alreadyLogged = (curStr === lastLoggedDateStr);
+                        
+                        revHtml += `
+                            <div class="bg-white border ${alreadyLogged ? 'border-blue-200' : 'border-amber-200'} rounded-xl p-3 shadow-sm transition-all">
+                                <div class="flex justify-between items-center mb-2">
+                                    <span class="text-[10px] font-black ${alreadyLogged ? 'text-blue-700 bg-blue-50 border-blue-100' : 'text-amber-700 bg-amber-50 border-amber-100'} uppercase tracking-widest px-2 py-1 rounded border">${shortDate} (${dayName})</span>
+                                    <div class="flex items-center gap-2">
+                                        ${alreadyLogged ? `<span class="text-[8px] font-bold text-blue-500 uppercase">Logged</span>` : `<span class="text-[8px] font-black text-rose-500 uppercase animate-pulse">🔴 Pending</span>`}
+                                        <span class="text-[9px] font-bold text-emerald-600 uppercase bg-emerald-50 px-2 py-0.5 rounded shadow-sm border border-emerald-100">🟢 ${mins} Mins</span>
+                                    </div>
+                                </div>
+                                <textarea class="batch-rev-input w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs font-bold text-slate-700 outline-none focus:border-amber-500 focus:bg-white resize-none h-14 placeholder-slate-300 transition-all" placeholder="Optional details (leave blank to skip)..." data-date="${curStr}" data-mins="${mins}"></textarea>
+                            </div>`;
+                    } else {
+                        revHtml += `
+                            <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 opacity-60 pointer-events-none">
+                                <div class="flex justify-between items-center">
+                                    <span class="text-[10px] font-black text-slate-500 uppercase tracking-widest">${shortDate} (${dayName})</span>
+                                    <span class="text-[9px] font-bold text-slate-500 uppercase">⏸️ ${reason} (Auto-Exempt)</span>
+                                </div>
+                            </div>`;
+                    }
+                    iterDate.setDate(iterDate.getDate() + 1);
+                }
+
+                const revContainer = document.getElementById('revision-batch-container');
+                if (revContainer) revContainer.innerHTML = revHtml || `<div class="text-center text-[10px] font-bold text-slate-400 p-4">No pending dates to log.</div>`;
+
+                // Calculate Compliance Lock
+                // If there is ANY date in the queue BEFORE today that hasn't been logged, they are locked.
+                let hasUnloggedPastDays = window.catchUpDates.some(d => d.date < todayISO && d.date !== lastLoggedDateStr);
+                
+                window.complianceLocked = enableDailyBlock ? hasUnloggedPastDays : false;
+                window.lwdDateStr = hasUnloggedPastDays ? window.catchUpDates.find(d => d.date < todayISO && d.date !== lastLoggedDateStr).date : todayISO;
 
                 const reqBtn = document.getElementById('request-unlock-btn');
                 const confBtn = document.getElementById('confirm-day-btn');
-                const revBlock = document.getElementById('unified-revision-block');
                 
-               if (window.isSubjectUnlocked || !globalAutoLock) {
+                if (window.isSubjectUnlocked || !globalAutoLock) {
                     reqBtn.innerText = "🔓 Unlocked! You can make corrections.";
                     reqBtn.className = "w-full bg-emerald-50 text-emerald-600 font-black py-3 rounded-xl uppercase tracking-widest text-[10px] border border-emerald-200 cursor-default";
                     reqBtn.disabled = true;
                     reqBtn.style.display = 'block';
                     if(confBtn) confBtn.style.display = 'block';
-                    
-                    let minDate = window.lwdDateStr || todayISO;
-                    if (window.lockedDateStr && window.lockedDateStr < minDate) minDate = window.lockedDateStr;
-
-                    // BUILD THE BATCH CATCH-UP MATRIX
-                    let iterDate = new Date(minDate); const endD = new Date(todayISO);
-                    let revHtml = ""; const dArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-                    while(iterDate <= endD) {
-                        const curStr = iterDate.toISOString().split('T')[0];
-                        const dayName = dArr[iterDate.getDay()];
-                        const shortDate = iterDate.toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
-                        const exclusion = checkDateExclusion(iterDate, cName, sName, subName);
-                        
-                        let isValidWorkingDay = false; let reason = exclusion.reason; let mins = 0;
-                        if (!exclusion.isExcluded) {
-                            if (isTimetableWorkingDay(iterDate, cName, sName, subName)) {
-                                isValidWorkingDay = true; reason = "Working Day";
-                                const fullDayName = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][iterDate.getDay()];
-                                const tMatch = (window.teacherTimetable || []).find(t => t.day === fullDayName && t.className === cName && t.section === sName && t.subject === subName);
-                                mins = tMatch ? parseInt(tMatch.duration) || activeSessionMins : activeSessionMins;
-                            } else reason = "No Class Scheduled";
-                        }
-
-                      // REMOVED: The logic that blocked a date if it was "Already Logged". 
-                        // Teachers MUST be able to log multiple topics or revisions on the exact same day!
-
-                        if (isValidWorkingDay) {
-                            window.catchUpDates.push({ date: curStr, label: `${shortDate} (${dayName})`, mins: mins });
-                            revHtml += `
-                                <div class="bg-white border border-amber-200 rounded-xl p-3 shadow-sm transition-all hover:border-amber-400">
-                                    <div class="flex justify-between items-center mb-2">
-                                        <span class="text-[10px] font-black text-amber-700 uppercase tracking-widest bg-amber-50 px-2 py-1 rounded border border-amber-100">${shortDate} (${dayName})</span>
-                                        <span class="text-[9px] font-bold text-emerald-600 uppercase bg-emerald-50 px-2 py-0.5 rounded shadow-sm border border-emerald-100">🟢 ${mins} Mins</span>
-                                    </div>
-                                    <textarea class="batch-rev-input w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-xs font-bold text-slate-700 outline-none focus:border-amber-500 focus:bg-white resize-none h-14 placeholder-slate-300 transition-all" placeholder="Optional details (leave blank to skip)..." data-date="${curStr}" data-mins="${mins}"></textarea>
-                                </div>`;
-                        } else {
-                            revHtml += `
-                                <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 opacity-60 pointer-events-none">
-                                    <div class="flex justify-between items-center">
-                                        <span class="text-[10px] font-black text-slate-500 uppercase tracking-widest">${shortDate} (${dayName})</span>
-                                        <span class="text-[9px] font-bold text-rose-500 uppercase">🚫 ${reason}</span>
-                                    </div>
-                                </div>`;
-                        }
-                        iterDate.setDate(iterDate.getDate() + 1);
-                    }
-                    const revContainer = document.getElementById('revision-batch-container');
-                    if (revContainer) revContainer.innerHTML = revHtml || `<div class="text-center text-[10px] font-bold text-slate-400 p-4">No pending dates to log.</div>`;
                 } 
                 else if (window.complianceLocked) {
                     reqBtn.disabled = true;
@@ -710,26 +722,12 @@ const offset = new Date().getTimezoneOffset() * 60000;
                         autoRequestUnlock(window.lwdDateStr);
                     }
                 } 
-             else {
+                else {
                     reqBtn.innerText = "Made a Mistake? Request Admin Unlock";
                     reqBtn.className = "w-full bg-rose-50 text-rose-600 font-black py-3 rounded-2xl uppercase tracking-widest text-[10px] border border-rose-200 hover:bg-rose-100 transition-all";
                     reqBtn.disabled = false;
                     reqBtn.style.display = 'block';
                     if(confBtn) confBtn.style.display = 'block';
-                    
-                    window.catchUpDates = [{ date: todayISO, label: "Today", mins: activeSessionMins }];
-                    const shortDate = new Date().toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
-                    const revContainer = document.getElementById('revision-batch-container');
-                    if (revContainer) {
-                        revContainer.innerHTML = `
-                            <div class="bg-white border border-amber-200 rounded-xl p-4 shadow-sm h-full flex flex-col transition-all hover:border-amber-400">
-                                <div class="flex justify-between items-center mb-3">
-                                    <span class="text-[10px] font-black text-amber-700 uppercase tracking-widest bg-amber-50 px-2.5 py-1.5 rounded-lg border border-amber-100">Today (${shortDate})</span>
-                                    <span class="text-[9px] font-bold text-emerald-600 uppercase bg-emerald-50 px-2.5 py-1 rounded-lg border border-emerald-100 shadow-sm">🟢 ${activeSessionMins} Mins</span>
-                                </div>
-                                <textarea class="batch-rev-input w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold text-slate-700 outline-none focus:border-amber-500 focus:bg-white resize-none flex-1 placeholder-slate-300 transition-all" placeholder="Describe today's revision activity (Optional)..." data-date="${todayISO}" data-mins="${activeSessionMins}"></textarea>
-                            </div>`;
-                    }
                 }
                 
                 renderSyllabusExactMath();
@@ -1008,8 +1006,12 @@ const offset = new Date().getTimezoneOffset() * 60000;
                             <p class="text-[10px] font-black text-blue-600 uppercase tracking-widest mb-3">Chapter topics are locked until chapter is started</p>
                             <div class="flex flex-col sm:flex-row justify-center items-center gap-3">
                                 <div class="flex flex-col text-left">
-                                    <span class="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-1">Backdate Start</span>
-                                    <input type="date" id="start-date-${domSafeCh}" class="text-[11px] p-2.5 border border-blue-300 rounded-xl outline-none font-bold text-slate-700 shadow-sm bg-white cursor-pointer" value="${todayISO}" min="${minDate}" max="${todayISO}">
+                                    <span class="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-1">Select Start Date</span>
+                                    <select id="start-date-${domSafeCh}" class="text-[11px] p-2.5 border border-blue-300 rounded-xl outline-none font-bold text-slate-700 shadow-sm bg-white cursor-pointer min-w-[140px]">
+                                        ${window.catchUpDates && window.catchUpDates.length > 0 
+                                            ? window.catchUpDates.map(d => `<option value="${d.date}">${d.label}</option>`).join('') 
+                                            : `<option value="${todayISO}">Today (Fallback)</option>`}
+                                    </select>
                                 </div>
                                 <button onclick="startChapter('${safeChName}', document.getElementById('start-date-${domSafeCh}').value)" class="bg-blue-600 text-white px-8 py-3 rounded-xl font-black uppercase text-[11px] tracking-widest shadow-lg hover:bg-blue-700 transition-all pointer-events-auto sm:mt-4">▶ Start Chapter</button>
                             </div>
@@ -1420,25 +1422,24 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 return;
             }
 
-            // --- OPTION B: STRICT CHRONOLOGICAL AUDITOR ---
-            if (window.isSubjectUnlocked && window.catchUpDates && window.catchUpDates.length > 0) {
+           // --- STRICT CHRONOLOGICAL AUDITOR ---
+            if (window.catchUpDates && window.catchUpDates.length > 0) {
                 let accountedDates = new Set();
 
-                // 1. Gather all dates that have data (historical or newly inputted)
                 if (window.currentActivityLogs) window.currentActivityLogs.forEach(log => accountedDates.add(log.date));
                 newActivityLogs.forEach(log => accountedDates.add(log.date));
 
                 currentPlannerData.forEach(r => {
-                    if (r.chapterStartDate) accountedDates.add(r.chapterStartDate); // Chapter start clears a day
-                    if (r.isDone && r.completedDate) accountedDates.add(r.completedDate); // Topics clear a day
+                    if (r.chapterStartDate) accountedDates.add(r.chapterStartDate);
+                    if (r.isDone && r.completedDate) accountedDates.add(r.completedDate);
                 });
 
-                // 2. Find the absolute latest date the user is actively trying to submit right now
                 let latestSubmittedDate = "";
                 let activeSubmitDates = new Set();
                 newActivityLogs.forEach(log => activeSubmitDates.add(log.date));
                 currentPlannerData.forEach(r => {
                     if (r.isDone && !r.savedToDb && r.completedDate) activeSubmitDates.add(r.completedDate);
+                    if (r.chapterStartDate && !r.savedToDb) activeSubmitDates.add(r.chapterStartDate); // Account for new chapter starts
                 });
 
                 window.catchUpDates.forEach(cd => {
@@ -1447,17 +1448,16 @@ const offset = new Date().getTimezoneOffset() * 60000;
                     }
                 });
 
-                // 3. Verify no required working days were skipped before the latest submitted date
                 if (latestSubmittedDate) {
                     for (let cd of window.catchUpDates) {
-                        if (cd.date > latestSubmittedDate) break; // Stop checking after the latest submission
+                        if (cd.date > latestSubmittedDate) break; 
                         
                         if (!accountedDates.has(cd.date)) {
                             const formattedGap = new Date(cd.date).toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
                             const formattedLatest = new Date(latestSubmittedDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
                             
-                            alert(`🚨 CHRONOLOGY ERROR:\n\nYou are trying to log data for ${formattedLatest}, but you left ${formattedGap} completely blank.\n\nYou must log a syllabus topic, a chapter start, or an independent revision activity for ${formattedGap} before you can log future dates.`);
-                            return; // Halt the save!
+                            alert(`🚨 CHRONOLOGY ERROR:\n\nYou are trying to log data for ${formattedLatest}, but you left ${formattedGap} completely blank.\n\nYou must log a syllabus topic, a chapter start, or an independent revision activity for ${formattedGap} first. Excluded days (holidays/leaves) have already been skipped for you.`);
+                            return; 
                         }
                     }
                 }
