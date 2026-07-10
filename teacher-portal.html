@@ -29,9 +29,45 @@
                 Logout
             </button>
         </div>
- </header>
+</header>
 
-    <!-- NEW: LESSON PLANNER SOFT-LOCK WARNING BANNER -->
+    <div id="exam-syllabus-banner" class="hidden bg-rose-600 text-white p-4 sm:p-6 shadow-2xl relative z-[102] border-b-4 border-rose-800 animate-bounce-short">
+        <div class="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div class="flex items-center gap-4 text-center sm:text-left">
+                <span class="text-4xl animate-pulse">🚨</span>
+                <div>
+                    <h2 class="font-black text-lg sm:text-xl uppercase tracking-widest text-rose-50">Syllabus Missing</h2>
+                    <p class="font-bold text-sm text-rose-100 mt-1">An exam is scheduled for <span id="exam-compliance-target" class="font-black text-rose-900 bg-white px-2 py-0.5 rounded shadow-sm"></span> but the syllabus is pending. This is mandatory.</p>
+                </div>
+            </div>
+            <div class="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                <button onclick="document.getElementById('snooze-modal').classList.replace('hidden', 'flex')" id="snooze-btn" class="bg-rose-500 hover:bg-rose-400 text-white px-6 py-3 rounded-xl font-black uppercase tracking-widest shadow-md transition-colors w-full sm:w-auto whitespace-nowrap border border-rose-400">
+                    Remind Later
+                </button>
+                <button onclick="window.location.href='teacher-exam.html'" class="bg-white text-rose-600 hover:bg-rose-50 px-6 py-3 rounded-xl font-black uppercase tracking-widest shadow-lg active:scale-95 transition-all w-full sm:w-auto whitespace-nowrap">
+                    Mark Now ➔
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="snooze-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[200] hidden items-center justify-center p-4">
+        <div class="bg-white rounded-[2.5rem] w-full max-w-sm shadow-2xl overflow-hidden flex flex-col">
+            <div class="p-6 bg-rose-50 border-b border-rose-100 flex justify-between items-center shrink-0">
+                <div>
+                    <h3 class="font-black text-rose-900 text-lg uppercase tracking-tighter">Snooze Reminder</h3>
+                    <p class="text-xs font-bold text-rose-600 uppercase tracking-widest mt-1">Select a date to be reminded</p>
+                </div>
+                <button onclick="document.getElementById('snooze-modal').classList.replace('flex', 'hidden')" class="bg-rose-100 text-rose-500 hover:bg-rose-200 hover:text-rose-700 w-10 h-10 rounded-full font-black text-xl transition-colors flex items-center justify-center">✕</button>
+            </div>
+            <div class="p-6 bg-slate-50 flex flex-col gap-4">
+                <p class="text-xs font-bold text-slate-500">You must submit the syllabus at least 2 days before the exam date (<span id="snooze-deadline-txt" class="font-black text-slate-800"></span>).</p>
+                <input type="date" id="snooze-date" class="w-full p-4 rounded-xl border-2 border-slate-200 outline-none font-black text-slate-700 focus:border-rose-400 cursor-pointer text-center text-lg">
+                <button onclick="executeSnooze()" class="w-full py-4 bg-rose-600 text-white rounded-xl font-black uppercase tracking-widest text-sm shadow-md hover:bg-rose-500 transition-colors mt-2 active:scale-95">Set Reminder</button>
+            </div>
+        </div>
+    </div>
+
     <div id="lesson-compliance-banner" class="hidden bg-amber-400 text-amber-900 p-4 sm:p-6 shadow-2xl relative z-[101] border-b-4 border-amber-600 animate-bounce-short">
         <div class="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
             <div class="flex items-center gap-4 text-center sm:text-left">
@@ -768,12 +804,106 @@ window.ackDuty = function(dutyId) {
                     }
                 });
 
-                if (missingLogs.length > 0) {
+              if (missingLogs.length > 0) {
                     document.getElementById('compliance-class-list').innerText = missingLogs.join(', ');
                     document.getElementById('lesson-compliance-banner').classList.remove('hidden');
                 }
 
+                // --- NEW: TRIGGER SYLLABUS COMPLIANCE SCAN ---
+                await checkExamSyllabusCompliance(safeName, myClasses);
+
             } catch(e) { console.error("Compliance Check Error:", e); }
+        }
+
+        // --- NEW: SYLLABUS AUDITOR ENGINE ---
+        let currentSnoozeLimit = null;
+        let currentSnoozeKey = null;
+
+        async function checkExamSyllabusCompliance(safeName, myClasses) {
+            try {
+                const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+                const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
+                
+                const today = new Date();
+                const offset = today.getTimezoneOffset() * 60000;
+                const todayISO = new Date(today - offset).toISOString().split('T')[0];
+
+                const examSnap = await db.collection(prefix + "exam_schedules").where("date", ">=", todayISO).get();
+                if (examSnap.empty) return;
+
+                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                let missingSyllabusTargets = [];
+                let closestExamDate = null;
+
+                examSnap.docs.forEach(doc => {
+                    const data = doc.data();
+                    
+                    data.subjects.forEach(sub => {
+                        // Is this one of MY subjects?
+                        const isMine = myClasses.some(c => norm(c.c) === norm(data.className) && norm(c.s) === norm(data.section) && norm(c.sub) === norm(sub));
+                        
+                        if (isMine) {
+                            // Is the syllabus empty?
+                            const hasSyllabus = data.syllabi && data.syllabi[sub] && data.syllabi[sub].trim() !== "";
+                            if (!hasSyllabus) {
+                                missingSyllabusTargets.push(`${data.className} (Sec ${data.section}) - ${sub}`);
+                                if (!closestExamDate || data.date < closestExamDate) {
+                                    closestExamDate = data.date;
+                                }
+                            }
+                        }
+                    });
+                });
+
+                if (missingSyllabusTargets.length > 0 && closestExamDate) {
+                    // Check local storage to see if they snoozed it!
+                    const snoozeMemory = JSON.parse(localStorage.getItem('minerva_syllabus_snooze')) || {};
+                    const isSnoozedToday = snoozeMemory[closestExamDate] && snoozeMemory[closestExamDate] > todayISO;
+                    
+                    if (!isSnoozedToday) {
+                        // Calculate the Hard Deadline (2 Days Before Exam)
+                        const examDateObj = new Date(closestExamDate);
+                        examDateObj.setDate(examDateObj.getDate() - 2);
+                        const deadlineIso = new Date(examDateObj - offset).toISOString().split('T')[0];
+                        
+                        document.getElementById('exam-compliance-target').innerText = missingSyllabusTargets[0] + (missingSyllabusTargets.length > 1 ? ` (+${missingSyllabusTargets.length - 1} more)` : '');
+                        document.getElementById('exam-syllabus-banner').classList.remove('hidden');
+
+                        // Configure Snooze Modal Limits
+                        const datePicker = document.getElementById('snooze-date');
+                        const snoozeBtn = document.getElementById('snooze-btn');
+                        
+                        // If today is ALREADY past the deadline, they cannot snooze!
+                        if (todayISO >= deadlineIso) {
+                            snoozeBtn.classList.add('hidden');
+                        } else {
+                            datePicker.min = todayISO;
+                            datePicker.max = deadlineIso;
+                            datePicker.value = todayISO;
+                            currentSnoozeLimit = deadlineIso;
+                            currentSnoozeKey = closestExamDate;
+                            document.getElementById('snooze-deadline-txt').innerText = new Date(deadlineIso).toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'});
+                        }
+                    }
+                }
+            } catch(e) { console.error("Syllabus Audit Error:", e); }
+        }
+
+        function executeSnooze() {
+            const selectedDate = document.getElementById('snooze-date').value;
+            if (!selectedDate) return alert("Select a date.");
+            
+            if (selectedDate > currentSnoozeLimit) {
+                return alert("You cannot snooze past the mandatory deadline (2 days before the exam).");
+            }
+
+            // Save the snooze setting locally
+            let snoozeMemory = JSON.parse(localStorage.getItem('minerva_syllabus_snooze')) || {};
+            snoozeMemory[currentSnoozeKey] = selectedDate;
+            localStorage.setItem('minerva_syllabus_snooze', JSON.stringify(snoozeMemory));
+
+            document.getElementById('snooze-modal').classList.replace('flex', 'hidden');
+            document.getElementById('exam-syllabus-banner').classList.add('hidden');
         }
     </script>
 </body>
