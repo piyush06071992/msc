@@ -639,7 +639,8 @@
                 </div>
 
                 <div class="text-sm text-slate-300 mb-4 font-bold leading-relaxed shrink-0">
-                    You just updated the Master Schedule. The system found <span id="sync-date-count" class="text-fuchsia-400 font-black px-1">0</span> upcoming special dates (Exam Days/Overrides) that might need these teacher/room changes.
+                    You just updated the Master Schedule. The system found <span id="sync-date-count" class="text-fuchsia-400 font-black px-1">0</span> upcoming special dates that might need these teacher/room changes:
+                    <div id="sync-dates-preview" class="text-[11px] text-fuchsia-300 mt-2 uppercase tracking-widest font-black bg-white/5 p-2 rounded border border-white/10"></div>
                 </div>
 
                 <div class="flex-1 overflow-y-auto custom-scroll pr-2 space-y-4 relative">
@@ -1791,23 +1792,24 @@ async function checkAndApplyFutureMaster() {
         let pendingSyncChanges = [];
         let pendingSyncDates = [];
 
-        function getDeltaChanges(oldData, newData) {
+      function getDeltaChanges(oldData, newData) {
             let changes = [];
             let oldMap = {};
             const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-            // Map the old state by Class + Section + Subject
+            // FIX: We must index by Day and Start Time so we compare the EXACT same slots, 
+            // otherwise Monday's Physics room gets compared to Thursday's Physics room!
             oldData.forEach(s => {
                 if(s.subject !== "NONE" && s.subject !== "BREAK") {
-                    oldMap[`${norm(s.className)}|${norm(s.section)}|${norm(s.subject)}`] = s;
+                    let key = `${norm(s.className)}|${norm(s.section)}|${norm(s.subject)}|${s.day}|${s.start24}`;
+                    oldMap[key] = s;
                 }
             });
 
-            // Compare new state against the old map
             newData.forEach(newSlot => {
                 if(newSlot.subject === "NONE" || newSlot.subject === "BREAK") return;
                 
-                let key = `${norm(newSlot.className)}|${norm(newSlot.section)}|${norm(newSlot.subject)}`;
+                let key = `${norm(newSlot.className)}|${norm(newSlot.section)}|${norm(newSlot.subject)}|${newSlot.day}|${newSlot.start24}`;
                 let oldSlot = oldMap[key];
                 
                 if (oldSlot) {
@@ -1829,15 +1831,14 @@ async function checkAndApplyFutureMaster() {
                 }
             });
 
-            // Filter out duplicates (since subjects happen on multiple days)
-            return changes.filter((v, i, a) => a.findIndex(t => (t.className === v.className && t.section === v.section && t.subject === v.subject)) === i);
+            // Filter out duplicates (if the same change happened on Monday and Wednesday, only ask the Admin once!)
+            return changes.filter((v, i, a) => a.findIndex(t => (t.className === v.className && t.section === v.section && t.subject === v.subject && t.newTeacher === v.newTeacher && t.newRoom === v.newRoom)) === i);
         }
 
         async function checkForSmartSync(changes, effectiveDate) {
-            if (changes.length === 0) return; // No teachers or rooms changed
+            if (changes.length === 0) return false;
 
             try {
-                // Find all special dates AFTER the effective date
                 const snap = await getCollection("timetable_history").get();
                 let affectedDates = [];
                 
@@ -1848,13 +1849,15 @@ async function checkAndApplyFutureMaster() {
                     }
                 });
 
-                if (affectedDates.length === 0) return; // No future overrides to worry about
+                if (affectedDates.length === 0) return false;
 
-                // Setup the UI
                 pendingSyncChanges = changes;
                 pendingSyncDates = affectedDates;
-                
                 document.getElementById('sync-date-count').innerText = affectedDates.length;
+                
+                // FIX: Actually display the dates in the UI!
+                const dateStrings = affectedDates.map(d => new Date(d.date).toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'}));
+                document.getElementById('sync-dates-preview').innerText = dateStrings.join('  •  ');
                 
                 const list = document.getElementById('sync-changes-list');
                 list.innerHTML = changes.map(c => {
