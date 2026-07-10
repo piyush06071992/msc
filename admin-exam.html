@@ -348,7 +348,7 @@
             }
         }
 
-        // --- SMART AGGREGATION ENGINE ---
+     // --- SMART AGGREGATION ENGINE ---
         // Converts the raw database packets into densely grouped UI cards/rows
         function normalizeAndAggregate(packets) {
             let flatList = [];
@@ -358,11 +358,11 @@
                         t.sections.forEach(s => {
                             let secName = typeof s === 'object' ? s.section : s;
                             let subs = typeof s === 'object' && s.subjects ? s.subjects : (t.subjects || []);
-                            flatList.push({ id: p.id, type: p.type, className: t.className, section: secName, subjects: subs.join(', ') || "Mixed" });
+                            flatList.push({ id: p.id, type: p.type, className: t.className, section: secName, subjects: subs.join(', ') || "Mixed", savedBy: p.savedBy || "Admin", savedByDept: p.savedByDept || "Management" });
                         });
                     });
                 } else {
-                    flatList.push({ id: p.id, type: p.type, className: p.className, section: p.section, subjects: (p.subjects || []).join(', ') || "Mixed" });
+                    flatList.push({ id: p.id, type: p.type, className: p.className, section: p.section, subjects: (p.subjects || []).join(', ') || "Mixed", savedBy: p.savedBy || "Admin", savedByDept: p.savedByDept || "Management" });
                 }
             });
 
@@ -370,17 +370,25 @@
             flatList.forEach(item => {
                 let key = `${item.type}__${item.className}__${item.subjects}`;
                 if (!grouped[key]) {
-                    grouped[key] = { type: item.type, className: item.className, subjects: item.subjects, sections: [], ids: new Set() };
+                    grouped[key] = { type: item.type, className: item.className, subjects: item.subjects, sections: [], ids: new Set(), creators: new Set() };
                 }
                 if (!grouped[key].sections.includes(item.section)) grouped[key].sections.push(item.section);
                 grouped[key].ids.add(item.id);
+                // Tag the primary creator to this group
+                grouped[key].creators.add(`${item.savedBy}|${item.savedByDept}`);
             });
 
-            let result = Object.values(grouped).map(g => ({
-                ...g,
-                ids: Array.from(g.ids).join(','),
-                sectionsJoined: g.sections.sort().join(', ')
-            }));
+            let result = Object.values(grouped).map(g => {
+                // Get the first person who staged this specific class/subject combo
+                let mainCreator = Array.from(g.creators)[0] || "Admin|Management";
+                return {
+                    ...g,
+                    ids: Array.from(g.ids).join(','),
+                    sectionsJoined: g.sections.sort().join(', '),
+                    creatorName: mainCreator.split('|')[0],
+                    creatorDept: mainCreator.split('|')[1]
+                };
+            });
             result.sort((a,b) => a.className.localeCompare(b.className));
             return result;
         }
@@ -575,11 +583,14 @@
                     const sName = dataInput.getAttribute('data-sec');
                     const subjectsArr = JSON.parse(dataInput.value);
 
-                    if (subjectsArr.length > 0) {
+                 if (subjectsArr.length > 0) {
+                        const staffDept = activeStaff && activeStaff.dept ? (Array.isArray(activeStaff.dept) ? activeStaff.dept[0] : activeStaff.dept.split(',')[0]) : "Management";
                         const newRef = getCollection("exam_schedules").doc();
                         batch.set(newRef, {
                             date: date, type: type, className: cName, section: sName,
-                            subjects: subjectsArr, timestamp: Date.now(), savedBy: activeStaff ? activeStaff.name : "Admin"
+                            subjects: subjectsArr, timestamp: Date.now(), 
+                            savedBy: activeStaff ? activeStaff.name : "Admin",
+                            savedByDept: staffDept
                         });
                     }
                 });
@@ -641,12 +652,16 @@
                             if (data.type === 'OT') typeColor = "bg-amber-100 text-amber-700 border-amber-200";
                             if (data.type === 'Terminal Exams' || data.type === 'Preboard' || data.type === 'Board Exam') typeColor = "bg-rose-100 text-rose-700 border-rose-200";
 
-                            return `
+                         return `
                                 <tr class="group transition-colors border-b border-slate-100 last:border-0 hover:bg-slate-50">
                                     <td class="p-4"><span class="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border shadow-sm ${typeColor}">${data.type}</span></td>
                                     <td class="p-4 font-black text-slate-800 text-sm uppercase">${data.className}</td>
                                     <td class="p-4 font-bold text-slate-500 text-xs sm:text-sm uppercase">${data.sectionsJoined}</td>
                                     <td class="p-4 font-bold text-indigo-600 text-xs sm:text-sm uppercase">${data.subjects}</td>
+                                    <td class="p-4">
+                                        <div class="text-[10px] font-black text-slate-700 uppercase tracking-tight">${data.creatorName}</div>
+                                        <div class="text-[8px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">${data.creatorDept}</div>
+                                    </td>
                                     <td class="p-4 text-right">
                                         <button onclick="deleteExamGroup('${data.ids}')" class="text-rose-400 hover:text-rose-600 bg-white hover:bg-rose-50 px-3 py-1.5 rounded-lg font-black text-[10px] uppercase tracking-widest transition-colors shadow-sm border border-rose-200 hover:border-rose-400">
                                             Remove
@@ -675,6 +690,7 @@
                                                 <th class="p-4">Class</th>
                                                 <th class="p-4">Sections</th>
                                                 <th class="p-4">Subjects Tested</th>
+                                                <th class="p-4">Staged By</th>
                                                 <th class="p-4 text-right">Action</th>
                                             </tr>
                                         </thead>
@@ -767,11 +783,12 @@
                                 📅 ${rowDatePretty}
                             </td>
                         </tr>
-                        <tr>
+                     <tr>
                             <th style="background-color: #0f172a; color: white; padding: 10px; font-weight: bold;">Exam Type</th>
                             <th style="background-color: #0f172a; color: white; padding: 10px; font-weight: bold;">Class</th>
                             <th style="background-color: #0f172a; color: white; padding: 10px; font-weight: bold;">Sections</th>
                             <th style="background-color: #0f172a; color: white; padding: 10px; font-weight: bold;">Subjects Tested</th>
+                            <th style="background-color: #0f172a; color: white; padding: 10px; font-weight: bold;">Staged By</th>
                         </tr>
                     `;
 
@@ -785,6 +802,7 @@
                                 <td style="padding: 8px; font-weight: bold;">${row.className}</td>
                                 <td style="padding: 8px;">${row.sectionsJoined}</td>
                                 <td style="padding: 8px;">${row.subjects}</td>
+                                <td style="padding: 8px;">${row.creatorName} (${row.creatorDept})</td>
                             </tr>
                         `;
                     });
