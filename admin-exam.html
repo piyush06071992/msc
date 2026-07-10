@@ -349,7 +349,6 @@
         }
 
      // --- SMART AGGREGATION ENGINE ---
-        // Converts the raw database packets into densely grouped UI cards/rows
         function normalizeAndAggregate(packets) {
             let flatList = [];
             packets.forEach(p => {
@@ -358,11 +357,11 @@
                         t.sections.forEach(s => {
                             let secName = typeof s === 'object' ? s.section : s;
                             let subs = typeof s === 'object' && s.subjects ? s.subjects : (t.subjects || []);
-                            flatList.push({ id: p.id, type: p.type, className: t.className, section: secName, subjects: subs.join(', ') || "Mixed", savedBy: p.savedBy || "Admin", savedByDept: p.savedByDept || "Management" });
+                            flatList.push({ id: p.id, type: p.type, className: t.className, section: secName, subjects: subs.join(', ') || "Mixed", savedBy: p.savedBy || "Admin", savedByDept: p.savedByDept || "Management", syllabi: p.syllabi || {}, rawSubjects: subs });
                         });
                     });
                 } else {
-                    flatList.push({ id: p.id, type: p.type, className: p.className, section: p.section, subjects: (p.subjects || []).join(', ') || "Mixed", savedBy: p.savedBy || "Admin", savedByDept: p.savedByDept || "Management" });
+                    flatList.push({ id: p.id, type: p.type, className: p.className, section: p.section, subjects: (p.subjects || []).join(', ') || "Mixed", savedBy: p.savedBy || "Admin", savedByDept: p.savedByDept || "Management", syllabi: p.syllabi || {}, rawSubjects: p.subjects || [] });
                 }
             });
 
@@ -370,16 +369,21 @@
             flatList.forEach(item => {
                 let key = `${item.type}__${item.className}__${item.subjects}`;
                 if (!grouped[key]) {
-                    grouped[key] = { type: item.type, className: item.className, subjects: item.subjects, sections: [], ids: new Set(), creators: new Set() };
+                    grouped[key] = { type: item.type, className: item.className, subjects: item.subjects, sections: [], ids: new Set(), creators: new Set(), sectionDetails: [] };
                 }
                 if (!grouped[key].sections.includes(item.section)) grouped[key].sections.push(item.section);
                 grouped[key].ids.add(item.id);
-                // Tag the primary creator to this group
                 grouped[key].creators.add(`${item.savedBy}|${item.savedByDept}`);
+                
+                // Pack the details needed to render the Syllabus dropdowns
+                grouped[key].sectionDetails.push({
+                    section: item.section,
+                    rawSubjects: item.rawSubjects,
+                    syllabi: item.syllabi
+                });
             });
 
             let result = Object.values(grouped).map(g => {
-                // Get the first person who staged this specific class/subject combo
                 let mainCreator = Array.from(g.creators)[0] || "Admin|Management";
                 return {
                     ...g,
@@ -668,18 +672,52 @@
                             if (data.type === 'OT') typeColor = "bg-amber-100 text-amber-700 border-amber-200";
                             if (data.type === 'Terminal Exams' || data.type === 'Preboard' || data.type === 'Board Exam') typeColor = "bg-rose-100 text-rose-700 border-rose-200";
 
-                         return `
+                      // Generate the inner Syllabus Accordion HTML
+                            let syllabusHtml = `<div class="flex flex-col gap-2 w-full min-w-[250px]">`;
+                            
+                            data.sectionDetails.sort((a,b) => a.section.localeCompare(b.section)).forEach(sd => {
+                                sd.rawSubjects.forEach(sub => {
+                                    const hasSyllabus = sd.syllabi && sd.syllabi[sub] && sd.syllabi[sub].trim() !== "";
+                                    const syllText = hasSyllabus ? sd.syllabi[sub].replace(/\n/g, '<br>') : `<span class="text-rose-500 font-bold flex items-center gap-1 animate-pulse">⚠️ Pending</span>`;
+                                    const badgeColor = hasSyllabus ? 'bg-emerald-50 border-emerald-200' : 'bg-rose-50 border-rose-200';
+                                    const textColor = hasSyllabus ? 'text-emerald-800' : 'text-rose-800';
+                                    
+                                    syllabusHtml += `
+                                        <div class="${badgeColor} border rounded-lg p-3 flex flex-col gap-1.5 shadow-sm transition-all hover:shadow-md">
+                                            <div class="flex justify-between items-center border-b border-black/5 pb-1.5">
+                                                <span class="font-black text-[9px] uppercase tracking-widest opacity-80 ${textColor}">Sec ${sd.section}</span>
+                                                <span class="font-black text-[9px] uppercase tracking-widest bg-white/60 px-2 py-0.5 rounded shadow-sm ${textColor}">${sub}</span>
+                                            </div>
+                                            <div class="text-[10px] font-medium text-slate-700 max-h-32 overflow-y-auto custom-scroll leading-relaxed mt-1">${syllText}</div>
+                                        </div>
+                                    `;
+                                });
+                            });
+                            
+                            syllabusHtml += `</div>`;
+
+                            return `
                                 <tr class="group transition-colors border-b border-slate-100 last:border-0 hover:bg-slate-50">
-                                    <td class="p-4"><span class="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border shadow-sm ${typeColor}">${data.type}</span></td>
-                                    <td class="p-4 font-black text-slate-800 text-sm uppercase">${data.className}</td>
-                                    <td class="p-4 font-bold text-slate-500 text-xs sm:text-sm uppercase">${data.sectionsJoined}</td>
-                                    <td class="p-4 font-bold text-indigo-600 text-xs sm:text-sm uppercase">${data.subjects}</td>
-                                    <td class="p-4">
+                                    <td class="p-4 align-top"><span class="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border shadow-sm ${typeColor} whitespace-nowrap">${data.type}</span></td>
+                                    <td class="p-4 font-black text-slate-800 text-sm uppercase align-top">${data.className}</td>
+                                    <td class="p-4 font-bold text-slate-500 text-xs sm:text-sm uppercase align-top">${data.sectionsJoined}</td>
+                                    <td class="p-4 font-bold text-indigo-600 text-xs sm:text-sm uppercase align-top">
+                                        <div class="mb-2 leading-relaxed">${data.subjects}</div>
+                                        <details class="w-full mt-2 group/syll">
+                                            <summary class="inline-flex items-center gap-2 cursor-pointer outline-none select-none">
+                                                <span class="text-[9px] font-black uppercase tracking-widest text-indigo-500 bg-indigo-50 hover:bg-indigo-100 px-2 py-1 rounded border border-indigo-100 transition-colors">📄 View Syllabus Status</span>
+                                            </summary>
+                                            <div class="mt-3 bg-white rounded-xl border border-slate-200 p-3 shadow-inner">
+                                                ${syllabusHtml}
+                                            </div>
+                                        </details>
+                                    </td>
+                                    <td class="p-4 align-top">
                                         <div class="text-[10px] font-black text-slate-700 uppercase tracking-tight">${data.creatorName}</div>
                                         <div class="text-[8px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">${data.creatorDept}</div>
                                     </td>
-                                    <td class="p-4 text-right">
-                                        <button onclick="deleteExamGroup('${data.ids}')" class="text-rose-400 hover:text-rose-600 bg-white hover:bg-rose-50 px-3 py-1.5 rounded-lg font-black text-[10px] uppercase tracking-widest transition-colors shadow-sm border border-rose-200 hover:border-rose-400">
+                                    <td class="p-4 text-right align-top">
+                                        <button onclick="deleteExamGroup('${data.ids}')" class="text-rose-400 hover:text-rose-600 bg-white hover:bg-rose-50 px-3 py-1.5 rounded-lg font-black text-[10px] uppercase tracking-widest transition-colors shadow-sm border border-rose-200 hover:border-rose-400 whitespace-nowrap">
                                             Remove
                                         </button>
                                     </td>
