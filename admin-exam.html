@@ -200,6 +200,9 @@
         </div>
     </div>
 
+<div id="smart-cart-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[300] hidden items-center justify-center p-4 no-print">
+        </div>
+
 <div id="export-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[200] hidden items-center justify-center p-4">
         <div class="bg-white rounded-[2.5rem] w-full max-w-md shadow-2xl overflow-hidden flex flex-col">
             <div class="p-6 sm:p-8 bg-emerald-50 border-b border-emerald-100 flex justify-between items-center shrink-0">
@@ -586,15 +589,13 @@
 
                await batch.commit();
 
-                alert(`✅ Selected sections successfully saved to database!`);
+            await batch.commit();
                 
-                // NEW: Trigger the Auto-Timetable Generator
-                if (confirm(`Would you like to automatically generate and apply the Bell Timetable for this ${type} on ${date}?`)) {
-                    await generateExamTimetable(date, type, checkedRows);
-                }
-
                 document.querySelectorAll('.master-sub-cb').forEach(cb => cb.checked = false);
                 generateStagingTable();
+
+                // Trigger the Smart Cart Evaluator instead of the old generator
+                await evaluateSmartCart(date, type);
 
             } catch (error) {
                 alert("Error saving: " + error.message);
@@ -905,200 +906,149 @@
             `}).join('');
         }
         // --- DYNAMIC SKELETON ALGORITHM ---
-        async function generateExamTimetable(date, type, checkedRows) {
-            const btn = document.getElementById('save-btn');
-            const originalText = btn.innerHTML;
-            btn.innerHTML = "⏳ Generating Timetable...";
-            btn.disabled = true;
-            
+        // --- SMART CART HISTORICAL MATCHER ---
+        async function evaluateSmartCart(targetDate, type) {
+            const modal = document.getElementById('smart-cart-modal');
+            modal.innerHTML = `<div class="bg-white rounded-[2rem] p-8 max-w-md w-full shadow-2xl text-center"><span class="loader border-t-indigo-600"></span><p class="mt-4 font-black text-slate-500 uppercase tracking-widest text-xs">Scanning School History...</p></div>`;
+            modal.classList.replace('hidden', 'flex');
+
             try {
-                // 1. Get the Skeleton Draft (e.g., "draft_GHUMARWIN_UT_TEMPLATE")
-                const draftKey = `draft_${activeCenter}_${type}_TEMPLATE`;
-                const draftSnap = await db.collection("timetable_drafts").doc(draftKey).get();
-                if (!draftSnap.exists || !draftSnap.data().schedule) {
-                    alert(`⚠️ SKELETON MISSING: To use this feature, go to the Timetable Manager, create a schedule with your perfect Exam timings, click "Save as Cloud Draft", and name it exactly "${type}_TEMPLATE".`);
+                // 1. Get the CURRENT cart for the target date (including what user 1 & 2 just saved)
+                const targetSnap = await getCollection("exam_schedules").where("date", "==", targetDate).get();
+                if (targetSnap.empty) {
+                    modal.classList.replace('flex', 'hidden');
                     return;
                 }
-                const skeletonSlots = draftSnap.data().schedule;
 
-                // 2. Get the target day of week
-                const dayName = new Date(date).toLocaleDateString('en-US', { weekday: 'long' });
+                const targetKeys = new Set();
+                targetSnap.docs.forEach(d => {
+                    const data = d.data();
+                    targetKeys.add(`${data.className}|${data.section}`);
+                });
 
-                // 3. Get existing schedule for the date (In case other classes already have an override)
-                const historySnap = await getCollection("timetable_history").doc(date).get();
-                let baseSchedule = [];
-                if (historySnap.exists && historySnap.data().schedule) {
-                    baseSchedule = historySnap.data().schedule;
-                } else {
-                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                    baseSchedule = masterSnap.docs.map(d => d.data());
+                // 2. Fetch all past exam schedules
+                const pastSnap = await getCollection("exam_schedules").where("date", "<", targetDate).get();
+                const pastGroups = {};
+                pastSnap.docs.forEach(d => {
+                    const data = d.data();
+                    if (!pastGroups[data.date]) pastGroups[data.date] = new Set();
+                    pastGroups[data.date].add(`${data.className}|${data.section}`);
+                });
+
+                // 3. Find Exact Matches
+                let matchDate = null;
+                // Sort descending so we find the MOST RECENT historical match first
+                const pastDates = Object.keys(pastGroups).sort((a,b) => b.localeCompare(a)); 
+                for (let pDate of pastDates) {
+                    const pSet = pastGroups[pDate];
+                    if (pSet.size === targetKeys.size && [...pSet].every(k => targetKeys.has(k))) {
+                        matchDate = pDate;
+                        break; // Stop at the most recent perfect match
+                    }
                 }
 
-                // 4. Find which classes are being affected
-                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                let targetKeys = [];
-                checkedRows.forEach(cb => {
-                    const safeId = cb.id.replace('cb_', '');
-                    const dataInput = document.getElementById(`data_${safeId}`);
-                    targetKeys.push(`${norm(dataInput.getAttribute('data-class'))}|${norm(dataInput.getAttribute('data-sec'))}`);
-                });
-
-                // 5. Keep unaffected classes completely untouched
-                let newSchedule = baseSchedule.filter(slot => {
-                    return !targetKeys.includes(`${norm(slot.className)}|${norm(slot.section)}`);
-                });
-
-                // 6. Pour subjects into the Skeleton
-                const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                const liveMaster = masterSnap.docs.map(d => d.data());
-                const SPECIAL = ['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM', 'EVENT'];
-
-                checkedRows.forEach(cb => {
-                    const safeId = cb.id.replace('cb_', '');
-                    const dataInput = document.getElementById(`data_${safeId}`);
-                    const cName = dataInput.getAttribute('data-class');
-                    const sName = dataInput.getAttribute('data-sec');
-
-                    // A: Get normal classes for this section on this weekday
-                    const normalClasses = liveMaster.filter(slot => norm(slot.className) === norm(cName) && norm(slot.section) === norm(sName));
-                    normalClasses.sort((a, b) => {
-                        const [ah, am] = (a.start24||"00:00").split(':').map(Number);
-                        const [bh, bm] = (b.start24||"00:00").split(':').map(Number);
-                        return (ah*60+am) - (bh*60+bm);
-                    });
-
-                    // B: Get skeleton classes
-                    let skeletonClasses = skeletonSlots.filter(slot => norm(slot.className) === norm(cName) && norm(slot.section) === norm(sName));
+                // 4. Render UI based on what we found
+                if (matchDate) {
+                    const prettyMatch = new Date(matchDate).toLocaleDateString('en-GB', { month: 'short', day: 'numeric', year: 'numeric' });
+                    const prettyTarget = new Date(targetDate).toLocaleDateString('en-GB', { month: 'short', day: 'numeric', year: 'numeric' });
                     
-                    // IF admin didn't build a skeleton for every section, intelligently fallback to the first one available
-                    if (skeletonClasses.length === 0 && skeletonSlots.length > 0) {
-                        const firstClass = skeletonSlots[0].className;
-                        const firstSec = skeletonSlots[0].section;
-                        skeletonClasses = skeletonSlots.filter(slot => slot.className === firstClass && slot.section === firstSec);
-                    }
-                    
-                    skeletonClasses.sort((a, b) => {
-                        const [ah, am] = (a.start24||"00:00").split(':').map(Number);
-                        const [bh, bm] = (b.start24||"00:00").split(':').map(Number);
-                        return (ah*60+am) - (bh*60+bm);
-                    });
+                    modal.innerHTML = `
+                        <div class="bg-white rounded-[2.5rem] p-8 max-w-md w-full shadow-2xl border-4 border-emerald-100 flex flex-col relative overflow-hidden">
+                            <div class="absolute top-0 right-0 w-32 h-32 bg-emerald-500 rounded-bl-full -z-10 opacity-10"></div>
+                            <h3 class="font-black text-emerald-600 text-2xl uppercase tracking-tighter mb-2">Perfect Match Found!</h3>
+                            <p class="text-sm font-bold text-slate-600 mb-6 leading-relaxed">Data staged successfully. The system found that <span class="text-emerald-600 font-black bg-emerald-50 px-2 py-0.5 rounded">${prettyMatch}</span> perfectly matches these exact sections.</p>
+                            
+                            <div class="bg-slate-50 border border-slate-200 p-4 rounded-2xl mb-6">
+                                <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Replication Plan</p>
+                                <p class="text-xs font-bold text-slate-700">The entire school timetable from <b>${prettyMatch}</b> will be exactly copied to <b>${prettyTarget}</b>.</p>
+                            </div>
 
-                    // C: Pouring Algorithm
-                    let normalIndex = 0;
+                            <div class="flex flex-col sm:flex-row gap-3">
+                                <button onclick="document.getElementById('smart-cart-modal').classList.replace('flex', 'hidden')" class="flex-1 py-4 bg-slate-100 text-slate-500 hover:bg-slate-200 font-black rounded-xl text-[10px] uppercase tracking-widest transition-colors">Wait, Add More</button>
+                                <button onclick="executeTimetableReplication('${matchDate}', '${targetDate}')" class="flex-[2] py-4 bg-emerald-600 text-white hover:bg-emerald-500 font-black rounded-xl text-[10px] uppercase tracking-widest shadow-lg shadow-emerald-600/30 transition-all active:scale-95">Generate Now ➔</button>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    modal.innerHTML = `
+                        <div class="bg-white rounded-[2.5rem] p-8 max-w-md w-full shadow-2xl border-4 border-indigo-100 flex flex-col">
+                            <h3 class="font-black text-indigo-900 text-2xl uppercase tracking-tighter mb-2">Cart Updated</h3>
+                            <p class="text-sm font-bold text-slate-600 mb-6 leading-relaxed">Exam data staged successfully! No exact historical match was found for this specific combination of sections yet.</p>
+                            
+                            <label class="block text-[10px] font-black text-indigo-400 uppercase tracking-widest mb-2">Select a Past Date to Replicate Manually</label>
+                            <input type="date" id="manual-match-date" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-black text-slate-700 outline-none focus:border-indigo-500 cursor-pointer mb-6 text-center">
 
-                    skeletonClasses.forEach(skelSlot => {
-                        let subjectToAssign = skelSlot.subject;
-                        let teacherToAssign = skelSlot.teacher;
-                        let roomToAssign = skelSlot.room;
-                        const skelSubUpper = (skelSlot.subject || "").toUpperCase();
+                            <div class="flex flex-col sm:flex-row gap-3">
+                                <button onclick="document.getElementById('smart-cart-modal').classList.replace('flex', 'hidden')" class="flex-1 py-4 bg-slate-100 text-slate-500 hover:bg-slate-200 font-black rounded-xl text-[10px] uppercase tracking-widest transition-colors">Wait, Add More</button>
+                                <button onclick="executeTimetableReplication(document.getElementById('manual-match-date').value, '${targetDate}')" class="flex-[2] py-4 bg-indigo-600 text-white hover:bg-indigo-500 font-black rounded-xl text-[10px] uppercase tracking-widest shadow-lg shadow-indigo-600/30 transition-all active:scale-95">Generate ➔</button>
+                            </div>
+                        </div>
+                    `;
+                }
+            } catch (e) {
+                console.error(e);
+                modal.classList.replace('flex', 'hidden');
+            }
+        }
 
-                        if (SPECIAL.includes(skelSubUpper)) {
-                            // Keep Exam/Break/Lunch blocks exactly as they are in the skeleton
-                        } else {
-                            // It's an empty teaching slot! Pour the next normal subject into it.
-                            while (normalIndex < normalClasses.length && SPECIAL.includes((normalClasses[normalIndex].subject || "").toUpperCase())) {
-                                normalIndex++; // Skip breaks that were in the normal schedule
-                            }
+        async function executeTimetableReplication(sourceDate, targetDate) {
+            if (!sourceDate) return alert("Please select a valid past date to replicate.");
+            
+            const modal = document.getElementById('smart-cart-modal');
+            modal.innerHTML = `<div class="bg-white rounded-[2rem] p-8 max-w-md w-full shadow-2xl text-center"><span class="loader border-t-emerald-600"></span><p class="mt-4 font-black text-slate-500 uppercase tracking-widest text-xs">Cloning Entire School Timetable...</p></div>`;
 
-                            if (normalIndex < normalClasses.length) {
-                                const normalSlot = normalClasses[normalIndex];
-                                subjectToAssign = normalSlot.subject;
-                                teacherToAssign = normalSlot.teacher;
-                                roomToAssign = normalSlot.room;
-                                normalIndex++;
-                            } else {
-                                // Failsafe: Ran out of normal subjects to pour
-                                subjectToAssign = "SELF STUDY";
-                                teacherToAssign = "NONE";
-                            }
-                        }
+            try {
+                // 1. Fetch Source Timetable
+                const historySnap = await getCollection("timetable_history").doc(sourceDate).get();
+                let sourceSchedule = [];
+                
+                if (historySnap.exists && historySnap.data().schedule) {
+                    sourceSchedule = historySnap.data().schedule;
+                } else {
+                    // If the past date wasn't a specific override, fetch its normal Live Master equivalent
+                    const sourceDayName = new Date(sourceDate).toLocaleDateString('en-US', { weekday: 'long' });
+                    const masterSnap = await getCollection("timetable").where("day", "==", sourceDayName).get();
+                    if (masterSnap.empty) throw new Error("No timetable data found for the selected past date.");
+                    sourceSchedule = masterSnap.docs.map(d => d.data());
+                }
 
-                        newSchedule.push({
-                            day: dayName,
-                            className: cName,
-                            section: sName,
-                            start24: skelSlot.start24,
-                            end24: skelSlot.end24,
-                            subject: subjectToAssign,
-                            teacher: teacherToAssign,
-                            teacherName: teacherToAssign,
-                            teacherEmail: "", 
-                            room: roomToAssign,
-                            remark: type === 'OT' && !SPECIAL.includes((subjectToAssign||"").toUpperCase()) ? "Doubt Session" : "",
-                            sMins: skelSlot.sMins || 0,
-                            eMins: skelSlot.eMins || 0,
-                            timeRange: skelSlot.timeRange || `${skelSlot.start24} - ${skelSlot.end24}`
-                        });
-                    });
-                });
+                // 2. Adjust the 'day' parameter to match the target date so the Teacher UI renders it correctly
+                const targetDayName = new Date(targetDate).toLocaleDateString('en-US', { weekday: 'long' });
+                const clonedSchedule = sourceSchedule.map(slot => ({
+                    ...slot,
+                    day: targetDayName
+                }));
 
-                // 7. Save the fully generated day to history
-                await getCollection("timetable_history").doc(date).set({
-                    date: date,
+                // 3. Save directly to Target Date History Override
+                await getCollection("timetable_history").doc(targetDate).set({
+                    date: targetDate,
                     lastUpdated: Date.now(),
-                    schedule: newSchedule,
-                    type: "DAILY_OVERRIDE",
-                    tag: `${type} Exam Day`
+                    schedule: clonedSchedule,
+                    type: "EXAM_OVERRIDE",
+                    tag: "Replicated Exam Day"
                 });
                 await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
 
-                alert("✅ Timetable successfully generated and saved for " + date + "!");
-
+                modal.innerHTML = `
+                    <div class="bg-white rounded-[2.5rem] p-8 max-w-md w-full shadow-2xl border-4 border-emerald-100 flex flex-col items-center text-center">
+                        <span class="text-5xl mb-4">✅</span>
+                        <h3 class="font-black text-slate-900 text-xl uppercase tracking-tighter mb-2">Timetable Generated!</h3>
+                        <p class="text-xs font-bold text-slate-500 mb-6">The entire school schedule for ${targetDate} has been locked in.</p>
+                        <button onclick="document.getElementById('smart-cart-modal').classList.replace('flex', 'hidden')" class="w-full py-4 bg-emerald-600 text-white hover:bg-emerald-500 font-black rounded-xl text-[10px] uppercase tracking-widest shadow-md transition-colors">Done</button>
+                    </div>
+                `;
+                
             } catch (e) {
                 console.error(e);
-                alert("Error generating timetable: " + e.message);
-            } finally {
-                btn.innerHTML = originalText;
-                btn.disabled = false;
+                alert("Error replicating timetable: " + e.message);
+                modal.classList.replace('flex', 'hidden');
             }
         }
-        // --- RETROACTIVE TIMETABLE SYNC ---
+    // --- RETROACTIVE TIMETABLE SYNC ---
         async function syncExistingExams(dateStr) {
-            if (!confirm(`Generate the bell timetable for all exams saved on ${dateStr}?`)) return;
-            
-            try {
-                // 1. Fetch all exams scheduled for this specific date
-                const snap = await getCollection("exam_schedules").where("date", "==", dateStr).get();
-                if (snap.empty) return alert("No exams found for this date.");
-
-                let examRecords = snap.docs.map(d => d.data());
-                
-                // Find the dominant exam type (e.g., UT or OT) to know which template to fetch
-                const types = [...new Set(examRecords.map(e => e.type))];
-                const dominantType = types.includes('UT') ? 'UT' : types[0]; 
-
-                // 2. Format data into the structure the generator expects
-                let mockCheckedRows = [];
-                // We use a temporary container to mimic the DOM elements the algorithm looks for
-                const tempContainer = document.createElement('div');
-                
-                examRecords.forEach((record, index) => {
-                    const safeId = `retro_${index}`;
-                    const cName = record.className || "Mixed";
-                    const sName = record.section || "Mixed";
-                    
-                    // The algorithm needs a DOM element with data-class and data-sec
-                    const dataInput = document.createElement('input');
-                    dataInput.id = `data_${safeId}`;
-                    dataInput.setAttribute('data-class', cName);
-                    dataInput.setAttribute('data-sec', sName);
-                    tempContainer.appendChild(dataInput);
-                    
-                    mockCheckedRows.push({ id: `cb_${safeId}` });
-                });
-                
-                document.body.appendChild(tempContainer);
-
-                // 3. Fire the algorithm!
-                await generateExamTimetable(dateStr, dominantType, mockCheckedRows);
-
-                // Cleanup
-                document.body.removeChild(tempContainer);
-
-            } catch (error) {
-                console.error("Sync failed:", error);
-                alert("Error syncing timetable: " + error.message);
-            }
+            // Because we now use the Smart Cart evaluator, we don't need to mock DOM elements anymore!
+            // We just trigger the evaluator to scan the history for this date.
+            await evaluateSmartCart(dateStr, 'EXAM');
         }
     </script>
 </body>
