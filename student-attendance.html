@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minerva | Attendance Registers</title>
+    <script src="tailwind-engine.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
+        .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        
+        /* Book Cover CSS */
+        .book-spine { box-shadow: inset 4px 0 10px rgba(0,0,0,0.2), inset -1px 0 2px rgba(255,255,255,0.3); }
+        .book-pages { background: repeating-linear-gradient(to bottom, #f1f5f9, #f1f5f9 2px, #fff 2px, #white 4px); }
+        
+        /* Sticky Table Columns for Ledger */
+        .table-container { overflow-x: auto; max-width: 100%; border-radius: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .ledger-table { border-collapse: separate; border-spacing: 0; min-w-[1500px]; }
+        .ledger-table th, .ledger-table td { border-bottom: 1px solid #e2e8f0; border-right: 1px solid #e2e8f0; padding: 0.5rem; white-space: nowrap; text-align: center; }
+        .ledger-table th { background-color: #f8fafc; color: #64748b; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 900; }
+        .sticky-col-1 { position: sticky; left: 0; z-index: 20; background: white; width: 60px; min-width: 60px; font-weight: 900; color: #475569; }
+        .sticky-col-2 { position: sticky; left: 60px; z-index: 20; background: white; width: 150px; min-width: 150px; text-align: left !important; font-weight: 800; color: #1e293b; box-shadow: 2px 0 5px rgba(0,0,0,0.05); }
+        .ledger-table th.sticky-col-1, .ledger-table th.sticky-col-2 { background-color: #f1f5f9; z-index: 30; }
+        
+        /* Segmented Radio Buttons for Attendance */
+        .att-radio { display: none; }
+        .att-label { display: inline-block; padding: 6px 12px; cursor: pointer; font-size: 10px; font-weight: 900; text-transform: uppercase; border: 1px solid #e2e8f0; transition: all 0.2s; }
+        .att-label.left { border-radius: 8px 0 0 8px; border-right: none; }
+        .att-label.mid { border-radius: 0; border-right: none; }
+        .att-label.right { border-radius: 0 8px 8px 0; }
+        
+        .att-radio[value="P"]:checked + .att-label { background-color: #10b981; color: white; border-color: #10b981; }
+        .att-radio[value="A"]:checked + .att-label { background-color: #ef4444; color: white; border-color: #ef4444; }
+        .att-radio[value="L"]:checked + .att-label { background-color: #f59e0b; color: white; border-color: #f59e0b; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen font-sans pb-20 relative">
+
+    <header class="bg-[#1e1b4b] text-white p-4 sm:px-6 sm:py-5 flex items-center justify-between shadow-xl sticky top-0 z-40 border-b-4 border-purple-500">
+        <div class="flex items-center gap-4">
+            <button onclick="window.location.href='teacher-portal.html'" class="p-3 bg-white/10 hover:bg-white/20 rounded-xl transition-colors shadow-sm shrink-0 backdrop-blur-sm">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
+            </button>
+            <div>
+                <h1 class="text-xl sm:text-2xl font-black tracking-widest uppercase leading-none">Attendance Desk</h1>
+                <p class="text-[10px] sm:text-xs text-purple-300 font-bold uppercase tracking-widest mt-1" id="teacher-badge">Loading...</p>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto p-4 sm:p-8 mt-2">
+        <div class="mb-8 border-l-4 border-purple-500 pl-4">
+            <h2 class="text-2xl sm:text-3xl font-black uppercase tracking-tighter text-slate-800">My Registers</h2>
+            <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Based on your Timetable & Substitutions</p>
+        </div>
+
+        <div id="bookshelf-container" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">
+            <div class="col-span-full text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest animate-pulse">
+                Fetching Registers...
+            </div>
+        </div>
+    </main>
+
+    <!-- FULL SCREEN REGISTER MODAL -->
+    <div id="register-modal" class="fixed inset-0 bg-slate-900 z-50 hidden flex-col">
+        <!-- Top Bar -->
+        <div class="bg-[#1e293b] p-4 flex justify-between items-center shadow-md shrink-0">
+            <div class="flex items-center gap-4">
+                <button onclick="closeRegister()" class="w-10 h-10 bg-slate-800 hover:bg-rose-500 text-white rounded-full flex justify-center items-center font-black transition-colors">✕</button>
+                <div class="text-white">
+                    <h2 id="reg-title" class="text-lg sm:text-xl font-black uppercase tracking-widest leading-tight"></h2>
+                    <p id="reg-subtitle" class="text-[10px] sm:text-xs text-purple-300 font-bold uppercase tracking-widest mt-0.5"></p>
+                </div>
+            </div>
+            
+            <div class="flex bg-slate-800 p-1 rounded-xl">
+                <button id="tab-daily" onclick="switchTab('daily')" class="px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg bg-white text-slate-900 shadow-sm transition-all">📝 Daily Roll Call</button>
+                <button id="tab-ledger" onclick="switchTab('ledger')" class="px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg text-slate-400 hover:text-white transition-all">📊 Monthly Ledger</button>
+            </div>
+        </div>
+
+        <!-- TAB 1: DAILY ROLL CALL (SPEED MODE) -->
+        <div id="view-daily" class="flex-1 bg-slate-50 overflow-y-auto custom-scroll flex flex-col relative">
+            <div class="sticky top-0 bg-white/90 backdrop-blur-md p-4 border-b border-slate-200 z-10 flex justify-between items-center shadow-sm">
+                <div>
+                    <h3 class="font-black text-slate-800 uppercase tracking-widest text-sm" id="daily-date-label">Today</h3>
+                    <p class="text-[9px] font-bold text-slate-500 uppercase tracking-widest" id="daily-stats-label">0 Present | 0 Absent</p>
+                </div>
+                <div class="flex gap-2">
+                    <input type="date" id="daily-date-picker" onchange="loadDailyAttendance()" class="border border-slate-300 rounded-lg px-2 py-1 text-xs font-bold text-slate-600 outline-none">
+                    <button onclick="markAllPresent()" class="bg-emerald-100 text-emerald-700 hover:bg-emerald-200 px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors border border-emerald-200 shadow-sm hidden sm:block">Mark All Present</button>
+                </div>
+            </div>
+            
+            <div class="p-4 sm:p-6 max-w-4xl mx-auto w-full flex-1">
+                <button onclick="markAllPresent()" class="w-full mb-4 bg-emerald-100 text-emerald-700 hover:bg-emerald-200 px-4 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors border border-emerald-200 shadow-sm sm:hidden">Mark All Present</button>
+                
+                <div id="daily-students-list" class="space-y-2">
+                    <!-- Daily rows generate here -->
+                </div>
+            </div>
+            
+            <div class="sticky bottom-0 bg-white border-t border-slate-200 p-4 shrink-0 shadow-[0_-4px_10px_rgba(0,0,0,0.05)]">
+                <div class="max-w-4xl mx-auto">
+                    <button onclick="saveDailyAttendance()" id="save-daily-btn" class="w-full bg-purple-600 hover:bg-purple-700 text-white font-black py-4 rounded-xl uppercase tracking-widest text-sm shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2">
+                        💾 Save Today's Attendance
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 2: MONTHLY LEDGER (ANALYTICS MODE) -->
+        <div id="view-ledger" class="flex-1 bg-white overflow-hidden hidden flex-col">
+            <div class="bg-slate-50 p-4 border-b border-slate-200 flex justify-between items-center shrink-0">
+                <div class="flex items-center gap-3">
+                    <select id="ledger-month" onchange="loadLedger()" class="border border-slate-300 rounded-lg px-3 py-2 text-xs font-black uppercase tracking-widest text-slate-700 outline-none shadow-sm cursor-pointer bg-white">
+                        <!-- Populated by JS -->
+                    </select>
+                </div>
+                <div class="flex items-center gap-4 text-[9px] font-black uppercase tracking-widest">
+                    <span class="text-rose-500">🔴 < 75% Alert</span>
+                    <span class="text-slate-400">H = Holiday</span>
+                </div>
+            </div>
+            
+            <div class="flex-1 overflow-hidden p-4 relative">
+                <div class="table-container h-full custom-scroll" id="ledger-table-container">
+                    <!-- Wide Table generates here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- FIREBASE CONFIGURATION ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
+            authDomain: "shop-portal-bbbbb.firebaseapp.com",
+            projectId: "shop-portal-bbbbb",
+            storageBucket: "shop-portal-bbbbb.firebasestorage.app",
+            messagingSenderId: "701377739976",
+            appId: "1:701377739976:web:99998220272090e56e79fd"
+        };
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        let activeCenter = "GHUMARWIN";
+        let activeStaff = null;
+        
+        let myRegisters = [];
+        let holidaysData = [];
+        let studentsData = [];
+        
+        // Active Register State
+        let currentReg = null; 
+        let currentMonthDoc = {}; 
+        let prevMonthDoc = {}; 
+
+        const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+        async function init() {
+            activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+            if (!activeStaff) return window.location.replace('staff-login.html');
+            
+            const safeName = activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : activeStaff.email;
+            document.getElementById('teacher-badge').innerText = `Teacher: ${safeName}`;
+
+            try {
+                const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                if (!staffSnap.empty) {
+                    const data = staffSnap.docs[0].data();
+                    const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                    if (centerKey) {
+                        const rawCenter = String(data.details[centerKey]).toUpperCase();
+                        if (rawCenter.includes('DHARAMSHALA')) activeCenter = 'DHARAMSHALA';
+                        else if (rawCenter.includes('GHUMARWIN')) activeCenter = 'GHUMARWIN';
+                        else activeCenter = rawCenter.trim();
+                    }
+                }
+            } catch (e) { console.error("Permission check failed:", e); }
+
+            // Set Date Picker to Today
+            const today = new Date();
+            const offset = today.getTimezoneOffset() * 60000;
+            const todayISO = new Date(today - offset).toISOString().split('T')[0];
+            document.getElementById('daily-date-picker').value = todayISO;
+            document.getElementById('daily-date-picker').max = todayISO; // Cannot take future attendance
+
+            // Populate Ledger Months
+            const monthSelect = document.getElementById('ledger-month');
+            let mHtml = "";
+            for(let i=0; i<6; i++) {
+                let d = new Date(); d.setMonth(d.getMonth() - i);
+                let val = `${d.getFullYear()}_${String(d.getMonth()+1).padStart(2,'0')}`;
+                let txt = `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
+                mHtml += `<option value="${val}">${txt}</option>`;
+            }
+            monthSelect.innerHTML = mHtml;
+
+            await fetchData(safeName);
+        }
+
+        function getCollection(name) {
+            const globalCollections = ['configs', 'staff_applications', 'system_metadata'];
+            if (globalCollections.includes(name)) return db.collection(name);
+            if (activeCenter === "GHUMARWIN") return db.collection(name);
+            return db.collection(`${activeCenter.toLowerCase()}_${name}`);
+        }
+
+        async function fetchData(safeName) {
+            const container = document.getElementById('bookshelf-container');
+            try {
+                // Fetch Timetable, Structure, Holidays, and Students in parallel
+                const [ttSnap, structSnap, holSnap, stuSnap] = await Promise.all([
+                    getCollection("timetable").get(), // Fetch all to find subs if needed
+                    getCollection("institute_structure").get(),
+                    getCollection("school_holidays").get(),
+                    getCollection("students").where("isActive", "==", true).get()
+                ]);
+
+                holidaysData = holSnap.docs.map(d => d.data());
+                
+                studentsData = [];
+                stuSnap.forEach(d => studentsData.push({ id: d.id, ...d.data() }));
+
+                const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const allTimetables = ttSnap.docs.map(d => d.data());
+                
+                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const mySafeName = norm(safeName);
+
+                // 1. Get Routine Classes
+                let regMap = new Map();
+                allTimetables.forEach(t => {
+                    if (norm(t.teacherName) === mySafeName || norm(t.teacher) === mySafeName) {
+                        const key = `${t.className}|${t.section}|${t.subject}`;
+                        regMap.set(key, { c: t.className, s: t.section, sub: t.subject });
+                    }
+                });
+
+                // 2. Add Substitution Logic (Check Today's Leaves)
+                const today = new Date();
+                const offset = today.getTimezoneOffset() * 60000;
+                const todayISO = new Date(today - offset).toISOString().split('T')[0];
+                
+                const leaveSnap = await getCollection("leave_requests").where("status", "in", ["APPROVED", "PENDING"]).get();
+                leaveSnap.forEach(doc => {
+                    const lData = doc.data();
+                    if (lData.adjustments) {
+                        lData.adjustments.forEach(adj => {
+                            if (adj.date === todayISO && adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
+                                const parts = (adj.sub || "").split('|');
+                                const cName = parts[0] ? parts[0].trim() : "";
+                                const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "";
+                                const key = `${cName}|${sName}|${adj.title}`;
+                                regMap.set(key, { c: cName, s: sName, sub: adj.title, isSub: true });
+                            }
+                        });
+                    }
+                });
+
+                myRegisters = Array.from(regMap.values());
+
+                if (myRegisters.length === 0) {
+                    container.innerHTML = `<div class="col-span-full text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest border-2 border-dashed border-slate-200 rounded-3xl bg-white">No Assigned Registers Found</div>`;
+                    return;
+                }
+
+                // Render Bookshelf
+                let html = "";
+                const colors = [
+                    { spine: 'bg-blue-800', cover: 'bg-blue-600', text: 'text-blue-200' },
+                    { spine: 'bg-emerald-800', cover: 'bg-emerald-600', text: 'text-emerald-200' },
+                    { spine: 'bg-rose-800', cover: 'bg-rose-600', text: 'text-rose-200' },
+                    { spine: 'bg-amber-700', cover: 'bg-amber-500', text: 'text-amber-100' },
+                    { spine: 'bg-purple-800', cover: 'bg-purple-600', text: 'text-purple-200' }
+                ];
+
+                myRegisters.sort((a,b) => a.c.localeCompare(b.c)).forEach((reg, index) => {
+                    const c = colors[index % colors.length];
+                    const subBadge = reg.isSub ? `<div class="absolute -top-3 -right-3 bg-rose-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">Substitution</div>` : '';
+                    
+                    const safeArgs = `'${reg.c}', '${reg.s}', '${reg.sub}'`;
+                    
+                    html += `
+                        <div onclick="openRegister(${safeArgs})" class="cursor-pointer group relative transition-transform hover:-translate-y-2 hover:rotate-1 duration-300">
+                            ${subBadge}
+                            <div class="relative w-full aspect-[3/4] rounded-r-2xl rounded-l-md shadow-[4px_4px_15px_rgba(0,0,0,0.1)] overflow-hidden flex">
+                                <!-- Spine -->
+                                <div class="w-6 h-full ${c.spine} book-spine shrink-0 z-10 relative">
+                                    <div class="absolute top-4 left-0 w-full h-px bg-white/20"></div>
+                                    <div class="absolute top-5 left-0 w-full h-px bg-white/20"></div>
+                                    <div class="absolute bottom-4 left-0 w-full h-px bg-white/20"></div>
+                                    <div class="absolute bottom-5 left-0 w-full h-px bg-white/20"></div>
+                                </div>
+                                <!-- Cover -->
+                                <div class="flex-1 h-full ${c.cover} p-4 flex flex-col justify-between relative">
+                                    <div class="absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/20 to-transparent"></div>
+                                    <div class="relative z-10">
+                                        <div class="text-[10px] font-black ${c.text} uppercase tracking-widest mb-1 border-b border-white/20 pb-1 inline-block">Register</div>
+                                        <h3 class="text-xl font-black text-white uppercase tracking-tighter leading-none break-words">${reg.c}</h3>
+                                        <p class="text-sm font-bold text-white/80 uppercase mt-1">Sec ${reg.s}</p>
+                                    </div>
+                                    <div class="relative z-10 bg-white/10 backdrop-blur-sm border border-white/20 p-2 rounded-lg text-center mt-4">
+                                        <span class="text-[10px] font-black text-white uppercase tracking-widest line-clamp-2">${reg.sub}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="w-[90%] h-2 bg-black/20 rounded-full mx-auto mt-2 blur-[2px] group-hover:blur-[4px] transition-all"></div>
+                        </div>
+                    `;
+                });
+                container.innerHTML = html;
+
+            } catch (e) {
+                console.error(e);
+                container.innerHTML = `<div class="col-span-full text-center py-20 text-rose-500 font-bold uppercase text-xs tracking-widest">Error fetching registers.</div>`;
+            }
+        }
+
+        function switchTab(tab) {
+            if (tab === 'daily') {
+                document.getElementById('tab-daily').className = "px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg bg-white text-slate-900 shadow-sm transition-all";
+                document.getElementById('tab-ledger').className = "px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg text-slate-400 hover:text-white transition-all";
+                document.getElementById('view-daily').style.display = 'flex';
+                document.getElementById('view-ledger').style.display = 'none';
+            } else {
+                document.getElementById('tab-ledger').className = "px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg bg-white text-slate-900 shadow-sm transition-all";
+                document.getElementById('tab-daily').className = "px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg text-slate-400 hover:text-white transition-all";
+                document.getElementById('view-daily').style.display = 'none';
+                document.getElementById('view-ledger').style.display = 'flex';
+                loadLedger(); // Render table when tab is opened
+            }
+        }
+
+        async function openRegister(c, s, sub) {
+            currentReg = { c, s, sub };
+            document.getElementById('reg-title').innerText = `${c} | Sec ${s}`;
+            document.getElementById('reg-subtitle').innerText = sub;
+            document.getElementById('register-modal').style.display = 'flex';
+            
+            switchTab('daily');
+            await loadDailyAttendance();
+        }
+
+        function closeRegister() {
+            document.getElementById('register-modal').style.display = 'none';
+            currentReg = null;
+        }
+
+        // --- TAB 1: DAILY ROLL CALL ---
+        async function loadDailyAttendance() {
+            const dateStr = document.getElementById('daily-date-picker').value;
+            const [y, m, d] = dateStr.split('-');
+            const monthKey = `${y}_${m}`;
+            const docId = `att_${activeCenter}_${currentReg.c.replace(/\s/g,'_')}_${currentReg.s.replace(/\s/g,'_')}_${currentReg.sub.replace(/\s/g,'_')}_${monthKey}`;
+            
+            const listContainer = document.getElementById('daily-students-list');
+            listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
+
+            // Filter students for this register
+            let myStudents = studentsData.filter(stu => stu.className === currentReg.c && stu.section === currentReg.s).sort((a,b) => a.rollNo.localeCompare(b.rollNo, undefined, {numeric:true}));
+
+            if(myStudents.length === 0) {
+                listContainer.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs border-2 border-dashed border-slate-300 rounded-2xl">No active students found in this section.</div>`;
+                updateDailyStats();
+                return;
+            }
+
+            try {
+                // Check for Global Holiday
+                const checkDate = new Date(dateStr); checkDate.setHours(0,0,0,0);
+                if (checkDate.getDay() === 0) {
+                    listContainer.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest text-sm bg-rose-50 rounded-2xl border border-rose-200">Sunday (Weekly Off) - Attendance Disabled</div>`;
+                    return;
+                }
+                
+                let isHol = false; let holReason = "";
+                for(let h of holidaysData) {
+                    if(h.startDate && h.isFullDay) {
+                        let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
+                        let he = new Date(h.endDate || h.startDate); he.setHours(23,59,59,999);
+                        if(checkDate >= hs && checkDate <= he) { isHol = true; holReason = h.reason; break; }
+                    }
+                }
+                if(isHol) {
+                    listContainer.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest text-sm bg-rose-50 rounded-2xl border border-rose-200">Holiday: ${holReason} - Attendance Disabled</div>`;
+                    return;
+                }
+
+                // Fetch Attendance DB
+                const docSnap = await getCollection("attendance_records").doc(docId).get();
+                currentMonthDoc = docSnap.exists ? docSnap.data().records || {} : {};
+                const todaysData = currentMonthDoc[dateStr] || {};
+
+                let html = "";
+                myStudents.forEach(stu => {
+                    // Default to Present if not marked yet
+                    const status = todaysData[stu.id] || "P"; 
+                    
+                    html += `
+                        <div class="bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center hover:border-purple-300 transition-colors">
+                            <div class="flex items-center gap-3 sm:gap-4">
+                                <span class="bg-slate-100 text-slate-500 font-mono text-[10px] sm:text-xs font-black px-2 py-1 rounded border border-slate-200">#${stu.rollNo}</span>
+                                <div>
+                                    <h4 class="font-black text-slate-800 text-xs sm:text-sm uppercase tracking-tight">${stu.name}</h4>
+                                </div>
+                            </div>
+                            <div class="flex">
+                                <input type="radio" name="att_${stu.id}" id="P_${stu.id}" value="P" class="att-radio" ${status==='P' ? 'checked' : ''} onchange="updateDailyStats()">
+                                <label for="P_${stu.id}" class="att-label left text-slate-500 hover:bg-slate-50 select-none">P</label>
+                                
+                                <input type="radio" name="att_${stu.id}" id="A_${stu.id}" value="A" class="att-radio" ${status==='A' ? 'checked' : ''} onchange="updateDailyStats()">
+                                <label for="A_${stu.id}" class="att-label mid text-slate-500 hover:bg-slate-50 select-none">A</label>
+                                
+                                <input type="radio" name="att_${stu.id}" id="L_${stu.id}" value="L" class="att-radio" ${status==='L' ? 'checked' : ''} onchange="updateDailyStats()">
+                                <label for="L_${stu.id}" class="att-label right text-slate-500 hover:bg-slate-50 select-none">L</label>
+                            </div>
+                        </div>
+                    `;
+                });
+                
+                listContainer.innerHTML = html;
+                updateDailyStats();
+
+            } catch(e) {
+                console.error(e);
+                listContainer.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest text-xs">Error loading data.</div>`;
+            }
+        }
+
+        function updateDailyStats() {
+            const dateStr = document.getElementById('daily-date-picker').value;
+            const pretty = new Date(dateStr).toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short'});
+            document.getElementById('daily-date-label').innerText = pretty;
+            
+            const radios = document.querySelectorAll('.att-radio:checked');
+            if (radios.length === 0) return;
+            
+            let p = 0, a = 0, l = 0;
+            radios.forEach(r => {
+                if(r.value === 'P') p++;
+                if(r.value === 'A') a++;
+                if(r.value === 'L') l++;
+            });
+            document.getElementById('daily-stats-label').innerText = `P: ${p} | A: ${a} | L: ${l} | Total: ${radios.length}`;
+        }
+
+        function markAllPresent() {
+            const myStudents = studentsData.filter(stu => stu.className === currentReg.c && stu.section === currentReg.s);
+            myStudents.forEach(stu => {
+                const radio = document.getElementById(`P_${stu.id}`);
+                if (radio) radio.checked = true;
+            });
+            updateDailyStats();
+        }
+
+        async function saveDailyAttendance() {
+            const dateStr = document.getElementById('daily-date-picker').value;
+            const btn = document.getElementById('save-daily-btn');
+            
+            // Collect Data
+            const myStudents = studentsData.filter(stu => stu.className === currentReg.c && stu.section === currentReg.s);
+            let todaysData = {};
+            myStudents.forEach(stu => {
+                const checked = document.querySelector(`input[name="att_${stu.id}"]:checked`);
+                if(checked) todaysData[stu.id] = checked.value;
+            });
+
+            if(Object.keys(todaysData).length === 0) return;
+
+            const origText = btn.innerHTML;
+            btn.innerHTML = "⏳ Saving..."; btn.disabled = true;
+
+            const [y, m, d] = dateStr.split('-');
+            const monthKey = `${y}_${m}`;
+            const docId = `att_${activeCenter}_${currentReg.c.replace(/\s/g,'_')}_${currentReg.s.replace(/\s/g,'_')}_${currentReg.sub.replace(/\s/g,'_')}_${monthKey}`;
+
+            try {
+                // We use set with merge so we don't overwrite other days in the month
+                await getCollection("attendance_records").doc(docId).set({
+                    [`records.${dateStr}`]: todaysData,
+                    className: currentReg.c,
+                    section: currentReg.s,
+                    subject: currentReg.sub,
+                    monthKey: monthKey,
+                    lastUpdated: Date.now()
+                }, { merge: true });
+                
+                // Update local memory so Ledger works instantly
+                if(!currentMonthDoc) currentMonthDoc = {};
+                currentMonthDoc[dateStr] = todaysData;
+
+                btn.innerHTML = "✅ Saved Successfully!";
+                setTimeout(() => { btn.innerHTML = origText; btn.disabled = false; }, 2000);
+            } catch(e) {
+                console.error(e);
+                alert("Failed to save.");
+                btn.innerHTML = origText; btn.disabled = false;
+            }
+        }
+
+        // --- TAB 2: MONTHLY LEDGER ---
+        async function loadLedger() {
+            const container = document.getElementById('ledger-table-container');
+            container.innerHTML = `<div class="text-center py-20"><span class="loader"></span></div>`;
+
+            const monthVal = document.getElementById('ledger-month').value; // e.g. "2026_07"
+            const [y, m] = monthVal.split('_');
+            const docId = `att_${activeCenter}_${currentReg.c.replace(/\s/g,'_')}_${currentReg.s.replace(/\s/g,'_')}_${currentReg.sub.replace(/\s/g,'_')}_${monthVal}`;
+            
+            // Previous month calculation
+            let prevM = parseInt(m) - 1; let prevY = parseInt(y);
+            if (prevM === 0) { prevM = 12; prevY--; }
+            const prevMonthKey = `${prevY}_${String(prevM).padStart(2,'0')}`;
+            const prevDocId = `att_${activeCenter}_${currentReg.c.replace(/\s/g,'_')}_${currentReg.s.replace(/\s/g,'_')}_${currentReg.sub.replace(/\s/g,'_')}_${prevMonthKey}`;
+
+            try {
+                // Fetch Current and Previous Month
+                const [curSnap, prevSnap] = await Promise.all([
+                    getCollection("attendance_records").doc(docId).get(),
+                    getCollection("attendance_records").doc(prevDocId).get()
+                ]);
+
+                const curRecords = curSnap.exists ? curSnap.data().records || {} : {};
+                const prevStats = prevSnap.exists ? prevSnap.data().aggregatedStats || {} : {}; // Assumes a Cloud Function or batch process saves grand totals at month end. If not, we fall back to 0.
+
+                const myStudents = studentsData.filter(stu => stu.className === currentReg.c && stu.section === currentReg.s).sort((a,b) => a.rollNo.localeCompare(b.rollNo, undefined, {numeric:true}));
+
+                if (myStudents.length === 0) {
+                    container.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs">No students in section.</div>`; return;
+                }
+
+                const daysInMonth = new Date(y, m, 0).getDate();
+                const today = new Date();
+                const offset = today.getTimezoneOffset() * 60000;
+                const todayISO = new Date(today - offset).toISOString().split('T')[0];
+
+                // --- Calculate Working Days ---
+                let totalWorkingDaysMonth = 0;
+                let dayHeaders = "";
+                let dayStatuses = []; // Pre-calculate if day is holiday/sunday
+                
+                for(let d=1; d<=daysInMonth; d++) {
+                    const dateStr = `${y}-${m}-${String(d).padStart(2,'0')}`;
+                    const dObj = new Date(dateStr);
+                    const isSunday = dObj.getDay() === 0;
+                    
+                    let isHol = false;
+                    for(let h of holidaysData) {
+                        if(h.startDate && h.isFullDay) {
+                            let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
+                            let he = new Date(h.endDate || h.startDate); he.setHours(23,59,59,999);
+                            if(dObj >= hs && dObj <= he) { isHol = true; break; }
+                        }
+                    }
+
+                    // Only count as a "Working Day" if it's not a holiday/Sunday AND it's on or before today
+                    const isWorkingDay = !isSunday && !isHol && dateStr <= todayISO;
+                    if(isWorkingDay) totalWorkingDaysMonth++;
+
+                    dayStatuses.push({ date: dateStr, isHol: (isSunday || isHol), isFuture: dateStr > todayISO });
+                    
+                    let bg = (isSunday || isHol) ? "bg-slate-200 text-slate-400" : "bg-white";
+                    dayHeaders += `<th class="${bg} min-w-[30px] border-r border-b border-slate-200">${d}</th>`;
+                }
+
+                // Prev Stats defaults
+                const prevTotalWorking = prevStats.globalTotalWorkingDays || 0;
+                const grandTotalWorking = prevTotalWorking + totalWorkingDaysMonth;
+
+                // --- Build Table ---
+                let tableHtml = `
+                    <table class="ledger-table w-full">
+                        <thead>
+                            <tr>
+                                <th class="sticky-col-1" rowspan="2">Roll</th>
+                                <th class="sticky-col-2" rowspan="2">Full Name</th>
+                                <th colspan="${daysInMonth}" class="border-b border-r border-slate-200 text-center py-2">Days of ${monthNames[parseInt(m)-1]} ${y}</th>
+                                <th colspan="3" class="bg-indigo-50 border-b border-r border-slate-200 text-indigo-700">Working Days</th>
+                                <th colspan="4" class="bg-emerald-50 border-b border-slate-200 text-emerald-700">Student Attendance</th>
+                                <th rowspan="2" class="bg-slate-800 text-white w-[60px]"> % </th>
+                            </tr>
+                            <tr>
+                                ${dayHeaders}
+                                <th class="bg-indigo-50 border-r border-slate-200 text-[8px]" title="Total Working Days This Month">This Month</th>
+                                <th class="bg-indigo-50 border-r border-slate-200 text-[8px]" title="Grand Total Working Days Previous Month">Prev Total</th>
+                                <th class="bg-indigo-50 border-r border-slate-200 text-[8px]" title="Grand Total Working Days Till Now">Till Now</th>
+                                
+                                <th class="bg-emerald-50 border-r border-slate-200 text-[8px]" title="Leaves This Month">Month (L)</th>
+                                <th class="bg-emerald-50 border-r border-slate-200 text-[8px]" title="Attendance This Month">Month (P)</th>
+                                <th class="bg-emerald-50 border-r border-slate-200 text-[8px]" title="Grand Total Attendance Previous Month">Prev Total</th>
+                                <th class="bg-emerald-50 border-r border-slate-200 text-[8px]" title="Grand Total Attendance Till Now">Till Now</th>
+                            </tr>
+                        </thead>
+                        <tbody class="text-[10px] font-bold text-slate-700 bg-white">
+                `;
+
+                myStudents.forEach(stu => {
+                    const stuPrevAtt = prevStats.students ? (prevStats.students[stu.id] || 0) : 0;
+                    
+                    let pCount = 0; let lCount = 0;
+                    let rowHtml = "";
+
+                    dayStatuses.forEach(ds => {
+                        let cellContent = "";
+                        let bgClass = "bg-white hover:bg-slate-50";
+
+                        if (ds.isHol) {
+                            bgClass = "bg-slate-100 text-slate-300";
+                            cellContent = "H";
+                        } else if (ds.isFuture) {
+                            cellContent = "-";
+                            bgClass = "bg-slate-50/50 text-slate-300";
+                        } else {
+                            // Working Day recorded?
+                            if (curRecords[ds.date] && curRecords[ds.date][stu.id]) {
+                                const val = curRecords[ds.date][stu.id];
+                                if (val === 'P') { cellContent = "P"; bgClass = "text-emerald-600 font-black"; pCount++; }
+                                else if (val === 'A') { cellContent = "A"; bgClass = "text-rose-500 font-black bg-rose-50"; }
+                                else if (val === 'L') { cellContent = "L"; bgClass = "text-amber-500 font-black"; lCount++; }
+                            } else {
+                                cellContent = "?"; // Not marked
+                                bgClass = "text-slate-300 bg-slate-50";
+                            }
+                        }
+                        
+                        rowHtml += `<td class="${bgClass} border-r border-b border-slate-200 text-center">${cellContent}</td>`;
+                    });
+
+                    const grandTotalAtt = stuPrevAtt + pCount;
+                    
+                    let percentage = 0;
+                    if (grandTotalWorking > 0) {
+                        percentage = Math.round((grandTotalAtt / grandTotalWorking) * 100);
+                    }
+                    
+                    const pctClass = percentage < 75 && grandTotalWorking > 0 ? "bg-rose-100 text-rose-600 font-black" : "font-black text-slate-800";
+
+                    tableHtml += `
+                        <tr>
+                            <td class="sticky-col-1 border-b border-slate-200 bg-white shadow-[1px_0_2px_rgba(0,0,0,0.05)] text-slate-400">#${stu.rollNo}</td>
+                            <td class="sticky-col-2 border-b border-slate-200 bg-white uppercase truncate px-2" title="${stu.name}">${stu.name}</td>
+                            ${rowHtml}
+                            <td class="bg-indigo-50/30 border-r border-b border-slate-200 font-black text-slate-600">${totalWorkingDaysMonth}</td>
+                            <td class="bg-indigo-50/30 border-r border-b border-slate-200 text-slate-500">${prevTotalWorking}</td>
+                            <td class="bg-indigo-50 border-r border-b border-slate-200 font-black text-indigo-700">${grandTotalWorking}</td>
+                            
+                            <td class="bg-amber-50/30 border-r border-b border-amber-100 text-amber-600 font-black">${lCount}</td>
+                            <td class="bg-emerald-50/30 border-r border-b border-emerald-100 text-emerald-600 font-black">${pCount}</td>
+                            <td class="bg-emerald-50/30 border-r border-b border-emerald-100 text-slate-500">${stuPrevAtt}</td>
+                            <td class="bg-emerald-50 border-r border-b border-emerald-200 font-black text-emerald-700">${grandTotalAtt}</td>
+                            
+                            <td class="border-b border-slate-200 ${pctClass}">${percentage}%</td>
+                        </tr>
+                    `;
+                });
+
+                tableHtml += `</tbody></table>`;
+                container.innerHTML = tableHtml;
+
+            } catch (e) {
+                console.error(e);
+                container.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest text-xs">Error loading ledger.</div>`;
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
