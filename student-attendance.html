@@ -42,7 +42,7 @@
 
     <header class="bg-[#1e1b4b] text-white p-4 sm:px-6 sm:py-5 flex items-center justify-between shadow-xl sticky top-0 z-40 border-b-4 border-purple-500">
         <div class="flex items-center gap-4">
-            <button onclick="window.location.href='teacher-portal.html'" class="p-3 bg-white/10 hover:bg-white/20 rounded-xl transition-colors shadow-sm shrink-0 backdrop-blur-sm">
+            <button onclick="handleBack()" class="p-3 bg-white/10 hover:bg-white/20 rounded-xl transition-colors shadow-sm shrink-0 backdrop-blur-sm">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
             </button>
             <div>
@@ -162,24 +162,43 @@
 
         const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+        const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+
+        function handleBack() {
+            if (isAdmin) {
+                window.location.href = 'admin.html';
+            } else {
+                window.location.href = 'teacher-portal.html';
+            }
+        }
+
         async function init() {
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
-            if (!activeStaff) return window.location.replace('staff-login.html');
             
-            const safeName = activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : activeStaff.email;
-            document.getElementById('teacher-badge').innerText = `Teacher: ${safeName}`;
+            // If they aren't logged in as staff, check if they are logged in as Admin
+            if (!activeStaff && !isAdmin) return window.location.replace('staff-login.html');
+            
+            let safeName = "Admin";
+            if (activeStaff) {
+                safeName = activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : activeStaff.email;
+            }
+            document.getElementById('teacher-badge').innerText = `User: ${safeName}`;
 
             try {
-                const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
-                if (!staffSnap.empty) {
-                    const data = staffSnap.docs[0].data();
-                    const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
-                    if (centerKey) {
-                        const rawCenter = String(data.details[centerKey]).toUpperCase();
-                        if (rawCenter.includes('DHARAMSHALA')) activeCenter = 'DHARAMSHALA';
-                        else if (rawCenter.includes('GHUMARWIN')) activeCenter = 'GHUMARWIN';
-                        else activeCenter = rawCenter.trim();
+                if (activeStaff) {
+                    const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                    if (!staffSnap.empty) {
+                        const data = staffSnap.docs[0].data();
+                        const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                        if (centerKey) {
+                            const rawCenter = String(data.details[centerKey]).toUpperCase();
+                            if (rawCenter.includes('DHARAMSHALA')) activeCenter = 'DHARAMSHALA';
+                            else if (rawCenter.includes('GHUMARWIN')) activeCenter = 'GHUMARWIN';
+                            else activeCenter = rawCenter.trim();
+                        }
                     }
+                } else if (isAdmin) {
+                    activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
                 }
             } catch (e) { console.error("Permission check failed:", e); }
 
@@ -188,7 +207,7 @@
             const offset = today.getTimezoneOffset() * 60000;
             const todayISO = new Date(today - offset).toISOString().split('T')[0];
             document.getElementById('daily-date-picker').value = todayISO;
-            document.getElementById('daily-date-picker').max = todayISO; // Cannot take future attendance
+            document.getElementById('daily-date-picker').max = todayISO;
 
             // Populate Ledger Months
             const monthSelect = document.getElementById('ledger-month');
@@ -214,54 +233,72 @@
         async function fetchData(safeName) {
             const container = document.getElementById('bookshelf-container');
             try {
-                // Fetch Timetable, Structure, Holidays, and Students in parallel
+                // We REMOVE the .where("isActive") constraint so we catch older students too
                 const [ttSnap, structSnap, holSnap, stuSnap] = await Promise.all([
-                    getCollection("timetable").get(), // Fetch all to find subs if needed
+                    getCollection("timetable").get(),
                     getCollection("institute_structure").get(),
                     getCollection("school_holidays").get(),
-                    getCollection("students").where("isActive", "==", true).get()
+                    getCollection("students").get() 
                 ]);
 
                 holidaysData = holSnap.docs.map(d => d.data());
                 
                 studentsData = [];
-                stuSnap.forEach(d => studentsData.push({ id: d.id, ...d.data() }));
+                stuSnap.forEach(d => {
+                    const s = d.data();
+                    // We only exclude explicitly inactive students. 
+                    // True or undefined (older students) will be treated as Active.
+                    if (s.isActive !== false) {
+                        studentsData.push({ id: d.id, ...s });
+                    }
+                });
 
                 const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const allTimetables = ttSnap.docs.map(d => d.data());
                 
-                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const norm = (str) => String(str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
                 const mySafeName = norm(safeName);
 
-                // 1. Get Routine Classes
                 let regMap = new Map();
-                allTimetables.forEach(t => {
-                    if (norm(t.teacherName) === mySafeName || norm(t.teacher) === mySafeName) {
-                        const key = `${t.className}|${t.section}|${t.subject}`;
-                        regMap.set(key, { c: t.className, s: t.section, sub: t.subject });
-                    }
-                });
 
-                // 2. Add Substitution Logic (Check Today's Leaves)
-                const today = new Date();
-                const offset = today.getTimezoneOffset() * 60000;
-                const todayISO = new Date(today - offset).toISOString().split('T')[0];
-                
-                const leaveSnap = await getCollection("leave_requests").where("status", "in", ["APPROVED", "PENDING"]).get();
-                leaveSnap.forEach(doc => {
-                    const lData = doc.data();
-                    if (lData.adjustments) {
-                        lData.adjustments.forEach(adj => {
-                            if (adj.date === todayISO && adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
-                                const parts = (adj.sub || "").split('|');
-                                const cName = parts[0] ? parts[0].trim() : "";
-                                const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "";
-                                const key = `${cName}|${sName}|${adj.title}`;
-                                regMap.set(key, { c: cName, s: sName, sub: adj.title, isSub: true });
-                            }
+                if (isAdmin) {
+                    // ADMIN GOD MODE: Show every register based on Institute Structure
+                    structures.forEach(st => {
+                        (st.subjects || []).forEach(sub => {
+                            const key = `${st.className}|${st.sectionName}|${sub}`;
+                            regMap.set(key, { c: st.className, s: st.sectionName, sub: sub });
                         });
-                    }
-                });
+                    });
+                } else {
+                    // TEACHER MODE: Get Routine Classes
+                    allTimetables.forEach(t => {
+                        if (norm(t.teacherName) === mySafeName || norm(t.teacher) === mySafeName) {
+                            const key = `${t.className}|${t.section}|${t.subject}`;
+                            regMap.set(key, { c: t.className, s: t.section, sub: t.subject });
+                        }
+                    });
+
+                    // Add Substitution Logic (Check Today's Leaves)
+                    const today = new Date();
+                    const offset = today.getTimezoneOffset() * 60000;
+                    const todayISO = new Date(today - offset).toISOString().split('T')[0];
+                    
+                    const leaveSnap = await getCollection("leave_requests").where("status", "in", ["APPROVED", "PENDING"]).get();
+                    leaveSnap.forEach(doc => {
+                        const lData = doc.data();
+                        if (lData.adjustments) {
+                            lData.adjustments.forEach(adj => {
+                                if (adj.date === todayISO && adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
+                                    const parts = (adj.sub || "").split('|');
+                                    const cName = parts[0] ? parts[0].trim() : "";
+                                    const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "";
+                                    const key = `${cName}|${sName}|${adj.title}`;
+                                    regMap.set(key, { c: cName, s: sName, sub: adj.title, isSub: true });
+                                }
+                            });
+                        }
+                    });
+                }
 
                 myRegisters = Array.from(regMap.values());
 
@@ -280,11 +317,15 @@
                     { spine: 'bg-purple-800', cover: 'bg-purple-600', text: 'text-purple-200' }
                 ];
 
-                myRegisters.sort((a,b) => a.c.localeCompare(b.c)).forEach((reg, index) => {
+                myRegisters.sort((a,b) => String(a.c).localeCompare(String(b.c))).forEach((reg, index) => {
                     const c = colors[index % colors.length];
                     const subBadge = reg.isSub ? `<div class="absolute -top-3 -right-3 bg-rose-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">Substitution</div>` : '';
                     
-                    const safeArgs = `'${reg.c}', '${reg.s}', '${reg.sub}'`;
+                    // Escaping the strings so quotes don't break the onclick handler
+                    const escapedC = String(reg.c).replace(/'/g, "\\'");
+                    const escapedS = String(reg.s).replace(/'/g, "\\'");
+                    const escapedSub = String(reg.sub).replace(/'/g, "\\'");
+                    const safeArgs = `'${escapedC}', '${escapedS}', '${escapedSub}'`;
                     
                     html += `
                         <div onclick="openRegister(${safeArgs})" class="cursor-pointer group relative transition-transform hover:-translate-y-2 hover:rotate-1 duration-300">
@@ -333,9 +374,12 @@
                 document.getElementById('tab-daily').className = "px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg text-slate-400 hover:text-white transition-all";
                 document.getElementById('view-daily').style.display = 'none';
                 document.getElementById('view-ledger').style.display = 'flex';
-                loadLedger(); // Render table when tab is opened
+                loadLedger(); 
             }
         }
+
+        // --- BULLETPROOF STUDENT MATCHER ---
+        const safeMatch = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
         async function openRegister(c, s, sub) {
             currentReg = { c, s, sub };
@@ -357,14 +401,16 @@
             const dateStr = document.getElementById('daily-date-picker').value;
             const [y, m, d] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
-            const docId = `att_${activeCenter}_${currentReg.c.replace(/\s/g,'_')}_${currentReg.s.replace(/\s/g,'_')}_${currentReg.sub.replace(/\s/g,'_')}_${monthKey}`;
+            const docId = `att_${activeCenter}_${String(currentReg.c).replace(/\s/g,'_')}_${String(currentReg.s).replace(/\s/g,'_')}_${String(currentReg.sub).replace(/\s/g,'_')}_${monthKey}`;
             
-         const listContainer = document.getElementById('daily-students-list');
+            const listContainer = document.getElementById('daily-students-list');
             listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
 
-            // Filter students for this register (Ignoring spaces and capitalization)
-            const normMatch = str => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-            let myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s)).sort((a,b) => a.rollNo.localeCompare(b.rollNo, undefined, {numeric:true}));
+            // Bulletproof Filter
+            let myStudents = studentsData.filter(stu => 
+                safeMatch(stu.className) === safeMatch(currentReg.c) && 
+                safeMatch(stu.section) === safeMatch(currentReg.s)
+            ).sort((a,b) => String(a.rollNo).localeCompare(String(b.rollNo), undefined, {numeric:true}));
 
             if(myStudents.length === 0) {
                 listContainer.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs border-2 border-dashed border-slate-300 rounded-2xl">No active students found in this section.</div>`;
@@ -400,13 +446,12 @@
 
                 let html = "";
                 myStudents.forEach(stu => {
-                    // Default to Present if not marked yet
                     const status = todaysData[stu.id] || "P"; 
                     
                     html += `
                         <div class="bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center hover:border-purple-300 transition-colors">
                             <div class="flex items-center gap-3 sm:gap-4">
-                                <span class="bg-slate-100 text-slate-500 font-mono text-[10px] sm:text-xs font-black px-2 py-1 rounded border border-slate-200">#${stu.rollNo}</span>
+                                <span class="bg-slate-100 text-slate-500 font-mono text-[10px] sm:text-xs font-black px-2 py-1 rounded border border-slate-200">#${stu.rollNo || 'N/A'}</span>
                                 <div>
                                     <h4 class="font-black text-slate-800 text-xs sm:text-sm uppercase tracking-tight">${stu.name}</h4>
                                 </div>
@@ -451,9 +496,11 @@
             document.getElementById('daily-stats-label').innerText = `P: ${p} | A: ${a} | L: ${l} | Total: ${radios.length}`;
         }
 
-   function markAllPresent() {
-            const normMatch = str => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-            const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s));
+        function markAllPresent() {
+            const myStudents = studentsData.filter(stu => 
+                safeMatch(stu.className) === safeMatch(currentReg.c) && 
+                safeMatch(stu.section) === safeMatch(currentReg.s)
+            );
             myStudents.forEach(stu => {
                 const radio = document.getElementById(`P_${stu.id}`);
                 if (radio) radio.checked = true;
@@ -466,8 +513,10 @@
             const btn = document.getElementById('save-daily-btn');
             
             // Collect Data
-            const normMatch = str => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-            const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s));
+            const myStudents = studentsData.filter(stu => 
+                safeMatch(stu.className) === safeMatch(currentReg.c) && 
+                safeMatch(stu.section) === safeMatch(currentReg.s)
+            );
             let todaysData = {};
             myStudents.forEach(stu => {
                 const checked = document.querySelector(`input[name="att_${stu.id}"]:checked`);
@@ -481,10 +530,9 @@
 
             const [y, m, d] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
-            const docId = `att_${activeCenter}_${currentReg.c.replace(/\s/g,'_')}_${currentReg.s.replace(/\s/g,'_')}_${currentReg.sub.replace(/\s/g,'_')}_${monthKey}`;
+            const docId = `att_${activeCenter}_${String(currentReg.c).replace(/\s/g,'_')}_${String(currentReg.s).replace(/\s/g,'_')}_${String(currentReg.sub).replace(/\s/g,'_')}_${monthKey}`;
 
             try {
-                // We use set with merge so we don't overwrite other days in the month
                 await getCollection("attendance_records").doc(docId).set({
                     [`records.${dateStr}`]: todaysData,
                     className: currentReg.c,
@@ -494,7 +542,6 @@
                     lastUpdated: Date.now()
                 }, { merge: true });
                 
-                // Update local memory so Ledger works instantly
                 if(!currentMonthDoc) currentMonthDoc = {};
                 currentMonthDoc[dateStr] = todaysData;
 
@@ -512,28 +559,28 @@
             const container = document.getElementById('ledger-table-container');
             container.innerHTML = `<div class="text-center py-20"><span class="loader"></span></div>`;
 
-            const monthVal = document.getElementById('ledger-month').value; // e.g. "2026_07"
+            const monthVal = document.getElementById('ledger-month').value; 
             const [y, m] = monthVal.split('_');
-            const docId = `att_${activeCenter}_${currentReg.c.replace(/\s/g,'_')}_${currentReg.s.replace(/\s/g,'_')}_${currentReg.sub.replace(/\s/g,'_')}_${monthVal}`;
+            const docId = `att_${activeCenter}_${String(currentReg.c).replace(/\s/g,'_')}_${String(currentReg.s).replace(/\s/g,'_')}_${String(currentReg.sub).replace(/\s/g,'_')}_${monthVal}`;
             
-            // Previous month calculation
             let prevM = parseInt(m) - 1; let prevY = parseInt(y);
             if (prevM === 0) { prevM = 12; prevY--; }
             const prevMonthKey = `${prevY}_${String(prevM).padStart(2,'0')}`;
-            const prevDocId = `att_${activeCenter}_${currentReg.c.replace(/\s/g,'_')}_${currentReg.s.replace(/\s/g,'_')}_${currentReg.sub.replace(/\s/g,'_')}_${prevMonthKey}`;
+            const prevDocId = `att_${activeCenter}_${String(currentReg.c).replace(/\s/g,'_')}_${String(currentReg.s).replace(/\s/g,'_')}_${String(currentReg.sub).replace(/\s/g,'_')}_${prevMonthKey}`;
 
             try {
-                // Fetch Current and Previous Month
                 const [curSnap, prevSnap] = await Promise.all([
                     getCollection("attendance_records").doc(docId).get(),
                     getCollection("attendance_records").doc(prevDocId).get()
                 ]);
 
-               const curRecords = curSnap.exists ? curSnap.data().records || {} : {};
-                const prevStats = prevSnap.exists ? prevSnap.data().aggregatedStats || {} : {}; // Assumes a Cloud Function or batch process saves grand totals at month end. If not, we fall back to 0.
+                const curRecords = curSnap.exists ? curSnap.data().records || {} : {};
+                const prevStats = prevSnap.exists ? prevSnap.data().aggregatedStats || {} : {}; 
 
-                const normMatch = str => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s)).sort((a,b) => a.rollNo.localeCompare(b.rollNo, undefined, {numeric:true}));
+                const myStudents = studentsData.filter(stu => 
+                    safeMatch(stu.className) === safeMatch(currentReg.c) && 
+                    safeMatch(stu.section) === safeMatch(currentReg.s)
+                ).sort((a,b) => String(a.rollNo).localeCompare(String(b.rollNo), undefined, {numeric:true}));
 
                 if (myStudents.length === 0) {
                     container.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs">No students in section.</div>`; return;
@@ -544,10 +591,9 @@
                 const offset = today.getTimezoneOffset() * 60000;
                 const todayISO = new Date(today - offset).toISOString().split('T')[0];
 
-                // --- Calculate Working Days ---
                 let totalWorkingDaysMonth = 0;
                 let dayHeaders = "";
-                let dayStatuses = []; // Pre-calculate if day is holiday/sunday
+                let dayStatuses = []; 
                 
                 for(let d=1; d<=daysInMonth; d++) {
                     const dateStr = `${y}-${m}-${String(d).padStart(2,'0')}`;
@@ -563,7 +609,6 @@
                         }
                     }
 
-                    // Only count as a "Working Day" if it's not a holiday/Sunday AND it's on or before today
                     const isWorkingDay = !isSunday && !isHol && dateStr <= todayISO;
                     if(isWorkingDay) totalWorkingDaysMonth++;
 
@@ -573,11 +618,9 @@
                     dayHeaders += `<th class="${bg} min-w-[30px] border-r border-b border-slate-200">${d}</th>`;
                 }
 
-                // Prev Stats defaults
                 const prevTotalWorking = prevStats.globalTotalWorkingDays || 0;
                 const grandTotalWorking = prevTotalWorking + totalWorkingDaysMonth;
 
-                // --- Build Table ---
                 let tableHtml = `
                     <table class="ledger-table w-full">
                         <thead>
@@ -621,14 +664,13 @@
                             cellContent = "-";
                             bgClass = "bg-slate-50/50 text-slate-300";
                         } else {
-                            // Working Day recorded?
                             if (curRecords[ds.date] && curRecords[ds.date][stu.id]) {
                                 const val = curRecords[ds.date][stu.id];
                                 if (val === 'P') { cellContent = "P"; bgClass = "text-emerald-600 font-black"; pCount++; }
                                 else if (val === 'A') { cellContent = "A"; bgClass = "text-rose-500 font-black bg-rose-50"; }
                                 else if (val === 'L') { cellContent = "L"; bgClass = "text-amber-500 font-black"; lCount++; }
                             } else {
-                                cellContent = "?"; // Not marked
+                                cellContent = "?"; 
                                 bgClass = "text-slate-300 bg-slate-50";
                             }
                         }
@@ -647,7 +689,7 @@
 
                     tableHtml += `
                         <tr>
-                            <td class="sticky-col-1 border-b border-slate-200 bg-white shadow-[1px_0_2px_rgba(0,0,0,0.05)] text-slate-400">#${stu.rollNo}</td>
+                            <td class="sticky-col-1 border-b border-slate-200 bg-white shadow-[1px_0_2px_rgba(0,0,0,0.05)] text-slate-400">#${stu.rollNo || 'N/A'}</td>
                             <td class="sticky-col-2 border-b border-slate-200 bg-white uppercase truncate px-2" title="${stu.name}">${stu.name}</td>
                             ${rowHtml}
                             <td class="bg-indigo-50/30 border-r border-b border-slate-200 font-black text-slate-600">${totalWorkingDaysMonth}</td>
