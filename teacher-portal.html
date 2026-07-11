@@ -723,24 +723,27 @@ window.ackDuty = function(dutyId) {
               }, error => console.error("Notice board error:", error));
         }
 
-        // --- SILENT BACKGROUND COMPLIANCE AUDITOR ---
+     // --- SILENT BACKGROUND COMPLIANCE AUDITOR ---
         async function checkLessonCompliance(safeName) {
             try {
                 const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
                 const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
                 
-                // Fetch the data required to build the teacher's profile mathematically
-                const [ttSnap, structSnap, holSnap, plannerSnap] = await Promise.all([
+                // Fetch the data required to build the teacher's profile mathematically, INCLUDING TIMETABLE HISTORY
+                const [ttSnap, structSnap, holSnap, plannerSnap, histSnap] = await Promise.all([
                     db.collection(prefix + "timetable").where("teacherName", "==", safeName).get(),
                     getCollection("institute_structure").get(),
                     getCollection("school_holidays").get(),
-                    getCollection("lesson_planners").get()
+                    getCollection("lesson_planners").get(),
+                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get()
                 ]);
 
                 let myClasses = [];
                 const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const holidays = holSnap.docs.map(d => d.data());
                 const allPlanners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const historyOverrides = histSnap.docs.map(d => d.data());
+                const myFullTimetable = ttSnap.docs.map(d => d.data());
                 const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
                 ttSnap.docs.forEach(d => {
@@ -753,6 +756,7 @@ window.ackDuty = function(dutyId) {
                 const today = new Date();
                 const offset = today.getTimezoneOffset() * 60000;
                 const todayISO = new Date(today - offset).toISOString().split('T')[0];
+                const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                 let missingLogs = [];
 
                 // Map timetable to planner Assignment IDs
@@ -766,12 +770,17 @@ window.ackDuty = function(dutyId) {
                             if(mSub) exactSub = mSub;
                         }
                         const assignmentId = `${structMatch.id}_${exactSub}`.replace(/\s+/g, '_');
-                        uniqueAssignments.set(assignmentId, `[${cls.c} ${cls.s} - ${exactSub}]`);
+                        uniqueAssignments.set(assignmentId, {
+                            displayName: `[${cls.c} ${cls.s} - ${exactSub}]`,
+                            c: cls.c,
+                            s: cls.s,
+                            sub: exactSub
+                        });
                     }
                 });
 
                 // Audit each connected Planner
-                uniqueAssignments.forEach((displayName, assignmentId) => {
+                uniqueAssignments.forEach((classInfo, assignmentId) => {
                     const planner = allPlanners.find(p => p.id === assignmentId);
                     if(planner && planner.syllabusData && planner.syllabusData.length > 0) {
                         let lastLog = null;
@@ -794,8 +803,12 @@ window.ackDuty = function(dutyId) {
 
                             // Mathematical Loop
                             while(scanDate <= endD) {
+                                const scanIso = scanDate.toISOString().split('T')[0];
+                                const dayName = daysArr[scanDate.getDay()];
+
                                 if(scanDate.getDay() !== 0) { // Skip Sundays
                                     let isHol = false;
+                                    // 1. Holiday Check
                                     for(let h of holidays) {
                                         if(h.startDate && h.isFullDay) {
                                             let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
@@ -803,13 +816,37 @@ window.ackDuty = function(dutyId) {
                                             if(scanDate >= hs && scanDate <= he) { isHol = true; break; }
                                         }
                                     }
-                                    if(!isHol) missedDays++;
+
+                                    // 2. Exam / History Override Check
+                                    let isExamOrOverride = false;
+                                    const override = historyOverrides.find(o => o.date === scanIso);
+                                    if (override && override.schedule) {
+                                        const classSlots = override.schedule.filter(s => norm(s.className) === norm(classInfo.c) && norm(s.section) === norm(classInfo.s));
+                                        if (classSlots.length > 0) {
+                                            const subSlot = classSlots.find(s => norm(s.subject) === norm(classInfo.sub));
+                                            if (!subSlot || (subSlot.remark && subSlot.remark.toLowerCase().includes("doubt session"))) {
+                                                isExamOrOverride = true; // Doubt session or Exam
+                                            }
+                                        } else {
+                                            isExamOrOverride = true; // No class scheduled this day due to override
+                                        }
+                                    }
+
+                                    // 3. Routine Timetable Check
+                                    let hasRoutineClass = myFullTimetable.some(t =>
+                                        t.day === dayName && norm(t.className) === norm(classInfo.c) && norm(t.section) === norm(classInfo.s) && norm(t.subject) === norm(classInfo.sub)
+                                    );
+
+                                    // Only penalize if it's a working day, no global holiday, no exam override, AND they normally have class
+                                    if(!isHol && !isExamOrOverride && hasRoutineClass) {
+                                        missedDays++;
+                                    }
                                 }
                                 scanDate.setDate(scanDate.getDate() + 1);
                             }
                             
-                            // If they missed at least 1 working day, flag them for the banner warning
-                            if(missedDays > 0) missingLogs.push(displayName);
+                            // If they missed at least 1 valid scheduled working day, flag them
+                            if(missedDays > 0) missingLogs.push(classInfo.displayName);
                         }
                     }
                 });
