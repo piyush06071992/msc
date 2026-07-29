@@ -1026,7 +1026,7 @@ window.ackDuty = function(dutyId) {
             } catch(e) { console.error("Syllabus Audit Error:", e); }
         }
 
-        function executeSnooze() {
+     function executeSnooze() {
             const selectedDate = document.getElementById('snooze-date').value;
             if (!selectedDate) return alert("Select a date.");
             
@@ -1041,6 +1041,238 @@ window.ackDuty = function(dutyId) {
 
             document.getElementById('snooze-modal').classList.replace('flex', 'hidden');
             document.getElementById('exam-syllabus-banner').classList.add('hidden');
+        }
+
+        // ============================================================================
+        // === HOD TEACHER MAPPING ENGINE (REAL-TIME TIMETABLE SYNC)               ===
+        // ============================================================================
+        let hodDepartmentName = "General";
+        let hodAvailableTeachers = [];
+
+        function openTeacherMappingModal() {
+            const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff')) || {};
+            hodDepartmentName = (activeStaff.dept && activeStaff.dept !== "undefined") ? activeStaff.dept : "General";
+            
+            document.getElementById('mapping-dept-badge').innerText = `Department: ${hodDepartmentName} | Active Branch: ${activeStaff.center || "GHUMARWIN"}`;
+            document.getElementById('teacher-mapping-modal').classList.replace('hidden', 'flex');
+            loadTeacherMappings();
+        }
+
+        function closeTeacherMappingModal() {
+            document.getElementById('teacher-mapping-modal').classList.replace('flex', 'hidden');
+        }
+
+        async function loadTeacherMappings() {
+            const container = document.getElementById('mapping-sections-list');
+            container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest animate-pulse">Scanning Institute Sections & Timetable...</div>`;
+
+            try {
+                const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const targetDeptNorm = norm(hodDepartmentName);
+
+                // 1. Fetch all Sections, Timetable slots, Teachers, and Saved Mappings in parallel
+                const [structSnap, ttSnap, staffSnap, mapSnap] = await Promise.all([
+                    getCollection("institute_structure").get(),
+                    getCollection("timetable").get(),
+                    db.collection("staff_applications").where("status", "==", "approved").get(),
+                    getCollection("department_mappings").get()
+                ]);
+
+                // 2. Filter Teachers belonging to HOD's department
+                const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff')) || {};
+                const currentCenter = activeStaff.center || "GHUMARWIN";
+                hodAvailableTeachers = [];
+
+                staffSnap.forEach(doc => {
+                    const data = doc.data();
+                    const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                    const teacherCenter = centerKey ? String(data.details[centerKey]).toUpperCase() : "GHUMARWIN";
+                    const deptKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                    const deptStr = deptKey ? String(data.details[deptKey]) : (data.dept || "");
+
+                    if (teacherCenter.includes(currentCenter.toUpperCase()) && norm(deptStr).includes(targetDeptNorm)) {
+                        const nameKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('name'));
+                        hodAvailableTeachers.push({
+                            name: nameKey ? data.details[nameKey] : data.email,
+                            email: data.email
+                        });
+                    }
+                });
+                hodAvailableTeachers.sort((a,b) => a.name.localeCompare(b.name));
+
+                // 3. Filter Sections where this department/subject is taught
+                const relevantSections = [];
+                structSnap.forEach(doc => {
+                    const data = doc.data();
+                    const hasSubject = (data.subjects || []).some(s => norm(s) === targetDeptNorm || norm(s).includes(targetDeptNorm));
+                    if (hasSubject) {
+                        const exactSub = (data.subjects || []).find(s => norm(s) === targetDeptNorm || norm(s).includes(targetDeptNorm)) || hodDepartmentName;
+                        relevantSections.push({
+                            id: doc.id,
+                            className: data.className,
+                            sectionName: data.sectionName,
+                            subject: exactSub
+                        });
+                    }
+                });
+
+                if (relevantSections.length === 0) {
+                    container.innerHTML = `<div class="bg-slate-800 border border-slate-700 rounded-2xl p-12 text-center text-slate-400 font-bold uppercase text-xs tracking-widest">No classes or sections currently teach "${hodDepartmentName}".</div>`;
+                    return;
+                }
+
+                // 4. Parse saved mappings and live timetable slots
+                const savedMappings = {};
+                mapSnap.forEach(doc => {
+                    savedMappings[doc.id] = doc.data();
+                });
+
+                const allTimetableSlots = ttSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+                // 5. Render rows for each Section
+                relevantSections.sort((a,b) => a.className.localeCompare(b.className) || a.sectionName.localeCompare(b.sectionName));
+
+                let html = "";
+                relevantSections.forEach(sec => {
+                    const mapKey = `${sec.className}_${sec.sectionName}_${sec.subject}`.replace(/\s+/g, '_');
+                    const savedMap = savedMappings[mapKey] || {};
+
+                    // Check live timetable slots for this section and subject
+                    const activeSlots = allTimetableSlots.filter(t =>
+                        norm(t.className) === norm(sec.className) &&
+                        norm(t.section) === norm(sec.sectionName) &&
+                        norm(t.subject) === norm(sec.subject)
+                    );
+
+                    // Determine current teacher from live Timetable first, then fallback to saved mapping
+                    let currentTeacher = "NONE";
+                    let currentRemark = savedMap.remark || "";
+
+                    if (activeSlots.length > 0) {
+                        const firstTeacherSlot = activeSlots.find(t => t.teacher && t.teacher !== "NONE");
+                        if (firstTeacherSlot) {
+                            currentTeacher = firstTeacherSlot.teacher;
+                            if (firstTeacherSlot.remark) currentRemark = firstTeacherSlot.remark;
+                        }
+                    } else if (savedMap.teacher) {
+                        currentTeacher = savedMap.teacher;
+                    }
+
+                    // Build teacher dropdown options
+                    let teacherOptions = `<option value="NONE">- Unassigned / TBA -</option>`;
+                    let foundCurrent = false;
+                    hodAvailableTeachers.forEach(t => {
+                        const isSel = (t.name === currentTeacher) ? "selected" : "";
+                        if (isSel) foundCurrent = true;
+                        teacherOptions += `<option value="${t.name}" ${isSel}>${t.name}</option>`;
+                    });
+                    if (currentTeacher !== "NONE" && !foundCurrent) {
+                        teacherOptions += `<option value="${currentTeacher}" selected>${currentTeacher} (External)</option>`;
+                    }
+
+                    const statusBadge = activeSlots.length > 0
+                        ? `<span class="bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest">● ${activeSlots.length} Timetable Slots Active</span>`
+                        : `<span class="bg-amber-500/20 border border-amber-500/40 text-amber-300 px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest">● New Section - No Timetable Yet</span>`;
+
+                    const domSafeId = `${sec.className}_${sec.sectionName}`.replace(/[^a-zA-Z0-9]/g, '');
+
+                    html += `
+                        <div class="bg-slate-800/80 border border-slate-700/80 rounded-2xl p-5 shadow-lg flex flex-col md:flex-row md:items-center justify-between gap-4 hover:border-fuchsia-500/40 transition-all">
+                            <div class="flex-1">
+                                <div class="flex items-center gap-3 flex-wrap mb-1.5">
+                                    <h3 class="text-lg font-black text-white uppercase tracking-tight">${sec.className} <span class="text-slate-500 mx-1">|</span> <span class="text-fuchsia-400">SEC ${sec.sectionName}</span></h3>
+                                    ${statusBadge}
+                                </div>
+                                <p class="text-xs font-bold text-slate-400 uppercase tracking-widest">Subject: <span class="text-fuchsia-300 font-black">${sec.subject}</span></p>
+                            </div>
+
+                            <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full md:w-auto shrink-0">
+                                <div class="flex flex-col">
+                                    <label class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Assigned Teacher</label>
+                                    <select id="hod-tea-${domSafeId}" class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs font-bold text-white outline-none focus:border-fuchsia-500 cursor-pointer min-w-[180px]">
+                                        ${teacherOptions}
+                                    </select>
+                                </div>
+
+                                <div class="flex flex-col flex-1 sm:w-48">
+                                    <label class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">HOD Remarks / Notes</label>
+                                    <input type="text" id="hod-rem-${domSafeId}" value="${currentRemark}" placeholder="e.g. Focus on Calculus" class="bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-white outline-none focus:border-fuchsia-500">
+                                </div>
+
+                                <button onclick="saveTeacherMapping('${sec.className}', '${sec.sectionName}', '${sec.subject}', 'hod-tea-${domSafeId}', 'hod-rem-${domSafeId}', this)" class="bg-fuchsia-600 hover:bg-fuchsia-500 text-white px-5 py-2.5 rounded-xl font-black text-[11px] uppercase tracking-widest shadow-md transition-all self-end sm:self-auto mt-4 sm:mt-0 active:scale-95">
+                                    Save
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                });
+
+                container.innerHTML = html;
+            } catch (e) {
+                console.error("Error loading HOD mappings:", e);
+                container.innerHTML = `<div class="bg-rose-950/40 border border-rose-500/40 rounded-2xl p-8 text-center text-rose-300 font-bold uppercase text-xs">Error loading teacher mapping data: ${e.message}</div>`;
+            }
+        }
+
+        async function saveTeacherMapping(className, sectionName, subjectName, selectId, remarkId, btnEl) {
+            const selectEl = document.getElementById(selectId);
+            const remarkEl = document.getElementById(remarkId);
+            if (!selectEl || !remarkEl) return;
+
+            const newTeacher = selectEl.value;
+            const newRemark = remarkEl.value.trim();
+            const origText = btnEl.innerText;
+            btnEl.innerText = "⏳..."; btnEl.disabled = true;
+
+            try {
+                const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const mapKey = `${className}_${sectionName}_${subjectName}`.replace(/\s+/g, '_');
+
+                // 1. Save mapping to department_mappings collection
+                await getCollection("department_mappings").doc(mapKey).set({
+                    className,
+                    sectionName,
+                    subject: subjectName,
+                    teacher: newTeacher,
+                    remark: newRemark,
+                    updatedBy: activeStaff ? activeStaff.name || activeStaff.email : "HOD",
+                    updatedAt: Date.now()
+                }, { merge: true });
+
+                // 2. Query live Timetable slots for this class + section + subject and batch-update
+                const ttSnap = await getCollection("timetable")
+                    .where("className", "==", className)
+                    .where("section", "==", sectionName)
+                    .get();
+
+                let updatedSlotsCount = 0;
+                if (!ttSnap.empty) {
+                    const batch = db.batch();
+                    ttSnap.docs.forEach(doc => {
+                        const slot = doc.data();
+                        if (norm(slot.subject) === norm(subjectName)) {
+                            batch.update(doc.ref, {
+                                teacher: newTeacher,
+                                teacherName: newTeacher,
+                                remark: newRemark
+                            });
+                            updatedSlotsCount++;
+                        }
+                    });
+                    if (updatedSlotsCount > 0) {
+                        await batch.commit();
+                        await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
+                    }
+                }
+
+                alert(`✅ Teacher Mapping Saved!\n\nAssigned: ${newTeacher}\nTimetable Slots Updated: ${updatedSlotsCount}`);
+                btnEl.innerText = "✓ Saved";
+                setTimeout(() => { btnEl.innerText = origText; btnEl.disabled = false; }, 1500);
+            } catch (e) {
+                console.error("Error saving teacher mapping:", e);
+                alert("Error saving mapping: " + e.message);
+                btnEl.innerText = origText; btnEl.disabled = false;
+            }
         }
     </script>
 </body>
