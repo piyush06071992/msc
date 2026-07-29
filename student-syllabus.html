@@ -174,7 +174,6 @@
                 <button onclick="closeMyDoubtsModal()" class="w-10 h-10 rounded-full bg-slate-800 hover:bg-slate-700 font-black text-white flex items-center justify-center transition-colors">✕</button>
             </div>
 
-            <!-- Tab Switcher for Active vs Resolved -->
             <div class="flex border-b border-slate-200 bg-slate-50 px-6 pt-4 gap-3">
                 <button onclick="switchDoubtTab('ACTIVE')" id="doubt-tab-active" class="pb-3 px-4 text-xs font-black uppercase tracking-widest border-b-2 border-blue-600 text-blue-600 transition-all">Active Tickets</button>
                 <button onclick="switchDoubtTab('RESOLVED')" id="doubt-tab-resolved" class="pb-3 px-4 text-xs font-black uppercase tracking-widest border-b-2 border-transparent text-slate-400 hover:text-slate-700 transition-all">Resolved Tickets</button>
@@ -182,6 +181,23 @@
 
             <div id="my-doubts-content" class="p-6 overflow-y-auto space-y-4 custom-scroll bg-slate-50 flex-1">
                 <div class="text-center py-12 text-slate-400 font-bold uppercase text-xs">Loading your doubts...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- STUDENT NOTE/FILE ATTACHMENT MODAL FOR TOPICS -->
+    <div id="topic-attach-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[120] hidden items-center justify-center p-4">
+        <div class="bg-white rounded-[2rem] w-full max-w-md shadow-2xl overflow-hidden flex flex-col p-6 space-y-4">
+            <h3 class="font-black text-slate-900 text-base uppercase tracking-wider">Attach Notes / Files to Topic</h3>
+            <p id="attach-topic-title" class="text-[11px] font-bold text-blue-600 uppercase tracking-widest"></p>
+            
+            <input type="file" id="topic-extra-files" accept="image/*,application/pdf" multiple class="setup-input bg-slate-50 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-black file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer">
+            
+            <div id="existing-topic-attachments" class="space-y-2 max-h-32 overflow-y-auto custom-scroll"></div>
+
+            <div class="flex gap-3 pt-2">
+                <button onclick="closeTopicAttachModal()" class="flex-1 py-3 bg-slate-100 text-slate-600 rounded-xl font-black uppercase text-xs">Cancel</button>
+                <button onclick="saveTopicAttachments()" class="flex-1 py-3 bg-blue-600 text-white rounded-xl font-black uppercase text-xs shadow-md">Save Files</button>
             </div>
         </div>
     </div>
@@ -211,8 +227,12 @@
         let activeSubject = "";
         let activeFilter = "ALL";
         let studentMasteryMap = {};
+        let studentTopicFilesMap = {}; // Maps `${chapterName}___${subtopic}` -> [{name, url}]
         let cachedDoubts = null;
         let activeDoubtTab = "ACTIVE";
+        
+        let currentAttachCh = "";
+        let currentAttachSub = "";
 
         async function init() {
             const isAuth = sessionStorage.getItem('minervaStudentAuth');
@@ -268,7 +288,9 @@
                 const [plannerSnaps, masterySnap] = await Promise.all([Promise.all(plannerPromises), masteryPromise]);
 
                 if (masterySnap.exists) {
-                    studentMasteryMap = masterySnap.data().masteryMap || {};
+                    const mData = masterySnap.data();
+                    studentMasteryMap = mData.masteryMap || {};
+                    studentTopicFilesMap = mData.topicFilesMap || {};
                 }
 
                 plannersMap = {};
@@ -338,6 +360,7 @@
                     className: studentData.className,
                     section: studentData.section,
                     masteryMap: studentMasteryMap,
+                    topicFilesMap: studentTopicFilesMap,
                     lastUpdated: Date.now()
                 }, { merge: true });
             } catch (e) {
@@ -386,14 +409,32 @@
                 visibleChapterCount++;
 
                 let chDoneCount = chRows.filter(r => r.isDone).length;
-                let chIsFull = chDoneCount === chRows.length;
+                
+                // Fixed Chapter Status Logic: 0 = Pending, Some = Ongoing, All = Completed
+                let chStatusText = 'Pending';
+                let chStatusClass = 'bg-slate-100 text-slate-500 border-slate-200';
+                if (chDoneCount > 0 && chDoneCount < chRows.length) {
+                    chStatusText = 'Ongoing';
+                    chStatusClass = 'bg-blue-50 text-blue-700 border-blue-200';
+                } else if (chDoneCount === chRows.length && chRows.length > 0) {
+                    chStatusText = 'Completed';
+                    chStatusClass = 'bg-emerald-50 text-emerald-700 border-emerald-200';
+                }
 
                 let topicsHtml = filteredRows.map(r => {
                     const mKey = `${r['CHAPTER NAME']}___${r['SUBTOPICS']}`;
                     const curLvl = studentMasteryMap[mKey] || 0;
+                    
                     const teacherStatus = r.isDone 
                         ? `<span class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-[9px] font-black uppercase tracking-widest shadow-sm">✓ Done (${r.completedDate ? new Date(r.completedDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short'}) : 'Class'})</span>`
                         : `<span class="bg-slate-100 text-slate-400 border border-slate-200 px-2.5 py-1 rounded-md text-[9px] font-black uppercase tracking-widest">⏳ Pending</span>`;
+
+                    // Teacher attached files
+                    const teacherFiles = (r.questions || []).map(q => `<a href="${q.url}" target="_blank" class="inline-block bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 px-2 py-0.5 rounded text-[9px] font-black uppercase mr-1 mt-1">📎 ${q.name}</a>`).join('');
+                    
+                    // Student attached files
+                    const studentFilesArr = studentTopicFilesMap[mKey] || [];
+                    const studentFiles = studentFilesArr.map(f => `<a href="${f.url}" target="_blank" class="inline-block bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 px-2 py-0.5 rounded text-[9px] font-black uppercase mr-1 mt-1">📁 ${f.name}</a>`).join('');
 
                     return `
                         <div class="p-4 sm:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-slate-50 transition-colors">
@@ -401,7 +442,11 @@
                                 <span class="bg-slate-100 text-slate-500 font-mono text-[10px] font-black px-2.5 py-1 rounded-lg border border-slate-200 shrink-0">Lec ${r['LECTURE NUMBER'] || '--'}</span>
                                 <div>
                                     <div class="font-bold text-slate-800 text-xs sm:text-sm uppercase tracking-tight leading-snug">${r['SUBTOPICS']}</div>
-                                    <div class="flex items-center gap-2 mt-2">${teacherStatus}</div>
+                                    <div class="flex flex-wrap items-center gap-2 mt-2">
+                                        ${teacherStatus}
+                                        <button onclick="openTopicAttachModal('${r['CHAPTER NAME'].replace(/'/g, "\\'")}', '${r['SUBTOPICS'].replace(/'/g, "\\'")}')" class="text-[9px] font-black uppercase bg-slate-100 hover:bg-blue-50 text-slate-600 hover:text-blue-600 border border-slate-200 px-2.5 py-1 rounded-md transition-colors">📎 Attach Files (${studentFilesArr.length + (r.questions || []).length})</button>
+                                    </div>
+                                    <div class="mt-1.5">${teacherFiles} ${studentFiles}</div>
                                 </div>
                             </div>
 
@@ -421,7 +466,6 @@
                     topicsHtml = `<div class="p-6 text-center text-xs text-slate-400 font-bold italic">No topics match this filter in this chapter.</div>`;
                 }
 
-                // NOTE: Accordions render closed by default (removed 'open' attribute)
                 html += `
                     <details class="glass-card rounded-[2rem] overflow-hidden shadow-sm group">
                         <summary class="p-6 bg-slate-50 border-b border-slate-200 flex justify-between items-center cursor-pointer select-none outline-none hover:bg-slate-100 transition-colors">
@@ -433,7 +477,7 @@
                                 </div>
                             </div>
                             <div class="flex items-center gap-3">
-                                <span class="text-[10px] font-black uppercase px-3 py-1.5 rounded-full border ${chIsFull ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-blue-50 text-blue-700 border-blue-200'} shadow-sm">${chDoneCount === chRows.length ? 'Completed' : 'Ongoing'}</span>
+                                <span class="text-[10px] font-black uppercase px-3 py-1.5 rounded-full border ${chStatusClass} shadow-sm">${chStatusText}</span>
                                 <span class="text-slate-400 text-lg group-open:rotate-180 transition-transform">▼</span>
                             </div>
                         </summary>
@@ -459,6 +503,88 @@
             document.getElementById('mastery-prog-bar').style.width = `${masteryPct}%`;
         }
 
+        // --- TOPIC ATTACHMENT MODAL LOGIC ---
+        function openTopicAttachModal(ch, sub) {
+            currentAttachCh = ch;
+            currentAttachSub = sub;
+            document.getElementById('attach-topic-title').innerText = `${ch} → ${sub}`;
+            document.getElementById('topic-extra-files').value = '';
+            
+            renderExistingTopicAttachments();
+            openModal('topic-attach-modal');
+        }
+
+        function closeTopicAttachModal() {
+            closeModal('topic-attach-modal');
+        }
+
+        function renderExistingTopicAttachments() {
+            const mKey = `${currentAttachCh}___${currentAttachSub}`;
+            const files = studentTopicFilesMap[mKey] || [];
+            const container = document.getElementById('existing-topic-attachments');
+
+            if (files.length === 0) {
+                container.innerHTML = `<p class="text-xs text-slate-400 italic">No custom files attached yet.</p>`;
+                return;
+            }
+
+            container.innerHTML = files.map((f, idx) => `
+                <div class="flex justify-between items-center bg-slate-50 p-2.5 rounded-xl border border-slate-200 text-xs">
+                    <a href="${f.url}" target="_blank" class="font-bold text-blue-600 underline truncate max-w-[220px]">📎 ${f.name}</a>
+                    <button onclick="removeTopicAttachment(${idx})" class="text-rose-500 font-black px-2 hover:bg-rose-100 rounded">✕</button>
+                </div>
+            `).join('');
+        }
+
+        async function removeTopicAttachment(idx) {
+            const mKey = `${currentAttachCh}___${currentAttachSub}`;
+            if (!studentTopicFilesMap[mKey]) return;
+            studentTopicFilesMap[mKey].splice(idx, 1);
+            renderExistingTopicAttachments();
+            await saveTopicFilesToCloud();
+            renderSyllabusView();
+        }
+
+        async function saveTopicAttachments() {
+            const fileInput = document.getElementById('topic-extra-files');
+            if (fileInput.files.length === 0) {
+                closeTopicAttachModal();
+                return;
+            }
+
+            const mKey = `${currentAttachCh}___${currentAttachSub}`;
+            if (!studentTopicFilesMap[mKey]) studentTopicFilesMap[mKey] = [];
+
+            try {
+                for (let file of fileInput.files) {
+                    const storageRef = storage.ref(`student_topic_files/${studentData.rollNo}_${Date.now()}_${file.name}`);
+                    await storageRef.put(file);
+                    const url = await storageRef.getDownloadURL();
+                    studentTopicFilesMap[mKey].push({ name: file.name, url: url });
+                }
+
+                await saveTopicFilesToCloud();
+                alert("✅ Files attached successfully!");
+                closeTopicAttachModal();
+                renderSyllabusView();
+            } catch (e) {
+                alert("Error uploading files: " + e.message);
+            }
+        }
+
+        async function saveTopicFilesToCloud() {
+            const masteryDocId = `${studentData.rollNo}_${studentData.className}_${studentData.section}`.replace(/[^a-zA-Z0-9]/g, '_');
+            await db.collection("student_mastery").doc(masteryDocId).set({
+                rollNo: studentData.rollNo,
+                name: studentData.name,
+                className: studentData.className,
+                section: studentData.section,
+                masteryMap: studentMasteryMap,
+                topicFilesMap: studentTopicFilesMap,
+                lastUpdated: Date.now()
+            }, { merge: true });
+        }
+
         // --- ASK DOUBTS MODAL LOGIC ---
         function openDoubtModal() {
             const subSelect = document.getElementById('doubt-subject-select');
@@ -470,15 +596,11 @@
             document.getElementById('doubt-files').value = '';
             document.getElementById('doubt-error').classList.add('hidden');
 
-            const modal = document.getElementById('doubt-modal');
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
+            openModal('doubt-modal');
         }
 
         function closeDoubtModal() {
-            const modal = document.getElementById('doubt-modal');
-            modal.classList.remove('flex');
-            modal.classList.add('hidden');
+            closeModal('doubt-modal');
         }
 
         function populateDoubtChapters() {
@@ -557,7 +679,6 @@
                     }
                 }
 
-                // Save to Firestore `student_doubts` collection with parameters for teacher marking
                 await db.collection("student_doubts").add({
                     rollNo: studentData.rollNo,
                     studentName: studentData.name,
@@ -570,12 +691,12 @@
                     description: text,
                     attachments: fileAttachments,
                     timestamp: Date.now(),
-                    status: "PENDING", // Will be marked by teacher later ('PENDING' or 'RESOLVED')
+                    status: "PENDING",
                     teacherRemarks: ""
                 });
 
                 alert("✅ Doubt ticket successfully submitted to faculty!");
-                cachedDoubts = null; // Reset cache so it refetches next time on-demand
+                cachedDoubts = null;
                 closeDoubtModal();
             } catch (e) {
                 console.error(e);
@@ -589,16 +710,12 @@
 
         // --- ON-DEMAND "MY DOUBTS" MODAL & TABS ---
         async function openMyDoubtsModal() {
-            const modal = document.getElementById('my-doubts-modal');
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
+            openModal('my-doubts-modal');
             await loadMyDoubts();
         }
 
         function closeMyDoubtsModal() {
-            const modal = document.getElementById('my-doubts-modal');
-            modal.classList.remove('flex');
-            modal.classList.add('hidden');
+            closeModal('my-doubts-modal');
         }
 
         function switchDoubtTab(tab) {
@@ -646,7 +763,6 @@
                 return;
             }
 
-            // Sort newest first
             filtered.sort((a, b) => b.timestamp - a.timestamp);
 
             container.innerHTML = filtered.map(d => {
@@ -673,6 +789,10 @@
                 `;
             }).join('');
         }
+
+        // Generic Modal Helpers
+        function openModal(id) { const el = document.getElementById(id); el.classList.remove('hidden'); el.classList.add('flex'); }
+        function closeModal(id) { const el = document.getElementById(id); el.classList.add('hidden'); el.classList.remove('flex'); }
 
         init();
     </script>
