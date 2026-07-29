@@ -1256,7 +1256,7 @@
             btnEl.closest('.hod-teacher-row').remove();
         }
 
-        async function saveSectionTeamMapping(className, sectionName, subjectName, domSafeId, btnEl) {
+      async function saveSectionTeamMapping(className, sectionName, subjectName, domSafeId, btnEl) {
             const container = document.getElementById(`teachers-list-${domSafeId}`);
             if (!container) return;
 
@@ -1300,34 +1300,33 @@
                     .where("section", "==", sectionName)
                     .get();
 
-                let updatedSlotsCount = 0;
+                let updatedLiveCount = 0;
+                let teaIdx = 0;
+
                 if (!ttSnap.empty) {
                     const batch = db.batch();
-                    let teaIdx = 0;
-
                     ttSnap.docs.forEach(doc => {
                         const slot = doc.data();
                         if (norm(slot.subject) === norm(subjectName)) {
-                            // Cycle through selected teachers if multiple slots exist
                             const assignedTea = selectedTeachers.length > 0 ? selectedTeachers[teaIdx % selectedTeachers.length] : "NONE";
                             batch.update(doc.ref, {
                                 teacher: assignedTea,
                                 teacherName: assignedTea,
                                 remark: sharedRemark
                             });
-                            updatedSlotsCount++;
+                            updatedLiveCount++;
                             teaIdx++;
                         }
                     });
 
-                    if (updatedSlotsCount > 0) {
+                    if (updatedLiveCount > 0) {
                         await batch.commit();
                         await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
                     }
                 }
 
                 // 3. Fallback for newly created sections with zero timetable slots yet
-                if (updatedSlotsCount === 0) {
+                if (updatedLiveCount === 0) {
                     const teaToCreate = selectedTeachers.length > 0 ? selectedTeachers : ["NONE"];
                     for (const tea of teaToCreate) {
                         await getCollection("timetable").add({
@@ -1347,12 +1346,63 @@
                             sMins: 540,
                             eMins: 600
                         });
-                        updatedSlotsCount++;
+                        updatedLiveCount++;
                     }
                     await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
                 }
 
-                alert(`✅ Section Team Mapping Saved!\n\nTeam: ${selectedTeachers.length > 0 ? selectedTeachers.join(", ") : "Unassigned"}\nTimetable Slots Updated/Created: ${updatedSlotsCount}`);
+                // 4. --- 🌟 UNIVERSAL FUTURE / UPCOMING SCHEDULE SYNC ---
+                // Query all future schedules in timetable_history (FUTURE_MASTER, DAILY_OVERRIDE, EXAM_OVERRIDE, etc.)
+                // and update matching slots so "Continue from Date" and future overrides are updated instantly!
+                const todayIso = new Date().toISOString().split('T')[0];
+                const histSnap = await getCollection("timetable_history").where("date", ">=", todayIso).get();
+                let updatedFutureSchedulesCount = 0;
+                let updatedFutureSlotsCount = 0;
+
+                if (!histSnap.empty) {
+                    const histBatch = db.batch();
+                    let histTeaIdx = 0;
+
+                    histSnap.docs.forEach(doc => {
+                        const hData = doc.data();
+                        if (hData.schedule && Array.isArray(hData.schedule)) {
+                            let docModified = false;
+                            const updatedSchedule = hData.schedule.map(slot => {
+                                if (
+                                    norm(slot.className) === norm(className) &&
+                                    norm(slot.section) === norm(sectionName) &&
+                                    norm(slot.subject) === norm(subjectName)
+                                ) {
+                                    const assignedTea = selectedTeachers.length > 0 ? selectedTeachers[histTeaIdx % selectedTeachers.length] : "NONE";
+                                    histTeaIdx++;
+                                    docModified = true;
+                                    updatedFutureSlotsCount++;
+                                    return {
+                                        ...slot,
+                                        teacher: assignedTea,
+                                        teacherName: assignedTea,
+                                        remark: sharedRemark
+                                    };
+                                }
+                                return slot;
+                            });
+
+                            if (docModified) {
+                                histBatch.update(doc.ref, {
+                                    schedule: updatedSchedule,
+                                    lastUpdated: Date.now()
+                                });
+                                updatedFutureSchedulesCount++;
+                            }
+                        }
+                    });
+
+                    if (updatedFutureSchedulesCount > 0) {
+                        await histBatch.commit();
+                    }
+                }
+
+                alert(`✅ Section Team Mapping Saved!\n\nTeam: ${selectedTeachers.length > 0 ? selectedTeachers.join(", ") : "Unassigned"}\nLive Timetable Slots Updated: ${updatedLiveCount}\nFuture/Upcoming Schedule Dates Updated: ${updatedFutureSchedulesCount} (${updatedFutureSlotsCount} slots)`);
                 btnEl.innerText = "✓ Saved";
                 setTimeout(() => { btnEl.innerText = origText; btnEl.disabled = false; loadTeacherMappings(); }, 1200);
             } catch (e) {
