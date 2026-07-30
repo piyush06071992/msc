@@ -186,6 +186,11 @@
                         </tbody>
                     </table>
                 </div>
+
+                <h3 class="text-sm font-black uppercase tracking-widest text-slate-800 mb-4 mt-8 pt-8 border-t border-slate-100">Date-wise Activity Log</h3>
+                <div id="student-date-logs" class="space-y-4">
+                    <div class="text-center py-10 text-slate-400">Loading daily logs...</div>
+                </div>
             </div>
         </div>
 
@@ -464,16 +469,34 @@
                 const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 const mySafeName = normMatch(safeName);
 
-                let grouped = {};
-                structures.forEach(st => {
-                    if (!grouped[st.className]) grouped[st.className] = {};
-                    if (!grouped[st.className][st.sectionName]) grouped[st.className][st.sectionName] = [];
-                    (st.subjects || []).forEach(sub => { grouped[st.className][st.sectionName].push(sub); });
+                // Ensure Subjects actually have teachers assigned (Excluding Break/Lunch)
+                let subjectsWithTeachers = new Set();
+                timetableData.forEach(t => {
+                    let teacher = (t.teacherName || t.teacher || "").trim();
+                    let subjectName = t.subject || t.title || "";
+                    let subLower = subjectName.toLowerCase();
+                    
+                    if (teacher && teacher.toLowerCase() !== "none" && teacher.toLowerCase() !== "n/a" && 
+                        !subLower.includes("break") && !subLower.includes("lunch")) {
+                        subjectsWithTeachers.add(`${normMatch(t.className)}|${normMatch(t.section || t.sectionName)}|${normMatch(subjectName)}`);
+                    }
                 });
 
                 if (isAdmin || isStudent) {
+                    let grouped = {};
+                    structures.forEach(st => {
+                        (st.subjects || []).forEach(sub => { 
+                            let key = `${normMatch(st.className)}|${normMatch(st.sectionName)}|${normMatch(sub)}`;
+                            if (subjectsWithTeachers.has(key)) {
+                                if (!grouped[st.className]) grouped[st.className] = {};
+                                if (!grouped[st.className][st.sectionName]) grouped[st.className][st.sectionName] = [];
+                                grouped[st.className][st.sectionName].push(sub);
+                            }
+                        });
+                    });
+
                     if (Object.keys(grouped).length === 0) {
-                        container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest border-2 border-dashed border-slate-200 rounded-3xl bg-white">No Classes Configured</div>`; return;
+                        container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest border-2 border-dashed border-slate-200 rounded-3xl bg-white">No Assigned Classes Found</div>`; return;
                     }
 
                     let html = "";
@@ -496,7 +519,7 @@
                                 <div class="p-4 bg-white grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
                             `;
                             grouped[className][sectionName].forEach(sub => {
-                                const safeArgs = `'${String(className).replace(/'/g, "\\'")}', '${String(sectionName).replace(/'/g, "\\'")}', '${String(sub).replace(/'/g, "\\'")}'`;
+                                const safeArgs = `'${String(className).replace(/'/g, "\\'")}', '${String(sectionName).replace(/'/g, "\\'")}', '${String(sub).replace(/'/g, "\\'")}', false`;
                                 html += `
                                     <div onclick="openRegister(${safeArgs})" class="cursor-pointer bg-slate-50 border border-slate-200 rounded-xl p-4 text-center hover:bg-purple-50 hover:border-purple-300 transition-colors shadow-sm group/card">
                                         <div class="text-2xl mb-2 group-hover/card:scale-110 transition-transform">📘</div>
@@ -510,19 +533,16 @@
                     });
                     container.innerHTML = html;
                 } else {
+                    // Teacher View
                     let regMap = new Map();
                     timetableData.forEach(t => {
-                        if (normMatch(t.teacherName) === mySafeName || normMatch(t.teacher) === mySafeName) {
-                            regMap.set(`${t.className}|${t.section}|${t.subject}`, { c: t.className, s: t.section, sub: t.subject });
+                        let subjectName = t.subject || t.title || "";
+                        let key = `${normMatch(t.className)}|${normMatch(t.section || t.sectionName)}|${normMatch(subjectName)}`;
+                        
+                        if (subjectsWithTeachers.has(key) && (normMatch(t.teacherName) === mySafeName || normMatch(t.teacher) === mySafeName)) {
+                            regMap.set(key, { c: t.className, s: t.section, sub: subjectName, canEdit: true });
                         }
                     });
-
-                    const staffPermDoc = staffList.find(st => st.email === activeStaff.email);
-                    if (staffPermDoc && staffPermDoc.attendancePermission === "VIEW_ALL") {
-                        timetableData.forEach(t => {
-                            regMap.set(`${t.className}|${t.section}|${t.subject}`, { c: t.className, s: t.section, sub: t.subject });
-                        });
-                    }
 
                     const today = new Date();
                     const offset = today.getTimezoneOffset() * 60000;
@@ -537,11 +557,27 @@
                                     const parts = (adj.sub || "").split('|');
                                     const cName = parts[0] ? parts[0].trim() : "";
                                     const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "";
-                                    regMap.set(`${cName}|${sName}|${adj.title}`, { c: cName, s: sName, sub: adj.title, isSub: true });
+                                    const subLower = (adj.title || "").toLowerCase();
+                                    
+                                    if (!subLower.includes("break") && !subLower.includes("lunch")) {
+                                        regMap.set(`${cName}|${sName}|${adj.title}`, { c: cName, s: sName, sub: adj.title, isSub: true, canEdit: true });
+                                    }
                                 }
                             });
                         }
                     });
+
+                    // Delegated READ ONLY Access check
+                    const staffPermDoc = staffList.find(st => st.email === activeStaff.email);
+                    if (staffPermDoc && staffPermDoc.attendancePermission === "VIEW_ALL") {
+                        timetableData.forEach(t => {
+                            let subjectName = t.subject || t.title || "";
+                            let key = `${normMatch(t.className)}|${normMatch(t.section || t.sectionName)}|${normMatch(subjectName)}`;
+                            if (subjectsWithTeachers.has(key) && !regMap.has(key)) {
+                                regMap.set(key, { c: t.className, s: t.section, sub: subjectName, canEdit: false });
+                            }
+                        });
+                    }
 
                     const myRegisters = Array.from(regMap.values());
                     if (myRegisters.length === 0) {
@@ -553,8 +589,8 @@
 
                     myRegisters.sort((a,b) => String(a.c).localeCompare(String(b.c))).forEach((reg, i) => {
                         const c = colors[i % colors.length];
-                        const subBadge = reg.isSub ? `<div class="absolute -top-3 -right-3 bg-rose-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">Substitution</div>` : '';
-                        const safeArgs = `'${String(reg.c).replace(/'/g, "\\'")}', '${String(reg.s).replace(/'/g, "\\'")}', '${String(reg.sub).replace(/'/g, "\\'")}'`;
+                        const subBadge = reg.isSub ? `<div class="absolute -top-3 -right-3 bg-rose-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">Substitution</div>` : (!reg.canEdit ? `<div class="absolute -top-3 -right-3 bg-slate-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">View Only</div>` : '');
+                        const safeArgs = `'${String(reg.c).replace(/'/g, "\\'")}', '${String(reg.s).replace(/'/g, "\\'")}', '${String(reg.sub).replace(/'/g, "\\'")}', ${reg.canEdit}`;
                         
                         html += `
                             <div onclick="openRegister(${safeArgs})" class="cursor-pointer group relative transition-transform hover:-translate-y-2 hover:rotate-1 duration-300">
@@ -585,28 +621,38 @@
             if(!studentData) return;
             const monthVal = document.getElementById('student-month-select').value;
             const tbody = document.getElementById('subject-breakdown-body');
+            const logsContainer = document.getElementById('student-date-logs');
             tbody.innerHTML = `<tr><td colspan="5" class="text-center py-10 text-slate-400">Fetching records...</td></tr>`;
+            logsContainer.innerHTML = `<div class="text-center py-10 text-slate-400">Loading daily logs...</div>`;
 
             try {
                 const snap = await getCollection("attendance_records").where("monthKey", "==", monthVal).where("className", "==", studentData.className).where("section", "==", studentData.section).get();
 
                 let totalP = 0, totalA = 0, totalL = 0;
                 let subStats = {};
+                let dailyLogs = {};
 
                 snap.forEach(doc => {
                     const data = doc.data();
                     const sub = data.subject || "General";
-                    const records = data.records || {};
+                    const subLower = sub.toLowerCase();
+                    if (subLower.includes("break") || subLower.includes("lunch")) return;
 
+                    const records = data.records || {};
                     if(!subStats[sub]) subStats[sub] = { p: 0, a: 0, l: 0 };
 
                     Object.keys(records).forEach(dateStr => {
                         const dayMap = records[dateStr];
                         if (dayMap[studentData.id]) {
                             const val = dayMap[studentData.id];
+                            if (val === 'ADMIN_EXEMPT') return; // Completely ignore admin overrides
+                            
                             if(val === 'P') { subStats[sub].p++; totalP++; }
                             else if(val === 'A') { subStats[sub].a++; totalA++; }
                             else if(val === 'L') { subStats[sub].l++; totalL++; }
+
+                            if (!dailyLogs[dateStr]) dailyLogs[dateStr] = [];
+                            dailyLogs[dateStr].push({ sub: sub, status: val });
                         }
                     });
                 });
@@ -617,6 +663,7 @@
 
                 if (Object.keys(subStats).length === 0) {
                     tbody.innerHTML = `<tr><td colspan="5" class="text-center py-10 text-slate-400">No attendance records found for this month.</td></tr>`;
+                    logsContainer.innerHTML = `<div class="text-center py-10 text-slate-400">No daily logs found.</div>`;
                     return;
                 }
 
@@ -638,9 +685,43 @@
                     `;
                 });
                 tbody.innerHTML = html;
+
+                // Build Date-wise Chronological Audit Log
+                let logsHtml = "";
+                const sortedDates = Object.keys(dailyLogs).sort((a,b) => new Date(b) - new Date(a)); 
+                
+                sortedDates.forEach(d => {
+                    const prettyDate = new Date(d).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+                    let dayItemsHtml = dailyLogs[d].sort((a,b) => a.sub.localeCompare(b.sub)).map(item => {
+                        let badge = "";
+                        if (item.status === 'P') badge = `<span class="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded font-black text-[10px]">PRESENT</span>`;
+                        else if (item.status === 'A') badge = `<span class="bg-rose-100 text-rose-700 px-2 py-0.5 rounded font-black text-[10px]">ABSENT</span>`;
+                        else if (item.status === 'L') badge = `<span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded font-black text-[10px]">LATE</span>`;
+
+                        return `
+                            <div class="flex justify-between items-center bg-slate-50 border border-slate-100 p-3 rounded-xl">
+                                <span class="text-xs font-black text-slate-700 uppercase">${item.sub}</span>
+                                ${badge}
+                            </div>
+                        `;
+                    }).join('');
+
+                    logsHtml += `
+                        <div class="border-l-4 border-indigo-400 pl-4 py-2 mb-6">
+                            <h4 class="text-xs font-black uppercase tracking-widest text-slate-500 mb-3">${prettyDate}</h4>
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                ${dayItemsHtml}
+                            </div>
+                        </div>
+                    `;
+                });
+
+                logsContainer.innerHTML = logsHtml;
+
             } catch(e) {
                 console.error(e);
                 tbody.innerHTML = `<tr><td colspan="5" class="text-center py-10 text-rose-500">Error loading records.</td></tr>`;
+                logsContainer.innerHTML = `<div class="text-center py-10 text-rose-500">Error loading daily logs.</div>`;
             }
         }
 
@@ -666,7 +747,9 @@
                     const records = data.records || {};
                     const className = data.className;
                     const section = data.section;
-                    const subject = data.subject;
+                    const subject = data.subject || "";
+
+                    if (subject.toLowerCase().includes("break") || subject.toLowerCase().includes("lunch")) return;
 
                     if (records[filterDate]) {
                         const dayRecs = records[filterDate];
@@ -795,15 +878,15 @@
             if(tab === 'ledger') loadLedger();
         }
 
-        async function openRegister(c, s, sub) {
-            currentReg = { c, s, sub };
+        async function openRegister(c, s, sub, canEdit) {
+            currentReg = { c, s, sub, canEdit };
             document.getElementById('reg-title').innerText = `${c} | Sec ${s}`;
             document.getElementById('reg-subtitle').innerText = sub;
             document.getElementById('register-modal').style.display = 'flex';
             document.getElementById('daily-date-picker').value = todayISO; 
 
-            // ADMIN & STUDENT LOCKOUT: Hide all save/bulk tools completely.
-            if (isAdmin || isStudent) {
+            // EXPLICIT LOCKOUT for any unauthorized profile (Admins, Students, or View-Only Teachers)
+            if (!canEdit) {
                 document.getElementById('save-bar-container').style.display = 'none';
                 document.getElementById('bulk-present-btn').style.display = 'none';
                 document.getElementById('bulk-absent-btn').style.display = 'none';
@@ -953,8 +1036,8 @@
                 let html = "";
                 myStudents.forEach(stu => {
                     const val = todaysData[stu.id] || "P"; 
-                    const disabledAttr = (isAdmin || isStudent) ? 'disabled' : '';
-                    const disabledClass = (isAdmin || isStudent) ? 'pointer-events-none opacity-50' : '';
+                    const disabledAttr = (!currentReg.canEdit) ? 'disabled' : '';
+                    const disabledClass = (!currentReg.canEdit) ? 'pointer-events-none opacity-50' : '';
                     
                     html += `
                         <div id="row_${stu.id}" class="student-row bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center transition-all duration-300">
@@ -1030,14 +1113,14 @@
         }
 
         function markAllPresent() {
-            if(isAdmin || isStudent) return;
+            if(!currentReg.canEdit) return;
             const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s));
             myStudents.forEach(stu => { const radio = document.getElementById(`P_${stu.id}`); if (radio) radio.checked = true; });
             updateDailyStats();
         }
 
         function markAllAbsent() {
-            if(isAdmin || isStudent) return;
+            if(!currentReg.canEdit) return;
             const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s));
             myStudents.forEach(stu => { const radio = document.getElementById(`A_${stu.id}`); if (radio) radio.checked = true; });
             updateDailyStats();
@@ -1116,9 +1199,8 @@
         }
         function stopTTS() { if(ttsActive) toggleTTS(); }
 
-        // --- ROBUST READ-MODIFY-WRITE TO GUARANTEE SAVE INTEGRITY ---
         async function saveDailyAttendance() {
-            if(isAdmin || isStudent) return;
+            if(!currentReg.canEdit) return;
             const dateStr = document.getElementById('daily-date-picker').value;
             const btn = document.getElementById('save-daily-btn');
             
@@ -1142,7 +1224,6 @@
             const docRef = getCollection("attendance_records").doc(`att_${activeCenter}_${String(currentReg.c).replace(/\s/g,'_')}_${String(currentReg.s).replace(/\s/g,'_')}_${String(currentReg.sub).replace(/\s/g,'_')}_${monthKey}`);
 
             try {
-                // Fetch existing document to prevent nested-map overwrites
                 const docSnap = await docRef.get();
                 let docData = docSnap.exists ? docSnap.data() : {
                     className: currentReg.c,
@@ -1152,12 +1233,10 @@
                     records: {}
                 };
 
-                // Merge today's data cleanly
                 if (!docData.records) docData.records = {};
                 docData.records[dateStr] = todaysData;
                 docData.lastUpdated = Date.now();
 
-                // Completely rewrite the document payload
                 await docRef.set(docData);
                 
                 if(!currentMonthDoc) currentMonthDoc = {};
