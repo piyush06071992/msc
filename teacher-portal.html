@@ -191,19 +191,16 @@
                 <h2 class="font-black text-base sm:text-lg uppercase tracking-widest leading-tight">Classroom<br>Notes</h2>
             </button>
             
-            <!-- NEW: Hidden Manage Classes Button -->
             <button id="manage-classes-btn" onclick="window.location.href='admin-classes.html'" class="hidden dash-btn bg-[#334155] text-white p-6 sm:p-8 rounded-2xl shadow-lg flex flex-col items-center justify-center min-h-[120px] sm:min-h-[140px] text-center">
                 <span class="text-2xl mb-1">🏛️</span>
                 <h2 class="font-black text-base sm:text-lg uppercase tracking-widest leading-tight">Manage<br>Classes</h2>
             </button>
 
-            <!-- NEW: Hidden Room Manager Button -->
             <button id="manage-rooms-btn" onclick="window.location.href='admin-rooms.html'" class="hidden dash-btn bg-gradient-to-br from-sky-500 to-blue-600 text-white p-6 sm:p-8 rounded-2xl shadow-lg flex flex-col items-center justify-center min-h-[120px] sm:min-h-[140px] text-center border-b-4 border-blue-800">
                 <span class="text-2xl mb-1">📐</span>
                 <h2 class="font-black text-base sm:text-lg uppercase tracking-widest leading-tight">Room<br>Manager</h2>
             </button>
 
-            <!-- NEW: Hidden HOD Teacher Mapping Button -->
             <button id="hod-mapping-btn" onclick="openTeacherMappingModal()" class="hidden dash-btn bg-gradient-to-br from-fuchsia-600 to-purple-700 text-white p-6 sm:p-8 rounded-2xl shadow-lg flex flex-col items-center justify-center min-h-[120px] sm:min-h-[140px] text-center border-b-4 border-fuchsia-900">
                 <span class="text-2xl mb-1">🔀</span>
                 <h2 class="font-black text-base sm:text-lg uppercase tracking-widest leading-tight">Teacher<br>Mapping</h2>
@@ -231,7 +228,7 @@
         <div class="flex-1 overflow-y-auto p-4 sm:p-8 bg-slate-900/50 custom-scroll">
             <div class="max-w-6xl mx-auto">
                 <div class="bg-fuchsia-950/40 border border-fuchsia-500/30 rounded-2xl p-4 mb-6 text-fuchsia-200 text-xs font-bold flex items-center justify-between flex-wrap gap-2">
-                    <span>💡 One card per Section. Assign one or more teachers to your department's team. Saving updates both Live Timetable slots and scheduled Future Masters automatically.</span>
+                    <span>💡 Map teachers directly to their individual timetable slots. Updates automatically sync with the Live Timetable and scheduled Future Masters.</span>
                     <button onclick="loadTeacherMappings()" class="bg-fuchsia-600 hover:bg-fuchsia-500 text-white px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all">↻ Refresh Live</button>
                 </div>
 
@@ -249,6 +246,14 @@
        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
+        function format12Hour(time24) {
+            if (!time24) return ""; 
+            let [h, m] = time24.split(':');
+            let ampm = h >= 12 ? 'PM' : 'AM'; 
+            h = h % 12 || 12;
+            return `${h.toString().padStart(2, '0')}:${m} ${ampm}`;
+        }
+
         // --- MULTI-CENTER DATABASE ROUTER ---
         function getCollection(name) {
             const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
@@ -259,7 +264,6 @@
             return db.collection(`${center.toLowerCase()}_${name}`);
         }
         
-        // --- SAFETY NET: Prevent crashes if Push Notifications are unsupported ---
         let messaging = null;
         try {
             if (firebase.messaging && firebase.messaging.isSupported) {
@@ -277,7 +281,6 @@
                 return;
             }
 
-            // 1. INSTANT UI UPDATE (Prevents indefinite loading)
             const safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name : activeStaff.email;
             const safeDept = (activeStaff.dept && activeStaff.dept !== "undefined") ? activeStaff.dept : "General";
             document.getElementById('staff-name').innerText = `"${safeName}"`;
@@ -301,21 +304,18 @@
                     activeStaff.center = teacherCenter;
                     localStorage.setItem('minervaActiveStaff', JSON.stringify(activeStaff));
 
-                    // --- REVEAL ADMIN BUTTONS IF AUTHORIZED ---
                     const ttAuthLevel = data.canEditTimetable;
                     if (ttAuthLevel === true || ttAuthLevel === teacherCenter) {
                         const classBtn = document.getElementById('manage-classes-btn');
                         if (classBtn) classBtn.classList.remove('hidden');
                     }
 
-                    // --- REVEAL ROOM MANAGER BUTTON IF AUTHORIZED ---
                     const roomAuthLevel = data.canManageRooms;
                     if (roomAuthLevel === true || roomAuthLevel === teacherCenter) {
                         const roomBtn = document.getElementById('manage-rooms-btn');
                         if (roomBtn) roomBtn.classList.remove('hidden');
                     }
 
-                    // --- REVEAL HOD TEACHER MAPPING BUTTON IF HOD ---
                     const isHOD = data.isHOD === true;
                     if (isHOD) {
                         const hodBtn = document.getElementById('hod-mapping-btn');
@@ -352,7 +352,6 @@
             listenForPendingAdjustments(activeStaff);
             loadLeaveNoticeBoard();
             
-            // Trigger Silent Background Compliance Scan
             checkLessonCompliance(safeName);
         };
 
@@ -439,7 +438,6 @@
                     .where("date", "==", todayDateIso)
                     .get();
 
-              // 1. Load the Base Schedule (Exam Override OR Master Timetable)
                 if (!dateSnap.empty) {
                     todaysSchedule = dateSnap.docs.map(d => d.data());
                 } else {
@@ -450,10 +448,8 @@
                     todaysSchedule = daySnap.docs.map(d => d.data()).filter(item => !item.date);
                 }
 
-                // 2. --- THE LIVE LEAVE PATCHER ---
-                // Fetch ALL accepted leave adjustments for today to see if this teacher is substituting
                 const leaveSnap = await db.collection(prefix + "leave_requests")
-                    .where("status", "==", "PENDING") // Leave is still pending or approved
+                    .where("status", "==", "PENDING")
                     .get();
 
                 leaveSnap.forEach(doc => {
@@ -461,9 +457,7 @@
                     if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
                         if (leaveData.adjustments) {
                             leaveData.adjustments.forEach(adj => {
-                                // If the current user is the substitute for a class TODAY
                                 if (adj.date === todayDateIso && adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
-                                    // Construct the class object from the adjustment data
                                     const parts = (adj.sub || "").split('|');
                                     todaysSchedule.push({
                                         className: parts[0] ? parts[0].trim() : "Custom",
@@ -517,7 +511,6 @@
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
             const myEmail = (staffObj.email || "").trim().toLowerCase();
             
-            // Get today's local date string
             const offset = new Date().getTimezoneOffset() * 60000;
             const todayIsoStr = (new Date(Date.now() - offset)).toISOString().split('T')[0];
 
@@ -537,7 +530,6 @@
                                   if (!adj.substituteResponse || adj.substituteResponse === "PENDING") {
                                       pendingCount++;
                                   } else if (adj.substituteResponse === "ACCEPTED" && adj.date === todayIsoStr) {
-                                      // It is accepted (forced by admin or previously accepted by teacher) AND it is happening TODAY
                                       const dutyId = `duty_${doc.id}_${adj.start}`;
                                       if (!ackSubs.includes(dutyId)) {
                                           todayDuties.push({ ...adj, dutyId: dutyId, originalTeacher: data.teacherName });
@@ -548,7 +540,6 @@
                       }
                   });
                   
-                  // 1. Update the tiny badge on the sidebar
                   const badge = document.getElementById('sidebar-leave-badge');
                   const totalAlerts = pendingCount + todayDuties.length;
                   if (badge) {
@@ -560,11 +551,9 @@
                       }
                   }
 
-                  // 2. Render the Feed Banners
                   const container = document.getElementById('feed-urgent-subs');
                   let html = '';
 
-                  // Banner A: Action Required (Pending Requests)
                   if (pendingCount > 0) {
                       html += `
                           <div class="bg-rose-600 text-white p-5 rounded-2xl shadow-md flex flex-col sm:flex-row items-center justify-between gap-4 animate-fade-in border border-rose-500 mb-3">
@@ -582,7 +571,6 @@
                       `;
                   }
 
-                  // Banner B: Today's Assigned Duties (Unacknowledged)
                   todayDuties.forEach(duty => {
                       const timeStr = `${minsTo12H(duty.start).replace(/ (AM|PM)/i,"")} - ${minsTo12H(duty.end)}`;
                       const subParts = (duty.sub || "").split('|');
@@ -607,7 +595,6 @@
                   });
 
                   if (container) container.innerHTML = html;
-                  checkEmptyState();
               }, error => console.error("Adjustment listener failed:", error));
         }
         window.ackDuty = function(dutyId) {
@@ -621,10 +608,7 @@
                 el.style.transition = 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
                 el.style.opacity = '0';
                 el.style.transform = 'scale(0.95)';
-                setTimeout(() => { 
-                    el.remove(); 
-                    checkEmptyState(); 
-                }, 300);
+                setTimeout(() => { el.remove(); }, 300);
             }
         }
         async function loadLeaveNoticeBoard() {
@@ -632,7 +616,6 @@
             const center = activeStaff.center || "GHUMARWIN";
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
             
-            // --- CACHE STAFF DEPARTMENTS TO SAVE READS ---
             let staffDeptMap = JSON.parse(sessionStorage.getItem('minervaStaffDepts_' + center)) || {};
             if (Object.keys(staffDeptMap).length === 0) {
                 try {
@@ -653,7 +636,6 @@
             nextWeek.setDate(d.getDate() + 7);
             const nextWeekIso = `${nextWeek.getFullYear()}-${String(nextWeek.getMonth()+1).padStart(2,'0')}-${String(nextWeek.getDate()).padStart(2,'0')}`;
 
-            // SAFE MEMORY FILTERING (Bypasses Firebase Index errors)
             db.collection(prefix + "leave_requests").onSnapshot(snap => {
                   const board = document.getElementById('leave-notice-board');
                   if (!board) return;
@@ -667,7 +649,6 @@
                       if (data.startDate && data.endDate) {
                           if ((data.status === "APPROVED" || data.status === "PENDING") && data.endDate >= todayIso && data.startDate <= nextWeekIso) {
                               records.push(data);
-                              // Count Today vs Upcoming
                               if (todayIso >= data.startDate && todayIso <= data.endDate) {
                                   todayCount++;
                               } else if (data.startDate > todayIso) {
@@ -677,7 +658,6 @@
                       }
                   });
 
-                  // Update UI counts
                   const countTodayEl = document.getElementById('leave-count-today');
                   const countUpcomingEl = document.getElementById('leave-count-upcoming');
                   if(countTodayEl) countTodayEl.innerText = `Today: ${todayCount}`;
@@ -696,10 +676,8 @@
                       const eDate = new Date(req.endDate + "T00:00:00").toLocaleDateString('en-GB', {day:'numeric', month:'short'});
                       const dateStr = req.startDate === req.endDate ? sDate : `${sDate} - ${eDate}`;
                       
-                     // Lookup department from cache
                       const reqDept = staffDeptMap[(req.teacherEmail || "").toLowerCase()] || req.department || "General";
 
-                      // Bulletproof Time Badge Logic
                       let timeBadge = "FULL DAY";
                       if (req.startTime && req.endTime && req.type && req.type !== "FULL") {
                           const format12 = (t24) => {
@@ -740,10 +718,9 @@
                       }
 
                       html += `
-                        <style>details > summary { list-style: none; } details > summary::-webkit-details-marker { display: none; }</style>
                         <details class="bg-white rounded-xl border border-slate-200 shadow-sm transition-all group overflow-hidden mb-3">
                             <summary class="p-3.5 flex justify-between items-center cursor-pointer outline-none hover:bg-slate-50">
-<div>
+                                <div>
                                     <h4 class="font-black text-slate-800 text-sm uppercase tracking-tighter">${req.teacherName}</h4>
                                     <div class="flex items-center gap-2 mt-1 flex-wrap">
                                         <span class="text-[9px] font-black text-slate-500 uppercase tracking-widest bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">${reqDept}</span>
@@ -769,13 +746,11 @@
               }, error => console.error("Notice board error:", error));
         }
 
-     // --- SILENT BACKGROUND COMPLIANCE AUDITOR ---
         async function checkLessonCompliance(safeName) {
             try {
                 const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
                 const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
                 
-        // Fetch the data required to build the teacher's profile mathematically, INCLUDING TIMETABLE HISTORY
                 const [ttSnap, structSnap, holSnap, plannerSnap, histSnap] = await Promise.all([
                     db.collection(prefix + "timetable").where("teacherName", "==", safeName).get(),
                     getCollection("institute_structure").get(),
@@ -805,7 +780,6 @@
                 const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                 let missingLogs = [];
 
-                // Map timetable to planner Assignment IDs
                 let uniqueAssignments = new Map();
                 myClasses.forEach(cls => {
                     const structMatch = structures.find(st => norm(st.className) === norm(cls.c) && norm(st.sectionName) === norm(cls.s));
@@ -825,7 +799,6 @@
                     }
                 });
 
-                // Audit each connected Planner
                 uniqueAssignments.forEach((classInfo, assignmentId) => {
                     const planner = allPlanners.find(p => p.id === assignmentId);
                     if(planner && planner.syllabusData && planner.syllabusData.length > 0) {
@@ -842,19 +815,17 @@
                         
                         if (lastLog && lastLog < todayISO) {
                             let scanDate = new Date(lastLog);
-                            scanDate.setDate(scanDate.getDate() + 1); // Start scanning day after last log
+                            scanDate.setDate(scanDate.getDate() + 1); 
                             let missedDays = 0;
                             const endD = new Date(todayISO);
-                            endD.setDate(endD.getDate() - 1); // Audit stops at yesterday
+                            endD.setDate(endD.getDate() - 1); 
 
-                            // Mathematical Loop
                             while(scanDate <= endD) {
                                 const scanIso = scanDate.toISOString().split('T')[0];
                                 const dayName = daysArr[scanDate.getDay()];
 
-                                if(scanDate.getDay() !== 0) { // Skip Sundays
+                                if(scanDate.getDay() !== 0) { 
                                     let isHol = false;
-                                    // 1. Holiday Check
                                     for(let h of holidays) {
                                         if(h.startDate && h.isFullDay) {
                                             let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
@@ -863,7 +834,6 @@
                                         }
                                     }
 
-                                    // 2. Exam / History Override Check
                                     let isExamOrOverride = false;
                                     const override = historyOverrides.find(o => o.date === scanIso);
                                     if (override && override.schedule) {
@@ -871,19 +841,17 @@
                                         if (classSlots.length > 0) {
                                             const subSlot = classSlots.find(s => norm(s.subject) === norm(classInfo.sub));
                                             if (!subSlot || (subSlot.remark && subSlot.remark.toLowerCase().includes("doubt session"))) {
-                                                isExamOrOverride = true; // Doubt session or Exam
+                                                isExamOrOverride = true; 
                                             }
                                         } else {
-                                            isExamOrOverride = true; // No class scheduled this day due to override
+                                            isExamOrOverride = true; 
                                         }
                                     }
 
-                                   // 3. Routine Timetable Check
                                     let hasRoutineClass = myFullTimetable.some(t =>
                                         t.day === dayName && norm(t.className) === norm(classInfo.c) && norm(t.section) === norm(classInfo.s) && norm(t.subject) === norm(classInfo.sub)
                                     );
 
-                                    // Only penalize if it's a working day, no global holiday, no exam override, AND they normally have class
                                     if(!isHol && !isExamOrOverride && hasRoutineClass) {
                                         missedDays++;
                                     }
@@ -891,14 +859,13 @@
                                 scanDate.setDate(scanDate.getDate() + 1);
                             }
                             
-                            // --- NEW: SUPPRESS WARNING ON DAYS THE TEACHER CANNOT FIX IT ---
                             let isTodayExcluded = false;
                             const todayDayName = daysArr[today.getDay()];
                             const todayDateOnly = new Date(todayISO); 
                             todayDateOnly.setHours(0,0,0,0);
                             
                             if (today.getDay() === 0) {
-                                isTodayExcluded = true; // Sunday
+                                isTodayExcluded = true; 
                             } else {
                                 let isHolToday = false;
                                 for(let h of holidays) {
@@ -932,27 +899,23 @@
                                 }
                             }
                             
-                            // If they missed at least 1 valid scheduled working day AND today is a day they can actually access the planner to fix it
                             if(missedDays > 0 && !isTodayExcluded) {
                                 missingLogs.push(classInfo.displayName);
                             }
                         }
                     }
                 });
-      
 
               if (missingLogs.length > 0) {
                     document.getElementById('compliance-class-list').innerText = missingLogs.join(', ');
                     document.getElementById('lesson-compliance-banner').classList.remove('hidden');
                 }
 
-                // --- NEW: TRIGGER SYLLABUS COMPLIANCE SCAN ---
                 await checkExamSyllabusCompliance(safeName, myClasses);
 
             } catch(e) { console.error("Compliance Check Error:", e); }
         }
 
-        // --- NEW: SYLLABUS AUDITOR ENGINE ---
         let currentSnoozeLimit = null;
         let currentSnoozeKey = null;
 
@@ -976,11 +939,9 @@
                     const data = doc.data();
                     
                     data.subjects.forEach(sub => {
-                        // Is this one of MY subjects?
                         const isMine = myClasses.some(c => norm(c.c) === norm(data.className) && norm(c.s) === norm(data.section) && norm(c.sub) === norm(sub));
                         
                         if (isMine) {
-                            // Is the syllabus empty?
                             const hasSyllabus = data.syllabi && data.syllabi[sub] && data.syllabi[sub].trim() !== "";
                             if (!hasSyllabus) {
                                 missingSyllabusTargets.push(`${data.className} (Sec ${data.section}) - ${sub}`);
@@ -993,12 +954,10 @@
                 });
 
                 if (missingSyllabusTargets.length > 0 && closestExamDate) {
-                    // Check local storage to see if they snoozed it!
                     const snoozeMemory = JSON.parse(localStorage.getItem('minerva_syllabus_snooze')) || {};
                     const isSnoozedToday = snoozeMemory[closestExamDate] && snoozeMemory[closestExamDate] > todayISO;
                     
                     if (!isSnoozedToday) {
-                        // Calculate the Hard Deadline (2 Days Before Exam)
                         const examDateObj = new Date(closestExamDate);
                         examDateObj.setDate(examDateObj.getDate() - 2);
                         const deadlineIso = new Date(examDateObj - offset).toISOString().split('T')[0];
@@ -1006,11 +965,9 @@
                         document.getElementById('exam-compliance-target').innerText = missingSyllabusTargets[0] + (missingSyllabusTargets.length > 1 ? ` (+${missingSyllabusTargets.length - 1} more)` : '');
                         document.getElementById('exam-syllabus-banner').classList.remove('hidden');
 
-                        // Configure Snooze Modal Limits
                         const datePicker = document.getElementById('snooze-date');
                         const snoozeBtn = document.getElementById('snooze-btn');
                         
-                        // If today is ALREADY past the deadline, they cannot snooze!
                         if (todayISO >= deadlineIso) {
                             snoozeBtn.classList.add('hidden');
                         } else {
@@ -1034,7 +991,6 @@
                 return alert("You cannot snooze past the mandatory deadline (2 days before the exam).");
             }
 
-            // Save the snooze setting locally
             let snoozeMemory = JSON.parse(localStorage.getItem('minerva_syllabus_snooze')) || {};
             snoozeMemory[currentSnoozeKey] = selectedDate;
             localStorage.setItem('minerva_syllabus_snooze', JSON.stringify(snoozeMemory));
@@ -1044,7 +1000,7 @@
         }
 
         // ============================================================================
-        // === HOD TEACHER MAPPING ENGINE (ONE CLEAN CARD PER SECTION)              ===
+        // === HOD TEACHER MAPPING ENGINE (SLOT-LEVEL MAPPING)                      ===
         // ============================================================================
         let hodDepartmentName = "General";
         let hodAvailableTeachers = [];
@@ -1078,12 +1034,11 @@
                 };
                 const targetDeptNorm = norm(hodDepartmentName);
 
-                // 1. Fetch sections, timetable slots, staff, and saved mappings in parallel
-                const [structSnap, ttSnap, staffSnap, mapSnap] = await Promise.all([
+                // 1. Fetch sections, timetable slots, and staff
+                const [structSnap, ttSnap, staffSnap] = await Promise.all([
                     getCollection("institute_structure").get(),
                     getCollection("timetable").get(),
-                    db.collection("staff_applications").where("status", "==", "approved").get(),
-                    getCollection("department_mappings").get()
+                    db.collection("staff_applications").where("status", "==", "approved").get()
                 ]);
 
                 // 2. Filter Teachers belonging to HOD's department
@@ -1129,40 +1084,20 @@
                     return;
                 }
 
-                const savedMappings = {};
-                mapSnap.forEach(doc => { savedMappings[doc.id] = doc.data(); });
-
                 const allTimetableSlots = ttSnap.docs.map(d => ({ docId: d.id, ...d.data() }));
                 relevantSections.sort((a,b) => a.className.localeCompare(b.className) || a.sectionName.localeCompare(b.sectionName));
 
                 let html = "";
                 relevantSections.forEach(sec => {
-                    const mapKey = `${sec.className}_${sec.sectionName}_${sec.subject}`.replace(/\s+/g, '_');
-                    const savedMap = savedMappings[mapKey] || {};
-
-                    // Find all live timetable slots for this section & subject
                     const activeSlots = allTimetableSlots.filter(t =>
                         norm(t.className) === norm(sec.className) &&
                         norm(t.section) === norm(sec.sectionName) &&
                         norm(t.subject) === norm(sec.subject)
                     );
 
-                    // Collect unique teachers currently teaching this section (from live timetable or saved mappings)
-                    let currentTeachers = [];
-                    if (activeSlots.length > 0) {
-                        const uniqueTeas = [...new Set(activeSlots.map(t => t.teacher).filter(n => n && n !== "NONE"))];
-                        if (uniqueTeas.length > 0) currentTeachers = uniqueTeas;
-                    }
-                    if (currentTeachers.length === 0 && savedMap.teachers && Array.isArray(savedMap.teachers)) {
-                        currentTeachers = savedMap.teachers;
-                    } else if (currentTeachers.length === 0 && savedMap.teacher) {
-                        currentTeachers = [savedMap.teacher];
-                    }
-                    if (currentTeachers.length === 0) currentTeachers = ["NONE"];
-
                     const statusBadge = activeSlots.length > 0
                         ? `<span class="bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest">● ${activeSlots.length} Timetable Slots Active</span>`
-                        : `<span class="bg-amber-500/20 border border-amber-500/40 text-amber-300 px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest">● New Section - Ready to Assign</span>`;
+                        : `<span class="bg-amber-500/20 border border-amber-500/40 text-amber-300 px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest">● No Slots Found</span>`;
 
                     const domSafeId = `${sec.className}_${sec.sectionName}_${sec.subject}`.replace(/[^a-zA-Z0-9]/g, '');
 
@@ -1175,26 +1110,62 @@
                                 </div>
                                 <div class="flex items-center gap-2">
                                     ${statusBadge}
-                                    <button onclick="addTeacherRowToSection('${domSafeId}', 'NONE', '')" class="bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 hover:bg-indigo-600 hover:text-white px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all">
-                                        + Add Teacher
-                                    </button>
                                 </div>
                             </div>
-
                             <div class="space-y-2" id="teachers-list-${domSafeId}">
                     `;
 
-                    currentTeachers.forEach((teaName, index) => {
-                        html += renderTeacherRowHtml(teaName, savedMap.remark || "", index === 0 && currentTeachers.length === 1);
-                    });
+                    if (activeSlots.length > 0) {
+                        const dayOrder = { 'Monday':1, 'Tuesday':2, 'Wednesday':3, 'Thursday':4, 'Friday':5, 'Saturday':6, 'Sunday':7 };
+                        activeSlots.sort((a,b) => dayOrder[a.day] - dayOrder[b.day] || a.start24.localeCompare(b.start24));
+
+                        activeSlots.forEach(slot => {
+                            const time12 = format12Hour(slot.start24) + ' - ' + format12Hour(slot.end24);
+                            let teacherOptions = `<option value="NONE">- Unassigned / TBA -</option>`;
+                            let foundCurrent = false;
+                            
+                            hodAvailableTeachers.forEach(t => {
+                                const isSel = (t.name === slot.teacher) ? "selected" : "";
+                                if (isSel) foundCurrent = true;
+                                teacherOptions += `<option value="${t.name}" ${isSel}>${t.name}</option>`;
+                            });
+                            
+                            if (slot.teacher && slot.teacher !== "NONE" && !foundCurrent) {
+                                teacherOptions += `<option value="${slot.teacher}" selected>${slot.teacher} (External)</option>`;
+                            }
+
+                            html += `
+                                <div class="hod-teacher-row bg-slate-900/60 border border-slate-700/60 rounded-xl p-3 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 mb-2" data-docid="${slot.docId}" data-day="${slot.day}" data-start="${slot.start24}" data-end="${slot.end24}">
+                                    <div class="flex flex-col w-32 shrink-0">
+                                        <span class="text-[10px] font-black text-fuchsia-400 uppercase tracking-widest">${slot.day}</span>
+                                        <span class="text-xs font-bold text-slate-300 mt-0.5">${time12}</span>
+                                    </div>
+                                    <div class="flex flex-col flex-1">
+                                        <label class="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Assigned Teacher</label>
+                                        <select class="tea-select bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-bold text-white outline-none focus:border-fuchsia-500 cursor-pointer">
+                                            ${teacherOptions}
+                                        </select>
+                                    </div>
+                                    <div class="flex flex-col flex-1">
+                                        <label class="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Remarks / Notes</label>
+                                        <input type="text" class="tea-remark bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-bold text-white outline-none focus:border-fuchsia-500" value="${slot.remark || ''}" placeholder="e.g. Lab, Theory...">
+                                    </div>
+                                </div>
+                            `;
+                        });
+                    } else {
+                        html += `<div class="p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-300 text-xs font-bold text-center">No timetable slots active for this subject yet. Create slots in Timetable Management first.</div>`;
+                    }
 
                     html += `
                             </div>
+                            ${activeSlots.length > 0 ? `
                             <div class="flex justify-end pt-2 border-t border-slate-700/50">
                                 <button onclick="saveSectionTeamMapping('${sec.className}', '${sec.sectionName}', '${sec.subject}', '${domSafeId}', this)" class="bg-fuchsia-600 hover:bg-fuchsia-500 text-white px-6 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-md transition-all active:scale-95">
-                                    Save Section Team
+                                    Save Slot Assignments
                                 </button>
                             </div>
+                            ` : ''}
                         </div>
                     `;
                 });
@@ -1206,154 +1177,47 @@
             }
         }
 
-        function renderTeacherRowHtml(selectedTeacher, remarkVal, isSingle) {
-            let teacherOptions = `<option value="NONE">- Unassigned / TBA -</option>`;
-            let foundCurrent = false;
-            hodAvailableTeachers.forEach(t => {
-                const isSel = (t.name === selectedTeacher) ? "selected" : "";
-                if (isSel) foundCurrent = true;
-                teacherOptions += `<option value="${t.name}" ${isSel}>${t.name}</option>`;
-            });
-            if (selectedTeacher && selectedTeacher !== "NONE" && !foundCurrent) {
-                teacherOptions += `<option value="${selectedTeacher}" selected>${selectedTeacher} (External)</option>`;
-            }
-
-            return `
-                <div class="hod-teacher-row bg-slate-900/60 border border-slate-700/60 rounded-xl p-3 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-                    <div class="flex flex-col flex-1">
-                        <label class="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Assigned Teacher</label>
-                        <select class="tea-select bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-bold text-white outline-none focus:border-fuchsia-500 cursor-pointer">
-                            ${teacherOptions}
-                        </select>
-                    </div>
-
-                    <div class="flex flex-col flex-1">
-                        <label class="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Remarks / Notes</label>
-                        <input type="text" class="tea-remark bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs font-bold text-white outline-none focus:border-fuchsia-500" value="${remarkVal || ''}" placeholder="e.g. Focus on Mechanics">
-                    </div>
-
-                    <button onclick="removeTeacherRow(this)" class="bg-rose-950/40 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 px-3 py-2 rounded-lg font-black text-[10px] uppercase tracking-widest transition-all self-end sm:self-auto mt-2 sm:mt-0" title="Remove Teacher">
-                        🗑️
-                    </button>
-                </div>
-            `;
-        }
-
-        function addTeacherRowToSection(domSafeId, teacherName, remarkVal) {
-            const container = document.getElementById(`teachers-list-${domSafeId}`);
-            if (!container) return;
-            const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = renderTeacherRowHtml(teacherName, remarkVal, false);
-            container.appendChild(tempDiv.firstElementChild);
-        }
-
-        function removeTeacherRow(btnEl) {
-            const container = btnEl.closest('[id^="teachers-list-"]');
-            if (container && container.querySelectorAll('.hod-teacher-row').length <= 1) {
-                alert("Each section must have at least one teacher row. Select '- Unassigned / TBA -' if no teacher is assigned yet.");
-                return;
-            }
-            btnEl.closest('.hod-teacher-row').remove();
-        }
-
-      async function saveSectionTeamMapping(className, sectionName, subjectName, domSafeId, btnEl) {
+        async function saveSectionTeamMapping(className, sectionName, subjectName, domSafeId, btnEl) {
             const container = document.getElementById(`teachers-list-${domSafeId}`);
             if (!container) return;
 
             const rows = container.querySelectorAll('.hod-teacher-row');
-            const selectedTeachers = [];
-            let sharedRemark = "";
+            if (rows.length === 0) return alert("No slots to update.");
 
-            rows.forEach((row, idx) => {
-                const tName = row.querySelector('.tea-select').value;
-                const rem = row.querySelector('.tea-remark').value.trim();
-                if (tName && tName !== "NONE" && !selectedTeachers.includes(tName)) {
-                    selectedTeachers.push(tName);
-                }
-                if (idx === 0 && rem) sharedRemark = rem;
-            });
-
-            const primaryTeacher = selectedTeachers.length > 0 ? selectedTeachers[0] : "NONE";
             const origText = btnEl.innerText;
             btnEl.innerText = "⏳..."; btnEl.disabled = true;
 
             try {
-                const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                const mapKey = `${className}_${sectionName}_${subjectName}`.replace(/\s+/g, '_');
-                const staffObj = JSON.parse(localStorage.getItem('minervaActiveStaff')) || {};
-
-                // 1. Save mapping to department_mappings collection
-                await getCollection("department_mappings").doc(mapKey).set({
-                    className,
-                    sectionName,
-                    subject: subjectName,
-                    teacher: primaryTeacher,
-                    teachers: selectedTeachers,
-                    remark: sharedRemark,
-                    updatedBy: staffObj.name || staffObj.email || "HOD",
-                    updatedAt: Date.now()
-                }, { merge: true });
-
-                // 2. Query live Timetable slots and update/assign teachers
-                const ttSnap = await getCollection("timetable")
-                    .where("className", "==", className)
-                    .where("section", "==", sectionName)
-                    .get();
-
+                const batch = db.batch();
                 let updatedLiveCount = 0;
-                let teaIdx = 0;
+                
+                const slotUpdates = [];
+                rows.forEach(row => {
+                    const docId = row.getAttribute('data-docid');
+                    const day = row.getAttribute('data-day');
+                    const start24 = row.getAttribute('data-start');
+                    const end24 = row.getAttribute('data-end');
+                    const teacher = row.querySelector('.tea-select').value;
+                    const remark = row.querySelector('.tea-remark').value.trim();
+                    
+                    slotUpdates.push({ docId, day, start24, end24, teacher, remark });
 
-                if (!ttSnap.empty) {
-                    const batch = db.batch();
-                    ttSnap.docs.forEach(doc => {
-                        const slot = doc.data();
-                        if (norm(slot.subject) === norm(subjectName)) {
-                            const assignedTea = selectedTeachers.length > 0 ? selectedTeachers[teaIdx % selectedTeachers.length] : "NONE";
-                            batch.update(doc.ref, {
-                                teacher: assignedTea,
-                                teacherName: assignedTea,
-                                remark: sharedRemark
-                            });
-                            updatedLiveCount++;
-                            teaIdx++;
-                        }
-                    });
-
-                    if (updatedLiveCount > 0) {
-                        await batch.commit();
-                        await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
-                    }
-                }
-
-                // 3. Fallback for newly created sections with zero timetable slots yet
-                if (updatedLiveCount === 0) {
-                    const teaToCreate = selectedTeachers.length > 0 ? selectedTeachers : ["NONE"];
-                    for (const tea of teaToCreate) {
-                        await getCollection("timetable").add({
-                            day: "Monday",
-                            className: className,
-                            section: sectionName,
-                            subject: subjectName,
-                            teacher: tea,
-                            teacherName: tea,
-                            teacherEmail: "",
-                            room: "TBD",
-                            remark: sharedRemark,
-                            start24: "09:00",
-                            end24: "10:00",
-                            timeRange: "09:00 AM - 10:00 AM",
-                            duration: "60 MINS",
-                            sMins: 540,
-                            eMins: 600
+                    if (docId) {
+                        batch.update(getCollection("timetable").doc(docId), {
+                            teacher: teacher,
+                            teacherName: teacher,
+                            remark: remark
                         });
                         updatedLiveCount++;
                     }
+                });
+
+                if (updatedLiveCount > 0) {
+                    await batch.commit();
                     await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
                 }
 
-                // 4. --- 🌟 UNIVERSAL FUTURE / UPCOMING SCHEDULE SYNC ---
-                // Query all future schedules in timetable_history (FUTURE_MASTER, DAILY_OVERRIDE, EXAM_OVERRIDE, etc.)
-                // and update matching slots so "Continue from Date" and future overrides are updated instantly!
+                // Update Future Masters
                 const todayIso = new Date().toISOString().split('T')[0];
                 const histSnap = await getCollection("timetable_history").where("date", ">=", todayIso).get();
                 let updatedFutureSchedulesCount = 0;
@@ -1361,52 +1225,39 @@
 
                 if (!histSnap.empty) {
                     const histBatch = db.batch();
-                    let histTeaIdx = 0;
+                    const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
                     histSnap.docs.forEach(doc => {
                         const hData = doc.data();
                         if (hData.schedule && Array.isArray(hData.schedule)) {
                             let docModified = false;
                             const updatedSchedule = hData.schedule.map(slot => {
-                                if (
-                                    norm(slot.className) === norm(className) &&
-                                    norm(slot.section) === norm(sectionName) &&
-                                    norm(slot.subject) === norm(subjectName)
-                                ) {
-                                    const assignedTea = selectedTeachers.length > 0 ? selectedTeachers[histTeaIdx % selectedTeachers.length] : "NONE";
-                                    histTeaIdx++;
-                                    docModified = true;
-                                    updatedFutureSlotsCount++;
-                                    return {
-                                        ...slot,
-                                        teacher: assignedTea,
-                                        teacherName: assignedTea,
-                                        remark: sharedRemark
-                                    };
+                                if (norm(slot.className) === norm(className) && norm(slot.section) === norm(sectionName) && norm(slot.subject) === norm(subjectName)) {
+                                    const match = slotUpdates.find(su => su.day === slot.day && su.start24 === slot.start24 && su.end24 === slot.end24);
+                                    if (match) {
+                                        docModified = true;
+                                        updatedFutureSlotsCount++;
+                                        return { ...slot, teacher: match.teacher, teacherName: match.teacher, remark: match.remark };
+                                    }
                                 }
                                 return slot;
                             });
 
                             if (docModified) {
-                                histBatch.update(doc.ref, {
-                                    schedule: updatedSchedule,
-                                    lastUpdated: Date.now()
-                                });
+                                histBatch.update(doc.ref, { schedule: updatedSchedule, lastUpdated: Date.now() });
                                 updatedFutureSchedulesCount++;
                             }
                         }
                     });
-
-                    if (updatedFutureSchedulesCount > 0) {
-                        await histBatch.commit();
-                    }
+                    if (updatedFutureSchedulesCount > 0) await histBatch.commit();
                 }
 
-                alert(`✅ Section Team Mapping Saved!\n\nTeam: ${selectedTeachers.length > 0 ? selectedTeachers.join(", ") : "Unassigned"}\nLive Timetable Slots Updated: ${updatedLiveCount}\nFuture/Upcoming Schedule Dates Updated: ${updatedFutureSchedulesCount} (${updatedFutureSlotsCount} slots)`);
+                alert(`✅ Slot Mapping Saved!\nLive Timetable Slots Updated: ${updatedLiveCount}\nFuture/Upcoming Schedule Dates Updated: ${updatedFutureSchedulesCount} (${updatedFutureSlotsCount} slots)`);
                 btnEl.innerText = "✓ Saved";
                 setTimeout(() => { btnEl.innerText = origText; btnEl.disabled = false; loadTeacherMappings(); }, 1200);
+
             } catch (e) {
-                console.error("Error saving teacher mapping:", e);
+                console.error("Error saving slot mapping:", e);
                 alert("Error saving mapping: " + e.message);
                 btnEl.innerText = origText; btnEl.disabled = false;
             }
