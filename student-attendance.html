@@ -130,19 +130,12 @@
             <div class="bg-white p-6 sm:p-8 rounded-3xl shadow-sm border border-slate-200 max-w-2xl space-y-6">
                 <div>
                     <label class="block text-xs font-black uppercase tracking-widest text-slate-600 mb-2">1. Select Department</label>
-                    <select id="perm-dept-select" onchange="populateFacultyDropdown()" class="w-full border border-slate-300 rounded-xl p-3 text-xs font-bold bg-white outline-none shadow-sm">
-                        <option value="">-- Choose Department --</option>
-                        <option value="Mathematics">Mathematics</option>
-                        <option value="Physics">Physics</option>
-                        <option value="Chemistry">Chemistry</option>
-                        <option value="Biology">Biology</option>
-                        <option value="Administration">Administration</option>
-                    </select>
+                    <select id="perm-dept-select" onchange="populateFacultyDropdown()" class="w-full border border-slate-300 rounded-xl p-3 text-xs font-bold bg-white outline-none shadow-sm cursor-pointer"></select>
                 </div>
                 <div>
                     <label class="block text-xs font-black uppercase tracking-widest text-slate-600 mb-2">2. Select Faculty Member</label>
-                    <select id="perm-faculty-select" class="w-full border border-slate-300 rounded-xl p-3 text-xs font-bold bg-white outline-none shadow-sm">
-                        <option value="">-- Choose Faculty --</option>
+                    <select id="perm-faculty-select" class="w-full border border-slate-300 rounded-xl p-3 text-xs font-bold bg-white outline-none shadow-sm cursor-pointer">
+                        <option value="">-- Select Dept First --</option>
                     </select>
                 </div>
                 <div class="flex items-center gap-3 pt-2">
@@ -150,6 +143,11 @@
                     <button onclick="grantFacultyPermission('REVOKE')" class="bg-rose-100 hover:bg-rose-200 text-rose-700 px-6 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all">Revoke Access</button>
                 </div>
                 <div id="perm-status-msg" class="text-xs font-bold text-purple-600"></div>
+
+                <div class="mt-8 border-t border-slate-200 pt-6">
+                    <h4 class="font-black text-slate-800 text-sm uppercase tracking-widest mb-4">Currently Authorized Faculty</h4>
+                    <div id="authorized-faculty-list" class="space-y-3"></div>
+                </div>
             </div>
         </div>
 
@@ -394,6 +392,14 @@
             const globalCollections = ['configs', 'staff_applications', 'system_metadata'];
             if (globalCollections.includes(name)) return db.collection(name);
             return activeCenter === "GHUMARWIN" ? db.collection(name) : db.collection(`${activeCenter.toLowerCase()}_${name}`);
+        }
+
+        function getRawDept(s) {
+            const det = s.details || {};
+            const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject') || k.toLowerCase().includes('branch'));
+            let rawDept = deptKey ? det[deptKey] : 'General';
+            if (rawDept === undefined || rawDept === null) rawDept = 'General';
+            return rawDept.toString();
         }
 
         function switchBranch() {
@@ -707,24 +713,59 @@
             }
         }
 
-        function loadStaffListForPerms() {}
+        function loadStaffListForPerms() {
+            let depts = new Set();
+            staffList.forEach(s => {
+                getRawDept(s).split(',').forEach(item => {
+                    const c = item.trim();
+                    if(c && c !== 'undefined' && c !== 'General') depts.add(c);
+                });
+            });
+            const deptArray = Array.from(depts).sort();
+            document.getElementById('perm-dept-select').innerHTML = `<option value="">-- Choose Department --</option>` + deptArray.map(d => `<option value="${d}">${d}</option>`).join('');
+            document.getElementById('perm-faculty-select').innerHTML = `<option value="">-- Select Dept First --</option>`;
+            
+            renderAuthorizedFaculty();
+        }
 
         function populateFacultyDropdown() {
             const dept = document.getElementById('perm-dept-select').value;
             const facSelect = document.getElementById('perm-faculty-select');
-            if(!dept) { facSelect.innerHTML = `<option value="">-- Choose Faculty --</option>`; return; }
+            if(!dept) { facSelect.innerHTML = `<option value="">-- Select Dept First --</option>`; return; }
 
-            const filtered = staffList.filter(s => {
-                const d = s.department || (s.details && s.details.department) || "";
-                return d.toLowerCase().includes(dept.toLowerCase()) || dept === "Administration";
-            });
+            const filtered = staffList.filter(s => getRawDept(s).includes(dept));
 
             let opts = `<option value="">-- Choose Faculty --</option>`;
             filtered.forEach(f => {
-                const name = f.name || f.email;
+                const nameKey = Object.keys(f.details || {}).find(k=>k.toLowerCase().includes('name'));
+                const name = nameKey ? f.details[nameKey] : f.email;
                 opts += `<option value="${f.email}">${name} (${f.email})</option>`;
             });
             facSelect.innerHTML = opts;
+        }
+
+        function renderAuthorizedFaculty() {
+            const container = document.getElementById('authorized-faculty-list');
+            const authStaff = staffList.filter(s => s.attendancePermission === 'VIEW_ALL');
+            
+            if(authStaff.length === 0) {
+                container.innerHTML = `<div class="text-xs font-bold text-slate-400 bg-slate-50 p-4 rounded-xl text-center border border-slate-100 uppercase tracking-widest">No faculty has global access.</div>`;
+                return;
+            }
+
+            container.innerHTML = authStaff.map(f => {
+                const nameKey = Object.keys(f.details || {}).find(k=>k.toLowerCase().includes('name'));
+                const name = nameKey ? f.details[nameKey] : f.email;
+                return `
+                    <div class="flex justify-between items-center bg-slate-50 border border-slate-200 p-3 rounded-xl">
+                        <div>
+                            <p class="text-sm font-black text-slate-800">${name}</p>
+                            <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">${f.email}</p>
+                        </div>
+                        <span class="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest">Global Access</span>
+                    </div>
+                `;
+            }).join('');
         }
 
         async function grantFacultyPermission(mode) {
@@ -732,13 +773,14 @@
             const msgEl = document.getElementById('perm-status-msg');
             if(!email) { alert("Please select a faculty member."); return; }
 
-            msgEl.innerText = "⏳ Saving permission...";
+            msgEl.innerText = "⏳ Updating permission...";
             try {
                 const staffDoc = staffList.find(s => s.email === email);
                 if(staffDoc) {
                     await db.collection("staff_applications").doc(staffDoc.id).update({ attendancePermission: mode });
                     staffDoc.attendancePermission = mode;
-                    msgEl.innerText = `✅ Successfully updated permission to: ${mode}`;
+                    msgEl.innerText = mode === 'VIEW_ALL' ? `✅ Access Granted Successfully!` : `✅ Access Revoked Successfully!`;
+                    renderAuthorizedFaculty();
                 }
             } catch(e) {
                 console.error(e);
@@ -760,6 +802,7 @@
             document.getElementById('register-modal').style.display = 'flex';
             document.getElementById('daily-date-picker').value = todayISO; 
 
+            // ADMIN & STUDENT LOCKOUT: Hide all save/bulk tools completely.
             if (isAdmin || isStudent) {
                 document.getElementById('save-bar-container').style.display = 'none';
                 document.getElementById('bulk-present-btn').style.display = 'none';
@@ -911,6 +954,8 @@
                 myStudents.forEach(stu => {
                     const val = todaysData[stu.id] || "P"; 
                     const disabledAttr = (isAdmin || isStudent) ? 'disabled' : '';
+                    const disabledClass = (isAdmin || isStudent) ? 'pointer-events-none opacity-50' : '';
+                    
                     html += `
                         <div id="row_${stu.id}" class="student-row bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center transition-all duration-300">
                             <div class="flex items-center gap-3 sm:gap-4">
@@ -920,7 +965,7 @@
                                     <div id="disc_warning_${stu.id}" class="text-[9px] font-black text-rose-600 bg-rose-50 px-2 py-0.5 rounded border border-rose-200 mt-1 hidden uppercase tracking-widest"></div>
                                 </div>
                             </div>
-                            <div class="flex shrink-0">
+                            <div class="flex shrink-0 ${disabledClass}">
                                 <input type="radio" name="att_${stu.id}" id="P_${stu.id}" value="P" class="att-radio" ${val==='P' ? 'checked' : ''} ${disabledAttr} onchange="updateDailyStats()">
                                 <label for="P_${stu.id}" class="att-label left text-slate-500 hover:bg-slate-50 select-none">P</label>
                                 
@@ -1071,7 +1116,7 @@
         }
         function stopTTS() { if(ttsActive) toggleTTS(); }
 
-        // ROBUST SAVE FUNCTION USING READ-MODIFY-WRITE PATTERN
+        // --- ROBUST READ-MODIFY-WRITE TO GUARANTEE SAVE INTEGRITY ---
         async function saveDailyAttendance() {
             if(isAdmin || isStudent) return;
             const dateStr = document.getElementById('daily-date-picker').value;
@@ -1097,7 +1142,7 @@
             const docRef = getCollection("attendance_records").doc(`att_${activeCenter}_${String(currentReg.c).replace(/\s/g,'_')}_${String(currentReg.s).replace(/\s/g,'_')}_${String(currentReg.sub).replace(/\s/g,'_')}_${monthKey}`);
 
             try {
-                // Read-Modify-Write to guarantee persistence and avoid nested map merge bugs
+                // Fetch existing document to prevent nested-map overwrites
                 const docSnap = await docRef.get();
                 let docData = docSnap.exists ? docSnap.data() : {
                     className: currentReg.c,
@@ -1107,10 +1152,12 @@
                     records: {}
                 };
 
+                // Merge today's data cleanly
                 if (!docData.records) docData.records = {};
                 docData.records[dateStr] = todaysData;
                 docData.lastUpdated = Date.now();
 
+                // Completely rewrite the document payload
                 await docRef.set(docData);
                 
                 if(!currentMonthDoc) currentMonthDoc = {};
@@ -1219,7 +1266,7 @@
                     let percentage = grandTotalWorking > 0 ? Math.round((grandTotalAtt / grandTotalWorking) * 100) : 0;
                     const pctClass = percentage < 75 && grandTotalWorking > 0 ? "bg-rose-100 text-rose-600 font-black" : "font-black text-slate-800";
 
-                    tableHtml += `<tr><td class="sticky-col-1 border-b border-slate-200 bg-white shadow-[1px_0_2px_rgba(0,0,0,0.05)] text-slate-400">#${stu.rollNo || 'N/A'}</td><td class="sticky-col-2 border-b border-slate-200 bg-white uppercase truncate px-2" title="${stu.name}">${stu.name}</td>${rowHtml}<td class="bg-indigo-50/30 border-r border-b border-slate-200 font-black text-slate-600">${totalWorkingDaysMonth}</td><td class="bg-indigo-50 border-r border-b border-slate-200 text-slate-500">${prevTotalWorking}</td><td class="bg-indigo-50 border-r border-slate-200 font-black text-indigo-700">${grandTotalWorking}</td><td class="bg-amber-50/30 border-r border-b border-amber-100 text-amber-600 font-black">${lCount}</td><td class="bg-emerald-50/30 border-r border-b border-emerald-100 text-emerald-600 font-black">${pCount}</td><td class="bg-emerald-50/30 border-r border-b border-emerald-100 text-slate-500">${stuPrevAtt}</td><td class="bg-emerald-50 border-r border-b border-emerald-200 font-black text-emerald-700">${grandTotalAtt}</td><td class="border-b border-slate-200 ${pctClass}">${percentage}%</td></tr>`;
+                    tableHtml += `<tr><td class="sticky-col-1 border-b border-slate-200 bg-white shadow-[1px_0_2px_rgba(0,0,0,0.05)] text-slate-400">#${stu.rollNo || 'N/A'}</td><td class="sticky-col-2 border-b border-slate-200 bg-white uppercase truncate px-2" title="${stu.name}">${stu.name}</td>${rowHtml}<td class="bg-indigo-50/30 border-r border-b border-slate-200 font-black text-slate-600">${totalWorkingDaysMonth}</td><td class="bg-indigo-50/30 border-r border-b border-slate-200 text-slate-500">${prevTotalWorking}</td><td class="bg-indigo-50 border-r border-slate-200 font-black text-indigo-700">${grandTotalWorking}</td><td class="bg-amber-50/30 border-r border-b border-amber-100 text-amber-600 font-black">${lCount}</td><td class="bg-emerald-50/30 border-r border-b border-emerald-100 text-emerald-600 font-black">${pCount}</td><td class="bg-emerald-50/30 border-r border-b border-emerald-100 text-slate-500">${stuPrevAtt}</td><td class="bg-emerald-50 border-r border-b border-emerald-200 font-black text-emerald-700">${grandTotalAtt}</td><td class="border-b border-slate-200 ${pctClass}">${percentage}%</td></tr>`;
                 });
 
                 container.innerHTML = tableHtml + `</tbody></table>`;
