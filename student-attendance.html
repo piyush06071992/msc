@@ -13,10 +13,10 @@
         .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
         .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         .book-spine { box-shadow: inset 4px 0 10px rgba(0,0,0,0.2), inset -1px 0 2px rgba(255,255,255,0.3); }
-        .table-container { overflow-x: auto; max-width: 100%; }
+        .table-container { overflow-x: auto; max-width: 100%; border-radius: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         
         /* Traditional Physical Register Ledger Styling - Displayed ON SCREEN */
-        .ledger-paper { background: #ffffff; padding: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); width: 100%; overflow-x: auto; }
+        .ledger-paper { background: #ffffff; padding: 24px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.08); border: 1px solid #cbd5e1; width: 100%; overflow-x: auto; }
         .ledger-table { border-collapse: collapse; border-spacing: 0; min-width: 1500px; width: 100%; font-family: Arial, sans-serif; border: 2px solid #000; }
         .ledger-table th, .ledger-table td { border: 1px solid #000; padding: 4px; white-space: nowrap; text-align: center; font-size: 12px; color: #000; }
         .ledger-table th { font-weight: bold; font-size: 10px; }
@@ -274,8 +274,8 @@
                 </div>
             </div>
             
-            <div class="ledger-paper w-full">
-                <div id="ledger-table-container" class="table-container"></div>
+            <div class="ledger-paper">
+                <div id="ledger-table-container"></div>
             </div>
         </div>
     </div>
@@ -391,6 +391,14 @@
 
         const normDoc = (val) => String(val || "").replace(/\s/g, '_').toUpperCase();
         const normMatch = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+        function parseSafeDate(dVal) {
+            if (!dVal) return null;
+            if (dVal.toDate && typeof dVal.toDate === 'function') return dVal.toDate();
+            if (typeof dVal === 'string' || typeof dVal === 'number') return new Date(dVal);
+            if (dVal instanceof Date) return dVal;
+            return null;
+        }
 
         function handleBack() { 
             if (activeStudent) {
@@ -757,7 +765,7 @@
 
                     let isHol = false;
                     for(let h of holidaysData) {
-                        if(h.startDate && h.isFullDay) {
+                        if(h.startDate && h.suspendClasses !== false) {
                             const [sy, sm, sd] = h.startDate.split('-');
                             let hs = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd));
                             
@@ -949,7 +957,7 @@
 
             // 1. Check strict holidays from school_holidays
             for(let h of holidaysData) {
-                if(h.startDate) {
+                if(h.startDate && h.suspendClasses !== false) {
                     const [sy, sm, sd] = h.startDate.split('-');
                     let hs = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd));
                     
@@ -971,10 +979,7 @@
                         });
 
                         if (matchesClass) {
-                            if (h.isFullDay) {
-                                if (h.type === 'HOLIDAY') return { locked: true, reason: h.reason, type: "HOLIDAY" };
-                                if (h.type === 'EVENT') return { locked: false, isEvent: true, reason: h.reason, type: "EVENT" };
-                            }
+                            return { locked: true, reason: h.reason, type: "HOLIDAY" };
                         }
                     }
                 }
@@ -985,20 +990,16 @@
             if (override) {
                 const classSlots = (override.schedule || []).filter(s => normMatch(s.className) === normMatch(currentReg.c) && normMatch(s.section) === normMatch(currentReg.s));
                 if (classSlots.length === 0) {
-                    return { locked: true, reason: "NO CLASS", type: "HOLIDAY" };
+                    return { locked: true, reason: "NO CLASS", type: "NOCLASS" };
                 } else {
-                    const isOnlyEvent = classSlots.every(s => ['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'EVENT'].includes((s.subject || "").toUpperCase()));
-                    if (isOnlyEvent && override.tag) {
-                         return { locked: false, isEvent: true, reason: override.tag, type: "EVENT" };
-                    }
-                    const isExam = classSlots.some(s => ['EXAM', 'UT', 'OT'].includes((s.subject || "").toUpperCase()));
-                    if (isExam && override.tag) {
-                         return { locked: false, isEvent: true, reason: override.tag, type: "EVENT" };
+                    const subjExists = classSlots.some(s => normMatch(s.subject) === normMatch(currentReg.sub));
+                    if (!subjExists && !classSlots.some(s => ['EXAM', 'UT', 'OT'].includes((s.subject || "").toUpperCase()))) {
+                        return { locked: true, reason: "NO CLASS", type: "NOCLASS" };
                     }
                     
-                    const subjExists = classSlots.some(s => normMatch(s.subject) === normMatch(currentReg.sub));
-                    if (!subjExists) {
-                        return { locked: true, reason: "NO CLASS", type: "HOLIDAY" };
+                    // If it's an exam/event but we still have a class slot, let attendance be taken, but mark it as an event.
+                    if (override.tag) {
+                         return { locked: false, isEvent: true, reason: override.tag, type: "EVENT" };
                     }
                 }
             }
@@ -1006,7 +1007,7 @@
             // 3. Check regular slots from master timetable
             const slotExists = getSlotExistsForDate(dateToCheckStr);
             if (!slotExists && !override) {
-                return { locked: true, reason: "NO CLASS", type: "HOLIDAY" };
+                return { locked: true, reason: "NO CLASS", type: "NOCLASS" };
             }
 
             return { locked: false };
@@ -1017,9 +1018,6 @@
             const dateStr = document.getElementById('daily-date-picker').value;
             const [y, m, d] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
-            
-            const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthKey}`;
-            const fallbackDocId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${monthKey}`;
             
             const listContainer = document.getElementById('daily-students-list');
             const btn = document.getElementById('save-daily-btn');
@@ -1033,12 +1031,20 @@
             }
 
             try {
-                let docSnap = await getCollection("attendance_records").doc(docId).get();
-                if (!docSnap.exists) {
-                    docSnap = await getCollection("attendance_records").doc(fallbackDocId).get();
-                }
-                
-                currentMonthDoc = docSnap.exists ? docSnap.data().records || {} : {};
+                // Fetch ALL attendance docs for this section for this month (robust fallback merger)
+                const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).get();
+                let mergedRecords = {};
+                querySnap.forEach(doc => {
+                    const data = doc.data();
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                        if (data.records) {
+                            Object.keys(data.records).forEach(dKey => {
+                                mergedRecords[dKey] = { ...(mergedRecords[dKey] || {}), ...data.records[dKey] };
+                            });
+                        }
+                    }
+                });
+                currentMonthDoc = mergedRecords;
                 
                 const remKey = `${dateStr}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}`;
                 const isRemedial = remedialDataMap[remKey] ? true : false;
@@ -1379,29 +1385,43 @@
             const monthVal = document.getElementById('ledger-month').value; 
             const [y, m] = monthVal.split('_');
             
-            const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthVal}`;
-            const fallbackDocId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${monthVal}`;
-            
             let prevM = parseInt(m) - 1; let prevY = parseInt(y);
             if (prevM === 0) { prevM = 12; prevY--; }
             const prevMonthKey = `${prevY}_${String(prevM).padStart(2,'0')}`;
-            const prevDocId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${prevMonthKey}`;
-            const fallbackPrevDocId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${prevMonthKey}`;
 
             try {
-                let [curSnap, prevSnap] = await Promise.all([
-                    getCollection("attendance_records").doc(docId).get(),
-                    getCollection("attendance_records").doc(prevDocId).get()
+                // Fetch ALL attendance docs for this section for current and previous month
+                const [curQuerySnap, prevQuerySnap] = await Promise.all([
+                    getCollection("attendance_records").where("monthKey", "==", monthVal).get(),
+                    getCollection("attendance_records").where("monthKey", "==", prevMonthKey).get()
                 ]);
 
-                // Fallback to fetch data if saved before subject integration
-                if (!curSnap.exists) curSnap = await getCollection("attendance_records").doc(fallbackDocId).get();
-                if (!prevSnap.exists) prevSnap = await getCollection("attendance_records").doc(fallbackPrevDocId).get();
+                let curRecords = {};
+                let curStats = {};
+                let prevStats = {};
 
-                const curData = curSnap.exists ? curSnap.data() : {};
-                const curRecords = curData.records || {};
-                const curStats = curData.aggregatedStats || {};
-                const prevStats = prevSnap.exists ? (prevSnap.data().aggregatedStats || {}) : {}; 
+                curQuerySnap.forEach(doc => {
+                    const data = doc.data();
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                        if (data.records) {
+                            Object.keys(data.records).forEach(dKey => {
+                                curRecords[dKey] = { ...(curRecords[dKey] || {}), ...data.records[dKey] };
+                            });
+                        }
+                        if (data.aggregatedStats) {
+                            curStats = { ...curStats, ...data.aggregatedStats };
+                        }
+                    }
+                });
+
+                prevQuerySnap.forEach(doc => {
+                    const data = doc.data();
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                        if (data.aggregatedStats) {
+                            prevStats = { ...prevStats, ...data.aggregatedStats };
+                        }
+                    }
+                });
 
                 const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s)).sort((a,b) => String(a.rollNo).localeCompare(String(b.rollNo), undefined, {numeric:true}));
                 if (myStudents.length === 0) { container.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs">No students in section.</div>`; return; }
@@ -1452,7 +1472,6 @@
                 const prevTotalWorking = curStats.globalTotalWorkingDays !== undefined ? curStats.globalTotalWorkingDays : (prevStats.globalTotalWorkingDays || 0);
                 const grandTotalWorking = prevTotalWorking + totalWorkingDaysMonth;
 
-                // Full Printed Layout matching physical register exactly
                 let printHeaderHtml = `
                     <div id="print-header" class="w-full mb-6 text-black font-sans">
                         <div class="text-center mb-4 border-b-2 border-black pb-4">
