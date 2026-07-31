@@ -14,7 +14,7 @@
         .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         .book-spine { box-shadow: inset 4px 0 10px rgba(0,0,0,0.2), inset -1px 0 2px rgba(255,255,255,0.3); }
         .table-container { overflow-x: auto; max-width: 100%; border-radius: 0.75rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .ledger-table { border-collapse: separate; border-spacing: 0; min-w-[1500px]; }
+        .ledger-table { border-collapse: separate; border-spacing: 0; min-width: 1500px; }
         .ledger-table th, .ledger-table td { border-bottom: 1px solid #e2e8f0; border-right: 1px solid #e2e8f0; padding: 0.5rem; white-space: nowrap; text-align: center; }
         .ledger-table th { background-color: #f8fafc; color: #64748b; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 900; }
         .sticky-col-1 { position: sticky; left: 0; z-index: 20; background: white; width: 60px; min-width: 60px; font-weight: 900; color: #475569; }
@@ -172,6 +172,15 @@
                     <button id="bulk-absent-btn" onclick="markAllAbsent()" class="bg-rose-100 text-rose-700 hover:bg-rose-200 px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors border border-rose-200 shadow-sm hidden sm:block">All Absent</button>
                 </div>
             </div>
+
+            <!-- REMEDIAL CLASS TOGGLE BAR (Admin / Authorized) -->
+            <div id="remedial-admin-bar" class="hidden bg-indigo-50 border-b border-indigo-200 p-3 px-6 flex items-center justify-between gap-4">
+                <div class="flex items-center gap-3 w-full">
+                    <span class="text-[10px] font-black text-indigo-900 uppercase tracking-widest shrink-0">🎯 Remedial Mode:</span>
+                    <input type="text" id="remedial-reason-input" placeholder="Enter Remedial Reason (e.g. Extra Math Revision)..." class="flex-1 bg-white border border-indigo-200 rounded-lg px-3 py-1 text-xs font-bold text-slate-700 outline-none">
+                    <button onclick="toggleRemedialDay()" id="remedial-toggle-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-sm">Mark as Remedial</button>
+                </div>
+            </div>
             
             <div id="lock-warning-banner" class="hidden bg-rose-100 border-b-2 border-rose-200 p-4 text-center flex-col items-center justify-center text-xs font-black text-rose-700 uppercase tracking-widest gap-2">
                 <span id="lock-warning-text">You must fill missing attendance for older dates before proceeding.</span>
@@ -241,6 +250,7 @@
 
         let activeCenter = "GHUMARWIN";
         let activeStaff = null;
+        let activeStudent = null;
         let holidaysData = [];
         let timetableHistoryData = [];
         let timetableData = [];
@@ -252,6 +262,7 @@
         let absentWhatsAppList = [];
         let globalCrossSubMap = {};
         let discrepancyMap = {};
+        let remedialDataMap = {}; // Tracks remedial dates and reasons
 
         let ttsVoices = [];
         if ('speechSynthesis' in window) {
@@ -261,18 +272,30 @@
         const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
         const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
 
-        // UNIVERSAL NORMALIZER: Replaces spaces with underscores and forces Uppercase. Guarantees 100% docId match.
         const normDoc = (val) => String(val || "").replace(/\s/g, '_').toUpperCase();
         const normMatch = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-        function handleBack() { window.location.href = isAdmin ? 'admin.html' : 'teacher-portal.html'; }
+        function handleBack() { 
+            if (activeStudent) {
+                window.location.href = 'student-portal.html';
+            } else {
+                window.location.href = isAdmin ? 'admin.html' : 'teacher-portal.html'; 
+            }
+        }
 
         async function init() {
+            activeStudent = JSON.parse(localStorage.getItem('minervaActiveStudent'));
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
-            if (!activeStaff && !isAdmin) return window.location.replace('staff-login.html');
+            
+            if (!activeStaff && !isAdmin && !activeStudent) return window.location.replace('staff-login.html');
             
             let safeName = "Admin";
-            if (activeStaff) safeName = activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : activeStaff.email;
+            if (activeStudent) {
+                safeName = activeStudent.name || activeStudent.email || "Student";
+                activeCenter = activeStudent.center || "GHUMARWIN";
+            } else if (activeStaff) {
+                safeName = activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : activeStaff.email;
+            }
             
             if (isAdmin) {
                 document.getElementById('admin-branch-container').style.display = 'flex';
@@ -282,6 +305,10 @@
                 document.getElementById('user-badge').innerText = `God Mode (${activeCenter}) - Read Only`;
                 document.getElementById('header-title').innerText = "Attendance Audit Desk";
                 await fetchData("Admin");
+            } else if (activeStudent) {
+                document.getElementById('user-badge').innerText = `Student: ${safeName} (${activeStudent.className}-${activeStudent.section})`;
+                document.getElementById('header-title').innerText = "My Attendance Register";
+                await fetchDataForStudent(activeStudent);
             } else {
                 document.getElementById('user-badge').innerText = `Teacher: ${safeName}`;
                 try {
@@ -313,7 +340,7 @@
         }
 
         function getCollection(name) {
-            const globalCollections = ['configs', 'staff_applications', 'system_metadata'];
+            const globalCollections = ['configs', 'staff_applications', 'system_metadata', 'students'];
             if (globalCollections.includes(name)) return db.collection(name);
             return activeCenter === "GHUMARWIN" ? db.collection(name) : db.collection(`${activeCenter.toLowerCase()}_${name}`);
         }
@@ -343,27 +370,68 @@
             document.getElementById('btn-tab-perm').className = tab === 'permissions' ? "bg-purple-600 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all" : "bg-slate-800 text-slate-300 hover:text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all";
         }
 
+        async function fetchDataForStudent(student) {
+            const container = document.getElementById('bookshelf-container');
+            try {
+                const [ttSnap, structSnap, holSnap, histSnap] = await Promise.all([
+                    getCollection("timetable").where("className", "==", student.className).where("section", "==", student.section).get(),
+                    getCollection("institute_structure").where("className", "==", student.className).where("sectionName", "==", student.section).get(),
+                    getCollection("school_holidays").get(),
+                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"]).get()
+                ]);
+
+                holidaysData = holSnap.docs.map(d => d.data());
+                timetableHistoryData = histSnap.docs.map(d => d.data());
+                timetableData = ttSnap.docs.map(d => d.data());
+
+                let subs = [];
+                timetableData.forEach(t => {
+                    if (t.subject && !t.subject.toLowerCase().includes("break")) subs.push(t.subject);
+                });
+                if (subs.length === 0 && !structSnap.empty) {
+                    subs = structSnap.docs[0].data().subjects || [];
+                }
+
+                let html = `<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">`;
+                const colors = [ { spine: 'bg-blue-800', cover: 'bg-blue-600', text: 'text-blue-200' }, { spine: 'bg-emerald-800', cover: 'bg-emerald-600', text: 'text-emerald-200' }, { spine: 'bg-rose-800', cover: 'bg-rose-600', text: 'text-rose-200' } ];
+
+                subs.forEach((sub, i) => {
+                    const c = colors[i % colors.length];
+                    const safeArgs = `'${String(student.className).replace(/'/g, "\\'")}', '${String(student.section).replace(/'/g, "\\'")}', '${String(sub).replace(/'/g, "\\'")}', false`;
+                    html += `<div onclick="openRegister(${safeArgs})" class="cursor-pointer group relative transition-transform hover:-translate-y-2 hover:rotate-1 duration-300"><div class="absolute -top-3 -right-3 bg-slate-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">View Only</div><div class="relative w-full aspect-[3/4] rounded-r-2xl rounded-l-md shadow-[4px_4px_15px_rgba(0,0,0,0.1)] overflow-hidden flex"><div class="w-6 h-full ${c.spine} book-spine shrink-0 z-10 relative"></div><div class="flex-1 h-full ${c.cover} p-4 flex flex-col justify-between relative"><div class="absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/20 to-transparent"></div><div class="relative z-10"><div class="text-[10px] font-black ${c.text} uppercase tracking-widest mb-1 border-b border-white/20 pb-1 inline-block">Subject Register</div><h3 class="text-xl font-black text-white uppercase tracking-tighter leading-none">${student.className}</h3><p class="text-sm font-bold text-white/80 uppercase mt-1">Sec ${student.section}</p></div><div class="relative z-10 bg-white/15 backdrop-blur-sm border border-white/20 p-2 rounded-lg text-center mt-4"><span class="text-[10px] font-black text-white uppercase tracking-widest line-clamp-2">${sub}</span></div></div></div></div>`;
+                });
+                container.innerHTML = html + `</div>`;
+            } catch (e) {
+                console.error(e);
+                container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs">Error loading student registers.</div>`;
+            }
+        }
+
         async function fetchData(safeName) {
             const container = document.getElementById('bookshelf-container');
             try {
-                const [ttSnap, structSnap, holSnap, stuSnap, histSnap, staffSnap] = await Promise.all([
+                const [ttSnap, structSnap, holSnap, stuSnap, histSnap, staffSnap, remSnap] = await Promise.all([
                     getCollection("timetable").get(),
                     getCollection("institute_structure").get(),
                     getCollection("school_holidays").get(),
                     getCollection("students").get(),
                     getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"]).get(),
-                    db.collection("staff_applications").get()
+                    db.collection("staff_applications").get(),
+                    getCollection("remedial_classes").get()
                 ]);
 
                 holidaysData = holSnap.docs.map(d => d.data());
                 timetableHistoryData = histSnap.docs.map(d => d.data());
                 timetableData = ttSnap.docs.map(d => d.data());
                 
+                remedialDataMap = {};
+                remSnap.forEach(d => { remedialDataMap[d.id] = d.data(); }); // id format: DATE_CLASS_SEC_SUB
+
                 studentsData = [];
                 stuSnap.forEach(d => { if (d.data().isActive !== false) studentsData.push({ id: d.id, ...d.data() }); });
                 staffList = staffSnap.docs.map(d => ({ id: d.id, ...d.data() }));
 
-                if (isAdmin) loadStaffListForPerms(); // Populate dynamically immediately
+                if (isAdmin) loadStaffListForPerms();
 
                 const classFilterSelect = document.getElementById('audit-class-filter');
                 let classSet = new Set();
@@ -408,7 +476,7 @@
                         Object.keys(grouped[className]).sort().forEach(sectionName => {
                             html += `<details class="bg-white rounded-2xl shadow-sm border border-slate-200 group/sec overflow-hidden"><summary class="p-4 bg-sky-50 text-sky-900 cursor-pointer select-none flex justify-between items-center outline-none hover:bg-sky-100 transition-colors"><h3 class="font-black uppercase tracking-widest text-sm">Section ${sectionName}</h3><span class="text-sky-500 text-sm group-open/sec:rotate-180 transition-transform">▼</span></summary><div class="p-4 bg-white grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">`;
                             grouped[className][sectionName].forEach(sub => {
-                                const safeArgs = `'${String(className).replace(/'/g, "\\'")}', '${String(sectionName).replace(/'/g, "\\'")}', '${String(sub).replace(/'/g, "\\'")}', false`;
+                                const safeArgs = `'${String(className).replace(/'/g, "\\'")}', '${String(sectionName).replace(/'/g, "\\'")}', '${String(sub).replace(/'/g, "\\'")}', true`;
                                 html += `<div onclick="openRegister(${safeArgs})" class="cursor-pointer bg-slate-50 border border-slate-200 rounded-xl p-4 text-center hover:bg-purple-50 hover:border-purple-300 transition-colors shadow-sm group/card"><div class="text-2xl mb-2 group-hover/card:scale-110 transition-transform">📘</div><div class="text-[10px] font-black text-slate-800 uppercase tracking-widest line-clamp-2">${sub}</div></div>`;
                             });
                             html += `</div></details>`;
@@ -604,11 +672,19 @@
         }
 
         async function openRegister(c, s, sub, canEdit) {
+            if (activeStudent) canEdit = false;
             currentReg = { c, s, sub, canEdit };
             document.getElementById('reg-title').innerText = `${c} | Sec ${s}`;
             document.getElementById('reg-subtitle').innerText = sub;
             document.getElementById('register-modal').style.display = 'flex';
             document.getElementById('daily-date-picker').value = todayISO; 
+
+            // Show remedial admin control bar if admin or authorized
+            if (isAdmin || canEdit) {
+                document.getElementById('remedial-admin-bar').style.display = 'flex';
+            } else {
+                document.getElementById('remedial-admin-bar').style.display = 'none';
+            }
 
             if (!canEdit) {
                 document.getElementById('save-bar-container').style.display = 'none';
@@ -661,43 +737,20 @@
             const checkD = new Date(dateToCheckStr); checkD.setHours(0,0,0,0);
             if (checkD.getDay() === 0) return { locked: true, reason: "Sunday (Weekly Off)" }; 
 
+            // Check Holidays
             for(let h of holidaysData) {
                 if(h.startDate && h.isFullDay) {
                     let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
                     let he = new Date(h.endDate || h.startDate); he.setHours(23,59,59,999);
-                    if(checkD >= hs && checkD <= he) return { locked: true, reason: `Holiday: ${h.reason}` };
+                    if(checkD >= hs && checkD <= he) {
+                        const targetCls = `${currentReg.c}|${currentReg.s}`;
+                        if (h.targetClasses.includes('ALL') || h.targetClasses.includes(targetCls)) {
+                            return { locked: true, reason: `Holiday: ${h.reason}` };
+                        }
+                    }
                 }
             }
             
-            const override = timetableHistoryData.find(o => o.date === dateToCheckStr);
-            if (override && override.schedule) {
-                const classSlots = override.schedule.filter(s => normMatch(s.className) === normMatch(currentReg.c) && normMatch(s.section) === normMatch(currentReg.s));
-                if (classSlots.length > 0) {
-                    const subSlot = classSlots.find(s => normMatch(s.subject) === normMatch(currentReg.sub));
-                    if (!subSlot || (subSlot.remark && subSlot.remark.toLowerCase().includes("doubt session"))) return { locked: true, reason: "Exam / Doubt Session" };
-                } else return { locked: true, reason: "No Timetable Today (Exam Override)" };
-            }
-
-            if (!isAdmin) {
-                const [y, m, d] = dateToCheckStr.split('-');
-                for(let prevD = 1; prevD < parseInt(d); prevD++) {
-                    const pdStr = `${y}-${m}-${String(prevD).padStart(2,'0')}`;
-                    const pdObj = new Date(pdStr); pdObj.setHours(0,0,0,0);
-                    
-                    let isWorkingDay = true;
-                    if (pdObj.getDay() === 0) isWorkingDay = false;
-                    for(let h of holidaysData) {
-                        if(h.startDate && h.isFullDay) {
-                            let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
-                            let he = new Date(h.endDate || h.startDate); he.setHours(23,59,59,999);
-                            if(pdObj >= hs && pdObj <= he) { isWorkingDay = false; break; }
-                        }
-                    }
-                    if(isWorkingDay && !monthRecords[pdStr]) {
-                        return { locked: true, reason: "LOCKED", missingDate: pdStr };
-                    }
-                }
-            }
             return { locked: false };
         }
 
@@ -707,7 +760,6 @@
             const [y, m, d] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
             
-            // UNIVERSAL DOC ID - Uppercase to enforce exact matches between Teacher & Admin views
             const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthKey}`;
             
             await updateScheduledTeacherBadge(dateStr);
@@ -727,30 +779,31 @@
                 const docSnap = await getCollection("attendance_records").doc(docId).get();
                 currentMonthDoc = docSnap.exists ? docSnap.data().records || {} : {};
                 
-                globalCrossSubMap = {};
-                const allAttSnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).where("className", "==", currentReg.c).where("section", "==", currentReg.s).get();
-                allAttSnap.forEach(d => {
-                    const subData = d.data();
-                    if(subData.subject !== currentReg.sub && subData.records && subData.records[dateStr]) {
-                        const subName = subData.subject;
-                        Object.keys(subData.records[dateStr]).forEach(sId => {
-                            if(!globalCrossSubMap[sId]) globalCrossSubMap[sId] = {};
-                            globalCrossSubMap[sId][subName] = subData.records[dateStr][sId];
-                        });
-                    }
-                });
+                // Check if Remedial is marked for this date/class/sub
+                const remKey = `${dateStr}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}`;
+                const isRemedial = remedialDataMap[remKey] ? true : false;
+                const remedialReason = isRemedial ? remedialDataMap[remKey].reason : "";
+
+                const remedialToggleBtn = document.getElementById('remedial-toggle-btn');
+                const remedialInput = document.getElementById('remedial-reason-input');
+                if (isRemedial) {
+                    remedialToggleBtn.innerText = "Remove Remedial";
+                    remedialToggleBtn.className = "bg-rose-600 hover:bg-rose-700 text-white px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-sm";
+                    remedialInput.value = remedialReason;
+                } else {
+                    remedialToggleBtn.innerText = "Mark as Remedial";
+                    remedialToggleBtn.className = "bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-sm";
+                    remedialInput.value = "";
+                }
 
                 const status = checkDateStatus(dateStr, currentMonthDoc);
-                if (status.locked && status.reason !== "LOCKED") {
+                if (status.locked) {
                     banner.classList.add('hidden'); btn.disabled = true; btn.classList.add('opacity-50', 'cursor-not-allowed');
-                    listContainer.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest text-sm bg-rose-50 rounded-2xl border border-rose-200">${status.reason} - Attendance Disabled</div>`; return;
-                } else if (status.locked && status.reason === "LOCKED") {
-                    const pdPretty = new Date(status.missingDate).toLocaleDateString('en-GB', {day:'numeric', month:'short'});
-                    document.getElementById('lock-warning-text').innerHTML = `⚠️ System Locked: You must fill missing attendance for <b>${pdPretty}</b> before proceeding.`;
-                    banner.classList.remove('hidden'); banner.classList.add('flex');
-                    btn.disabled = true; btn.classList.add('opacity-50', 'cursor-not-allowed');
-                    document.getElementById('lock-status').classList.remove('hidden');
-                    listContainer.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest text-sm bg-rose-50 rounded-2xl border border-rose-200">Date Locked</div>`; return;
+                    listContainer.innerHTML = `<div class="text-center py-12 text-rose-600 font-black uppercase tracking-widest text-sm bg-rose-50 rounded-2xl border border-rose-200 shadow-sm">🌴 ${status.reason} <br><span class="text-xs font-bold text-slate-500 mt-1 block">Strictly no attendance required.</span></div>`; return;
+                }
+
+                if (isRemedial) {
+                    listContainer.innerHTML = `<div class="text-center py-12 text-indigo-700 font-black uppercase tracking-widest text-sm bg-indigo-50 rounded-2xl border border-indigo-200 shadow-sm">🎯 Remedial Class Session: "${remedialReason}" <br><span class="text-xs font-bold text-slate-600 mt-1 block">Attendance marked here is for record tracking only and is excluded from ledger percentage calculations.</span></div>`;
                 }
 
                 banner.classList.add('hidden'); banner.classList.remove('flex');
@@ -763,7 +816,7 @@
                     const val = todaysData[stu.id] || "P"; 
                     
                     let attControls = "";
-                    if (currentReg.canEdit) {
+                    if (currentReg.canEdit && !activeStudent) {
                         attControls = `
                             <input type="radio" name="att_${stu.id}" id="P_${stu.id}" value="P" class="att-radio" ${val==='P' ? 'checked' : ''} onchange="updateDailyStats()">
                             <label for="P_${stu.id}" class="att-label left text-slate-500 hover:bg-slate-50 select-none">P</label>
@@ -777,7 +830,6 @@
                     } else {
                         let statusColor = val === 'P' ? 'text-emerald-700 bg-emerald-50 border-emerald-200' : val === 'A' ? 'text-rose-700 bg-rose-50 border-rose-200' : 'text-amber-700 bg-amber-50 border-amber-200';
                         let statusText = val === 'P' ? 'Present' : val === 'A' ? 'Absent' : 'Late';
-                        if (val === 'ADMIN_EXEMPT') { statusColor = 'text-slate-500 bg-slate-100 border-slate-200'; statusText = 'Exempt'; }
                         attControls = `<div class="px-4 py-1.5 rounded border text-[10px] font-black uppercase tracking-widest ${statusColor}">${statusText}</div>`;
                     }
                     
@@ -787,7 +839,6 @@
                                 <span class="bg-slate-100 text-slate-500 font-mono text-[10px] sm:text-xs font-black px-2 py-1 rounded border border-slate-200">#${stu.rollNo || 'N/A'}</span>
                                 <div>
                                     <h4 class="student-name font-black text-slate-800 text-xs sm:text-sm uppercase tracking-tight" data-name="${stu.name}">${stu.name}</h4>
-                                    <div id="disc_warning_${stu.id}" class="text-[9px] font-black text-rose-600 bg-rose-50 px-2 py-0.5 rounded border border-rose-200 mt-1 hidden uppercase tracking-widest"></div>
                                 </div>
                             </div>
                             <div class="flex shrink-0 pointer-events-auto">
@@ -796,9 +847,38 @@
                         </div>
                     `;
                 });
-                listContainer.innerHTML = html;
+                if (!isRemedial) {
+                    listContainer.innerHTML = html;
+                } else {
+                    listContainer.innerHTML = `<div class="mb-4 text-xs font-bold text-slate-500 uppercase tracking-widest">Attendance Records (Remedial Tracking):</div>` + html;
+                }
                 updateDailyStats();
             } catch(e) { console.error(e); }
+        }
+
+        async function toggleRemedialDay() {
+            if (!isAdmin && !currentReg.canEdit) return alert("Unauthorized.");
+            const dateStr = document.getElementById('daily-date-picker').value;
+            const reason = document.getElementById('remedial-reason-input').value.trim() || "Remedial Class";
+            const remKey = `${dateStr}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}`;
+            
+            const docRef = getCollection("remedial_classes").doc(remKey);
+            try {
+                if (remedialDataMap[remKey]) {
+                    await docRef.delete();
+                    delete remedialDataMap[remKey];
+                    alert("✅ Remedial tag removed.");
+                } else {
+                    const payload = { date: dateStr, className: currentReg.c, section: currentReg.s, subject: currentReg.sub, reason: reason };
+                    await docRef.set(payload);
+                    remedialDataMap[remKey] = payload;
+                    alert("✅ Marked as Remedial Class successfully.");
+                }
+                loadDailyAttendance();
+            } catch (e) {
+                console.error(e);
+                alert("Failed to update remedial status.");
+            }
         }
 
         function updateDailyStats() {
@@ -814,48 +894,17 @@
                 if(r.value === 'P') p++; if(r.value === 'A') a++; if(r.value === 'L') l++;
             });
             document.getElementById('daily-stats-label').innerText = `P: ${p} | A: ${a} | L: ${l} | Total: ${radios.length}`;
-
-            discrepancyMap = {};
-            const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s));
-
-            myStudents.forEach(stu => {
-                const checked = document.querySelector(`input[name="att_${stu.id}"]:checked`);
-                const currentStatus = checked ? checked.value : 'P';
-                const otherSubs = globalCrossSubMap[stu.id] || {};
-                
-                let warnings = [];
-                Object.keys(otherSubs).forEach(subName => {
-                    const otherStatus = otherSubs[subName];
-                    if (currentStatus === 'P' && otherStatus === 'A') {
-                        warnings.push(`Present here, but Absent in ${subName}`);
-                    } else if (currentStatus === 'A' && otherStatus === 'P') {
-                        warnings.push(`Absent here, but Present in ${subName}`);
-                    }
-                });
-
-                const warningEl = document.getElementById(`disc_warning_${stu.id}`);
-                if (warningEl) {
-                    if (warnings.length > 0) {
-                        discrepancyMap[stu.id] = warnings.join('. ');
-                        warningEl.innerHTML = `⚠️ ${discrepancyMap[stu.id]}`;
-                        warningEl.classList.remove('hidden');
-                    } else {
-                        warningEl.innerHTML = '';
-                        warningEl.classList.add('hidden');
-                    }
-                }
-            });
         }
 
         function markAllPresent() {
-            if(!currentReg.canEdit) return;
+            if(!currentReg.canEdit || activeStudent) return;
             const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s));
             myStudents.forEach(stu => { const radio = document.getElementById(`P_${stu.id}`); if (radio) radio.checked = true; });
             updateDailyStats();
         }
 
         function markAllAbsent() {
-            if(!currentReg.canEdit) return;
+            if(!currentReg.canEdit || activeStudent) return;
             const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s));
             myStudents.forEach(stu => { const radio = document.getElementById(`A_${stu.id}`); if (radio) radio.checked = true; });
             updateDailyStats();
@@ -870,8 +919,7 @@
             myStudents.forEach(stu => {
                 const checked = document.querySelector(`input[name="att_${stu.id}"]:checked`);
                 const status = checked ? checked.value : 'P';
-                const discNote = discrepancyMap[stu.id] ? ` _(${discrepancyMap[stu.id]})_` : '';
-                const entry = `#${stu.rollNo || 'N/A'} - ${stu.name}${discNote}`;
+                const entry = `#${stu.rollNo || 'N/A'} - ${stu.name}`;
 
                 if (status === 'P') presentList.push(entry);
                 else if (status === 'A') absentList.push(entry);
@@ -934,9 +982,8 @@
         }
         function stopTTS() { if(ttsActive) toggleTTS(); }
 
-        // --- ROBUST READ-MODIFY-WRITE WITH NORMALIZED DOC ID ---
         async function saveDailyAttendance() {
-            if(!currentReg.canEdit) return;
+            if(!currentReg.canEdit || activeStudent) return;
             const dateStr = document.getElementById('daily-date-picker').value;
             const btn = document.getElementById('save-daily-btn');
             
@@ -1009,7 +1056,6 @@
             const monthVal = document.getElementById('ledger-month').value; 
             const [y, m] = monthVal.split('_');
             
-            // UNIVERSAL DOC ID - Exact match with Save Logic
             const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthVal}`;
             
             let prevM = parseInt(m) - 1; let prevY = parseInt(y);
@@ -1043,22 +1089,31 @@
                         if(h.startDate && h.isFullDay) {
                             let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
                             let he = new Date(h.endDate || h.startDate); he.setHours(23,59,59,999);
-                            if(dObj >= hs && dObj <= he) { isHol = true; break; }
+                            if(dObj >= hs && dObj <= he) {
+                                const targetCls = `${currentReg.c}|${currentReg.s}`;
+                                if (h.targetClasses.includes('ALL') || h.targetClasses.includes(targetCls)) {
+                                    isHol = true; break;
+                                }
+                            }
                         }
                     }
 
-                    const isWorkingDay = !isSunday && !isHol && dateStr <= todayISO;
+                    // Check if date is Remedial (Remedial dates are excluded from working days count)
+                    const remKey = `${dateStr}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}`;
+                    const isRemedialDay = remedialDataMap[remKey] ? true : false;
+
+                    const isWorkingDay = !isSunday && !isHol && !isRemedialDay && dateStr <= todayISO;
                     if(isWorkingDay) totalWorkingDaysMonth++;
 
-                    dayStatuses.push({ date: dateStr, isHol: (isSunday || isHol), isFuture: dateStr > todayISO });
-                    let bg = (isSunday || isHol) ? "bg-slate-200 text-slate-400" : "bg-white";
-                    dayHeaders += `<th class="${bg} min-w-[30px] border-r border-b border-slate-200">${d}</th>`;
+                    dayStatuses.push({ date: dateStr, isHol: (isSunday || isHol || isRemedialDay), isFuture: dateStr > todayISO, isRemedial: isRemedialDay });
+                    let bg = (isSunday || isHol) ? "bg-slate-200 text-slate-400" : (isRemedialDay ? "bg-indigo-100 text-indigo-700 font-black" : "bg-white");
+                    dayHeaders += `<th class="${bg} min-w-[30px] border-r border-b border-slate-200" title="${isRemedialDay ? 'Remedial Class' : ''}">${d}</th>`;
                 }
 
                 const prevTotalWorking = prevStats.globalTotalWorkingDays || 0;
                 const grandTotalWorking = prevTotalWorking + totalWorkingDaysMonth;
 
-                let tableHtml = `<table class="ledger-table w-full"><thead><tr><th class="sticky-col-1" rowspan="2">Roll</th><th class="sticky-col-2" rowspan="2">Full Name</th><th colspan="${daysInMonth}" class="border-b border-r border-slate-200 text-center py-2">Days of ${monthNames[parseInt(m)-1]} ${y}</th><th colspan="3" class="bg-indigo-50 border-b border-r border-slate-200 text-indigo-700">Working Days</th><th colspan="4" class="bg-emerald-50 border-b border-slate-200 text-emerald-700">Student Attendance</th><th rowspan="2" class="bg-slate-800 text-white w-[60px]"> % </th></tr><tr>${dayHeaders}<th class="bg-indigo-50 border-r border-slate-200 text-[8px]">This Month</th><th class="bg-indigo-50 border-r border-slate-200 text-[8px]">Prev Total</th><th class="bg-indigo-50 border-r border-slate-200 text-[8px]">Till Now</th><th class="bg-emerald-50 border-r border-slate-200 text-[8px]">Month (L)</th><th class="bg-emerald-50 border-r border-slate-200 text-[8px]">Month (P)</th><th class="bg-emerald-50 border-r border-slate-200 text-[8px]">Prev Total</th><th class="bg-emerald-50 border-r border-slate-200 text-[8px]">Till Now</th></tr></thead><tbody class="text-[10px] font-bold text-slate-700 bg-white">`;
+                let tableHtml = `<table class="ledger-table w-full"><thead><tr><th class="sticky-col-1" rowspan="2">Roll</th><th class="sticky-col-2" rowspan="2">Full Name</th><th colspan="${daysInMonth}" class="border-b border-r border-slate-200 text-center py-2">Days of ${monthNames[parseInt(m)-1]} ${y}[cite: 1]</th><th colspan="3" class="bg-indigo-50 border-b border-r border-slate-200 text-indigo-700">Working Days</th><th colspan="4" class="bg-emerald-50 border-b border-slate-200 text-emerald-700">Student Attendance</th><th rowspan="2" class="bg-slate-800 text-white w-[60px]"> % </th></tr><tr>${dayHeaders}<th class="bg-indigo-50 border-r border-slate-200 text-[8px]">This Month</th><th class="bg-indigo-50 border-r border-slate-200 text-[8px]">Prev Total</th><th class="bg-indigo-50 border-r border-slate-200 text-[8px]">Till Now</th><th class="bg-emerald-50 border-r border-slate-200 text-[8px]">Month (L)</th><th class="bg-emerald-50 border-r border-slate-200 text-[8px]">Month (P)</th><th class="bg-emerald-50 border-r border-slate-200 text-[8px]">Prev Total</th><th class="bg-emerald-50 border-r border-slate-200 text-[8px]">Till Now</th></tr></thead><tbody class="text-[10px] font-bold text-slate-700 bg-white">`;
 
                 myStudents.forEach(stu => {
                     const stuPrevAtt = prevStats.students ? (prevStats.students[stu.id] || 0) : 0;
@@ -1066,7 +1121,8 @@
 
                     dayStatuses.forEach(ds => {
                         let cellContent = ""; let bgClass = "bg-white hover:bg-slate-50";
-                        if (ds.isHol) { bgClass = "bg-slate-100 text-slate-300"; cellContent = "H"; } 
+                        if (ds.isRemedial) { bgClass = "bg-indigo-50 text-indigo-600 font-black"; cellContent = "R"; }
+                        else if (ds.isHol) { bgClass = "bg-slate-100 text-slate-300"; cellContent = "H"; } 
                         else if (ds.isFuture) { cellContent = "-"; bgClass = "bg-slate-50/50 text-slate-300"; } 
                         else {
                             if (curRecords[ds.date] && curRecords[ds.date][stu.id]) {
