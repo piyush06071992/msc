@@ -224,7 +224,7 @@
         <div id="view-daily" class="flex-1 bg-slate-50 overflow-y-auto custom-scroll flex flex-col relative">
             <div class="sticky top-0 bg-white/90 backdrop-blur-md p-4 border-b border-slate-200 z-20 flex justify-between items-center shadow-sm flex-wrap gap-2 no-print">
                 <div>
-                    <h3 class="font-black text-slate-800 uppercase tracking-widest text-sm flex items-center gap-2" id="daily-date-label">Today <span id="lock-status" class="hidden text-[8px] bg-rose-500 text-white px-2 py-0.5 rounded uppercase">Locked</span></h3>
+                    <h3 class="font-black text-slate-800 uppercase tracking-widest text-sm flex items-center gap-2" id="daily-date-label">Today</h3>
                     <p class="text-[9px] font-bold text-slate-500 uppercase tracking-widest" id="daily-stats-label">0 Present | 0 Absent</p>
                     <p class="text-[9px] font-black text-indigo-600 uppercase tracking-widest mt-0.5" id="scheduled-teacher-badge">Subject Daily Sync</p>
                 </div>
@@ -243,6 +243,12 @@
             
             <div id="lock-warning-banner" class="hidden bg-rose-100 border-b-2 border-rose-200 p-4 text-center flex-col items-center justify-center text-xs font-black text-rose-700 uppercase tracking-widest gap-2">
                 <span id="lock-warning-text">You must fill missing attendance for older dates before proceeding.</span>
+            </div>
+
+            <!-- DYNAMIC EXCLUSION WARNING BANNER (Yellow) -->
+            <div id="exclusion-warning-banner" class="hidden bg-amber-50 border-b-2 border-amber-200 p-4 text-center flex-col items-center justify-center gap-2">
+                <span id="exclusion-warning-text" class="text-xs font-black text-amber-800 uppercase tracking-widest"></span>
+                <span class="text-[10px] font-bold text-amber-600 uppercase tracking-widest">By default, this is an excluded day. You may mark attendance below if a special session is being held.</span>
             </div>
 
             <div class="p-4 sm:p-6 max-w-4xl mx-auto w-full flex-1">
@@ -274,7 +280,7 @@
                 </div>
             </div>
             
-            <div class="ledger-paper">
+            <div class="ledger-paper w-full">
                 <div id="ledger-table-container"></div>
             </div>
         </div>
@@ -765,7 +771,7 @@
 
                     let isHol = false;
                     for(let h of holidaysData) {
-                        if(h.startDate && h.suspendClasses !== false) {
+                        if(h.startDate && h.isFullDay) {
                             const [sy, sm, sd] = h.startDate.split('-');
                             let hs = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd));
                             
@@ -953,7 +959,7 @@
         function checkDateStatus(dateToCheckStr) {
             const [cy, cm, cd] = dateToCheckStr.split('-');
             const checkD = new Date(parseInt(cy), parseInt(cm)-1, parseInt(cd));
-            if (checkD.getDay() === 0) return { locked: true, reason: "SUNDAY", type: "HOLIDAY" }; 
+            if (checkD.getDay() === 0) return { isExcluded: true, reason: "Sunday (Weekly Off)" }; 
 
             // 1. Check strict holidays from school_holidays
             for(let h of holidaysData) {
@@ -979,7 +985,11 @@
                         });
 
                         if (matchesClass) {
-                            return { locked: true, reason: h.reason, type: "HOLIDAY" };
+                            if (h.isFullDay) {
+                                return { isExcluded: true, reason: h.reason };
+                            } else if (h.startTime && h.endTime) {
+                                return { isExcluded: true, reason: h.reason + " (Half Day)" };
+                            }
                         }
                     }
                 }
@@ -990,16 +1000,14 @@
             if (override) {
                 const classSlots = (override.schedule || []).filter(s => normMatch(s.className) === normMatch(currentReg.c) && normMatch(s.section) === normMatch(currentReg.s));
                 if (classSlots.length === 0) {
-                    return { locked: true, reason: "NO CLASS", type: "NOCLASS" };
+                    return { isExcluded: true, reason: "Class Not Scheduled" };
                 } else {
                     const subjExists = classSlots.some(s => normMatch(s.subject) === normMatch(currentReg.sub));
                     if (!subjExists && !classSlots.some(s => ['EXAM', 'UT', 'OT'].includes((s.subject || "").toUpperCase()))) {
-                        return { locked: true, reason: "NO CLASS", type: "NOCLASS" };
+                        return { isExcluded: true, reason: "Class Not Scheduled" };
                     }
-                    
-                    // If it's an exam/event but we still have a class slot, let attendance be taken, but mark it as an event.
-                    if (override.tag) {
-                         return { locked: false, isEvent: true, reason: override.tag, type: "EVENT" };
+                    if (override.tag && override.tag !== "Daily Override") {
+                         return { isExcluded: true, reason: override.tag };
                     }
                 }
             }
@@ -1007,10 +1015,10 @@
             // 3. Check regular slots from master timetable
             const slotExists = getSlotExistsForDate(dateToCheckStr);
             if (!slotExists && !override) {
-                return { locked: true, reason: "NO CLASS", type: "NOCLASS" };
+                return { isExcluded: true, reason: "No Class Scheduled" };
             }
 
-            return { locked: false };
+            return { isExcluded: false };
         }
 
         async function loadDailyAttendance() {
@@ -1019,9 +1027,11 @@
             const [y, m, d] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
             
+            const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthKey}`;
+            
             const listContainer = document.getElementById('daily-students-list');
             const btn = document.getElementById('save-daily-btn');
-            const banner = document.getElementById('lock-warning-banner');
+            const exclBanner = document.getElementById('exclusion-warning-banner');
             listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
 
             let myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s)).sort((a,b) => String(a.rollNo).localeCompare(String(b.rollNo), undefined, {numeric:true}));
@@ -1031,12 +1041,12 @@
             }
 
             try {
-                // Fetch ALL attendance docs for this section for this month (robust fallback merger)
+                // Robust Fetch: Get everything matching this class+section+subject+month
                 const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).get();
                 let mergedRecords = {};
                 querySnap.forEach(doc => {
                     const data = doc.data();
-                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s) && normMatch(data.subject) === normMatch(currentReg.sub)) {
                         if (data.records) {
                             Object.keys(data.records).forEach(dKey => {
                                 mergedRecords[dKey] = { ...(mergedRecords[dKey] || {}), ...data.records[dKey] };
@@ -1051,33 +1061,23 @@
                 const remedialReason = isRemedial ? remedialDataMap[remKey].reason : "";
 
                 const status = checkDateStatus(dateStr);
-                if (status.locked) {
-                    banner.classList.add('hidden'); 
-                    if(btn) { btn.disabled = true; btn.classList.add('opacity-50', 'cursor-not-allowed'); }
-                    listContainer.innerHTML = `<div class="text-center py-12 text-rose-600 font-black uppercase tracking-widest text-sm bg-rose-50 rounded-2xl border border-rose-200 shadow-sm">🌴 ${status.reason} <br><span class="text-xs font-bold text-slate-500 mt-1 block">Strictly no attendance required.</span></div>`; return;
-                }
-
                 const hasAttendanceMarked = currentMonthDoc[dateStr] && Object.keys(currentMonthDoc[dateStr]).length > 0;
-                if (status.isEvent && !hasAttendanceMarked && !activeStudent && !isAdmin) {
-                    banner.classList.add('hidden');
-                    if(btn) btn.disabled = false;
-                    listContainer.innerHTML = `
-                        <div class="text-center py-10 bg-amber-50 rounded-2xl border border-amber-200 p-6 shadow-sm">
-                            <h4 class="font-black text-amber-900 text-base uppercase tracking-wider mb-2">🎉 ${status.reason}</h4>
-                            <p class="text-xs font-bold text-amber-700 uppercase tracking-widest mb-4">By default, an event is active for this session. If you wish to record attendance anyway, click below.</p>
-                            <button onclick="forceShowAttendanceGrid('${dateStr}')" class="bg-amber-600 hover:bg-amber-700 text-white px-6 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-md">Mark Attendance Anyway</button>
-                        </div>
-                    `;
-                    return;
+
+                // Only show exclusion warning if attendance is NOT marked
+                if (status.isExcluded && !hasAttendanceMarked && !activeStudent) {
+                    exclBanner.classList.remove('hidden'); 
+                    exclBanner.classList.add('flex');
+                    document.getElementById('exclusion-warning-text').innerText = `⚠️ EXCLUDED DAY: ${status.reason}`;
+                } else {
+                    exclBanner.classList.add('hidden'); 
+                    exclBanner.classList.remove('flex');
                 }
 
                 if (isRemedial) {
                     listContainer.innerHTML = `<div class="text-center py-6 text-indigo-700 font-black uppercase tracking-widest text-xs bg-indigo-50 rounded-2xl border border-indigo-200 shadow-sm mb-4">🎯 Remedial Session: "${remedialReason}" <br><span class="text-[10px] font-bold text-slate-600 mt-0.5 block">Attendance marked here is for tracking only and is excluded from ledger percentage calculations.</span></div>`;
                 }
 
-                banner.classList.add('hidden'); banner.classList.remove('flex');
                 if(btn) { btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed'); }
-                document.getElementById('lock-status').classList.add('hidden');
                 
                 const todaysData = currentMonthDoc[dateStr] || {};
                 let html = "";
@@ -1119,15 +1119,10 @@
                 if (!isRemedial) {
                     listContainer.innerHTML = html;
                 } else {
-                    listContainer.innerHTML = `<div class="mb-4 text-xs font-bold text-slate-500 uppercase tracking-widest">Attendance Records (Remedial Tracking):</div>` + html;
+                    listContainer.innerHTML += html;
                 }
                 updateDailyStats();
             } catch(e) { console.error(e); }
-        }
-
-        function forceShowAttendanceGrid(dateStr) {
-            if (!currentMonthDoc[dateStr]) currentMonthDoc[dateStr] = {};
-            loadDailyAttendance();
         }
 
         function openCorrectionModal() {
@@ -1320,6 +1315,11 @@
                 currentMonthDoc[dateStr] = todaysData;
 
                 btn.innerHTML = "✅ Saved Successfully!";
+                
+                // Hide the exclusion banner immediately upon saving
+                document.getElementById('exclusion-warning-banner').classList.add('hidden');
+                document.getElementById('exclusion-warning-banner').classList.remove('flex');
+
                 setTimeout(() => { 
                     btn.innerHTML = origText; btn.disabled = false; 
                     if (absentWhatsAppList.length > 0) {
@@ -1390,7 +1390,7 @@
             const prevMonthKey = `${prevY}_${String(prevM).padStart(2,'0')}`;
 
             try {
-                // Fetch ALL attendance docs for this section for current and previous month
+                // Fetch ALL attendance docs for this section for current and previous month to map past unified records accurately
                 const [curQuerySnap, prevQuerySnap] = await Promise.all([
                     getCollection("attendance_records").where("monthKey", "==", monthVal).get(),
                     getCollection("attendance_records").where("monthKey", "==", prevMonthKey).get()
@@ -1402,7 +1402,7 @@
 
                 curQuerySnap.forEach(doc => {
                     const data = doc.data();
-                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s) && normMatch(data.subject) === normMatch(currentReg.sub)) {
                         if (data.records) {
                             Object.keys(data.records).forEach(dKey => {
                                 curRecords[dKey] = { ...(curRecords[dKey] || {}), ...data.records[dKey] };
@@ -1416,7 +1416,7 @@
 
                 prevQuerySnap.forEach(doc => {
                     const data = doc.data();
-                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s) && normMatch(data.subject) === normMatch(currentReg.sub)) {
                         if (data.aggregatedStats) {
                             prevStats = { ...prevStats, ...data.aggregatedStats };
                         }
@@ -1432,46 +1432,48 @@
                 
                 for(let d=1; d<=daysInMonth; d++) {
                     const dateStr = `${y}-${m}-${String(d).padStart(2,'0')}`;
-                    const dObj = new Date(parseInt(y), parseInt(m)-1, d);
-                    const isSunday = dObj.getDay() === 0;
-                    
                     const status = checkDateStatus(dateStr);
-                    const isHol = status.locked;
+                    const hasAttendanceMarked = curRecords[dateStr] && Object.keys(curRecords[dateStr]).length > 0;
+                    
                     const remKey = `${dateStr}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}`;
                     const isRemedialDay = remedialDataMap[remKey] ? true : false;
-                    const isNoClass = status.locked && status.reason === "NO CLASS";
-
-                    const isWorkingDay = !isSunday && !isHol && !isRemedialDay && !isNoClass && dateStr <= todayISO;
-                    if(isWorkingDay) totalWorkingDaysMonth++;
-
+                    
+                    let isWorkingDay = false;
                     let verticalReason = "";
-                    if (isSunday) verticalReason = "SUNDAY";
-                    else if (isNoClass) verticalReason = "NOCLASS";
-                    else if (status.locked && status.type === "HOLIDAY") {
-                        verticalReason = status.reason.replace(/Holiday:\s*/i, '').replace(/Event:\s*/i, '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-                    }
-                    else if (status.isEvent) {
-                        verticalReason = status.reason.replace(/Event:\s*/i, '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-                    }
-                    else if (isRemedialDay) {
+
+                    if (isRemedialDay) {
+                        isWorkingDay = false;
                         verticalReason = remedialDataMap[remKey].reason.toUpperCase().replace(/[^A-Z0-9]/g, '');
+                    } else if (hasAttendanceMarked) {
+                        // User overrode the exclusion and marked attendance anyway. Counts as Working Day!
+                        isWorkingDay = true;
+                        verticalReason = "";
+                    } else if (status.isExcluded) {
+                        isWorkingDay = false;
+                        verticalReason = status.reason.toUpperCase().replace(/[^A-Z0-9]/g, '');
+                    } else if (dateStr <= todayISO) {
+                        isWorkingDay = true;
+                        verticalReason = "";
                     }
 
-                    if (verticalReason) verticalReason = verticalReason.replace(/\s+/g, '');
+                    if(isWorkingDay) totalWorkingDaysMonth++;
 
                     dayStatuses.push({ 
                         date: dateStr, 
-                        isFuture: dateStr > todayISO, 
-                        verticalReason 
+                        isFuture: dateStr > todayISO && !status.isExcluded, 
+                        verticalReason,
+                        isRemedial: isRemedialDay,
+                        isExcluded: status.isExcluded && !hasAttendanceMarked
                     });
                     
-                    let bg = (isSunday || isHol || isNoClass) ? "bg-slate-200 text-slate-400" : (isRemedialDay ? "bg-indigo-100 text-indigo-800 font-black" : "bg-white");
+                    let bg = (status.isExcluded && !hasAttendanceMarked) ? "bg-slate-200 text-slate-400" : (isRemedialDay ? "bg-indigo-100 text-indigo-800 font-black" : "bg-white");
                     dayHeaders += `<th class="${bg} min-w-[25px] font-black border-r border-b border-black text-[9px]">${d}</th>`;
                 }
 
                 const prevTotalWorking = curStats.globalTotalWorkingDays !== undefined ? curStats.globalTotalWorkingDays : (prevStats.globalTotalWorkingDays || 0);
                 const grandTotalWorking = prevTotalWorking + totalWorkingDaysMonth;
 
+                // PDF Header Element
                 let printHeaderHtml = `
                     <div id="print-header" class="w-full mb-6 text-black font-sans">
                         <div class="text-center mb-4 border-b-2 border-black pb-4">
@@ -1504,11 +1506,11 @@
                         <th class="sticky-col-2 maroon-bg print-maroon-header" rowspan="2" style="width: 40px; border: 1px solid #000;">Roll<br>No.</th>
                         <th class="sticky-col-3 maroon-bg print-maroon-header" rowspan="2" style="width: 200px; border: 1px solid #000;">Name of Student</th>
                         <th colspan="${daysInMonth}" class="text-center py-1 tracking-widest border-b border-black text-[9px] maroon-bg print-maroon-header">DATES (1 TO 31)</th>
-                        <th rowspan="2" class="rotate-text h-[100px] w-[30px] leading-tight maroon-light-bg print-maroon-header-light" style="border: 1px solid #000;">Attendance<br>Curr. month</th>
-                        <th rowspan="2" class="rotate-text h-[100px] w-[30px] leading-tight maroon-light-bg print-maroon-header-light" style="border: 1px solid #000;">Previous month<br>Attendance</th>
-                        <th rowspan="2" class="rotate-text h-[100px] w-[30px] leading-tight maroon-light-bg print-maroon-header-light" style="border: 1px solid #000;">G. Total of<br>attendance</th>
-                        <th rowspan="2" class="rotate-text h-[100px] w-[30px] leading-tight maroon-light-bg print-maroon-header-light" style="border: 1px solid #000;">Leave</th>
-                        <th rowspan="2" class="w-[80px] maroon-light-bg print-maroon-header-light" style="border: 1px solid #000;">Remarks<br>if any</th>
+                        <th rowspan="2" class="rotate-text h-[100px] w-[30px] leading-tight maroon-light-bg print-maroon-header-light border: 1px solid #000;">Attendance<br>Curr. month</th>
+                        <th rowspan="2" class="rotate-text h-[100px] w-[30px] leading-tight maroon-light-bg print-maroon-header-light border: 1px solid #000;">Previous month<br>Attendance</th>
+                        <th rowspan="2" class="rotate-text h-[100px] w-[30px] leading-tight maroon-light-bg print-maroon-header-light border: 1px solid #000;">G. Total of<br>attendance</th>
+                        <th rowspan="2" class="rotate-text h-[100px] w-[30px] leading-tight maroon-light-bg print-maroon-header-light border: 1px solid #000;">Leave</th>
+                        <th rowspan="2" class="w-[80px] maroon-light-bg print-maroon-header-light border: 1px solid #000;">Remarks<br>if any</th>
                     </tr>
                     <tr class="maroon-bg print-maroon-header">${dayHeaders}</tr>
                 </thead><tbody class="text-[12px] font-bold text-black bg-white">`;
