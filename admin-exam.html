@@ -202,9 +202,16 @@
                     <label class="block text-sm font-black text-slate-500 uppercase tracking-widest mb-2">1. Select Department</label>
                     <select id="auth-dept" onchange="populateAuthStaff()" class="input-field bg-white text-sm"></select>
                 </div>
-                <div>
+             <div>
                     <label class="block text-sm font-black text-slate-500 uppercase tracking-widest mb-2">2. Select Staff Member</label>
                     <select id="auth-staff" class="input-field bg-white disabled:opacity-50 text-sm" disabled></select>
+                </div>
+                <div>
+                    <label class="block text-sm font-black text-slate-500 uppercase tracking-widest mb-2">3. Select Access Level</label>
+                    <select id="auth-level" class="input-field bg-white text-sm">
+                        <option value="edit">Editor (Can Manage & Edit)</option>
+                        <option value="view">Viewer (Read-Only Access)</option>
+                    </select>
                 </div>
                 <button onclick="grantExamAuth()" class="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black uppercase tracking-widest text-sm shadow-lg hover:bg-indigo-700 transition-colors mt-2">Grant Exam Authority</button>
             </div>
@@ -368,8 +375,8 @@
                     
                     if (teacherCenter.includes(activeCenter.toUpperCase())) {
                         const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                        allTeachers.push({ 
-                            id: d.id, email: data.email, details: det, dept: deptKey ? det[deptKey] : 'General', canManageExams: data.canManageExams || false 
+                      allTeachers.push({ 
+                            id: d.id, email: data.email, details: det, dept: deptKey ? det[deptKey] : 'General', canManageExams: data.canManageExams || false, examAccessLevel: data.examAccessLevel || 'edit'
                         });
                     }
                 });
@@ -735,7 +742,8 @@
                         return;
                     }
 
-                    const groupedByDate = {};
+                  const groupedByDate = {};
+                    window.examDataCache = {}; // Cache for WhatsApp Sharing
                     snap.forEach(doc => {
                         const data = doc.data();
                         if (!groupedByDate[data.date]) groupedByDate[data.date] = [];
@@ -750,8 +758,9 @@
                         const prettyDate = dateObj.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
                         const rawPackets = groupedByDate[dateStr];
                         
-                        // SMART AGGREGATION: Compress rows visually
+                      // SMART AGGREGATION: Compress rows visually
                         const aggregatedRows = normalizeAndAggregate(rawPackets);
+                        window.examDataCache[dateStr] = aggregatedRows; // Store for sharing
 
                       let rowsHtml = aggregatedRows.map(data => {
                             let typeColor = "bg-slate-100 text-slate-700 border-slate-200";
@@ -778,7 +787,10 @@
                                         <div class="text-[10px] font-black text-slate-700 uppercase tracking-tight">${data.savedBy}</div>
                                         <div class="text-[8px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">${data.savedByDept}</div>
                                     </td>
-                                    <td class="p-4 text-right align-middle">
+                              <td class="p-4 text-right align-middle flex flex-col gap-2">
+                                        <button onclick="shareViaWhatsApp('${dateStr}', '${data.className}', '${data.section}', '${data.subject}')" class="text-green-600 hover:text-green-700 bg-white hover:bg-green-50 px-3 py-1.5 rounded-lg font-black text-[10px] uppercase tracking-widest transition-colors shadow-sm border border-green-200 hover:border-green-400 whitespace-nowrap">
+                                            <i class="bi bi-whatsapp"></i> Share
+                                        </button>
                                         <button onclick="deleteExamGroup('${data.id}')" class="text-rose-400 hover:text-rose-600 bg-white hover:bg-rose-50 px-3 py-1.5 rounded-lg font-black text-[10px] uppercase tracking-widest transition-colors shadow-sm border border-rose-200 hover:border-rose-400 whitespace-nowrap" title="Remove entire section exam block">
                                             Remove Block
                                         </button>
@@ -793,8 +805,11 @@
                                     <h3 class="font-black text-lg sm:text-xl uppercase tracking-widest flex items-center gap-3">
                                         <span class="bg-white/20 px-3 py-1.5 rounded-xl shadow-inner text-base">📅</span> ${prettyDate}
                                     </h3>
-                                    <div class="flex items-center gap-4">
-                                        <span class="text-xs font-bold text-slate-300 uppercase tracking-widest bg-slate-900 px-3 py-1.5 rounded-lg shadow-inner">${aggregatedRows.length} Subject(s)</span>
+                                 <div class="flex items-center gap-2 sm:gap-4">
+                                        <button type="button" onclick="shareViaWhatsApp('${dateStr}'); event.stopPropagation();" class="bg-green-500 hover:bg-green-400 text-white px-3 py-1.5 rounded-lg text-xs font-black uppercase tracking-widest shadow-md transition-colors flex items-center gap-2">
+                                            <i class="bi bi-whatsapp"></i> Share
+                                        </button>
+                                        <span class="text-xs font-bold text-slate-300 uppercase tracking-widest bg-slate-900 px-3 py-1.5 rounded-lg shadow-inner hidden sm:inline-block">${aggregatedRows.length} Subject(s)</span>
                                         <span class="text-slate-400 text-xl group-open:rotate-180 transition-transform">▼</span>
                                     </div>
                                 </summary>
@@ -1008,11 +1023,15 @@
 
         async function grantExamAuth() {
             const staffId = document.getElementById('auth-staff').value;
+            const level = document.getElementById('auth-level').value;
             if(!staffId) return alert("Select a Staff member.");
             try {
-                await getCollection("staff_applications").doc(staffId).update({ canManageExams: true });
+                await getCollection("staff_applications").doc(staffId).update({ canManageExams: true, examAccessLevel: level });
                 const staff = allTeachers.find(s => s.id === staffId);
-                if(staff) staff.canManageExams = true;
+                if(staff) {
+                    staff.canManageExams = true;
+                    staff.examAccessLevel = level;
+                }
                 renderAuthList();
                 alert("Authority Granted!");
             } catch(e) { alert("Error granting rights."); }
@@ -1041,12 +1060,56 @@
                 return `
                 <div class="bg-white border-2 border-indigo-50 p-5 rounded-2xl flex justify-between items-center shadow-sm">
                     <div>
-                        <h3 class="font-black text-slate-800 text-base uppercase">${n}</h3>
+                      <h3 class="font-black text-slate-800 text-base uppercase flex items-center gap-2">
+                            ${n} 
+                            ${s.examAccessLevel === 'view' ? '<span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[10px]">VIEWER</span>' : '<span class="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded text-[10px]">EDITOR</span>'}
+                        </h3>
                         <span class="text-xs font-bold text-indigo-500 uppercase tracking-widest mt-1 inline-block">${deptStr}</span>
                     </div>
                     <button onclick="revokeExamAuth('${s.id}')" class="bg-rose-50 text-rose-600 px-5 py-3 rounded-xl font-black text-xs uppercase tracking-widest border border-rose-200 shadow-sm hover:bg-rose-600 hover:text-white transition-colors">Revoke</button>
                 </div>
             `}).join('');
+        }
+        // --- WHATSAPP SHARING ENGINE ---
+        function shareViaWhatsApp(dateStr, className = null, section = null, subject = null) {
+            const rowData = window.examDataCache[dateStr];
+            if (!rowData || rowData.length === 0) return alert("No data to share.");
+
+            let textToShare = `*📅 Exam Schedule - ${new Date(dateStr).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}*\n\n`;
+
+            const filteredData = rowData.filter(row => {
+                if (className && row.className !== className) return false;
+                if (section && row.section !== section) return false;
+                if (subject && row.subject !== subject) return false;
+                return true;
+            });
+
+            if (filteredData.length === 0) return alert("No matching syllabus found.");
+
+            const grouped = {};
+            filteredData.forEach(row => {
+                const key = `*Class ${row.className} - Sec ${row.section}*`;
+                if (!grouped[key]) grouped[key] = [];
+                grouped[key].push(row);
+            });
+
+            Object.keys(grouped).forEach(key => {
+                textToShare += `${key}\n`;
+                grouped[key].forEach(row => {
+                    textToShare += `🔹 *${row.subject}* (${row.type})\n`;
+                    if (row.syllabus && row.syllabus.trim() !== "") {
+                        textToShare += `_Syllabus:_ ${row.syllabus.trim()}\n`;
+                    } else {
+                        textToShare += `_Syllabus:_ Pending\n`;
+                    }
+                });
+                textToShare += `\n`;
+            });
+
+            textToShare += `Regards,\nMinerva Study Circle`;
+
+            const encodedText = encodeURIComponent(textToShare);
+            window.open(`https://wa.me/?text=${encodedText}`, '_blank');
         }
 
     </script>
