@@ -280,8 +280,15 @@
                 </div>
             </div>
             
-            <div class="ledger-paper w-full">
+           <div class="ledger-paper w-full">
                 <div id="ledger-table-container"></div>
+            </div>
+        </div>
+
+        <!-- NEW: STUDENT PERSONAL VIEW -->
+        <div id="view-student-personal" class="flex-1 bg-slate-50 overflow-y-auto hidden flex-col custom-scroll p-4 sm:p-8 relative">
+            <div class="max-w-4xl mx-auto w-full" id="student-personal-content">
+                <!-- Injected via JS -->
             </div>
         </div>
     </div>
@@ -895,14 +902,16 @@
             }
         }
 
-        function switchTab(tab) {
+     function switchTab(tab) {
             document.getElementById('view-daily').style.display = tab === 'daily' ? 'flex' : 'none';
             document.getElementById('view-ledger').style.display = tab === 'ledger' ? 'flex' : 'none';
+            document.getElementById('view-student-personal').style.display = tab === 'personal' ? 'flex' : 'none';
+            
             if(tab === 'daily') stopTTS();
             if(tab === 'ledger') loadLedger();
+            if(tab === 'personal') loadStudentPersonalView();
         }
-
-        async function openRegister(c, s, sub, canEdit) {
+      async function openRegister(c, s, sub, canEdit) {
             if (activeStudent) canEdit = false;
             currentReg = { c, s, sub, canEdit };
             document.getElementById('reg-title').innerText = `${c} | Sec ${s}`;
@@ -917,6 +926,9 @@
             const bulkA = document.getElementById('bulk-absent-btn');
             const corrBtn = document.getElementById('btn-open-correction');
             const augBtn = document.getElementById('btn-august-setup');
+            
+            const tabDailyBtn = document.getElementById('tab-daily');
+            const tabLedgerBtn = document.getElementById('tab-ledger');
 
             // Default to hidden
             saveBar.style.display = 'none'; mobileBtns.style.display = 'none';
@@ -924,25 +936,30 @@
             if(corrBtn) corrBtn.classList.add('hidden');
             if(augBtn) augBtn.classList.add('hidden');
 
-            if (isAdmin) {
-                // Admins: Read-only daily view, Setup access active
-                if(augBtn) augBtn.classList.remove('hidden');
-                currentReg.canEdit = false;
-            } else if (canEdit && !activeStudent) {
-                // Teachers: Full access, Correction access active
-                saveBar.style.display = 'block'; mobileBtns.style.display = 'grid';
-                ttsBtn.style.display = 'flex'; bulkP.style.display = 'block'; bulkA.style.display = 'block';
-                if(corrBtn) corrBtn.classList.remove('hidden');
+            if (activeStudent) {
+                // Completely block students from viewing the class register
+                tabDailyBtn.style.display = 'none';
+                tabLedgerBtn.style.display = 'none';
+                document.querySelector('button[onclick="printLedgerPDF()"]').style.display = 'none';
+                
+                switchTab('personal');
+            } else {
+                tabDailyBtn.style.display = 'block';
+                tabLedgerBtn.style.display = 'block';
+                document.querySelector('button[onclick="printLedgerPDF()"]').style.display = 'flex';
+                
+                if (isAdmin) {
+                    if(augBtn) augBtn.classList.remove('hidden');
+                    currentReg.canEdit = false;
+                } else if (canEdit) {
+                    saveBar.style.display = 'block'; mobileBtns.style.display = 'grid';
+                    ttsBtn.style.display = 'flex'; bulkP.style.display = 'block'; bulkA.style.display = 'block';
+                    if(corrBtn) corrBtn.classList.remove('hidden');
+                }
+                
+                switchTab('daily');
+                await loadDailyAttendance();
             }
-            
-            switchTab('daily');
-            await loadDailyAttendance();
-        }
-
-        function closeRegister() {
-            stopTTS();
-            document.getElementById('register-modal').style.display = 'none';
-            currentReg = null;
         }
 
         function getSlotExistsForDate(dateStr) {
@@ -1021,6 +1038,119 @@
             }
 
             return { isExcluded: false };
+        }
+
+       async function loadStudentPersonalView() {
+            const container = document.getElementById('student-personal-content');
+            container.innerHTML = `
+                <div class="text-center py-20 flex flex-col items-center justify-center">
+                    <div class="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mb-4"></div>
+                    <p class="text-xs font-bold text-slate-400 uppercase tracking-widest">Crunching your attendance data...</p>
+                </div>
+            `;
+
+            try {
+                // Fetch all attendance records for this specific subject
+                const snap = await getCollection("attendance_records")
+                    .where("className", "==", currentReg.c)
+                    .where("section", "==", currentReg.s)
+                    .where("subject", "==", currentReg.sub)
+                    .get();
+                    
+                let stats = { P: 0, A: 0, L: 0, Total: 0 };
+                let historyLog = [];
+                
+                snap.docs.forEach(doc => {
+                    const data = doc.data();
+                    
+                    if(data.records) {
+                        Object.keys(data.records).forEach(dateStr => {
+                            const status = data.records[dateStr][activeStudent.id];
+                            if(status === 'P' || status === 'A' || status === 'L') {
+                                stats[status]++;
+                                stats.Total++;
+                                historyLog.push({ date: dateStr, status: status });
+                            }
+                        });
+                    }
+                });
+
+                if (stats.Total === 0) {
+                    container.innerHTML = `
+                        <div class="text-center py-16 bg-white rounded-[2rem] border-2 border-dashed border-slate-200 shadow-sm">
+                            <span class="text-5xl mb-4 block">👻</span>
+                            <h3 class="text-lg font-black text-slate-700 uppercase tracking-tighter mb-1">No Data Yet</h3>
+                            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Attendance hasn't been marked for this subject.</span>
+                        </div>
+                    `;
+                    return;
+                }
+
+                // Sort history newest first
+                historyLog.sort((a,b) => b.date.localeCompare(a.date));
+
+                const pct = Math.round((stats.P / stats.Total) * 100) || 0;
+                const getHtmlColor = (p) => p >= 75 ? 'text-emerald-600' : (p >= 60 ? 'text-amber-500' : 'text-rose-600');
+                const getHtmlBg = (p) => p >= 75 ? 'bg-emerald-50 border-emerald-200' : (p >= 60 ? 'bg-amber-50 border-amber-200' : 'bg-rose-50 border-rose-200');
+
+                let html = `
+                    <div class="mb-8 p-6 sm:p-8 rounded-[2rem] border-2 ${getHtmlBg(pct)} flex flex-col sm:flex-row items-center justify-between shadow-sm transition-colors gap-6 text-center sm:text-left">
+                        <div>
+                            <h2 class="font-black text-slate-800 text-xl sm:text-2xl uppercase tracking-tighter leading-none">${currentReg.sub}</h2>
+                            <p class="text-[10px] sm:text-xs font-bold text-slate-500 uppercase mt-2 tracking-widest">Total Classes Attended: <span class="font-black text-slate-700">${stats.P} out of ${stats.Total}</span></p>
+                        </div>
+                        <div class="flex flex-col items-center sm:items-end">
+                            <div class="text-5xl sm:text-6xl font-black ${getHtmlColor(pct)} tracking-tighter">${pct}%</div>
+                            <div class="text-[10px] font-black text-slate-500 bg-white/60 px-3 py-1.5 rounded-lg mt-2 uppercase tracking-widest border border-slate-200 shadow-sm flex gap-3">
+                                <span class="text-emerald-600">Present: ${stats.P}</span>
+                                <span class="text-rose-500">Absent: ${stats.A}</span>
+                                <span class="text-amber-600">Late: ${stats.L}</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="bg-white rounded-[2rem] border border-slate-200 shadow-sm overflow-hidden">
+                        <div class="p-6 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+                            <h4 class="font-black text-slate-700 text-sm uppercase tracking-widest">Recent History</h4>
+                        </div>
+                        <div class="p-2">
+                `;
+
+                if(historyLog.length > 0) {
+                    html += `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4">`;
+                    historyLog.slice(0, 30).forEach(log => {
+                        const dObj = new Date(log.date);
+                        const prettyDate = dObj.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+                        
+                        let sPill = "";
+                        if(log.status === 'P') sPill = `<span class="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-md text-[10px] font-black uppercase tracking-widest">Present</span>`;
+                        else if(log.status === 'A') sPill = `<span class="bg-rose-100 text-rose-700 px-3 py-1 rounded-md text-[10px] font-black uppercase tracking-widest">Absent</span>`;
+                        else if(log.status === 'L') sPill = `<span class="bg-amber-100 text-amber-700 px-3 py-1 rounded-md text-[10px] font-black uppercase tracking-widest">Late</span>`;
+
+                        html += `
+                            <div class="flex justify-between items-center p-3 rounded-xl border border-slate-100 hover:bg-slate-50 transition-colors">
+                                <span class="text-xs font-bold text-slate-600">${prettyDate}</span>
+                                ${sPill}
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+                    if(historyLog.length > 30) html += `<p class="text-center text-[9px] font-bold text-slate-400 uppercase p-4">Showing last 30 records</p>`;
+                }
+
+                html += `
+                        </div>
+                    </div>
+                `;
+                container.innerHTML = html;
+
+            } catch (e) {
+                console.error(e);
+                container.innerHTML = `
+                    <div class="text-center py-10 bg-rose-50 border border-rose-200 rounded-2xl m-4">
+                        <span class="text-rose-500 font-black uppercase tracking-widest text-xs">Error loading your attendance.</span>
+                    </div>`;
+            }
         }
 
         async function loadDailyAttendance() {
