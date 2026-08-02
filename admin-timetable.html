@@ -5221,7 +5221,7 @@ async function executeImport() {
             historyContainer.scrollTop = historyContainer.scrollHeight;
         }
 
-        function scrapeDOMToGlobal() {
+      function scrapeDOMToGlobal() {
             const existingBlocks = document.querySelectorAll('.time-block');
             if (existingBlocks.length === 0) return;
             let tempSlots = [];
@@ -5236,8 +5236,10 @@ async function executeImport() {
                 
                 const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
                 const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
-                const dur = \`\${eMins - sMins} MINS\`;
-                const timeRange = \`\${format12Hour(s24)} - \${format12Hour(e24)}\`;
+                
+                // FIXED THE JAVASCRIPT SYNTAX ERROR HERE
+                const dur = `${eMins - sMins} MINS`;
+                const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
 
                 for(let ent of entries) {
                     if (ent.classList.contains('temp-duty-row')) continue;
@@ -5278,128 +5280,60 @@ async function executeImport() {
 
             if (!prompt) return;
 
-            // 1. Update UI
             appendChatMessage('user', prompt);
             inputEl.value = "";
             inputEl.disabled = true;
             btnEl.innerHTML = `<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>`;
             
-            // Temporary typing indicator
             const historyContainer = document.getElementById('copilot-chat-history');
             const typingId = "typing_" + Date.now();
             historyContainer.innerHTML += `<div id="${typingId}" class="flex flex-col items-start w-full animate-pulse mt-2"><div class="bg-slate-200 text-slate-500 p-3 rounded-2xl rounded-tl-none text-xs font-black uppercase tracking-widest shadow-sm">AI is crunching the timeline...</div></div>`;
             historyContainer.scrollTop = historyContainer.scrollHeight;
 
             try {
-                // Scrape current screen to ensure AI has the absolutely latest manual edits
                 scrapeDOMToGlobal();
-                takeSnapshot(); // Save to history stack for Undo functionality
+                if (typeof takeSnapshot === 'function') takeSnapshot();
 
-                // Build context strings for the AI
                 const teachersList = allTeachers.map(t => t.name).join(', ');
                 const subjectsList = [...new Set(structureData.flatMap(s => s.subjects))].join(', ');
                 const roomsList = allRooms.map(r => r.name).join(', ');
 
-                const systemInstruction = `You are the Minerva Timetable AI Copilot. You interact directly with the school admin to build and modify the live timetable JSON data.
+                // LINK TO YOUR NEW GOOGLE CLOUD FUNCTION
+                const copilotServiceUrl = "https://timetable-copilot-701377739976.asia-south1.run.app";
 
-AVAILABLE RESOURCES:
-- Teachers: ${teachersList}
-- Subjects: ${subjectsList}
-- Rooms: ${roomsList}
-
-CURRENT TIMETABLE STATE (JSON):
-${JSON.stringify(globalTimetable)}
-
-RULES:
-1. Act as a timetable algorithm. Calculate times accurately (e.g. 45 mins from 09:00 is 09:45).
-2. ONLY modify or add to the current timetable state based on the user's prompt. Do NOT delete existing blocks unless asked.
-3. You MUST return the ENTIRE updated JSON array containing both the untouched old blocks and your new/modified blocks. Ensure every block has "sMins" and "eMins" calculated correctly (hours * 60 + minutes).
-4. Detect clashes. If the user creates a clash (e.g. assigning a teacher to two places at the same time), still make the change in the JSON, but warn them politely in the "reply" string.
-5. You MUST return your response strictly as a JSON object adhering to this exact schema (no markdown, no backticks, raw JSON only):
-
-{
-  "reply": "Your conversational response here.",
-  "new_timetable_data": [
-    {
-      "day": "Monday",
-      "className": "10",
-      "section": "A",
-      "start24": "09:00",
-      "end24": "09:45",
-      "timeRange": "09:00 AM - 09:45 AM",
-      "duration": "45 MINS",
-      "subject": "MATHEMATICS",
-      "teacher": "NEEL KAMAL",
-      "teacherName": "NEEL KAMAL",
-      "teacherEmail": "",
-      "room": "",
-      "remark": "",
-      "sMins": 540,
-      "eMins": 585
-    }
-  ]
-}`;
-
-                // Format history for Gemini API
-                const formattedContents = aiChatHistory.map(msg => ({
-                    role: msg.role === 'ai' ? 'model' : 'user',
-                    parts: [{ text: msg.text }]
-                }));
-
-                // Add the newest user prompt
-                formattedContents.push({
-                    role: 'user',
-                    parts: [{ text: `SYSTEM CONTEXT & INSTRUCTIONS:\n${systemInstruction}\n\nUSER PROMPT:\n${prompt}` }]
-                });
-
-                // DIRECT BROWSER FETCH TO GEMINI API
-                const apiKey = "AIzaSyDISD49PETgSqatyTQ8fS2DdMoDfc5kH4Y"; // Provided key
-                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+                const response = await fetch(copilotServiceUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        contents: formattedContents,
-                        generationConfig: { 
-                            response_mime_type: "application/json",
-                            temperature: 0.1
+                        prompt: prompt,
+                        history: aiChatHistory,
+                        currentTimetable: globalTimetable,
+                        contextData: {
+                            teachers: teachersList,
+                            subjects: subjectsList,
+                            rooms: roomsList
                         }
                     })
                 });
 
-                const aiResult = await response.json();
+                const parsedResponse = await response.json();
                 
-                if (!response.ok) {
-                    throw new Error(aiResult.error?.message || "Gemini API rejected the request.");
+                if (parsedResponse.error) {
+                    throw new Error(parsedResponse.error);
                 }
 
-                // Clean the output
-                let jsonText = aiResult.candidates[0].content.parts[0].text;
-                jsonText = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
-
-                const parsedResponse = JSON.parse(jsonText);
-
-                // 2. Remove typing indicator
                 const typingDiv = document.getElementById(typingId);
                 if(typingDiv) typingDiv.remove();
 
-                // 3. Print AI Reply to Chat
                 appendChatMessage('ai', parsedResponse.reply);
 
-                // Update memory history
                 aiChatHistory.push({ role: 'user', text: prompt });
                 aiChatHistory.push({ role: 'ai', text: parsedResponse.reply });
 
-                // 4. LIVE UPDATE THE TIMETABLE UI
                 if (parsedResponse.new_timetable_data && Array.isArray(parsedResponse.new_timetable_data)) {
-                    // Inject the new data into global memory
                     globalTimetable = parsedResponse.new_timetable_data;
-                    
-                    // Force the UI to rebuild instantly to reflect the AI's changes
-                    // Pass true to skip scraping (we already scraped and updated the globalTimetable)
                     renderDirectDashboard(true);
-                    
-                    // Run the clash detector
-                    checkGlobalClash(); 
+                    if (typeof checkGlobalClash === 'function') checkGlobalClash(); 
                 }
 
             } catch (error) {
