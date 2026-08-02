@@ -10,7 +10,7 @@ exports.timetableCopilot = onCall(async (request) => {
         const contextData = data.contextData || {}; // Teachers, subjects, rooms limits
 
         // Your shared API key is perfectly safe here on the backend
-        const apiKey = "AQ.Ab8RN6KlOyoyiT1gxA-zvFoB8x_AlPM2iF25kqCiShNEL6guiQ"; 
+        const apiKey = ""; 
 
         if (!userPrompt) {
             throw new Error('Prompt is missing from the request.');
