@@ -5183,6 +5183,236 @@ async function executeImport() {
                 };
             }).filter(x => x !== null);
         }
+
+        // ============================================================================
+        // === DIRECT BROWSER AI COPILOT ENGINE                                     ===
+        // ============================================================================
+        let aiChatHistory = [];
+
+        function toggleCopilot() {
+            const drawer = document.getElementById('ai-copilot-drawer');
+            if (drawer.classList.contains('translate-x-full')) {
+                drawer.classList.remove('translate-x-full');
+                setTimeout(() => document.getElementById('copilot-input').focus(), 300);
+            } else {
+                drawer.classList.add('translate-x-full');
+            }
+        }
+
+        function appendChatMessage(role, text) {
+            const historyContainer = document.getElementById('copilot-chat-history');
+            let html = "";
+            if (role === 'user') {
+                html = `
+                <div class="flex flex-col items-end w-full mt-2">
+                    <div class="bg-indigo-600 text-white p-3 rounded-2xl rounded-tr-none shadow-md text-xs font-bold leading-relaxed max-w-[85%] border border-indigo-700">
+                        ${text}
+                    </div>
+                </div>`;
+            } else {
+                html = `
+                <div class="flex flex-col items-start w-full mt-2">
+                    <div class="bg-white border border-slate-200 p-3 rounded-2xl rounded-tl-none shadow-sm text-xs font-bold text-slate-700 leading-relaxed max-w-[85%]">
+                        ${text}
+                    </div>
+                </div>`;
+            }
+            historyContainer.innerHTML += html;
+            historyContainer.scrollTop = historyContainer.scrollHeight;
+        }
+
+        function scrapeDOMToGlobal() {
+            const existingBlocks = document.querySelectorAll('.time-block');
+            if (existingBlocks.length === 0) return;
+            let tempSlots = [];
+            existingBlocks.forEach(b => {
+                const className = b.getAttribute('data-class');
+                const sectionName = b.getAttribute('data-section');
+                const s24 = b.querySelector('.tb-s24').value; 
+                const e24 = b.querySelector('.tb-e24').value;
+                const entries = Array.from(b.querySelectorAll('.ent-row'));
+                
+                if (!s24 || !e24) return;
+                
+                const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
+                const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
+                const dur = \`\${eMins - sMins} MINS\`;
+                const timeRange = \`\${format12Hour(s24)} - \${format12Hour(e24)}\`;
+
+                for(let ent of entries) {
+                    if (ent.classList.contains('temp-duty-row')) continue;
+                    const sub = ent.querySelector('.ent-sub').value;
+                    let teacher = ent.querySelector('.ent-tea').value || "NONE"; 
+                    const room = ent.querySelector('.ent-room').value.trim();
+                    let remark = ent.querySelector('.ent-rem').value.trim();
+                    if (remark === "undefined") remark = ""; 
+                    
+                    let teacherEmail = "";
+                    let teacherName = teacher;
+                    
+                    if (ent.getAttribute('data-temp-sub') === 'true') {
+                        teacher = ent.getAttribute('data-orig-tea') || "NONE";
+                        teacherName = ent.getAttribute('data-orig-tea-name') || teacher;
+                        teacherEmail = ent.getAttribute('data-orig-tea-email') || "";
+                        remark = ent.getAttribute('data-orig-rem') || "";
+                    } else if (teacher !== "NONE") {
+                        const tObj = allTeachers.find(t => t.name === teacher);
+                        if (tObj) teacherEmail = tObj.email || ""; 
+                    }
+
+                    const activeDays = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
+
+                    activeDays.forEach(day => {
+                        tempSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName, teacherEmail, room, remark, sMins, eMins });
+                    });
+                }
+            });
+            globalTimetable = tempSlots;
+        }
+
+        async function sendCopilotMessage(e) {
+            e.preventDefault();
+            const inputEl = document.getElementById('copilot-input');
+            const btnEl = document.getElementById('copilot-send-btn');
+            const prompt = inputEl.value.trim();
+
+            if (!prompt) return;
+
+            // 1. Update UI
+            appendChatMessage('user', prompt);
+            inputEl.value = "";
+            inputEl.disabled = true;
+            btnEl.innerHTML = `<div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>`;
+            
+            // Temporary typing indicator
+            const historyContainer = document.getElementById('copilot-chat-history');
+            const typingId = "typing_" + Date.now();
+            historyContainer.innerHTML += `<div id="${typingId}" class="flex flex-col items-start w-full animate-pulse mt-2"><div class="bg-slate-200 text-slate-500 p-3 rounded-2xl rounded-tl-none text-xs font-black uppercase tracking-widest shadow-sm">AI is crunching the timeline...</div></div>`;
+            historyContainer.scrollTop = historyContainer.scrollHeight;
+
+            try {
+                // Scrape current screen to ensure AI has the absolutely latest manual edits
+                scrapeDOMToGlobal();
+                takeSnapshot(); // Save to history stack for Undo functionality
+
+                // Build context strings for the AI
+                const teachersList = allTeachers.map(t => t.name).join(', ');
+                const subjectsList = [...new Set(structureData.flatMap(s => s.subjects))].join(', ');
+                const roomsList = allRooms.map(r => r.name).join(', ');
+
+                const systemInstruction = `You are the Minerva Timetable AI Copilot. You interact directly with the school admin to build and modify the live timetable JSON data.
+
+AVAILABLE RESOURCES:
+- Teachers: ${teachersList}
+- Subjects: ${subjectsList}
+- Rooms: ${roomsList}
+
+CURRENT TIMETABLE STATE (JSON):
+${JSON.stringify(globalTimetable)}
+
+RULES:
+1. Act as a timetable algorithm. Calculate times accurately (e.g. 45 mins from 09:00 is 09:45).
+2. ONLY modify or add to the current timetable state based on the user's prompt. Do NOT delete existing blocks unless asked.
+3. You MUST return the ENTIRE updated JSON array containing both the untouched old blocks and your new/modified blocks. Ensure every block has "sMins" and "eMins" calculated correctly (hours * 60 + minutes).
+4. Detect clashes. If the user creates a clash (e.g. assigning a teacher to two places at the same time), still make the change in the JSON, but warn them politely in the "reply" string.
+5. You MUST return your response strictly as a JSON object adhering to this exact schema (no markdown, no backticks, raw JSON only):
+
+{
+  "reply": "Your conversational response here.",
+  "new_timetable_data": [
+    {
+      "day": "Monday",
+      "className": "10",
+      "section": "A",
+      "start24": "09:00",
+      "end24": "09:45",
+      "timeRange": "09:00 AM - 09:45 AM",
+      "duration": "45 MINS",
+      "subject": "MATHEMATICS",
+      "teacher": "NEEL KAMAL",
+      "teacherName": "NEEL KAMAL",
+      "teacherEmail": "",
+      "room": "",
+      "remark": "",
+      "sMins": 540,
+      "eMins": 585
+    }
+  ]
+}`;
+
+                // Format history for Gemini API
+                const formattedContents = aiChatHistory.map(msg => ({
+                    role: msg.role === 'ai' ? 'model' : 'user',
+                    parts: [{ text: msg.text }]
+                }));
+
+                // Add the newest user prompt
+                formattedContents.push({
+                    role: 'user',
+                    parts: [{ text: `SYSTEM CONTEXT & INSTRUCTIONS:\n${systemInstruction}\n\nUSER PROMPT:\n${prompt}` }]
+                });
+
+                // DIRECT BROWSER FETCH TO GEMINI API
+                const apiKey = "AIzaSyDISD49PETgSqatyTQ8fS2DdMoDfc5kH4Y"; // Provided key
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: formattedContents,
+                        generationConfig: { 
+                            response_mime_type: "application/json",
+                            temperature: 0.1
+                        }
+                    })
+                });
+
+                const aiResult = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(aiResult.error?.message || "Gemini API rejected the request.");
+                }
+
+                // Clean the output
+                let jsonText = aiResult.candidates[0].content.parts[0].text;
+                jsonText = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
+
+                const parsedResponse = JSON.parse(jsonText);
+
+                // 2. Remove typing indicator
+                const typingDiv = document.getElementById(typingId);
+                if(typingDiv) typingDiv.remove();
+
+                // 3. Print AI Reply to Chat
+                appendChatMessage('ai', parsedResponse.reply);
+
+                // Update memory history
+                aiChatHistory.push({ role: 'user', text: prompt });
+                aiChatHistory.push({ role: 'ai', text: parsedResponse.reply });
+
+                // 4. LIVE UPDATE THE TIMETABLE UI
+                if (parsedResponse.new_timetable_data && Array.isArray(parsedResponse.new_timetable_data)) {
+                    // Inject the new data into global memory
+                    globalTimetable = parsedResponse.new_timetable_data;
+                    
+                    // Force the UI to rebuild instantly to reflect the AI's changes
+                    // Pass true to skip scraping (we already scraped and updated the globalTimetable)
+                    renderDirectDashboard(true);
+                    
+                    // Run the clash detector
+                    checkGlobalClash(); 
+                }
+
+            } catch (error) {
+                console.error(error);
+                const typingDiv = document.getElementById(typingId);
+                if(typingDiv) typingDiv.remove();
+                appendChatMessage('ai', `⚠️ Error connecting to AI core: ${error.message}`);
+            } finally {
+                inputEl.disabled = false;
+                btnEl.innerHTML = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/></svg>`;
+                inputEl.focus();
+            }
+        }
     </script>
 </body>
 </html>
