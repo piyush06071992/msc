@@ -126,12 +126,20 @@
                 <button onclick="closeSheetModal()" class="bg-teal-700 text-teal-200 hover:bg-rose-500 hover:text-white w-10 h-10 rounded-full font-black text-xl transition-colors flex items-center justify-center">✕</button>
             </div>
             
+            <!-- Class Selection Toolbar -->
+            <div class="p-4 bg-slate-100 border-b border-slate-200 flex items-center justify-between gap-3 shrink-0">
+                <span class="text-xs font-black uppercase tracking-widest text-slate-600">Select Sheet Class:</span>
+                <select id="sheet-class-filter" onchange="onSheetClassChange()" class="input-field py-1.5 px-3 text-xs bg-white w-56">
+                    <!-- Populated dynamically from Column E -->
+                </select>
+            </div>
+
             <div class="p-6 flex-1 overflow-y-auto custom-scroll bg-slate-50 space-y-4" id="sheet-modal-body">
                 <div class="text-center py-10"><span class="loader border-t-teal-600"></span></div>
             </div>
 
             <div class="p-4 bg-white border-t border-slate-200 flex justify-end gap-3 shrink-0">
-                <button onclick="closeSheetModal()" class="px-5 py-2.5 bg-slate-100 text-slate-600 rounded-xl font-black text-xs uppercase tracking-widest hover:bg-slate-250 transition-colors">Cancel</button>
+                <button onclick="closeSheetModal()" class="px-5 py-2.5 bg-slate-100 text-slate-600 rounded-xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-colors">Cancel</button>
                 <button onclick="insertSelectedSyllabus()" class="px-6 py-2.5 bg-teal-600 text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-md hover:bg-teal-500 transition-colors">Insert Selected Topics</button>
             </div>
         </div>
@@ -480,12 +488,14 @@
             `;
         }
 
-        // --- GOOGLE SHEET SYLLABUS PICKER ENGINE ---
+        // --- GOOGLE SHEET SYLLABUS PICKER ENGINE WITH CLASS SELECTOR & ACCORDION ---
         let currentActiveTextAreaId = "";
+        let cachedSubject = "";
 
         function openSheetSyllabusModal(subjectName, className, textAreaId) {
             currentActiveTextAreaId = textAreaId;
-            document.getElementById('sheet-modal-sub').innerText = `${subjectName} | Class ${className}`;
+            cachedSubject = subjectName;
+            document.getElementById('sheet-modal-sub').innerText = `${subjectName}`;
             document.getElementById('sheet-modal-body').innerHTML = `<div class="text-center py-10"><span class="loader border-t-teal-600"></span></div>`;
             document.getElementById('sheet-syllabus-modal').classList.replace('hidden', 'flex');
 
@@ -495,11 +505,11 @@
                     header: true,
                     complete: function(results) {
                         masterSheetData = results.data || [];
-                        buildSheetTree(subjectName, className);
+                        initSheetModal(subjectName, className);
                     }
                 });
             } else {
-                buildSheetTree(subjectName, className);
+                initSheetModal(subjectName, className);
             }
         }
 
@@ -507,24 +517,53 @@
             document.getElementById('sheet-syllabus-modal').classList.replace('flex', 'hidden');
         }
 
-    function buildSheetTree(targetSubject, targetClass) {
-            const body = document.getElementById('sheet-modal-body');
-            const safeName = activeStaff ? (activeStaff.name || activeStaff.email) : "Unknown";
+        function initSheetModal(targetSubject, targetClass) {
+            const norm = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+            const normSub = norm(targetSubject);
+
+            // Filter rows by subject first
+            const subjectRows = masterSheetData.filter(row => {
+                const rSub = norm(row["Subject"]);
+                return rSub && (rSub === normSub || rSub.includes(normSub) || normSub.includes(rSub));
+            });
+
+            // Extract unique classes from Column E ("Class")
+            const classesSet = new Set();
+            subjectRows.forEach(r => {
+                const cls = r["Class"] || r["class"] || "General";
+                if (cls.trim()) classesSet.add(cls.trim());
+            });
+
+            const classDropdown = document.getElementById('sheet-class-filter');
+            const sortedClasses = Array.from(classesSet).sort((a,b) => a.localeCompare(b, undefined, {numeric: true}));
             
-            // Strict normalization helper
+            classDropdown.innerHTML = sortedClasses.map(c => `<option value="${c}">Class ${c}</option>`).join('');
+
+            const normCls = norm(targetClass);
+            const matchedClass = sortedClasses.find(c => norm(c) === normCls || norm(c).includes(normCls));
+            if (matchedClass) {
+                classDropdown.value = matchedClass;
+            } else if (sortedClasses.length > 0) {
+                classDropdown.value = sortedClasses[0];
+            }
+
+            buildSheetTree(cachedSubject, classDropdown.value);
+        }
+
+        function onSheetClassChange() {
+            const selectedClass = document.getElementById('sheet-class-filter').value;
+            buildSheetTree(cachedSubject, selectedClass);
+        }
+
+        function buildSheetTree(targetSubject, targetClass) {
+            const body = document.getElementById('sheet-modal-body');
             const norm = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
             const normSub = norm(targetSubject);
             const normCls = norm(targetClass);
 
-            if (!normSub) {
-                body.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase text-xs">Error: Invalid subject specified.</div>`;
-                return;
-            }
-
-            // Filter rows strictly matching the subject and class
             const filteredRows = masterSheetData.filter(row => {
                 const rSub = norm(row["Subject"]);
-                const rCls = norm(row["Class"]);
+                const rCls = norm(row["class"] || row["Class"]);
                 
                 if (!rSub) return false;
 
@@ -534,16 +573,15 @@
             });
 
             if (filteredRows.length === 0) {
-                body.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase text-xs">No matching topics found in Master Sheet for ${targetSubject} (Class ${targetClass}).</div>`;
+                body.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase text-xs">No topics found for ${targetSubject} in Class ${targetClass}.</div>`;
                 return;
             }
 
-            // Group by Chapter -> Topic -> Subtopics
             let chapters = {};
             filteredRows.forEach(r => {
-                const chap = r["Chapter"] || "General Chapters";
-                const top = r["Topic"] || "General Topics";
-                const sub = r["Subtopic"] || top;
+                const chap = r["Chapter"] || r["chapter"] || "General Chapters";
+                const top = r["Topic"] || r["topic"] || "General Topics";
+                const sub = r["Subtopic"] || r["subtopic"] || top;
 
                 if (!chapters[chap]) chapters[chap] = {};
                 if (!chapters[chap][top]) chapters[chap][top] = new Set();
@@ -615,13 +653,11 @@
             const ta = document.getElementById(currentActiveTextAreaId);
             if (!ta) return;
 
-            // Gather all checked items hierarchically
             let selectedTextParts = [];
             
-            // Find chapters
             document.querySelectorAll('.chap-cb').forEach(chapCb => {
                 const chapLabel = chapCb.closest('label').innerText.trim().replace('📚 ', '');
-                const chapContainer = chapCb.closest('div');
+                const chapContainer = chapCb.closest('details');
                 
                 const topCbs = chapContainer.querySelectorAll('.top-cb');
                 let topParts = [];
@@ -652,7 +688,6 @@
 
             const formattedString = selectedTextParts.join('\n\n');
             
-            // Append or set value
             if (ta.value.trim() !== "") {
                 ta.value += "\n\n" + formattedString;
             } else {
