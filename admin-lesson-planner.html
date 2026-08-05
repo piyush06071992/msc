@@ -332,8 +332,9 @@
         const REQUIRED_HEADERS = ["CHAPTER NAME", "LECTURE NUMBER", "SUBTOPICS", "Target days for chapter", "Standard Class Duration", "Target Minutes For Chapter"];
         let structureData = [], assignments = [], planners = [], staffList = [], timetableData = [], holidaysData = [];
         let isDemoMode = false, isDrillEditMode = false, currentUploadId = "", pendingSyllabusRows = [];
-        let lastDrillParams = {}, activeUploadRowIndex = null;
+  let lastDrillParams = {}, activeUploadRowIndex = null;
         let dailyBlockEnabled = false;
+        let summaryGroupBy = 'CLASS'; // Global toggle state for grouping
 
         // --- GLOBAL NAVIGATION & MODAL ENGINE ---
         function handleGlobalBack() {
@@ -346,17 +347,19 @@
             document.getElementById('menu-view').classList.remove('hidden');
         }
 
-       function showSummaryView() {
+        function showSummaryView() {
             document.querySelectorAll('main > div').forEach(d => d.classList.add('hidden'));
             document.getElementById('summary-view').classList.remove('hidden');
             document.getElementById('summary-controls').classList.remove('hidden');
-            renderSummary();
+            document.getElementById('summary-accordion-container').innerHTML = `<div class="text-center py-32"><span class="loader mb-4"></span><br><span class="text-sm font-black uppercase tracking-[0.2em] text-slate-400">Loading Analytics...</span></div>`;
+            setTimeout(() => renderSummary(), 50); // Allows UI to switch instantly before heavy math
         }
 
         function showEditView() {
             document.querySelectorAll('main > div, #summary-controls').forEach(d => d.classList.add('hidden'));
             document.getElementById('edit-view').classList.remove('hidden');
-            renderSetup();
+            document.getElementById('setup-accordion-container').innerHTML = `<div class="text-center py-32"><span class="loader mb-4"></span><br><span class="text-sm font-black uppercase tracking-[0.2em] text-slate-400">Loading Registry...</span></div>`;
+            setTimeout(() => renderSetup(), 50); // Allows UI to switch instantly before heavy math
         }
 
         function openModal(id) { const el = document.getElementById(id); el.classList.remove('hidden'); el.classList.add('flex'); }
@@ -770,342 +773,431 @@ function getScheduleSnapshotForDate(dateIso) {
             return dObj.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
         }
 
-        function renderSummary() {
+   function renderSummary() {
             const container = document.getElementById('summary-accordion-container');
-            if(!container) return; container.innerHTML = '';
-            const list = isDemoMode ? [{className:"Sample Data", sectionName:"Warrior Batch", subjects:["Mathematics", "Physics"]}] : structureData;
+            if(!container) return; 
 
-            const classGroups = {};
+            // View Toggle UI
+            const toggleHtml = `
+                <div class="flex flex-col sm:flex-row justify-between items-center mb-6 gap-4 border-b border-slate-200 pb-4">
+                    <h3 class="font-black uppercase text-xl sm:text-2xl tracking-widest text-slate-900">Analytics Dashboard</h3>
+                    <div class="bg-slate-200 p-1.5 rounded-xl inline-flex shadow-inner">
+                        <button onclick="summaryGroupBy = 'CLASS'; renderSummary();" class="px-6 py-2.5 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg transition-all ${summaryGroupBy === 'CLASS' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'}">Class-Wise</button>
+                        <button onclick="summaryGroupBy = 'SUBJECT'; renderSummary();" class="px-6 py-2.5 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg transition-all ${summaryGroupBy === 'SUBJECT' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-800'}">Subject-Wise</button>
+                    </div>
+                </div>
+            `;
+
+            const list = isDemoMode ? [{id: "sim1", className:"Sample Data", sectionName:"Warrior Batch", subjects:["Mathematics", "Physics"]}] : structureData;
+
+            // Pre-calculate ALL subject blocks so they can be sorted into either view
+            let allSubjectBlocks = [];
+
             list.forEach(st => {
-                if (!classGroups[st.className]) classGroups[st.className] = [];
-                classGroups[st.className].push(st);
+                st.subjects.filter(s => !['BREAK','EVENT','EXAM','ASSEMBLY'].includes(s.toUpperCase())).forEach((sub, i) => {
+                    const id = `${st.id}_${sub}`.replace(/\s+/g, '_');
+                    const assign = assignments.find(a => a.id === id) || {};
+                    const planner = planners.find(p => p.id === id);
+
+                    let sPct = 0, tPct = 0, chDone = 0, chTotal = 0, remainingTargetDays = 0;
+                    let totalDayGap = 0, totalMinGap = 0;
+                    let hasCompletedChapters = false;
+                    let totalTargetDaysAll = 0, totalActualDaysAll = 0;
+                    let totalTargetMinsAll = 0, totalSyllabusCoveredMins = 0;
+                    let firstStartDate = null;
+                    let standardClassDuration = 0;
+                    let completionEstimateHtml = "";
+
+                    let hasSyllabus = planner && planner.syllabusData && planner.syllabusData.length > 0;
+                    let isStartedAny = hasSyllabus && planner.syllabusData.some(topic => topic.isDone || topic.chapterStartDate);
+                    let needsRedAlert = !isDemoMode && (!hasSyllabus || !isStartedAny);
+
+                    let alertMessage = !hasSyllabus ? "🚨 No Syllabus" : "🚨 Not Started";
+                    let redAlertBadge = needsRedAlert 
+                        ? `<span class="bg-rose-100 text-rose-700 border border-rose-200 text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded shadow-sm animate-pulse whitespace-nowrap ml-3">${alertMessage}</span>` 
+                        : '';
+
+                    if(isDemoMode) { 
+                        sPct = 70; tPct = 65; chTotal = 12; chDone = 8; remainingTargetDays = 25; totalDayGap = -2; totalMinGap = 40; hasCompletedChapters = true; 
+                        standardClassDuration = 90; totalSyllabusCoveredMins = 540; totalTargetMinsAll = 1080; firstStartDate = new Date("2026-04-01");
+                    }
+                    else if(planner && planner.syllabusData) {
+                        const rows = planner.syllabusData;
+                        sPct = rows.length ? Math.round((rows.filter(r => r.isDone).length / rows.length) * 100) : 0;
+                        const chNames = [...new Set(rows.map(r => r["CHAPTER NAME"]))];
+                        chTotal = chNames.length;
+                        
+                        standardClassDuration = parseInt(rows[0]?.['Standard Class Duration']) || 0;
+                        let chapterRanges = []; 
+                        let completedTargetDays = 0;
+                        let subjectUniqueWorkingDays = new Set();
+
+                        chNames.forEach(ch => {
+                            const chRows = rows.filter(r => r["CHAPTER NAME"] === ch);
+                            const doneR = chRows.filter(r => r.isDone);
+                            const isF = doneR.length === chRows.length && chRows.length > 0;
+                            
+                            let chStart = chRows[0]?.chapterStartDate ? new Date(chRows[0].chapterStartDate) : null;
+                            if (chStart && (!firstStartDate || chStart < firstStartDate)) { firstStartDate = chStart; }
+
+                            const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
+                            const chEnd = (isF && compDates.length) ? new Date(Math.max(...compDates)) : null;
+                            
+                            const tDays = parseInt(chRows[0]?.['Target days for chapter']) || 0;
+                            const tMins = parseInt(chRows[0]?.['Target Minutes For Chapter']) || 0;
+                            
+                            totalTargetDaysAll += tDays;
+                            totalTargetMinsAll += tMins;
+
+                            if (isF) {
+                                totalSyllabusCoveredMins += tMins; 
+                                chDone++;
+                                completedTargetDays += tDays;
+                                hasCompletedChapters = true; 
+                                
+                                let effectiveEnd = chEnd ? new Date(chEnd) : new Date();
+                                effectiveEnd.setHours(23,59,59,999);
+                                chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
+
+                                let actDays = 0;
+                                let chapterDates = [];
+                                let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
+                                let cur = new Date(chStart); 
+                                while(cur <= effectiveEnd) {
+                                    const offset = cur.getTimezoneOffset() * 60000;
+                                    const curStr = (new Date(cur.getTime() - offset)).toISOString().split('T')[0];
+                                    const exclusion = checkDateExclusion(cur, st.className, st.sectionName, sub);
+                                    if (!exclusion.isExcluded) {
+                                        if (validTickDates.has(curStr)) { actDays++; chapterDates.push(curStr); } 
+                                        else if(isTimetableWorkingDay(cur, st.className, st.sectionName, sub)) { actDays++; chapterDates.push(curStr); }
+                                    }
+                                    cur.setDate(cur.getDate() + 1);
+                                }
+                                totalActualDaysAll += actDays;
+                                chapterDates.forEach(d => subjectUniqueWorkingDays.add(d));
+
+                                let sessionMap = {}; let extraMins = 0;
+                                doneR.forEach(r => {
+                                    let d = r.completedDate; let mRaw = parseFloat(r.completedMinutes) || 0; 
+                                    let sessionKey = d + "_" + mRaw;
+                                    if(d) { if(!sessionMap[sessionKey]) sessionMap[sessionKey] = mRaw; } 
+                                    else { extraMins += mRaw; }
+                                });
+                                let actMins = Object.values(sessionMap).reduce((a,b) => a+Math.floor(b), 0) + Math.floor(extraMins);
+                                totalMinGap += (targetMins - actMins);
+
+                            } else {
+                                remainingTargetDays += tDays;
+                                let partialMins = 0;
+                                doneR.forEach(r => { partialMins += parseFloat(r.completedMinutes) || 0; });
+                                totalSyllabusCoveredMins += partialMins;
+                                
+                                if (chStart) {
+                                    hasCompletedChapters = true;
+                                    let effectiveEnd = new Date(); effectiveEnd.setHours(23,59,59,999);
+                                    chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
+                                    
+                                    let actDays = 0;
+                                    let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
+                                    let cur = new Date(chStart); 
+                                    while(cur <= effectiveEnd) {
+                                        const offset = cur.getTimezoneOffset() * 60000;
+                                        const curStr = (new Date(cur.getTime() - offset)).toISOString().split('T')[0];
+                                        const exclusion = checkDateExclusion(cur, st.className, st.sectionName, sub);
+                                        if (!exclusion.isExcluded) {
+                                            if (validTickDates.has(curStr)) { actDays++; subjectUniqueWorkingDays.add(curStr); } 
+                                            else if(isTimetableWorkingDay(cur, st.className, st.sectionName, sub)) { actDays++; subjectUniqueWorkingDays.add(curStr); }
+                                        }
+                                        cur.setDate(cur.getDate() + 1);
+                                    }
+                                    totalActualDaysAll += actDays;
+                                }
+                            }
+                        });
+
+                        let activityLogs = planner.activityLogs || [];
+                        let extraActivityDays = 0; 
+                        let activityMinsTotal = 0;
+                        let independentRevisionDates = new Set();
+                        let dailyLogSums = {};
+                        
+                        activityLogs.forEach(log => {
+                            let logD = new Date(log.date);
+                            logD.setHours(12, 0, 0, 0); 
+                            let dStr = logD.toISOString().split('T')[0];
+                            
+                            let isInsideChapter = chapterRanges.some(range => {
+                                return logD >= range.start && logD <= range.end;
+                            });
+
+                            if (!isInsideChapter) {
+                                if (isTimetableWorkingDay(logD, st.className, st.sectionName, sub)) {
+                                    let mins = parseFloat(log.minutes) || 0;
+                                    dailyLogSums[dStr] = (dailyLogSums[dStr] || 0) + mins;
+                                    if (!independentRevisionDates.has(dStr)) {
+                                        extraActivityDays++; 
+                                        independentRevisionDates.add(dStr);
+                                    }
+                                }
+                            }
+                        });
+
+                        const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                        Object.keys(dailyLogSums).forEach(dStr => {
+                            let logD = new Date(dStr);
+                            let dayName = daysArr[logD.getDay()];
+                            let ttMins = 0;
+                            timetableData.forEach(t => {
+                                if(t.day === dayName && t.className === st.className && t.section === st.sectionName && t.subject === sub) {
+                                    ttMins += (parseInt(t.duration) || 0);
+                                }
+                            });
+                            if(isDemoMode) ttMins = 90; 
+                            activityMinsTotal += Math.min(dailyLogSums[dStr], ttMins > 0 ? ttMins : dailyLogSums[dStr]);
+                        });
+
+                        totalActualDaysAll = subjectUniqueWorkingDays.size + extraActivityDays;
+                        
+                        if(chDone > 0 || independentRevisionDates.size > 0) {
+                            totalDayGap = completedTargetDays - totalActualDaysAll; 
+                            totalMinGap -= Math.floor(activityMinsTotal);
+                            hasCompletedChapters = true; 
+                        }
+
+                        tPct = totalTargetDaysAll > 0 ? Math.min(100, Math.round((totalActualDaysAll / totalTargetDaysAll) * 100)) : 0;
+                    }
+
+                    let minsLeft = totalTargetMinsAll - totalSyllabusCoveredMins;
+                    if (minsLeft < 0) minsLeft = 0;
+                    let classesLeft = standardClassDuration > 0 ? Math.ceil(minsLeft / standardClassDuration) : 0;
+                    
+                    let targetDateFormatted = assign.targetDate ? new Date(assign.targetDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not Set';
+                    let firstStartFormatted = firstStartDate ? new Date(firstStartDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not Started';
+                    
+                    if (hasSyllabus) {
+                        completionEstimateHtml = `
+                            <div class="bg-white/60 border border-slate-200 rounded-xl p-4 mt-4 shadow-sm w-full hover:bg-white transition-colors">
+                                <div class="flex flex-col md:flex-row justify-between md:items-center gap-4">
+                                    <div>
+                                        <h5 class="text-[11px] font-black text-slate-800 uppercase tracking-widest mb-1.5">Syllabus Coverage Audit</h5>
+                                        <div class="text-[10px] font-bold text-slate-600 uppercase flex flex-wrap gap-2 items-center">
+                                            <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Start: <b class="text-blue-600">${firstStartFormatted}</b></span> 
+                                            <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Target End: <b class="text-rose-600">${targetDateFormatted}</b></span>
+                                            <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Class Duration: <b>${standardClassDuration}m</b></span>
+                                        </div>
+                                    </div>
+                                    <div class="flex gap-2 shrink-0">
+                                        <div class="bg-white px-4 py-2.5 rounded-lg border border-emerald-100 shadow-sm text-center flex-1 sm:flex-none">
+                                            <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Total Covered</div>
+                                            <div class="text-sm font-black text-emerald-600">${totalSyllabusCoveredMins} Mins</div>
+                                        </div>
+                                        <div class="bg-white px-4 py-2.5 rounded-lg border border-rose-100 shadow-sm text-center flex-1 sm:flex-none">
+                                            <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Remaining</div>
+                                            <div class="text-sm font-black text-rose-600">${minsLeft} Mins</div>
+                                            <div class="text-[8px] font-bold text-slate-500 uppercase mt-0.5">~${classesLeft} Classes</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    let subStatusColor = 'slate'; 
+                    let subStatusBg = 'bg-white border-slate-100';
+                    let gapDisplayHtml = `<span class="text-[10px] sm:text-xs font-black text-slate-400 tracking-widest bg-slate-100 px-4 py-1.5 rounded-full shadow-inner">PENDING</span>`;
+                    
+                    if (hasCompletedChapters) {
+                        subStatusColor = totalDayGap < 0 ? 'rose' : 'emerald';
+                        subStatusBg = totalDayGap < 0 ? 'bg-rose-50/50 border-rose-100 hover:bg-rose-100/50' : 'bg-emerald-50/50 border-emerald-100 hover:bg-emerald-100/50';
+                        gapDisplayHtml = `
+                            <div class="flex flex-col sm:flex-row gap-2 items-center w-full justify-center md:justify-end">
+                                <span class="px-3 sm:px-4 py-1.5 sm:py-2 rounded-full text-[10px] sm:text-[11px] font-black ${totalDayGap >= 0 ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-rose-100 text-rose-700 border-rose-200'} border w-full sm:w-auto text-center shadow-sm">${totalDayGap > 0 ? '+' : ''}${totalDayGap} Days</span>
+                                <span class="px-3 sm:px-4 py-1.5 sm:py-2 rounded-full text-[10px] sm:text-[11px] font-black ${totalMinGap >= 0 ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-amber-50 text-amber-600 border-amber-100'} border w-full sm:w-auto text-center shadow-sm">${totalMinGap > 0 ? '+' : ''}${totalMinGap} Mins</span>
+                            </div>`;
+                    } else if (assign.targetDate) {
+                        subStatusColor = 'blue';
+                        subStatusBg = 'bg-blue-50/30 border-blue-100 hover:bg-blue-50/60';
+                    }
+
+                    let htmlContent = `
+                        <div class="flex flex-col p-5 sm:p-6 border-b ${subStatusBg} last:border-0 cursor-pointer transition-colors gap-4" onclick="openDrillDown('${st.className}','${st.sectionName}','${sub}', '${id}')">
+                            <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 md:gap-0 w-full">
+                                
+                                <div class="w-full md:w-[30%] flex flex-col gap-2">
+                                    <div class="text-sm sm:text-base font-black text-${subStatusColor}-700 uppercase tracking-widest flex flex-wrap items-center gap-2">
+                                        <div class="w-2.5 h-2.5 rounded-full bg-${subStatusColor}-500 shadow-sm"></div>
+                                        ${summaryGroupBy === 'CLASS' ? sub : `<span class="text-slate-500">${st.className} | Sec ${st.sectionName}</span>`}
+                                        ${redAlertBadge}
+                                    </div>
+                                    
+                                    <div class="flex flex-col gap-1 w-fit">
+                                        <div class="text-[10px] font-black text-emerald-600 uppercase tracking-widest bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-100 w-fit shadow-sm">
+                                            ✅ ${chDone} Chapters Completed
+                                        </div>
+                                        <div class="text-[10px] font-black text-amber-600 uppercase tracking-widest bg-amber-50 px-3 py-1.5 rounded-lg border border-amber-100 w-fit shadow-sm">
+                                            ⏳ ${chTotal - chDone} Remaining (${remainingTargetDays} Target Days)
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="w-full md:w-1/3 md:pr-10 space-y-3">
+                                    <div>
+                                        <div class="flex justify-between text-[10px] sm:text-[11px] font-black uppercase text-blue-700 mb-1.5"><span>SYLLABUS PACE</span><span>${sPct}%</span></div>
+                                        <div class="h-2.5 sm:h-3 bg-black/5 rounded-full overflow-hidden shadow-inner"><div class="h-full bg-blue-600 transition-all rounded-full" style="width:${sPct}%"></div></div>
+                                    </div>
+                                    <div>
+                                        <div class="flex justify-between text-[10px] sm:text-[11px] font-black uppercase text-slate-500 mb-1.5"><span>CLOCK CONSUMPTION</span><span>${tPct}%</span></div>
+                                        <div class="h-2.5 sm:h-3 bg-black/5 rounded-full overflow-hidden shadow-inner"><div class="h-full bg-slate-400 transition-all rounded-full" style="width:${tPct}%"></div></div>
+                                    </div>
+                                </div>
+                                
+                                <div class="w-full md:w-1/4 flex justify-center md:justify-end items-center mt-2 md:mt-0">${gapDisplayHtml}</div>
+                                <div class="hidden md:flex w-12 justify-end text-${subStatusColor}-400 text-2xl font-black">➔</div>
+                            </div>
+                            ${completionEstimateHtml}
+                        </div>`;
+
+                    allSubjectBlocks.push({
+                        className: st.className,
+                        sectionName: st.sectionName,
+                        subject: sub,
+                        html: htmlContent,
+                        hasLate: hasCompletedChapters && totalDayGap < 0,
+                        missSyll: (!isDemoMode && !hasSyllabus) ? 1 : 0,
+                        notStart: (!isDemoMode && !isStartedAny) ? 1 : 0
+                    });
+                });
             });
 
-          for (const [className, sections] of Object.entries(classGroups)) {
-                let classHtml = '';
-                let classHasLateSubjects = false; 
-                let clsMissSyll = 0; let clsNotStart = 0; // NEW: Class Counters
+            // Generate Accordion Views based on Toggle
+            let viewHtml = toggleHtml;
 
-                sections.forEach(st => {
-                    let sectionHtml = '';
-                    let sectionHasLateSubjects = false;
-                    let secMissSyll = 0; let secNotStart = 0; // NEW: Section Counters
+            if (summaryGroupBy === 'CLASS') {
+                const classGroups = {};
+                allSubjectBlocks.forEach(b => {
+                    if (!classGroups[b.className]) classGroups[b.className] = {};
+                    if (!classGroups[b.className][b.sectionName]) classGroups[b.className][b.sectionName] = [];
+                    classGroups[b.className][b.sectionName].push(b);
+                });
 
-                    st.subjects.filter(s => !['BREAK','EVENT','EXAM','ASSEMBLY'].includes(s.toUpperCase())).forEach((sub, i) => {
-                        const id = `${st.id}_${sub}`.replace(/\s+/g, '_');
-                        const assign = assignments.find(a => a.id === id) || {};
-                        const planner = planners.find(p => p.id === id);
+                Object.keys(classGroups).sort().forEach(className => {
+                    let classHtml = '';
+                    let classHasLateSubjects = false; 
+                    let clsMissSyll = 0; let clsNotStart = 0;
 
-                        let sPct = 0, tPct = 0, chDone = 0, chTotal = 0;
-                        let totalDayGap = 0, totalMinGap = 0;
-                        let hasCompletedChapters = false;
+                    Object.keys(classGroups[className]).sort().forEach(secName => {
+                        let sectionHtml = '';
+                        let sectionHasLateSubjects = false;
+                        let secMissSyll = 0; let secNotStart = 0;
 
-                 // NEW LOGIC: Subject, Section, and Class Alerts
-                        let hasSyllabus = planner && planner.syllabusData && planner.syllabusData.length > 0;
-                        let isStartedAny = hasSyllabus && planner.syllabusData.some(topic => topic.isDone || topic.chapterStartDate);
-                        let needsRedAlert = !isDemoMode && (!hasSyllabus || !isStartedAny);
-                        
-                        if (!isDemoMode && !hasSyllabus) { secMissSyll++; clsMissSyll++; }
-                        else if (!isDemoMode && !isStartedAny) { secNotStart++; clsNotStart++; }
+                        classGroups[className][secName].forEach(b => {
+                            sectionHtml += b.html;
+                            if(b.hasLate) { sectionHasLateSubjects = true; classHasLateSubjects = true; }
+                            secMissSyll += b.missSyll; clsMissSyll += b.missSyll;
+                            secNotStart += b.notStart; clsNotStart += b.notStart;
+                        });
 
-                        let alertMessage = !hasSyllabus ? "🚨 No Syllabus" : "🚨 Not Started";
-                        let redAlertBadge = needsRedAlert 
-                            ? `<span class="bg-rose-100 text-rose-700 border border-rose-200 text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded shadow-sm animate-pulse whitespace-nowrap ml-3">${alertMessage}</span>` 
-                            : '';
-
-                        let completionEstimateHtml = "";
-
-                        if(isDemoMode) { sPct = 70; tPct = 65; chTotal = 12; chDone = 8; totalDayGap = -2; totalMinGap = 40; hasCompletedChapters = true; sectionHasLateSubjects = true; classHasLateSubjects = true; }
-                        else if(planner && planner.syllabusData) {
-                            const rows = planner.syllabusData;
-                            sPct = rows.length ? Math.round((rows.filter(r => r.isDone).length / rows.length) * 100) : 0;
-                            const chNames = [...new Set(rows.map(r => r["CHAPTER NAME"]))];
-                            chTotal = chNames.length;
-                            
-                            let totalTargetDaysAll = 0, totalActualDaysAll = 0;
-                            let totalTargetMinsAll = 0, totalSyllabusCoveredMins = 0;
-                            let firstStartDate = null;
-                            let standardClassDuration = parseInt(rows[0]?.['Standard Class Duration']) || 0;
-
-                            let chapterRanges = []; 
-                            let completedTargetDays = 0;
-                            let subjectUniqueWorkingDays = new Set();
-
-                            chNames.forEach(ch => {
-                                const chRows = rows.filter(r => r["CHAPTER NAME"] === ch);
-                                const doneR = chRows.filter(r => r.isDone);
-                                const isF = doneR.length === chRows.length && chRows.length > 0;
-                                
-                                let chStart = chRows[0]?.chapterStartDate ? new Date(chRows[0].chapterStartDate) : null;
-                                
-                                if (chStart && (!firstStartDate || chStart < firstStartDate)) {
-                                    firstStartDate = chStart;
-                                }
-
-                                const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
-                                const chEnd = (isF && compDates.length) ? new Date(Math.max(...compDates)) : null;
-                                
-                                const tDays = parseInt(chRows[0]?.['Target days for chapter']) || 0;
-                                const tMins = parseInt(chRows[0]?.['Target Minutes For Chapter']) || 0;
-                                
-                                totalTargetDaysAll += tDays;
-                                totalTargetMinsAll += tMins;
-
-                                if (isF) {
-                                    totalSyllabusCoveredMins += tMins; // Fully completed chapter
-                                } else {
-                                    // Partially completed chapter -> sum actual completed minutes
-                                    let partialMins = 0;
-                                    doneR.forEach(r => { partialMins += parseFloat(r.completedMinutes) || 0; });
-                                    totalSyllabusCoveredMins += partialMins;
-                                }
-
-                                    if (chStart) {
-                                        hasCompletedChapters = true; 
-                                        let effectiveEnd = chEnd ? new Date(chEnd) : new Date();
-                                        effectiveEnd.setHours(23,59,59,999);
-                                        chapterRanges.push({ start: new Date(chStart), end: effectiveEnd });
-
-                                        let actDays = 0;
-                                        let chapterDates = [];
-                                        let validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
-                                       let cur = new Date(chStart); 
-                                        while(cur <= effectiveEnd) {
-                                            const offset = cur.getTimezoneOffset() * 60000;
-                                            const curStr = (new Date(cur.getTime() - offset)).toISOString().split('T')[0];
-                                            
-                                            const exclusion = checkDateExclusion(cur, st.className, st.sectionName, sub);
-                                            if (!exclusion.isExcluded) {
-                                                // Only count days that are NOT holidays
-                                                if (validTickDates.has(curStr)) {
-                                                    actDays++; 
-                                                    chapterDates.push(curStr);
-                                                } else if(isTimetableWorkingDay(cur, st.className, st.sectionName, sub)) {
-                                                    actDays++;
-                                                    chapterDates.push(curStr);
-                                                }
-                                            }
-                                            cur.setDate(cur.getDate() + 1);
-                                        }
-                                        totalActualDaysAll += actDays;
-
-                                    if (isF) { 
-                                        chDone++;
-                                        completedTargetDays += tDays;
-                                        chapterDates.forEach(d => subjectUniqueWorkingDays.add(d));
-
-                                        const targetMins = parseInt(chRows[0]?.['Target Minutes For Chapter']) || 0;
-                                        
-                                        let sessionMap = {}; let extraMins = 0;
-                                        doneR.forEach(r => {
-                                            let d = r.completedDate; let mRaw = parseFloat(r.completedMinutes) || 0; 
-                                            let sessionKey = d + "_" + mRaw;
-                                            if(d) { if(!sessionMap[sessionKey]) sessionMap[sessionKey] = mRaw; } 
-                                            else { extraMins += mRaw; }
-                                        });
-                                        let actMins = Object.values(sessionMap).reduce((a,b) => a+Math.floor(b), 0) + Math.floor(extraMins);
-                                        
-                                        totalMinGap += (targetMins - actMins);
-                                    }
-                                }
-                            });
-
-                            let activityLogs = planner.activityLogs || [];
-                            let extraActivityDays = 0; 
-                            let activityMinsTotal = 0;
-                            let independentRevisionDates = new Set();
-                            let dailyLogSums = {};
-                            
-                            activityLogs.forEach(log => {
-                                let logD = new Date(log.date);
-                                logD.setHours(12, 0, 0, 0); 
-                                let dStr = logD.toISOString().split('T')[0];
-                                
-                                let isInsideChapter = chapterRanges.some(range => {
-                                    return logD >= range.start && logD <= range.end;
-                                });
-
-                                if (!isInsideChapter) {
-                                    if (isTimetableWorkingDay(logD, st.className, st.sectionName, sub)) {
-                                        let mins = parseFloat(log.minutes) || 0;
-                                        dailyLogSums[dStr] = (dailyLogSums[dStr] || 0) + mins;
-                                        if (!independentRevisionDates.has(dStr)) {
-                                            extraActivityDays++; 
-                                            independentRevisionDates.add(dStr);
-                                        }
-                                    }
-                                }
-                            });
-
-                            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                            Object.keys(dailyLogSums).forEach(dStr => {
-                                let logD = new Date(dStr);
-                                let dayName = daysArr[logD.getDay()];
-                                let ttMins = 0;
-                                timetableData.forEach(t => {
-                                    if(t.day === dayName && t.className === st.className && t.section === st.sectionName && t.subject === sub) {
-                                        ttMins += (parseInt(t.duration) || 0);
-                                    }
-                                });
-                                if(isDemoMode) ttMins = 90; 
-                                activityMinsTotal += Math.min(dailyLogSums[dStr], ttMins > 0 ? ttMins : dailyLogSums[dStr]);
-                            });
-
-                            totalActualDaysAll = subjectUniqueWorkingDays.size + extraActivityDays;
-                            
-                            if(chDone > 0 || independentRevisionDates.size > 0) {
-                                totalDayGap = completedTargetDays - totalActualDaysAll; 
-                                totalMinGap -= Math.floor(activityMinsTotal);
-                                hasCompletedChapters = true; 
-                            }
-
-                            if (hasCompletedChapters && totalDayGap < 0) {
-                                sectionHasLateSubjects = true;
-                                classHasLateSubjects = true;
-                            }
-
-                            tPct = totalTargetDaysAll > 0 ? Math.min(100, Math.round((totalActualDaysAll / totalTargetDaysAll) * 100)) : 0;
-
-                            let minsLeft = totalTargetMinsAll - totalSyllabusCoveredMins;
-                            if (minsLeft < 0) minsLeft = 0;
-                            let classesLeft = standardClassDuration > 0 ? Math.ceil(minsLeft / standardClassDuration) : 0;
-                            
-                            let targetDateFormatted = assign.targetDate ? new Date(assign.targetDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not Set';
-                            let firstStartFormatted = firstStartDate ? new Date(firstStartDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not Started';
-                            
-                            if (hasSyllabus) {
-                                completionEstimateHtml = `
-                                    <div class="bg-white/60 border border-slate-200 rounded-xl p-4 mt-4 shadow-sm w-full hover:bg-white transition-colors">
-                                        <div class="flex flex-col md:flex-row justify-between md:items-center gap-4">
-                                            <div>
-                                                <h5 class="text-[11px] font-black text-slate-800 uppercase tracking-widest mb-1.5">Syllabus Coverage Audit</h5>
-                                                <div class="text-[10px] font-bold text-slate-600 uppercase flex flex-wrap gap-2 items-center">
-                                                    <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Start: <b class="text-blue-600">${firstStartFormatted}</b></span> 
-                                                    <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Target End: <b class="text-rose-600">${targetDateFormatted}</b></span>
-                                                    <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Class Duration: <b>${standardClassDuration}m</b></span>
-                                                </div>
-                                            </div>
-                                            <div class="flex gap-2 shrink-0">
-                                                <div class="bg-white px-4 py-2.5 rounded-lg border border-emerald-100 shadow-sm text-center flex-1 sm:flex-none">
-                                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Total Covered</div>
-                                                    <div class="text-sm font-black text-emerald-600">${totalSyllabusCoveredMins} Mins</div>
-                                                </div>
-                                                <div class="bg-white px-4 py-2.5 rounded-lg border border-rose-100 shadow-sm text-center flex-1 sm:flex-none">
-                                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Remaining</div>
-                                                    <div class="text-sm font-black text-rose-600">${minsLeft} Mins</div>
-                                                    <div class="text-[8px] font-bold text-slate-500 uppercase mt-0.5">~${classesLeft} Classes</div>
-                                                </div>
-                                            </div>
+                        if (sectionHtml) {
+                            const secTheme = sectionHasLateSubjects ? { text: 'rose-800', bg: 'rose-50', border: 'rose-200', tag: 'bg-rose-600 text-white animate-pulse shadow-md border-rose-700' } : { text: 'blue-800', bg: 'blue-50/40', border: 'blue-100', tag: 'bg-white text-blue-600 border border-blue-200 shadow-sm' };
+                            classHtml += `
+                                <details class="bg-${secTheme.bg} rounded-[1.5rem] sm:rounded-[2rem] border border-${secTheme.border} shadow-sm overflow-hidden mb-5 group/sec">
+                                    <summary class="p-5 sm:p-6 font-black text-${secTheme.text} text-base sm:text-lg uppercase tracking-widest cursor-pointer outline-none flex justify-between items-center select-none hover:brightness-95 transition-all">
+                                        <div class="flex items-center gap-3 sm:gap-4">
+                                            <div class="bg-white p-2.5 sm:p-3 rounded-xl shadow-sm border border-${secTheme.border} text-xl">🏷️</div>
+                                            SECTION: <span class="text-slate-900">${secName}</span>
                                         </div>
+                                        <div class="flex flex-wrap justify-end items-center gap-2 sm:gap-4">
+                                            ${secMissSyll > 0 ? `<span class="px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-rose-100 text-rose-700 border border-rose-200 shadow-sm animate-pulse whitespace-nowrap hidden sm:block">🚨 ${secMissSyll} NO SYLLABUS</span>` : ''}
+                                            ${secNotStart > 0 ? `<span class="px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-orange-100 text-orange-700 border border-orange-200 shadow-sm whitespace-nowrap hidden sm:block">⚠️ ${secNotStart} NOT STARTED</span>` : ''}
+                                            ${sectionHasLateSubjects ? `<span class="px-3 sm:px-4 py-1.5 sm:py-2 rounded-full text-[9px] sm:text-[10px] font-black uppercase tracking-widest ${secTheme.tag} hidden sm:block">ACTION REQ</span>` : ''}
+                                            <span class="text-xs sm:text-sm text-blue-700 bg-white border border-blue-200 px-5 py-2.5 sm:px-6 sm:py-3 rounded-full shadow-sm group-open/sec:bg-blue-700 group-open/sec:text-white transition-all">Open ➔</span>
+                                        </div>
+                                    </summary>
+                                    <div class="bg-white border-t border-${secTheme.border}">
+                                        ${sectionHtml}
                                     </div>
-                                `;
-                            }
+                                </details>
+                            `;
                         }
-
-                        let subStatusColor = 'slate'; 
-                        let subStatusBg = 'bg-white border-slate-100';
-                        let gapDisplayHtml = `<span class="text-[10px] sm:text-xs font-black text-slate-400 tracking-widest bg-slate-100 px-4 py-1.5 rounded-full shadow-inner">PENDING</span>`;
-                        
-                        if (hasCompletedChapters) {
-                            subStatusColor = totalDayGap < 0 ? 'rose' : 'emerald';
-                            subStatusBg = totalDayGap < 0 ? 'bg-rose-50/50 border-rose-100 hover:bg-rose-100/50' : 'bg-emerald-50/50 border-emerald-100 hover:bg-emerald-100/50';
-                            gapDisplayHtml = `
-                                <div class="flex flex-col sm:flex-row gap-2 items-center w-full justify-center md:justify-end">
-                                    <span class="px-3 sm:px-4 py-1.5 sm:py-2 rounded-full text-[10px] sm:text-[11px] font-black ${totalDayGap >= 0 ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-rose-100 text-rose-700 border-rose-200'} border w-full sm:w-auto text-center shadow-sm">${totalDayGap > 0 ? '+' : ''}${totalDayGap} Days</span>
-                                    <span class="px-3 sm:px-4 py-1.5 sm:py-2 rounded-full text-[10px] sm:text-[11px] font-black ${totalMinGap >= 0 ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-amber-50 text-amber-600 border-amber-100'} border w-full sm:w-auto text-center shadow-sm">${totalMinGap > 0 ? '+' : ''}${totalMinGap} Mins</span>
-                                </div>`;
-                        } else if (assign.targetDate) {
-                            subStatusColor = 'blue';
-                            subStatusBg = 'bg-blue-50/30 border-blue-100 hover:bg-blue-50/60';
-                        }
-
-                        sectionHtml += `
-                            <div class="flex flex-col p-5 sm:p-6 border-b ${subStatusBg} last:border-0 cursor-pointer transition-colors gap-4" onclick="openDrillDown('${st.className}','${st.sectionName}','${sub}', '${id}')">
-                                <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 md:gap-0 w-full">
-                                    <div class="w-full md:w-1/4 flex justify-between md:block items-center">
-                                        <div class="text-sm sm:text-base font-black text-${subStatusColor}-700 uppercase tracking-widest flex flex-wrap items-center gap-2">
-                                            <div class="w-2.5 h-2.5 rounded-full bg-${subStatusColor}-500 shadow-sm"></div>
-                                            ${sub}
-                                            ${redAlertBadge}
-                                        </div>
-                                        <div class="md:hidden font-black text-slate-900 text-sm bg-white px-3 py-1.5 rounded shadow-sm border border-slate-200">${chDone}/${chTotal} <span class="text-[10px] text-slate-400 uppercase">Chps</span></div>
-                                    </div>
-                                    
-                                    <div class="hidden md:flex w-1/6 font-black text-slate-900 text-base items-center gap-3">
-                                        <span class="bg-white px-4 py-2 rounded-xl shadow-sm border border-slate-200">${chDone} / ${chTotal}</span>
-                                        <span class="text-[10px] text-slate-400 uppercase leading-tight">Total<br>Chps</span>
-                                    </div>
-
-                                    <div class="w-full md:w-1/3 md:pr-10 space-y-3">
-                                        <div>
-                                            <div class="flex justify-between text-[10px] sm:text-[11px] font-black uppercase text-blue-700 mb-1.5"><span>SYLLABUS PACE</span><span>${sPct}%</span></div>
-                                            <div class="h-2.5 sm:h-3 bg-black/5 rounded-full overflow-hidden shadow-inner"><div class="h-full bg-blue-600 transition-all rounded-full" style="width:${sPct}%"></div></div>
-                                        </div>
-                                        <div>
-                                            <div class="flex justify-between text-[10px] sm:text-[11px] font-black uppercase text-slate-500 mb-1.5"><span>CLOCK CONSUMPTION</span><span>${tPct}%</span></div>
-                                            <div class="h-2.5 sm:h-3 bg-black/5 rounded-full overflow-hidden shadow-inner"><div class="h-full bg-slate-400 transition-all rounded-full" style="width:${tPct}%"></div></div>
-                                        </div>
-                                    </div>
-                                    
-                                    <div class="w-full md:w-1/4 flex justify-center md:justify-end items-center mt-2 md:mt-0">${gapDisplayHtml}</div>
-                                    <div class="hidden md:flex w-12 justify-end text-${subStatusColor}-400 text-2xl font-black">➔</div>
-                                </div>
-                                ${completionEstimateHtml}
-                            </div>`;
                     });
 
-                    if (sectionHtml) {
-                        const secTheme = sectionHasLateSubjects ? { text: 'rose-800', bg: 'rose-50', border: 'rose-200', tag: 'bg-rose-600 text-white animate-pulse shadow-md border-rose-700' } : { text: 'blue-800', bg: 'blue-50/40', border: 'blue-100', tag: 'bg-white text-blue-600 border border-blue-200 shadow-sm' };
-
-                        classHtml += `
-                            <details class="bg-${secTheme.bg} rounded-[1.5rem] sm:rounded-[2rem] border border-${secTheme.border} shadow-sm overflow-hidden mb-5 group/sec">
-                                <summary class="p-5 sm:p-6 font-black text-${secTheme.text} text-base sm:text-lg uppercase tracking-widest cursor-pointer outline-none flex justify-between items-center select-none hover:brightness-95 transition-all">
-                                    <div class="flex items-center gap-3 sm:gap-4">
-                                        <div class="bg-white p-2.5 sm:p-3 rounded-xl shadow-sm border border-${secTheme.border} text-xl">🏷️</div>
-                                        SECTION: <span class="text-slate-900">${st.sectionName}</span>
+                    if (classHtml) {
+                        const classTheme = classHasLateSubjects ? { header: 'bg-rose-900', border: 'border-rose-900', tag: 'text-rose-900 group-open/cls:bg-rose-800 group-open/cls:text-rose-100' } : { header: 'bg-slate-900', border: 'border-slate-800', tag: 'text-slate-900 group-open/cls:bg-slate-700 group-open/cls:text-slate-200' };
+                        viewHtml += `
+                            <details class="bg-slate-100 rounded-[2rem] sm:rounded-[2.5rem] border-2 ${classTheme.border} shadow-xl overflow-hidden mb-8 group/cls">
+                                <summary class="p-6 sm:p-8 ${classTheme.header} text-white font-black text-xl sm:text-3xl uppercase tracking-widest cursor-pointer outline-none flex justify-between items-center select-none hover:opacity-95 transition-opacity">
+                                    <div class="flex items-center gap-4 sm:gap-6">
+                                        <span class="text-3xl sm:text-5xl drop-shadow-md">🏫</span>
+                                        <div class="flex flex-col">
+                                            <span class="text-[10px] sm:text-xs text-white/60 tracking-[0.3em] mb-1">Grade Level</span>
+                                            CLASS: ${className}
+                                        </div>
                                     </div>
-                                     <div class="flex flex-wrap justify-end items-center gap-2 sm:gap-4">
-                                        ${secMissSyll > 0 ? `<span class="px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-rose-100 text-rose-700 border border-rose-200 shadow-sm animate-pulse whitespace-nowrap hidden sm:block">🚨 ${secMissSyll} NO SYLLABUS</span>` : ''}
-                                        ${secNotStart > 0 ? `<span class="px-3 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-orange-100 text-orange-700 border border-orange-200 shadow-sm whitespace-nowrap hidden sm:block">⚠️ ${secNotStart} NOT STARTED</span>` : ''}
-                                        ${sectionHasLateSubjects ? `<span class="px-3 sm:px-4 py-1.5 sm:py-2 rounded-full text-[9px] sm:text-[10px] font-black uppercase tracking-widest ${secTheme.tag} hidden sm:block">ACTION REQ</span>` : ''}
-                                        <span class="text-xs sm:text-sm text-blue-700 bg-white border border-blue-200 px-5 py-2.5 sm:px-6 sm:py-3 rounded-full shadow-sm group-open/sec:bg-blue-700 group-open/sec:text-white transition-all">Open ➔</span>
+                                    <div class="flex flex-wrap justify-end items-center gap-2 sm:gap-4">
+                                        ${clsMissSyll > 0 ? `<span class="hidden sm:inline-block px-4 py-2 bg-rose-100 text-rose-700 border border-rose-200 text-[10px] rounded-full animate-pulse tracking-widest shadow-sm font-black uppercase">🚨 ${clsMissSyll} Missing Syllabus</span>` : ''}
+                                        ${clsNotStart > 0 ? `<span class="hidden sm:inline-block px-4 py-2 bg-orange-100 text-orange-700 border border-orange-200 text-[10px] rounded-full tracking-widest shadow-sm font-black uppercase">⚠️ ${clsNotStart} Not Started</span>` : ''}
+                                        ${classHasLateSubjects ? '<span class="hidden sm:inline-block px-5 py-2.5 bg-rose-500 text-white text-[11px] rounded-full animate-pulse tracking-widest shadow-lg border border-rose-400 font-black uppercase">DELAY DETECTED</span>' : ''}
+                                        <span class="text-xs sm:text-sm bg-white px-6 py-3 sm:px-8 sm:py-4 rounded-full shadow-md transition-all font-bold ${classTheme.tag}">Expand ➔</span>
                                     </div>
                                 </summary>
-                                <div class="bg-white border-t border-${secTheme.border}">
-                                    ${sectionHtml}
+                                <div class="p-4 sm:p-8 bg-slate-100 border-t border-slate-200">
+                                    ${classHtml}
                                 </div>
                             </details>
                         `;
                     }
                 });
+            } else {
+                // Group by Subject -> Class & Section
+                const subjectGroups = {};
+                allSubjectBlocks.forEach(b => {
+                    if (!subjectGroups[b.subject]) subjectGroups[b.subject] = [];
+                    subjectGroups[b.subject].push(b);
+                });
 
-                if (classHtml) {
-                    const classTheme = classHasLateSubjects ? { header: 'bg-rose-900', border: 'border-rose-900', tag: 'text-rose-900 group-open/cls:bg-rose-800 group-open/cls:text-rose-100' } : { header: 'bg-slate-900', border: 'border-slate-800', tag: 'text-slate-900 group-open/cls:bg-slate-700 group-open/cls:text-slate-200' };
+                Object.keys(subjectGroups).sort().forEach(subName => {
+                    let subjectHtml = '';
+                    let subHasLateSubjects = false; 
+                    let subMissSyll = 0; let subNotStart = 0;
 
-                    container.innerHTML += `
-                        <details class="bg-slate-100 rounded-[2rem] sm:rounded-[2.5rem] border-2 ${classTheme.border} shadow-xl overflow-hidden mb-8 group/cls">
-                            <summary class="p-6 sm:p-8 ${classTheme.header} text-white font-black text-xl sm:text-3xl uppercase tracking-widest cursor-pointer outline-none flex justify-between items-center select-none hover:opacity-95 transition-opacity">
-                                <div class="flex items-center gap-5 sm:gap-6">
-                                    <span class="text-4xl sm:text-5xl drop-shadow-md">🏫</span>
-                                    <div class="flex flex-col">
-                                        <span class="text-[10px] sm:text-xs text-white/60 tracking-[0.3em] mb-1">Grade Level</span>
-                                        CLASS: ${className}
+                    subjectGroups[subName].sort((a,b) => a.className.localeCompare(b.className) || a.sectionName.localeCompare(b.sectionName)).forEach(b => {
+                        subjectHtml += b.html;
+                        if(b.hasLate) subHasLateSubjects = true;
+                        subMissSyll += b.missSyll;
+                        subNotStart += b.notStart;
+                    });
+
+                    if (subjectHtml) {
+                        const subTheme = subHasLateSubjects ? { header: 'bg-rose-900', border: 'border-rose-900', tag: 'text-rose-900 group-open/cls:bg-rose-800 group-open/cls:text-rose-100' } : { header: 'bg-indigo-900', border: 'border-indigo-800', tag: 'text-indigo-900 group-open/cls:bg-indigo-700 group-open/cls:text-indigo-200' };
+                        viewHtml += `
+                            <details class="bg-slate-100 rounded-[2rem] sm:rounded-[2.5rem] border-2 ${subTheme.border} shadow-xl overflow-hidden mb-8 group/cls">
+                                <summary class="p-6 sm:p-8 ${subTheme.header} text-white font-black text-xl sm:text-3xl uppercase tracking-widest cursor-pointer outline-none flex justify-between items-center select-none hover:opacity-95 transition-opacity">
+                                    <div class="flex items-center gap-4 sm:gap-6">
+                                        <span class="text-3xl sm:text-5xl drop-shadow-md">📘</span>
+                                        <div class="flex flex-col">
+                                            <span class="text-[10px] sm:text-xs text-white/60 tracking-[0.3em] mb-1">Subject Master</span>
+                                            ${subName}
+                                        </div>
+                                    </div>
+                                    <div class="flex flex-wrap justify-end items-center gap-2 sm:gap-4">
+                                        ${subMissSyll > 0 ? `<span class="hidden sm:inline-block px-4 py-2 bg-rose-100 text-rose-700 border border-rose-200 text-[10px] rounded-full animate-pulse tracking-widest shadow-sm font-black uppercase">🚨 ${subMissSyll} Missing Syllabus</span>` : ''}
+                                        ${subNotStart > 0 ? `<span class="hidden sm:inline-block px-4 py-2 bg-orange-100 text-orange-700 border border-orange-200 text-[10px] rounded-full tracking-widest shadow-sm font-black uppercase">⚠️ ${subNotStart} Not Started</span>` : ''}
+                                        ${subHasLateSubjects ? '<span class="hidden sm:inline-block px-5 py-2.5 bg-rose-500 text-white text-[11px] rounded-full animate-pulse tracking-widest shadow-lg border border-rose-400 font-black uppercase">DELAY DETECTED</span>' : ''}
+                                        <span class="text-xs sm:text-sm bg-white px-6 py-3 sm:px-8 sm:py-4 rounded-full shadow-md transition-all font-bold ${subTheme.tag}">Expand ➔</span>
+                                    </div>
+                                </summary>
+                                <div class="p-4 sm:p-8 bg-slate-100 border-t border-slate-200">
+                                    <div class="bg-white border border-slate-200 rounded-[1.5rem] overflow-hidden">
+                                        ${subjectHtml}
                                     </div>
                                 </div>
-                               <div class="flex flex-wrap justify-end items-center gap-2 sm:gap-4">
-                                    ${clsMissSyll > 0 ? `<span class="hidden sm:inline-block px-4 py-2 bg-rose-100 text-rose-700 border border-rose-200 text-[10px] rounded-full animate-pulse tracking-widest shadow-sm font-black uppercase">🚨 ${clsMissSyll} Missing Syllabus</span>` : ''}
-                                    ${clsNotStart > 0 ? `<span class="hidden sm:inline-block px-4 py-2 bg-orange-100 text-orange-700 border border-orange-200 text-[10px] rounded-full tracking-widest shadow-sm font-black uppercase">⚠️ ${clsNotStart} Not Started</span>` : ''}
-                                    ${classHasLateSubjects ? '<span class="hidden sm:inline-block px-5 py-2.5 bg-rose-500 text-white text-[11px] rounded-full animate-pulse tracking-widest shadow-lg border border-rose-400 font-black uppercase">DELAY DETECTED</span>' : ''}
-                                    <span class="text-xs sm:text-sm bg-white px-6 py-3 sm:px-8 sm:py-4 rounded-full shadow-md transition-all font-bold ${classTheme.tag}">Expand ➔</span>
-                                </div>
-                            </summary>
-                            <div class="p-4 sm:p-8 bg-slate-100 border-t border-slate-200">
-                                ${classHtml}
-                            </div>
-                        </details>
-                    `;
-                }
+                            </details>
+                        `;
+                    }
+                });
             }
+
+            container.innerHTML = viewHtml;
         }
 
         function openDrillDown(cls, sec, sub, fullId) {
