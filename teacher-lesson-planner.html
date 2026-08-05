@@ -540,7 +540,7 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 return; 
             }
 
-            try {
+          try {
                 const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
                 if (!window.teacherTimetable) {
                     const ttSnap = await getCollection("timetable").where("teacherName", "==", safeName).get();
@@ -554,6 +554,8 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 }
 
                 const doc = await getCollection("lesson_planners").doc(activeSubjectId).get();
+                const assignDoc = await getCollection("lesson_planner_assignments").doc(activeSubjectId).get();
+                window.currentAssignment = assignDoc.exists ? assignDoc.data() : {};
                 
                 // Bypass lock logic if syllabus is completely empty
                 if(!doc.exists || !doc.data().syllabusData || doc.data().syllabusData.length === 0) {
@@ -877,11 +879,16 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 if (r.chapterStartDate || r.isDone) chMap.get(r['CHAPTER NAME']).isStarted = true;
             });
             
-            let totalTargetDaysAll = 0, totalTargetMinsAll = 0;
+           let totalTargetDaysAll = 0, totalTargetMinsAll = 0;
             let completedTargetDays = 0, completedTargetMins = 0;
             let completedActualMins = 0;
             let chapterRanges = []; 
             let subjectUniqueWorkingDays = new Set(); // 🟢 PARALLEL DEDUPLICATION ENGINE
+            
+            // NEW VARIABLES FOR COVERAGE AUDIT
+            let firstStartDate = null;
+            let totalSyllabusCoveredMins = 0;
+            let standardClassDuration = parseInt(currentPlannerData[0]?.['Standard Class Duration']) || activeSessionMins;
 
             let activityLogs = window.currentActivityLogs || [];
             let dailyLogSums = {};
@@ -905,9 +912,17 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 const doneR = rows.filter(r => r.isDone);
                 const isStarted = rows[0].chapterStartDate || doneR.length > 0;
                 const isCompleted = doneR.length === rows.length && rows.length > 0;
-
-                const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
+const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
                 const targetMins = parseInt(rows[0]?.['Target Minutes For Chapter']) || 0;
+
+                if (isCompleted) {
+                    totalSyllabusCoveredMins += targetMins; // Fully completed chapter = target minutes
+                } else {
+                    // Partially completed chapter -> sum actual completed minutes
+                    let partialMins = 0;
+                    doneR.forEach(r => { partialMins += parseFloat(r.completedMinutes) || 0; });
+                    totalSyllabusCoveredMins += partialMins;
+                }
 
                 let sessionMap = {}; let extraMins = 0;
                 doneR.forEach(r => {
@@ -919,6 +934,11 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 const actualMins = Object.values(sessionMap).reduce((a,b) => a + Math.floor(b), 0) + Math.floor(extraMins);
                 
                 let chStartStr = rows[0]?.chapterStartDate; let chStart = chStartStr ? new Date(chStartStr) : null;
+                
+                if (chStart && (!firstStartDate || chStart < firstStartDate)) {
+                    firstStartDate = chStart;
+                }
+
                 const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
                 const chEnd = (isCompleted && compDates.length) ? new Date(Math.max(...compDates)) : null;
 
@@ -1263,17 +1283,50 @@ const offset = new Date().getTimezoneOffset() * 60000;
 
             let showVariance = completedTargetDays > 0 || (typeof independentRevisionDates !== 'undefined' && independentRevisionDates.size > 0);
 
+          let minsLeft = totalTargetMinsAll - totalSyllabusCoveredMins;
+            if (minsLeft < 0) minsLeft = 0;
+            let classesLeft = standardClassDuration > 0 ? Math.ceil(minsLeft / standardClassDuration) : 0;
+            
+            let targetDateFormatted = window.currentAssignment?.targetDate ? new Date(window.currentAssignment.targetDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not Set';
+            let firstStartFormatted = firstStartDate ? new Date(firstStartDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not Started';
+
             const paceWidget = document.getElementById('subject-pace-widget');
             if (paceWidget) {
                 paceWidget.className = "bg-[#fdfefe] border border-slate-200 rounded-2xl p-5 mb-6 shadow-sm"; 
                 paceWidget.innerHTML = `
-                    <b class='text-slate-800 text-sm uppercase tracking-widest'>Subject Overall Pace</b>
+                    <div class="flex justify-between items-start mb-3">
+                        <b class='text-slate-800 text-sm uppercase tracking-widest'>Subject Overall Pace</b>
+                    </div>
                     <div class='text-[10px] sm:text-[11px] mt-3 font-black text-emerald-600 uppercase tracking-widest'>Total Chapters Completed (${completedChapters} out of ${totalChapters} Chapters) - ${progressPct}%</div>
                     <div class='w-full bg-slate-100 h-2 rounded-full mt-2 mb-4 overflow-hidden'><div style='width: ${progressPct}%;' class='bg-emerald-500 h-full'></div></div>
                     
-                    <div class='flex items-center gap-3 p-3.5 rounded-xl border ${showVariance ? (totalOverallDayGap >= 0 ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700") : "bg-slate-50 border-slate-200 text-slate-500"}'>
+                    <div class='flex items-center gap-3 p-3.5 rounded-xl border mb-4 ${showVariance ? (totalOverallDayGap >= 0 ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700") : "bg-slate-50 border-slate-200 text-slate-500"}'>
                         <div class='text-[10px] sm:text-[11px] font-black uppercase tracking-widest'>
                             ${showVariance ? `Net Variance: ${totalOverallDayGap > 0 ? "+" : ""}${totalOverallDayGap} Days | ${totalOverallMinGap > 0 ? "+" : ""}${totalOverallMinGap} Mins <span class="ml-2 opacity-70">(${totalOverallDayGap >= 0 ? "Ahead/On Time" : "Behind Schedule"})</span>` : `Awaiting Completions for Variance`}
+                        </div>
+                    </div>
+
+                    <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 shadow-sm w-full">
+                        <div class="flex flex-col md:flex-row justify-between md:items-center gap-4">
+                            <div>
+                                <h5 class="text-[11px] font-black text-slate-800 uppercase tracking-widest mb-1.5">Syllabus Coverage Audit</h5>
+                                <div class="text-[10px] font-bold text-slate-600 uppercase flex flex-wrap gap-2 items-center">
+                                    <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Start: <b class="text-blue-600">${firstStartFormatted}</b></span> 
+                                    <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Target End: <b class="text-rose-600">${targetDateFormatted}</b></span>
+                                    <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Class Duration: <b>${standardClassDuration}m</b></span>
+                                </div>
+                            </div>
+                            <div class="flex gap-2 shrink-0">
+                                <div class="bg-white px-4 py-2.5 rounded-lg border border-emerald-100 shadow-sm text-center flex-1 sm:flex-none">
+                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Total Covered</div>
+                                    <div class="text-sm font-black text-emerald-600">${totalSyllabusCoveredMins} Mins</div>
+                                </div>
+                                <div class="bg-white px-4 py-2.5 rounded-lg border border-rose-100 shadow-sm text-center flex-1 sm:flex-none">
+                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Remaining</div>
+                                    <div class="text-sm font-black text-rose-600">${minsLeft} Mins</div>
+                                    <div class="text-[8px] font-bold text-slate-500 uppercase mt-0.5">~${classesLeft} Classes</div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 `;
