@@ -346,20 +346,16 @@
             document.getElementById('menu-view').classList.remove('hidden');
         }
 
-        async function showSummaryView() {
+       function showSummaryView() {
             document.querySelectorAll('main > div').forEach(d => d.classList.add('hidden'));
             document.getElementById('summary-view').classList.remove('hidden');
             document.getElementById('summary-controls').classList.remove('hidden');
-            document.getElementById('summary-accordion-container').innerHTML = `<div class="text-center py-32"><span class="loader mb-4"></span><br><span class="text-sm font-black uppercase tracking-[0.2em] text-slate-400">Fetching Analytics...</span></div>`;
-            await loadAllData(); 
             renderSummary();
         }
 
-        async function showEditView() {
+        function showEditView() {
             document.querySelectorAll('main > div, #summary-controls').forEach(d => d.classList.add('hidden'));
             document.getElementById('edit-view').classList.remove('hidden');
-            document.getElementById('setup-accordion-container').innerHTML = `<div class="text-center py-32"><span class="loader mb-4"></span><br><span class="text-sm font-black uppercase tracking-[0.2em] text-slate-400">Loading Registry...</span></div>`;
-            await loadAllData(); 
             renderSetup();
         }
 
@@ -804,7 +800,7 @@ function getScheduleSnapshotForDate(dateIso) {
                         let totalDayGap = 0, totalMinGap = 0;
                         let hasCompletedChapters = false;
 
-                        // NEW LOGIC: Subject, Section, and Class Alerts
+                 // NEW LOGIC: Subject, Section, and Class Alerts
                         let hasSyllabus = planner && planner.syllabusData && planner.syllabusData.length > 0;
                         let isStartedAny = hasSyllabus && planner.syllabusData.some(topic => topic.isDone || topic.chapterStartDate);
                         let needsRedAlert = !isDemoMode && (!hasSyllabus || !isStartedAny);
@@ -817,6 +813,8 @@ function getScheduleSnapshotForDate(dateIso) {
                             ? `<span class="bg-rose-100 text-rose-700 border border-rose-200 text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded shadow-sm animate-pulse whitespace-nowrap ml-3">${alertMessage}</span>` 
                             : '';
 
+                        let completionEstimateHtml = "";
+
                         if(isDemoMode) { sPct = 70; tPct = 65; chTotal = 12; chDone = 8; totalDayGap = -2; totalMinGap = 40; hasCompletedChapters = true; sectionHasLateSubjects = true; classHasLateSubjects = true; }
                         else if(planner && planner.syllabusData) {
                             const rows = planner.syllabusData;
@@ -825,6 +823,10 @@ function getScheduleSnapshotForDate(dateIso) {
                             chTotal = chNames.length;
                             
                             let totalTargetDaysAll = 0, totalActualDaysAll = 0;
+                            let totalTargetMinsAll = 0, totalSyllabusCoveredMins = 0;
+                            let firstStartDate = null;
+                            let standardClassDuration = parseInt(rows[0]?.['Standard Class Duration']) || 0;
+
                             let chapterRanges = []; 
                             let completedTargetDays = 0;
                             let subjectUniqueWorkingDays = new Set();
@@ -835,10 +837,28 @@ function getScheduleSnapshotForDate(dateIso) {
                                 const isF = doneR.length === chRows.length && chRows.length > 0;
                                 
                                 let chStart = chRows[0]?.chapterStartDate ? new Date(chRows[0].chapterStartDate) : null;
+                                
+                                if (chStart && (!firstStartDate || chStart < firstStartDate)) {
+                                    firstStartDate = chStart;
+                                }
+
                                 const compDates = doneR.map(r => new Date(r.completedDate)).filter(d => !isNaN(d));
                                 const chEnd = (isF && compDates.length) ? new Date(Math.max(...compDates)) : null;
+                                
                                 const tDays = parseInt(chRows[0]?.['Target days for chapter']) || 0;
+                                const tMins = parseInt(chRows[0]?.['Target Minutes For Chapter']) || 0;
+                                
                                 totalTargetDaysAll += tDays;
+                                totalTargetMinsAll += tMins;
+
+                                if (isF) {
+                                    totalSyllabusCoveredMins += tMins; // Fully completed chapter
+                                } else {
+                                    // Partially completed chapter -> sum actual completed minutes
+                                    let partialMins = 0;
+                                    doneR.forEach(r => { partialMins += parseFloat(r.completedMinutes) || 0; });
+                                    totalSyllabusCoveredMins += partialMins;
+                                }
 
                                     if (chStart) {
                                         hasCompletedChapters = true; 
@@ -945,6 +965,41 @@ function getScheduleSnapshotForDate(dateIso) {
                             }
 
                             tPct = totalTargetDaysAll > 0 ? Math.min(100, Math.round((totalActualDaysAll / totalTargetDaysAll) * 100)) : 0;
+
+                            let minsLeft = totalTargetMinsAll - totalSyllabusCoveredMins;
+                            if (minsLeft < 0) minsLeft = 0;
+                            let classesLeft = standardClassDuration > 0 ? Math.ceil(minsLeft / standardClassDuration) : 0;
+                            
+                            let targetDateFormatted = assign.targetDate ? new Date(assign.targetDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not Set';
+                            let firstStartFormatted = firstStartDate ? new Date(firstStartDate).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Not Started';
+                            
+                            if (hasSyllabus) {
+                                completionEstimateHtml = `
+                                    <div class="bg-white/60 border border-slate-200 rounded-xl p-4 mt-4 shadow-sm w-full hover:bg-white transition-colors">
+                                        <div class="flex flex-col md:flex-row justify-between md:items-center gap-4">
+                                            <div>
+                                                <h5 class="text-[11px] font-black text-slate-800 uppercase tracking-widest mb-1.5">Syllabus Coverage Audit</h5>
+                                                <div class="text-[10px] font-bold text-slate-600 uppercase flex flex-wrap gap-2 items-center">
+                                                    <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Start: <b class="text-blue-600">${firstStartFormatted}</b></span> 
+                                                    <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Target End: <b class="text-rose-600">${targetDateFormatted}</b></span>
+                                                    <span class="bg-white px-2 py-1 rounded shadow-sm border border-slate-200">Class Duration: <b>${standardClassDuration}m</b></span>
+                                                </div>
+                                            </div>
+                                            <div class="flex gap-2 shrink-0">
+                                                <div class="bg-white px-4 py-2.5 rounded-lg border border-emerald-100 shadow-sm text-center flex-1 sm:flex-none">
+                                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Total Covered</div>
+                                                    <div class="text-sm font-black text-emerald-600">${totalSyllabusCoveredMins} Mins</div>
+                                                </div>
+                                                <div class="bg-white px-4 py-2.5 rounded-lg border border-rose-100 shadow-sm text-center flex-1 sm:flex-none">
+                                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest">Remaining</div>
+                                                    <div class="text-sm font-black text-rose-600">${minsLeft} Mins</div>
+                                                    <div class="text-[8px] font-bold text-slate-500 uppercase mt-0.5">~${classesLeft} Classes</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                            }
                         }
 
                         let subStatusColor = 'slate'; 
@@ -965,34 +1020,37 @@ function getScheduleSnapshotForDate(dateIso) {
                         }
 
                         sectionHtml += `
-                            <div class="flex flex-col md:flex-row md:items-center justify-between p-5 sm:p-6 border-b ${subStatusBg} last:border-0 cursor-pointer transition-colors gap-4 md:gap-0" onclick="openDrillDown('${st.className}','${st.sectionName}','${sub}', '${id}')">
-                               <div class="w-full md:w-1/4 flex justify-between md:block items-center">
-                                    <div class="text-sm sm:text-base font-black text-${subStatusColor}-700 uppercase tracking-widest flex flex-wrap items-center gap-2">
-                                        <div class="w-2.5 h-2.5 rounded-full bg-${subStatusColor}-500 shadow-sm"></div>
-                                        ${sub}
-                                        ${redAlertBadge}
+                            <div class="flex flex-col p-5 sm:p-6 border-b ${subStatusBg} last:border-0 cursor-pointer transition-colors gap-4" onclick="openDrillDown('${st.className}','${st.sectionName}','${sub}', '${id}')">
+                                <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 md:gap-0 w-full">
+                                    <div class="w-full md:w-1/4 flex justify-between md:block items-center">
+                                        <div class="text-sm sm:text-base font-black text-${subStatusColor}-700 uppercase tracking-widest flex flex-wrap items-center gap-2">
+                                            <div class="w-2.5 h-2.5 rounded-full bg-${subStatusColor}-500 shadow-sm"></div>
+                                            ${sub}
+                                            ${redAlertBadge}
+                                        </div>
+                                        <div class="md:hidden font-black text-slate-900 text-sm bg-white px-3 py-1.5 rounded shadow-sm border border-slate-200">${chDone}/${chTotal} <span class="text-[10px] text-slate-400 uppercase">Chps</span></div>
                                     </div>
-                                    <div class="md:hidden font-black text-slate-900 text-sm bg-white px-3 py-1.5 rounded shadow-sm border border-slate-200">${chDone}/${chTotal} <span class="text-[10px] text-slate-400 uppercase">Chps</span></div>
-                                </div>
-                                
-                                <div class="hidden md:flex w-1/6 font-black text-slate-900 text-base items-center gap-3">
-                                    <span class="bg-white px-4 py-2 rounded-xl shadow-sm border border-slate-200">${chDone} / ${chTotal}</span>
-                                    <span class="text-[10px] text-slate-400 uppercase leading-tight">Total<br>Chps</span>
-                                </div>
+                                    
+                                    <div class="hidden md:flex w-1/6 font-black text-slate-900 text-base items-center gap-3">
+                                        <span class="bg-white px-4 py-2 rounded-xl shadow-sm border border-slate-200">${chDone} / ${chTotal}</span>
+                                        <span class="text-[10px] text-slate-400 uppercase leading-tight">Total<br>Chps</span>
+                                    </div>
 
-                                <div class="w-full md:w-1/3 md:pr-10 space-y-3">
-                                    <div>
-                                        <div class="flex justify-between text-[10px] sm:text-[11px] font-black uppercase text-blue-700 mb-1.5"><span>SYLLABUS PACE</span><span>${sPct}%</span></div>
-                                        <div class="h-2.5 sm:h-3 bg-black/5 rounded-full overflow-hidden shadow-inner"><div class="h-full bg-blue-600 transition-all rounded-full" style="width:${sPct}%"></div></div>
+                                    <div class="w-full md:w-1/3 md:pr-10 space-y-3">
+                                        <div>
+                                            <div class="flex justify-between text-[10px] sm:text-[11px] font-black uppercase text-blue-700 mb-1.5"><span>SYLLABUS PACE</span><span>${sPct}%</span></div>
+                                            <div class="h-2.5 sm:h-3 bg-black/5 rounded-full overflow-hidden shadow-inner"><div class="h-full bg-blue-600 transition-all rounded-full" style="width:${sPct}%"></div></div>
+                                        </div>
+                                        <div>
+                                            <div class="flex justify-between text-[10px] sm:text-[11px] font-black uppercase text-slate-500 mb-1.5"><span>CLOCK CONSUMPTION</span><span>${tPct}%</span></div>
+                                            <div class="h-2.5 sm:h-3 bg-black/5 rounded-full overflow-hidden shadow-inner"><div class="h-full bg-slate-400 transition-all rounded-full" style="width:${tPct}%"></div></div>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <div class="flex justify-between text-[10px] sm:text-[11px] font-black uppercase text-slate-500 mb-1.5"><span>CLOCK CONSUMPTION</span><span>${tPct}%</span></div>
-                                        <div class="h-2.5 sm:h-3 bg-black/5 rounded-full overflow-hidden shadow-inner"><div class="h-full bg-slate-400 transition-all rounded-full" style="width:${tPct}%"></div></div>
-                                    </div>
+                                    
+                                    <div class="w-full md:w-1/4 flex justify-center md:justify-end items-center mt-2 md:mt-0">${gapDisplayHtml}</div>
+                                    <div class="hidden md:flex w-12 justify-end text-${subStatusColor}-400 text-2xl font-black">➔</div>
                                 </div>
-                                
-                                <div class="w-full md:w-1/4 flex justify-center md:justify-end items-center mt-2 md:mt-0">${gapDisplayHtml}</div>
-                                <div class="hidden md:flex w-12 justify-end text-${subStatusColor}-400 text-2xl font-black">➔</div>
+                                ${completionEstimateHtml}
                             </div>`;
                     });
 
