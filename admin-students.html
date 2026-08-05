@@ -94,10 +94,11 @@
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Approve students and assign roll numbers</p>
             </div>
             
-            <div class="glass p-5 rounded-2xl border-2 border-slate-100 shadow-sm flex flex-col md:flex-row gap-4 mb-6">
+          <div class="glass p-5 rounded-2xl border-2 border-slate-100 shadow-sm flex flex-col md:flex-row gap-4 mb-6">
                 <input type="text" id="pending-search" onkeyup="renderPendingList()" placeholder="Search Name or Phone..." class="input-field flex-1 text-sm bg-white">
                 <select id="pending-filter-class" onchange="updatePendingSecFilter(); renderPendingList()" class="input-field w-full md:w-48 text-sm bg-white"><option value="ALL">All Classes</option></select>
                 <select id="pending-filter-sec" onchange="renderPendingList()" class="input-field w-full md:w-48 text-sm bg-white"><option value="ALL">All Sections</option></select>
+                <button onclick="bulkApprovePending(event)" class="bg-indigo-600 text-white px-6 py-2.5 rounded-xl font-black uppercase tracking-widest text-xs shadow-md hover:bg-indigo-700 transition-all shrink-0 active:scale-95">✅ Approve All Visible</button>
             </div>
 
             <div id="pending-list-container" class="grid grid-cols-1 gap-4">
@@ -967,13 +968,66 @@
             }
         }
 
-        async function rejectStudent() {
+  async function rejectStudent() {
             if(!confirm("Are you sure you want to completely reject and delete this student application?")) return;
             const stuId = document.getElementById('approve-stu-id').value;
             try {
                 await getCollection("students").doc(stuId).delete();
                 closeApproveModal();
             } catch(e) { alert("Error rejecting student."); }
+        }
+
+        async function bulkApprovePending(e) {
+            const searchQ = document.getElementById('pending-search').value.toLowerCase().trim();
+            const clsFilter = document.getElementById('pending-filter-class').value;
+            const secFilter = document.getElementById('pending-filter-sec').value;
+
+            // Grab only the students currently visible on screen based on active filters
+            let filtered = globalPendingData.filter(s => {
+                let match = true;
+                if (clsFilter !== 'ALL' && s.className !== clsFilter) match = false;
+                if (secFilter !== 'ALL' && s.section !== secFilter) match = false;
+                if (searchQ) {
+                    const searchStr = `${s.name || ''} ${s.rollNo || ''} ${s.fMobile || ''} ${s.mMobile || ''} ${s.whatsapp1 || ''}`.toLowerCase();
+                    if (!searchStr.includes(searchQ)) match = false;
+                }
+                return match;
+            });
+
+            if (filtered.length === 0) return alert("No students to approve in the current view.");
+
+            if (!confirm(`Are you sure you want to approve and enroll these ${filtered.length} student(s) simultaneously? Their provided Roll Numbers will be safely retained.`)) return;
+
+            const btn = e.target;
+            const origText = btn.innerHTML;
+            btn.innerHTML = "⏳ Processing..."; 
+            btn.disabled = true;
+
+            try {
+                const CHUNK_SIZE = 450; // Protects against Firebase batch limits for massive schools
+                for (let i = 0; i < filtered.length; i += CHUNK_SIZE) {
+                    const batch = db.batch();
+                    const chunk = filtered.slice(i, i + CHUNK_SIZE);
+                    
+                    chunk.forEach(stu => {
+                        const ref = getCollection("students").doc(stu.id);
+                        batch.update(ref, {
+                            admissionStatus: "APPROVED",
+                            isActive: true
+                        });
+                    });
+                    
+                    await batch.commit();
+                }
+                alert(`✅ Successfully enrolled ${filtered.length} student(s)!`);
+                // The real-time listener will auto-update the UI and move them to active directories
+            } catch (err) {
+                console.error(err);
+                alert("Error approving students: " + err.message);
+            } finally {
+                btn.innerHTML = origText; 
+                btn.disabled = false;
+            }
         }
 
         function renderAccordions() {
