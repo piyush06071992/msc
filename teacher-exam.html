@@ -79,8 +79,9 @@
             </button>
         </div>
 
-      <div class="flex justify-end">
-            <button onclick="openExportModal()" class="bg-emerald-600 text-white hover:bg-emerald-500 px-6 py-3.5 rounded-2xl font-black text-xs sm:text-sm uppercase tracking-widest shadow-lg transition-all flex items-center gap-3 active:scale-95 border border-emerald-500">
+    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+            <div id="teacher-view-toggle-area"></div>
+            <button onclick="openExportModal()" class="bg-emerald-600 text-white hover:bg-emerald-500 px-6 py-3.5 rounded-2xl font-black text-xs sm:text-sm uppercase tracking-widest shadow-lg transition-all flex items-center gap-3 active:scale-95 border border-emerald-500 ml-auto">
                 <span class="text-lg">📊</span> Download Excel
             </button>
         </div>
@@ -296,6 +297,31 @@
             return result;
         }
 
+   window.showAllExams = false; // Default: show only teacher's relevant classes & dates
+
+        function toggleTeacherExamView() {
+            window.showAllExams = !window.showAllExams;
+            listenForExams();
+        }
+
+        function hasTeacherTasks(dateStr, rawPackets) {
+            const safeName = activeStaff ? (activeStaff.name || activeStaff.email) : "Unknown";
+            const norm = str => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            let found = false;
+            rawPackets.forEach(packet => {
+                (packet.subjects || []).forEach(sub => {
+                    const isMySubject = (window.liveTimetable || []).some(t => 
+                        norm(t.className) === norm(packet.className) && 
+                        norm(t.section) === norm(packet.section) && 
+                        norm(t.subject) === norm(sub) && 
+                        (norm(t.teacher) === norm(safeName) || norm(t.teacherName) === norm(safeName))
+                    );
+                    if (isMySubject) found = true;
+                });
+            });
+            return found;
+        }
+
         function listenForExams() {
             const offset = (new Date()).getTimezoneOffset() * 60000;
             const todayIso = (new Date(Date.now() - offset)).toISOString().split('T')[0];
@@ -311,7 +337,7 @@
                         if (det.id) window.openDetailsIds.add(det.id);
                     });
                     
-                    window.examDataCache = {}; // <--- THIS FIXES THE CRASH
+                    window.examDataCache = {};
                     
                     if (snap.empty) {
                         upcomingContainer.innerHTML = `<div class="bg-slate-50 p-8 rounded-2xl text-center text-slate-400 font-bold uppercase tracking-widest text-sm">No Upcoming Exams</div>`;
@@ -333,11 +359,26 @@
                         }
                     });
 
-                    const sortedUpcomingDates = Object.keys(groupedUpcoming).sort();
-                    const sortedPastDates = Object.keys(groupedPast).sort().reverse();
+                    // Render toggle button
+                    const toggleArea = document.getElementById('teacher-view-toggle-area');
+                    if (toggleArea) {
+                        toggleArea.innerHTML = `
+                            <button onclick="toggleTeacherExamView()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-3 rounded-2xl text-xs font-black uppercase tracking-widest shadow-md transition-all cursor-pointer">
+                                ${window.showAllExams ? '📂 Showing All Schedules (Switch to Mine)' : '👤 Showing My Classes Only (Switch to All)'}
+                            </button>
+                        `;
+                    }
 
-                    upcomingContainer.innerHTML = sortedUpcomingDates.length > 0 ? sortedUpcomingDates.map(date => renderExamAccordion(date, groupedUpcoming[date], true)).join('') : `<div class="bg-slate-50 p-8 rounded-2xl text-center text-slate-400 font-bold uppercase tracking-widest text-sm border-2 border-dashed border-slate-200">No Upcoming Exams Scheduled</div>`;
-                    pastContainer.innerHTML = sortedPastDates.length > 0 ? sortedPastDates.map(date => renderExamAccordion(date, groupedPast[date], false)).join('') : `<div class="bg-slate-50 p-8 rounded-2xl text-center text-slate-400 font-bold uppercase tracking-widest text-sm border-2 border-dashed border-slate-200">No Past Exams Found</div>`;
+                    let sortedUpcomingDates = Object.keys(groupedUpcoming).sort();
+                    let sortedPastDates = Object.keys(groupedPast).sort().reverse();
+
+                    if (!window.showAllExams) {
+                        sortedUpcomingDates = sortedUpcomingDates.filter(dateStr => hasTeacherTasks(dateStr, groupedUpcoming[dateStr]));
+                        sortedPastDates = sortedPastDates.filter(dateStr => hasTeacherTasks(dateStr, groupedPast[dateStr]));
+                    }
+
+                    upcomingContainer.innerHTML = sortedUpcomingDates.length > 0 ? sortedUpcomingDates.map(date => renderExamAccordion(date, groupedUpcoming[date], true)).join('') : `<div class="bg-slate-50 p-8 rounded-2xl text-center text-slate-400 font-bold uppercase tracking-widest text-sm border-2 border-dashed border-slate-200">No Upcoming Exams Scheduled for You</div>`;
+                    pastContainer.innerHTML = sortedPastDates.length > 0 ? sortedPastDates.map(date => renderExamAccordion(date, groupedPast[date], false)).join('') : `<div class="bg-slate-50 p-8 rounded-2xl text-center text-slate-400 font-bold uppercase tracking-widest text-sm border-2 border-dashed border-slate-200">No Past Exams Found for You</div>`;
 
                 }, error => {
                     console.error("Exams Listener Error:", error);
@@ -445,8 +486,24 @@
                 `;
             }
 
-           const aggregatedRows = normalizeAndAggregate(rawPackets);
+          let aggregatedRows = normalizeAndAggregate(rawPackets);
             window.examDataCache[dateStr] = aggregatedRows; // Store for sharing
+
+            if (!window.showAllExams) {
+                aggregatedRows = aggregatedRows.filter(row => {
+                    const subsList = row.subjects.split(',').map(s => s.trim());
+                    return row.sections.some(secName => {
+                        return subsList.some(sub => {
+                            return (window.liveTimetable || []).some(t => 
+                                norm(t.className) === norm(row.className) && 
+                                norm(t.section) === norm(secName) && 
+                                norm(t.subject) === norm(sub) && 
+                                (norm(t.teacher) === norm(safeName) || norm(t.teacherName) === norm(safeName))
+                            );
+                        });
+                    });
+                });
+            }
 
             let classesHtml = "";
             const classNames = [...new Set(aggregatedRows.map(r => r.className))].sort((a,b) => a.localeCompare(b, undefined, {numeric:true}));
