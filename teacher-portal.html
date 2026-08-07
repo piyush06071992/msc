@@ -937,67 +937,78 @@
         let currentSnoozeLimit = null;
         let currentSnoozeKey = null;
 
-        async function checkExamSyllabusCompliance(safeName, myClasses) {
+     async function checkExamSyllabusCompliance(safeName, myClasses) {
             try {
                 const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
                 const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
                 
                 const today = new Date();
                 const offset = today.getTimezoneOffset() * 60000;
-                const todayISO = new Date(today - offset).toISOString().split('T')[0];
+                const todayISO = new Date(today - offset).toISOString().slice(0, 10);
 
-                const examSnap = await db.collection(prefix + "exam_schedules").where("date", ">=", todayISO).get();
-                if (examSnap.empty) return;
+                // Real-time listener: automatically hides banner as soon as syllabus is saved
+                db.collection(prefix + "exam_schedules").where("date", ">=", todayISO).onSnapshot(examSnap => {
+                    const banner = document.getElementById('exam-syllabus-banner');
+                    if (examSnap.empty) {
+                        banner.classList.add('hidden');
+                        return;
+                    }
 
-                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                let missingSyllabusTargets = [];
-                let closestExamDate = null;
+                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                    let missingSyllabusTargets = [];
+                    let closestExamDate = null;
 
-                examSnap.docs.forEach(doc => {
-                    const data = doc.data();
-                    
-                    data.subjects.forEach(sub => {
-                        const isMine = myClasses.some(c => norm(c.c) === norm(data.className) && norm(c.s) === norm(data.section) && norm(c.sub) === norm(sub));
+                    examSnap.docs.forEach(doc => {
+                        const data = doc.data();
                         
-                        if (isMine) {
-                            const hasSyllabus = data.syllabi && data.syllabi[sub] && data.syllabi[sub].trim() !== "";
-                            if (!hasSyllabus) {
-                                missingSyllabusTargets.push(`${data.className} (Sec ${data.section}) - ${sub}`);
-                                if (!closestExamDate || data.date < closestExamDate) {
-                                    closestExamDate = data.date;
+                        data.subjects.forEach(sub => {
+                            const isMine = myClasses.some(c => norm(c.c) === norm(data.className) && norm(c.s) === norm(data.section) && norm(c.sub) === norm(sub));
+                            
+                            if (isMine) {
+                                const hasSyllabus = data.syllabi && data.syllabi[sub] && data.syllabi[sub].trim() !== "";
+                                if (!hasSyllabus) {
+                                    const prettyDate = new Date(data.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+                                    missingSyllabusTargets.push(`${data.className} (Sec ${data.section}) - ${sub} on ${prettyDate}`);
+                                    if (!closestExamDate || data.date < closestExamDate) {
+                                        closestExamDate = data.date;
+                                    }
                                 }
                             }
-                        }
+                        });
                     });
-                });
 
-                if (missingSyllabusTargets.length > 0 && closestExamDate) {
-                    const snoozeMemory = JSON.parse(localStorage.getItem('minerva_syllabus_snooze')) || {};
-                    const isSnoozedToday = snoozeMemory[closestExamDate] && snoozeMemory[closestExamDate] > todayISO;
-                    
-                    if (!isSnoozedToday) {
-                        const examDateObj = new Date(closestExamDate);
-                        examDateObj.setDate(examDateObj.getDate() - 2);
-                        const deadlineIso = new Date(examDateObj - offset).toISOString().split('T')[0];
+                    if (missingSyllabusTargets.length > 0 && closestExamDate) {
+                        const snoozeMemory = JSON.parse(localStorage.getItem('minerva_syllabus_snooze')) || {};
+                        const isSnoozedToday = snoozeMemory[closestExamDate] && snoozeMemory[closestExamDate] > todayISO;
                         
-                        document.getElementById('exam-compliance-target').innerText = missingSyllabusTargets[0] + (missingSyllabusTargets.length > 1 ? ` (+${missingSyllabusTargets.length - 1} more)` : '');
-                        document.getElementById('exam-syllabus-banner').classList.remove('hidden');
+                        if (!isSnoozedToday) {
+                            const examDateObj = new Date(closestExamDate);
+                            examDateObj.setDate(examDateObj.getDate() - 2);
+                            const deadlineIso = new Date(examDateObj - offset).toISOString().slice(0, 10);
+                            
+                            document.getElementById('exam-compliance-target').innerText = missingSyllabusTargets[0] + (missingSyllabusTargets.length > 1 ? ` (+${missingSyllabusTargets.length - 1} more)` : '');
+                            banner.classList.remove('hidden');
 
-                        const datePicker = document.getElementById('snooze-date');
-                        const snoozeBtn = document.getElementById('snooze-btn');
-                        
-                        if (todayISO >= deadlineIso) {
-                            snoozeBtn.classList.add('hidden');
+                            const datePicker = document.getElementById('snooze-date');
+                            const snoozeBtn = document.getElementById('snooze-btn');
+                            
+                            if (todayISO >= deadlineIso) {
+                                snoozeBtn.classList.add('hidden');
+                            } else {
+                                datePicker.min = todayISO;
+                                datePicker.max = deadlineIso;
+                                datePicker.value = todayISO;
+                                currentSnoozeLimit = deadlineIso;
+                                currentSnoozeKey = closestExamDate;
+                                document.getElementById('snooze-deadline-txt').innerText = new Date(deadlineIso).toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'});
+                            }
                         } else {
-                            datePicker.min = todayISO;
-                            datePicker.max = deadlineIso;
-                            datePicker.value = todayISO;
-                            currentSnoozeLimit = deadlineIso;
-                            currentSnoozeKey = closestExamDate;
-                            document.getElementById('snooze-deadline-txt').innerText = new Date(deadlineIso).toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'});
+                            banner.classList.add('hidden');
                         }
+                    } else {
+                        banner.classList.add('hidden');
                     }
-                }
+                });
             } catch(e) { console.error("Syllabus Audit Error:", e); }
         }
 
