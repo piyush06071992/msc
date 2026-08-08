@@ -397,6 +397,9 @@
         let todayISO = "";
         let absentWhatsAppList = [];
         let remedialDataMap = {}; 
+        
+        window.approvedEditUnlocked = false;
+        window.activeEditTokenId = null;
 
         let ttsVoices = [];
         if ('speechSynthesis' in window) {
@@ -486,7 +489,7 @@
         }
 
         function getCollection(name) {
-            const globalCollections = ['configs', 'staff_applications', 'system_metadata', 'students'];
+            const globalCollections = ['configs', 'staff_applications', 'system_metadata', 'students', 'attendance_edit_requests'];
             if (globalCollections.includes(name)) return db.collection(name);
             return activeCenter === "GHUMARWIN" ? db.collection(name) : db.collection(`${activeCenter.toLowerCase()}_${name}`);
         }
@@ -1238,13 +1241,31 @@
                 const status = checkDateStatus(dateStr);
                 const hasAttendanceMarked = currentMonthDoc[dateStr] && Object.keys(currentMonthDoc[dateStr]).length > 0;
 
-                // Check if date is in the past and not today, and verify edit permission status
+                // Check past-date lock status
                 const isPastDate = dateStr < todayISO;
-                let editAllowed = !isPastDate || isAdmin;
+                let editUnlocked = !isPastDate || isAdmin || window.approvedEditUnlocked === true;
 
-                if (isPastDate && !isAdmin && activeStaff) {
-                    // Check if an approved token or pending request exists for this date/subject
-                    // We will inject a dynamic permission check banner here
+                // Check if an approved/pending request exists for this past date if not unlocked
+                if (isPastDate && !isAdmin && !window.approvedEditUnlocked && activeStaff) {
+                    const reqSnap = await getCollection("attendance_edit_requests")
+                        .where("date", "==", dateStr)
+                        .where("className", "==", currentReg.c)
+                        .where("section", "==", currentReg.s)
+                        .where("subject", "==", currentReg.sub)
+                        .where("teacherEmail", "==", activeStaff.email)
+                        .get();
+
+                    if (!reqSnap.empty) {
+                        const approvedDoc = reqSnap.docs.find(d => d.data().status === "APPROVED");
+                        if (approvedDoc) {
+                            window.activeEditTokenId = approvedDoc.id;
+                            window.approvedEditUnlocked = true;
+                            editUnlocked = true;
+                        } else {
+                            const pendingDoc = reqSnap.docs.find(d => d.data().status === "PENDING");
+                            if (pendingDoc) editUnlocked = false; 
+                        }
+                    }
                 }
 
                 // Only show exclusion warning if attendance is NOT marked
@@ -1274,7 +1295,7 @@
                     const val = todaysData[stu.id]; 
                     
                     let attControls = "";
-                    const canModify = currentReg.canEdit && !activeStudent && !isAdmin && (!isPastDateCheck || window.approvedEditUnlocked === true);
+                    const canModify = currentReg.canEdit && !activeStudent && !isAdmin && editUnlocked;
                     
                     if (canModify) {
                         attControls = `
@@ -1484,7 +1505,6 @@
 
             const isPastDateSave = dateStr < todayISO;
             if (isPastDateSave && window.approvedEditUnlocked !== true) {
-                // Submit an edit request instead of direct save if no token exists
                 const reason = prompt("This is a past date. Please enter a reason to request edit access from Admin:");
                 if (!reason) return;
                 try {
@@ -1542,7 +1562,7 @@
 
               await docRef.set(docData);
                 
-                // If this was an approved edit token, consume it so it can only be used ONCE
+                // Consume token so it can only be used ONCE
                 if (window.activeEditTokenId) {
                     await getCollection("attendance_edit_requests").doc(window.activeEditTokenId).update({ status: "USED", usedAt: Date.now() });
                     window.approvedEditUnlocked = false;
