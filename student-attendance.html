@@ -1361,27 +1361,47 @@ async function loadStudentPersonalView() {
             `;
 
             try {
+                // 1. Failsafe: Ensure we have the exact unique Document ID of the student
                 let stuId = activeStudent.id || activeStudent.uid || activeStudent.docId;
+                if (!stuId && activeStudent.rollNo) {
+                    const stuSnap = await getCollection("students").where("rollNo", "==", activeStudent.rollNo).get();
+                    if (!stuSnap.empty) {
+                        stuId = stuSnap.docs[0].id;
+                        activeStudent.id = stuId;
+                        sessionStorage.setItem('minervaStudentData', JSON.stringify(activeStudent));
+                    }
+                }
+                if (!stuId) throw new Error("Student ID missing from profile session.");
+
                 let stats = { P: 0, A: 0, L: 0, Total: 0 };
                 let historyLog = [];
 
-                // 1. Generate exact month keys for the past 12 months
+                // 2. Generate exact month keys for the past 6 months
                 let monthKeys = [];
                 let d = new Date();
-                for(let i=0; i<12; i++) {
+                for(let i=0; i<6; i++) {
                     let mDate = new Date(d.getFullYear(), d.getMonth() - i, 1);
                     monthKeys.push(`${mDate.getFullYear()}_${String(mDate.getMonth()+1).padStart(2,'0')}`);
                 }
 
-                // 2. EXPLICIT BYPASS: Fetch specific document IDs directly to bypass Firebase collection-read blocks
+                // 3. Generate all formatting combinations to bypass Teacher vs Admin typos
+                const cSet = new Set([ normDoc(currentReg.c), normDoc(`CLASS ${currentReg.c}`), normDoc(currentReg.c).replace('CLASS_', '') ]);
+                const sSet = new Set([ normDoc(currentReg.s), normDoc(`SEC ${currentReg.s}`), normDoc(currentReg.s).replace('SEC_', '') ]);
+                const subNorm = normDoc(currentReg.sub);
+
+                // 4. Fire explicit document reads for all combinations
                 let docPromises = [];
+                const targetCol = getCollection("attendance_records");
+                
                 monthKeys.forEach(mKey => {
-                    const id1 = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
-                    const id2 = `att_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
-                    
-                    docPromises.push(db.collection("attendance_records").doc(id1).get().catch(() => null));
-                    docPromises.push(db.collection("attendance_records").doc(id2).get().catch(() => null));
-                    docPromises.push(db.collection("dharamshala_attendance_records").doc(id1).get().catch(() => null));
+                    cSet.forEach(cV => {
+                        sSet.forEach(sV => {
+                            // Format 1: With Center Prefix
+                            docPromises.push(targetCol.doc(`att_${activeCenter}_${cV}_${sV}_${subNorm}_${mKey}`).get().catch(() => null));
+                            // Format 2: Legacy format without Center Prefix
+                            docPromises.push(targetCol.doc(`att_${cV}_${sV}_${subNorm}_${mKey}`).get().catch(() => null));
+                        });
+                    });
                 });
 
                 const snaps = await Promise.all(docPromises);
@@ -1393,10 +1413,10 @@ async function loadStudentPersonalView() {
                             Object.keys(data.records).forEach(dateStr => {
                                 const status = data.records[dateStr][stuId];
                                 if(status === 'P' || status === 'A' || status === 'L') {
-                                    stats[status]++;
-                                    stats.Total++;
-                                    // Prevent duplicate logs from multiple doc fetches
+                                    // Prevent duplicate count if multiple document formats exist
                                     if (!historyLog.some(log => log.date === dateStr)) {
+                                        stats[status]++;
+                                        stats.Total++;
                                         historyLog.push({ date: dateStr, status: status });
                                     }
                                 }
@@ -1478,7 +1498,7 @@ async function loadStudentPersonalView() {
                 console.error(e);
                 container.innerHTML = `
                     <div class="text-center py-10 bg-rose-50 border border-rose-200 rounded-2xl m-4">
-                        <span class="text-rose-500 font-black uppercase tracking-widest text-xs">Error loading your attendance.</span>
+                        <span class="text-rose-500 font-black uppercase tracking-widest text-xs">Error: ${e.message}</span>
                     </div>`;
             }
         }
