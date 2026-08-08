@@ -1351,7 +1351,7 @@ function updateAuditSectionFilter() {
             return { isExcluded: false };
         }
 
-  async function loadStudentPersonalView() {
+async function loadStudentPersonalView() {
             const container = document.getElementById('student-personal-content');
             container.innerHTML = `
                 <div class="text-center py-20 flex flex-col items-center justify-center">
@@ -1361,10 +1361,11 @@ function updateAuditSectionFilter() {
             `;
 
             try {
+                let stuId = activeStudent.id || activeStudent.uid || activeStudent.docId;
                 let stats = { P: 0, A: 0, L: 0, Total: 0 };
                 let historyLog = [];
 
-                // Generate month keys for the past 12 months to fetch direct documents
+                // 1. Generate exact month keys for the past 12 months
                 let monthKeys = [];
                 let d = new Date();
                 for(let i=0; i<12; i++) {
@@ -1372,16 +1373,15 @@ function updateAuditSectionFilter() {
                     monthKeys.push(`${mDate.getFullYear()}_${String(mDate.getMonth()+1).padStart(2,'0')}`);
                 }
 
-                // Directly fetch specific documents to bypass security rule blocks on sweeping collection fetches
-                const baseCol = getCollection("attendance_records");
+                // 2. EXPLICIT BYPASS: Fetch specific document IDs directly to bypass Firebase collection-read blocks
                 let docPromises = [];
-                
                 monthKeys.forEach(mKey => {
-                    const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
-                    const oldDocId = `att_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
+                    const id1 = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
+                    const id2 = `att_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
                     
-                    docPromises.push(baseCol.doc(docId).get().catch(() => null));
-                    docPromises.push(baseCol.doc(oldDocId).get().catch(() => null));
+                    docPromises.push(db.collection("attendance_records").doc(id1).get().catch(() => null));
+                    docPromises.push(db.collection("attendance_records").doc(id2).get().catch(() => null));
+                    docPromises.push(db.collection("dharamshala_attendance_records").doc(id1).get().catch(() => null));
                 });
 
                 const snaps = await Promise.all(docPromises);
@@ -1391,11 +1391,14 @@ function updateAuditSectionFilter() {
                         const data = docSnap.data();
                         if(data.records) {
                             Object.keys(data.records).forEach(dateStr => {
-                                const status = data.records[dateStr][activeStudent.id];
+                                const status = data.records[dateStr][stuId];
                                 if(status === 'P' || status === 'A' || status === 'L') {
                                     stats[status]++;
                                     stats.Total++;
-                                    historyLog.push({ date: dateStr, status: status });
+                                    // Prevent duplicate logs from multiple doc fetches
+                                    if (!historyLog.some(log => log.date === dateStr)) {
+                                        historyLog.push({ date: dateStr, status: status });
+                                    }
                                 }
                             });
                         }
@@ -1479,7 +1482,6 @@ function updateAuditSectionFilter() {
                     </div>`;
             }
         }
-
         async function loadDailyAttendance() {
             stopTTS();
             const dateStr = document.getElementById('daily-date-picker').value;
