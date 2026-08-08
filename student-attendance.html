@@ -1351,7 +1351,7 @@ function updateAuditSectionFilter() {
             return { isExcluded: false };
         }
 
-    async function loadStudentPersonalView() {
+  async function loadStudentPersonalView() {
             const container = document.getElementById('student-personal-content');
             container.innerHTML = `
                 <div class="text-center py-20 flex flex-col items-center justify-center">
@@ -1361,22 +1361,34 @@ function updateAuditSectionFilter() {
             `;
 
             try {
-                // Fetch from both Ghumarwin and Dharamshala collections to guarantee data retrieval
-                const [snap1, snap2] = await Promise.all([
-                    db.collection("attendance_records").get().catch(() => ({ docs: [] })),
-                    db.collection("dharamshala_attendance_records").get().catch(() => ({ docs: [] }))
-                ]);
-                
-                let allDocs = [...(snap1.docs || []), ...(snap2.docs || [])];
                 let stats = { P: 0, A: 0, L: 0, Total: 0 };
                 let historyLog = [];
+
+                // Generate month keys for the past 12 months to fetch direct documents
+                let monthKeys = [];
+                let d = new Date();
+                for(let i=0; i<12; i++) {
+                    let mDate = new Date(d.getFullYear(), d.getMonth() - i, 1);
+                    monthKeys.push(`${mDate.getFullYear()}_${String(mDate.getMonth()+1).padStart(2,'0')}`);
+                }
+
+                // Directly fetch specific documents to bypass security rule blocks on sweeping collection fetches
+                const baseCol = getCollection("attendance_records");
+                let docPromises = [];
                 
-                allDocs.forEach(doc => {
-                    const data = doc.data();
-                    if (normMatch(data.className) === normMatch(currentReg.c) && 
-                        normMatch(data.section) === normMatch(currentReg.s) && 
-                        normMatch(data.subject) === normMatch(currentReg.sub)) {
-                        
+                monthKeys.forEach(mKey => {
+                    const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
+                    const oldDocId = `att_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
+                    
+                    docPromises.push(baseCol.doc(docId).get().catch(() => null));
+                    docPromises.push(baseCol.doc(oldDocId).get().catch(() => null));
+                });
+
+                const snaps = await Promise.all(docPromises);
+                
+                snaps.forEach(docSnap => {
+                    if (docSnap && docSnap.exists) {
+                        const data = docSnap.data();
                         if(data.records) {
                             Object.keys(data.records).forEach(dateStr => {
                                 const status = data.records[dateStr][activeStudent.id];
