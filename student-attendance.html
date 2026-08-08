@@ -1265,11 +1265,18 @@
                 
             const todaysData = currentMonthDoc[dateStr] || {};
                 let html = "";
-               myStudents.forEach((stu, index) => {
+             // Check if editing past date is permitted via admin approval token
+                const isPastDateCheck = dateStr < todayISO;
+                let isEditPermitted = !isPastDateCheck;
+
+                // Async check for edit token in database (handled via attached attribute or state check)
+                myStudents.forEach((stu, index) => {
                     const val = todaysData[stu.id]; 
                     
                     let attControls = "";
-                    if (currentReg.canEdit && !activeStudent && !isAdmin) {
+                    const canModify = currentReg.canEdit && !activeStudent && !isAdmin && (!isPastDateCheck || window.approvedEditUnlocked === true);
+                    
+                    if (canModify) {
                         attControls = `
                             <input type="radio" name="att_${stu.id}" id="P_${stu.id}" value="P" class="att-radio" ${val==='P' ? 'checked' : ''} onchange="updateDailyStats()">
                             <label for="P_${stu.id}" class="att-label left text-slate-500 hover:bg-slate-50 select-none">P</label>
@@ -1470,10 +1477,34 @@
         }
         function stopTTS() { if(ttsActive) toggleTTS(); }
 
-        async function saveDailyAttendance() {
+    async function saveDailyAttendance() {
             if(!currentReg.canEdit || activeStudent || isAdmin) return;
             const dateStr = document.getElementById('daily-date-picker').value;
             const btn = document.getElementById('save-daily-btn');
+
+            const isPastDateSave = dateStr < todayISO;
+            if (isPastDateSave && window.approvedEditUnlocked !== true) {
+                // Submit an edit request instead of direct save if no token exists
+                const reason = prompt("This is a past date. Please enter a reason to request edit access from Admin:");
+                if (!reason) return;
+                try {
+                    await getCollection("attendance_edit_requests").add({
+                        center: activeCenter,
+                        className: currentReg.c,
+                        section: currentReg.s,
+                        subject: currentReg.sub,
+                        date: dateStr,
+                        teacherEmail: activeStaff.email,
+                        reason: reason,
+                        status: "PENDING",
+                        timestamp: Date.now()
+                    });
+                    alert("✅ Edit request sent to Admin successfully!");
+                } catch(err) {
+                    alert("Failed to submit request.");
+                }
+                return;
+            }
             
             const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s));
             let todaysData = {};
@@ -1509,7 +1540,14 @@
                 docData.records[dateStr] = todaysData;
                 docData.lastUpdated = Date.now();
 
-                await docRef.set(docData);
+              await docRef.set(docData);
+                
+                // If this was an approved edit token, consume it so it can only be used ONCE
+                if (window.activeEditTokenId) {
+                    await getCollection("attendance_edit_requests").doc(window.activeEditTokenId).update({ status: "USED", usedAt: Date.now() });
+                    window.approvedEditUnlocked = false;
+                    window.activeEditTokenId = null;
+                }
                 
                 if(!currentMonthDoc) currentMonthDoc = {};
                 currentMonthDoc[dateStr] = todaysData;
