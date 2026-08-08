@@ -80,10 +80,11 @@
                 <button onclick="switchMainTab('remedial')" id="btn-tab-rem" class="bg-slate-800 text-slate-300 hover:text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all">Global Remedial</button>
                 <button onclick="switchMainTab('absentees')" id="btn-tab-abs" class="bg-slate-800 text-slate-300 hover:text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all">Absentees Audit</button>
                 <button onclick="switchMainTab('permissions')" id="btn-tab-perm" class="bg-slate-800 text-slate-300 hover:text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all">Permissions</button>
-                <button onclick="switchMainTab('requests')" id="btn-tab-req" class="bg-slate-800 text-slate-300 hover:text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all relative">
+               <button onclick="switchMainTab('requests')" id="btn-tab-req" class="bg-slate-800 text-slate-300 hover:text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all relative">
                     Edit Requests
                     <span id="edit-req-badge" class="hidden absolute -top-2 -right-2 bg-rose-500 text-white text-[9px] px-1.5 py-0.5 rounded-full shadow-md animate-pulse">0</span>
                 </button>
+                <button onclick="switchMainTab('discrepancies')" id="btn-tab-disc" class="bg-slate-800 text-slate-300 hover:text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all">Discrepancies</button>
             </div>
         </div>
     </header>
@@ -220,9 +221,28 @@
                 <h2 class="text-2xl sm:text-3xl font-black uppercase tracking-tighter text-slate-800">Edit Requests</h2>
                 <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Approve teacher requests to modify past attendance</p>
             </div>
-            <div class="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden p-6 min-h-[300px]">
+         <div class="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden p-6 min-h-[300px]">
                 <div id="edit-requests-container" class="space-y-4">
                     <div class="text-center py-10 text-slate-400 font-bold uppercase text-xs tracking-widest">Select this tab to load requests.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DISCREPANCIES VIEW -->
+        <div id="main-view-discrepancies" class="hidden space-y-6">
+            <div class="mb-8 border-l-4 border-rose-600 pl-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <div>
+                    <h2 class="text-2xl sm:text-3xl font-black uppercase tracking-tighter text-slate-800">Proxy Alerts</h2>
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Cross-subject attendance discrepancies</p>
+                </div>
+                <div class="flex gap-2 flex-wrap items-center">
+                    <input type="date" id="disc-date-filter" class="border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none shadow-sm">
+                    <button onclick="loadDiscrepancies()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md">Check Alerts</button>
+                </div>
+            </div>
+            <div class="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden p-6 min-h-[300px]">
+                <div id="discrepancies-container" class="space-y-4">
+                    <div class="text-center py-10 text-slate-400 font-bold uppercase text-xs tracking-widest">Select date and filter to load alerts.</div>
                 </div>
             </div>
         </div>
@@ -548,12 +568,13 @@
             fetchData("Admin");
         }
 
-   function switchMainTab(tab) {
+function switchMainTab(tab) {
             document.getElementById('main-view-registers').classList.toggle('hidden', tab !== 'registers');
             document.getElementById('main-view-absentees').classList.toggle('hidden', tab !== 'absentees');
             document.getElementById('main-view-permissions').classList.toggle('hidden', tab !== 'permissions');
             document.getElementById('main-view-remedial').classList.toggle('hidden', tab !== 'remedial');
             document.getElementById('main-view-requests').classList.toggle('hidden', tab !== 'requests');
+            document.getElementById('main-view-discrepancies').classList.toggle('hidden', tab !== 'discrepancies');
 
             const activeClass = "bg-purple-600 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all relative";
             const inactiveClass = "bg-slate-800 text-slate-300 hover:text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all relative";
@@ -563,8 +584,13 @@
             document.getElementById('btn-tab-perm').className = tab === 'permissions' ? activeClass : inactiveClass;
             document.getElementById('btn-tab-rem').className = tab === 'remedial' ? activeClass : inactiveClass;
             document.getElementById('btn-tab-req').className = tab === 'requests' ? activeClass : inactiveClass;
+            document.getElementById('btn-tab-disc').className = tab === 'discrepancies' ? activeClass : inactiveClass;
 
             if (tab === 'requests') loadAttendanceEditRequests();
+            if (tab === 'discrepancies') {
+                document.getElementById('disc-date-filter').value = todayISO;
+                loadDiscrepancies();
+            }
         }
 
         async function fetchDataForStudent(student) {
@@ -1637,8 +1663,8 @@
                 }
             });
 
-            if(Object.keys(todaysData).length === 0) return;
-            const origText = btn.innerHTML; btn.innerHTML = "⏳ Saving..."; btn.disabled = true;
+        if(Object.keys(todaysData).length === 0) return;
+            const origText = btn.innerHTML; btn.innerHTML = "⏳ Checking..."; btn.disabled = true;
 
             const [y, m, d] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
@@ -1646,6 +1672,62 @@
             const docRef = getCollection("attendance_records").doc(docId);
 
         try {
+                // --- DISCREPANCY CHECK START ---
+                let discrepancies = [];
+                const otherSubSnap = await getCollection("attendance_records")
+                    .where("monthKey", "==", monthKey)
+                    .where("className", "==", currentReg.c)
+                    .where("section", "==", currentReg.s)
+                    .get();
+
+                otherSubSnap.forEach(doc => {
+                    const data = doc.data();
+                    if (normMatch(data.subject) !== normMatch(currentReg.sub) && data.records && data.records[dateStr]) {
+                        const otherRecs = data.records[dateStr];
+                        Object.keys(todaysData).forEach(stuId => {
+                            const curStat = todaysData[stuId];
+                            const othStat = otherRecs[stuId];
+                            // Detect Present vs Absent Mismatch
+                            if (othStat && curStat && ((curStat === 'P' && othStat === 'A') || (curStat === 'A' && othStat === 'P'))) {
+                                const stu = studentsData.find(s => s.id === stuId);
+                                discrepancies.push({
+                                    stuName: stu ? stu.name : 'Unknown', rollNo: stu ? stu.rollNo : 'N/A', stuId: stuId,
+                                    currentStatus: curStat, otherSubject: data.subject, otherStatus: othStat
+                                });
+                            }
+                        });
+                    }
+                });
+
+                if (discrepancies.length > 0) {
+                    let msg = `⚠️ WARNING: ${discrepancies.length} DISCREPANCY(IES) FOUND!\n\n`;
+                    discrepancies.slice(0, 5).forEach(d => {
+                        msg += `• #${d.rollNo} ${d.stuName}: Marked ${d.currentStatus==='P'?'Present':'Absent'} here, but was marked ${d.otherStatus==='P'?'Present':'Absent'} in ${d.otherSubject}.\n`;
+                    });
+                    if (discrepancies.length > 5) msg += `...and ${discrepancies.length - 5} more.\n`;
+                    msg += `\nDo you want to proceed and save anyway? (Admin will be notified)`;
+
+                    if (!confirm(msg)) {
+                        btn.innerHTML = origText; btn.disabled = false;
+                        return; // Abort saving
+                    }
+
+                    // Log to Admin Discrepancy Database
+                    const batch = db.batch();
+                    discrepancies.forEach(d => {
+                        const logRef = db.collection("attendance_discrepancies").doc();
+                        batch.set(logRef, {
+                            date: dateStr, center: activeCenter, className: currentReg.c, section: currentReg.s,
+                            currentSubject: currentReg.sub, currentStatus: d.currentStatus, teacherEmail: activeStaff.email,
+                            otherSubject: d.otherSubject, otherStatus: d.otherStatus, 
+                            studentId: d.stuId, studentName: d.stuName, rollNo: d.rollNo, timestamp: Date.now()
+                        });
+                    });
+                    await batch.commit();
+                }
+                btn.innerHTML = "⏳ Saving...";
+                // --- DISCREPANCY CHECK END ---
+
                 const docSnap = await docRef.get();
                 let docData = docSnap.exists ? docSnap.data() : {
                     className: currentReg.c,
@@ -2062,12 +2144,76 @@ async function loadAttendanceEditRequests() {
             } catch (e) { alert("Failed to approve"); }
         }
 
-        async function rejectEditRequest(id) {
+    async function rejectEditRequest(id) {
             if(!confirm("Reject this edit request?")) return;
             try {
                 await db.collection("attendance_edit_requests").doc(id).update({ status: "REJECTED", rejectedAt: Date.now() });
                 loadAttendanceEditRequests(); 
             } catch (e) { alert("Failed to reject"); }
+        }
+
+        async function loadDiscrepancies() {
+            const container = document.getElementById('discrepancies-container');
+            const dateStr = document.getElementById('disc-date-filter').value;
+            if (!dateStr) return;
+            
+            container.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
+            try {
+                const snap = await db.collection("attendance_discrepancies")
+                    .where("center", "==", activeCenter)
+                    .where("date", "==", dateStr)
+                    .get();
+
+                if (snap.empty) {
+                    container.innerHTML = `<div class="text-center py-20 text-emerald-500 font-bold uppercase tracking-widest text-xs border-2 border-dashed border-emerald-200 rounded-2xl bg-emerald-50">✅ No Proxy Alerts / Discrepancies found for this date.</div>`;
+                    return;
+                }
+
+                let alerts = snap.docs.map(d => d.data());
+                alerts.sort((a,b) => b.timestamp - a.timestamp);
+
+                let html = `<div class="grid grid-cols-1 md:grid-cols-2 gap-4">`;
+                alerts.forEach(data => {
+                    const time = new Date(data.timestamp).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
+                    const cStatHtml = data.currentStatus === 'P' ? `<span class="text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-black border border-emerald-200">PRESENT</span>` : `<span class="text-rose-600 bg-rose-50 px-2 py-0.5 rounded font-black border border-rose-200">ABSENT</span>`;
+                    const oStatHtml = data.otherStatus === 'P' ? `<span class="text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded font-black border border-emerald-200">PRESENT</span>` : `<span class="text-rose-600 bg-rose-50 px-2 py-0.5 rounded font-black border border-rose-200">ABSENT</span>`;
+
+                    let tName = data.teacherEmail;
+                    const tObj = staffList.find(s => s.email === data.teacherEmail);
+                    if (tObj && tObj.details) {
+                        const nameKey = Object.keys(tObj.details).find(k => k.toLowerCase().includes('name'));
+                        if (nameKey) tName = tObj.details[nameKey];
+                    }
+
+                    html += `
+                    <div class="bg-rose-50 border border-rose-200 rounded-xl p-4 relative overflow-hidden shadow-sm">
+                        <div class="absolute top-0 left-0 w-1 h-full bg-rose-500"></div>
+                        <div class="flex justify-between items-start mb-2">
+                            <div>
+                                <h4 class="font-black text-slate-900 uppercase text-sm">#${data.rollNo} ${data.studentName}</h4>
+                                <p class="text-[9px] font-black text-slate-500 uppercase tracking-widest">${data.className} - Sec ${data.section}</p>
+                            </div>
+                            <span class="text-[10px] font-bold text-slate-400">${time}</span>
+                        </div>
+                        <div class="mt-4 space-y-2">
+                            <div class="flex justify-between items-center bg-white p-2 rounded-lg border border-slate-100 shadow-sm text-xs">
+                                <span class="font-bold text-slate-600 uppercase w-24 truncate" title="${data.currentSubject}">${data.currentSubject}</span>
+                                ${cStatHtml}
+                            </div>
+                            <div class="flex justify-between items-center bg-white p-2 rounded-lg border border-slate-100 shadow-sm text-xs">
+                                <span class="font-bold text-slate-600 uppercase w-24 truncate" title="${data.otherSubject}">${data.otherSubject}</span>
+                                ${oStatHtml}
+                            </div>
+                        </div>
+                        <p class="text-[9px] font-black text-slate-400 mt-4 uppercase tracking-widest text-right">Logged By: ${tName}</p>
+                    </div>`;
+                });
+                html += `</div>`;
+                container.innerHTML = html;
+            } catch (e) {
+                console.error(e);
+                container.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest text-xs">Error loading discrepancies.</div>`;
+            }
         }
 
         function printLedgerPDF() {
