@@ -92,6 +92,22 @@
           </header>
            <main class="p-4 sm:p-6 lg:p-8 flex-1 relative z-10">
 
+                <!-- 7-DAY ABSENTEE BANNER -->
+                <div id="critical-absentees-banner" class="hidden bg-rose-600 text-white rounded-3xl p-5 shadow-2xl mb-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-2 border-rose-400 relative overflow-hidden">
+                    <div class="absolute top-0 right-0 w-32 h-32 bg-white rounded-bl-full opacity-10 pointer-events-none"></div>
+                    <div class="flex items-center gap-4 relative z-10 w-full">
+                        <div class="bg-white/20 p-3 rounded-2xl shadow-inner animate-pulse shrink-0"><span class="text-3xl">⚠️</span></div>
+                        <div class="flex-1">
+                            <h3 class="font-black text-lg sm:text-xl uppercase tracking-widest text-rose-50 leading-none">Critical Absentees</h3>
+                            <p class="text-[10px] sm:text-xs font-bold text-rose-200 mt-1.5 uppercase tracking-widest">These students have been continuously absent for 7+ days:</p>
+                            <div id="critical-absentees-list" class="mt-3 flex flex-col gap-2 max-h-48 overflow-y-auto custom-scroll pr-2"></div>
+                        </div>
+                    </div>
+                    <button onclick="window.location.href='student-attendance.html'" class="w-full sm:w-auto bg-white text-rose-600 hover:bg-rose-50 px-6 py-4 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest shadow-lg transition-colors whitespace-nowrap relative z-10 active:scale-95 shrink-0 border border-rose-200">
+                        Audit Hub ➔
+                    </button>
+                </div>
+
                 <div id="unconfigured-exams-banner" class="hidden bg-rose-600 text-white rounded-3xl p-5 shadow-2xl mb-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-2 border-rose-400 relative overflow-hidden">
                     <div class="absolute top-0 right-0 w-32 h-32 bg-white rounded-bl-full opacity-10 pointer-events-none"></div>
                     <div class="flex items-center gap-4 relative z-10 w-full">
@@ -539,8 +555,125 @@ let html = "";
                 }
             });
         }
-      listenForUnconfiguredExams();
+    listenForUnconfiguredExams();
+      listenForCriticalAbsentees();
         // --------------------------------
+
+        async function listenForCriticalAbsentees() {
+            const center = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
+            const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
+
+            const banner = document.getElementById('critical-absentees-banner');
+            const listEl = document.getElementById('critical-absentees-list');
+            if(!banner || !listEl) return;
+
+            try {
+                // 1. Fetch active students
+                const allStuSnap = await db.collection(prefix + "students").get();
+                let studentsData = [];
+                allStuSnap.forEach(doc => {
+                    if (doc.data().isActive !== false && doc.data().admissionStatus !== 'PENDING') {
+                        studentsData.push({ id: doc.id, ...doc.data() });
+                    }
+                });
+
+                if(studentsData.length === 0) return;
+
+                // 2. Fetch attendance for current and previous month
+                const today = new Date();
+                const y = today.getFullYear();
+                const m = today.getMonth() + 1;
+                const currentMonthKey = `${y}_${String(m).padStart(2, '0')}`;
+                
+                let prevM = m - 1; let prevY = y;
+                if (prevM === 0) { prevM = 12; prevY--; }
+                const prevMonthKey = `${prevY}_${String(prevM).padStart(2, '0')}`;
+
+                const [curSnap, prevSnap] = await Promise.all([
+                    db.collection(prefix + "attendance_records").where("monthKey", "==", currentMonthKey).get(),
+                    db.collection(prefix + "attendance_records").where("monthKey", "==", prevMonthKey).get()
+                ]);
+
+                let studentDailyStatus = {};
+
+                const processSnap = (snap) => {
+                    snap.forEach(doc => {
+                        const data = doc.data();
+                        if (data.records) {
+                            Object.keys(data.records).forEach(dateStr => {
+                                Object.keys(data.records[dateStr]).forEach(stuId => {
+                                    const status = data.records[dateStr][stuId];
+                                    if (!studentDailyStatus[stuId]) studentDailyStatus[stuId] = {};
+                                    
+                                    // If present/late for ANY subject on a date, they are globally present
+                                    if (studentDailyStatus[stuId][dateStr] !== 'P') {
+                                        if (status === 'P' || status === 'L') {
+                                            studentDailyStatus[stuId][dateStr] = 'P';
+                                        } else if (status === 'A') {
+                                            studentDailyStatus[stuId][dateStr] = 'A';
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                    });
+                };
+
+                processSnap(curSnap);
+                processSnap(prevSnap);
+
+                let flaggedStudents = [];
+
+                // 3. Calculate consecutive absences
+                Object.keys(studentDailyStatus).forEach(stuId => {
+                    const dates = Object.keys(studentDailyStatus[stuId]).sort((a,b) => b.localeCompare(a)); 
+                    if (dates.length === 0) return;
+                    
+                    let consecutiveAbsences = 0;
+                    
+                    for (let i = 0; i < dates.length; i++) {
+                        if (studentDailyStatus[stuId][dates[i]] === 'A') {
+                            consecutiveAbsences++;
+                        } else {
+                            break; 
+                        }
+                    }
+
+                    if (consecutiveAbsences >= 7) {
+                        const stu = studentsData.find(s => s.id === stuId);
+                        if (stu) {
+                            flaggedStudents.push({ stu: stu, absentCount: consecutiveAbsences });
+                        }
+                    }
+                });
+
+                // 4. Render Banner
+                if (flaggedStudents.length > 0) {
+                    flaggedStudents.sort((a,b) => b.absentCount - a.absentCount);
+                    let html = '';
+                    flaggedStudents.forEach(f => {
+                        html += `
+                            <div class="bg-rose-900/40 rounded-xl p-3 sm:p-4 border border-rose-500/50 shadow-inner flex flex-col sm:flex-row justify-between sm:items-center w-full gap-3 sm:gap-0">
+                                <div>
+                                    <div class="font-black text-white text-sm uppercase tracking-widest">${f.stu.name} <span class="text-rose-300 ml-1">#${f.stu.rollNo || 'N/A'}</span></div>
+                                    <div class="text-[10px] font-bold text-rose-200 mt-1 uppercase tracking-widest">Class ${f.stu.className} | Sec ${f.stu.section}</div>
+                                </div>
+                                <span class="bg-rose-500 text-white px-4 py-2 rounded-lg text-[10px] font-black uppercase shadow-md animate-pulse self-start sm:self-auto">${f.absentCount} Days Absent</span>
+                            </div>
+                        `;
+                    });
+                    listEl.innerHTML = html;
+                    banner.classList.remove('hidden');
+                    banner.classList.add('flex');
+                } else {
+                    banner.classList.add('hidden');
+                    banner.classList.remove('flex');
+                }
+
+            } catch (e) {
+                console.error("Error loading critical absentees:", e);
+            }
+        }
 
         async function loadAttendanceEditRequests() {
             const center = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
