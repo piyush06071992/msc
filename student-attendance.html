@@ -157,10 +157,11 @@
                     <select id="audit-section-filter" onchange="updateAuditSubjectFilter(); loadAbsenteesAudit();" class="border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none shadow-sm">
                         <option value="">All Sections</option>
                     </select>
-                    <select id="audit-subject-filter" onchange="loadAbsenteesAudit()" class="border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none shadow-sm">
+                  <select id="audit-subject-filter" onchange="loadAbsenteesAudit()" class="border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none shadow-sm">
                         <option value="">All Subjects</option>
                     </select>
-                    <button onclick="loadAbsenteesAudit()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md">Filter</button>
+                    <button onclick="loadAbsenteesAudit()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all">Filter</button>
+                    <button onclick="check7DayAbsentees()" class="bg-rose-600 hover:bg-rose-700 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-lg animate-pulse flex items-center gap-1 transition-all"><span class="text-sm">🚨</span> 7-Day Alert</button>
                 </div>
             </div>
            <div id="audit-summary-bar" class="hidden bg-white p-4 sm:p-5 rounded-2xl border border-slate-200 shadow-sm items-center justify-between gap-4 flex-wrap mb-4">
@@ -1139,6 +1140,126 @@ function updateAuditSectionFilter() {
             } catch (e) {
                 console.error(e);
                 tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 text-rose-500 font-bold uppercase">Error loading audit data.</td></tr>`;
+            }
+        }
+        async function check7DayAbsentees() {
+            const tbody = document.getElementById('audit-table-body');
+            const summaryBar = document.getElementById('audit-summary-bar');
+            
+            tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest"><span class="loader border-rose-500 border-top-transparent"></span> Scanning Database for Critical Absentees...</td></tr>`;
+            if(summaryBar) {
+                summaryBar.classList.add('hidden');
+                summaryBar.classList.remove('flex');
+            }
+
+            try {
+                const today = new Date();
+                const y = today.getFullYear();
+                const m = today.getMonth() + 1;
+                const currentMonthKey = `${y}_${String(m).padStart(2, '0')}`;
+                
+                let prevM = m - 1; let prevY = y;
+                if (prevM === 0) { prevM = 12; prevY--; }
+                const prevMonthKey = `${prevY}_${String(prevM).padStart(2, '0')}`;
+
+                // Fetch current and previous month records to seamlessly scan across month changes
+                const [curSnap, prevSnap] = await Promise.all([
+                    getCollection("attendance_records").where("monthKey", "==", currentMonthKey).get(),
+                    getCollection("attendance_records").where("monthKey", "==", prevMonthKey).get()
+                ]);
+
+                let studentDailyStatus = {};
+
+                const processSnap = (snap) => {
+                    snap.forEach(doc => {
+                        const data = doc.data();
+                        if (data.records) {
+                            Object.keys(data.records).forEach(dateStr => {
+                                Object.keys(data.records[dateStr]).forEach(stuId => {
+                                    const status = data.records[dateStr][stuId];
+                                    if (!studentDailyStatus[stuId]) studentDailyStatus[stuId] = {};
+                                    
+                                    // If marked Present/Late for ANY subject on this day, they are considered Present for the day globally
+                                    if (studentDailyStatus[stuId][dateStr] !== 'P') {
+                                        if (status === 'P' || status === 'L') {
+                                            studentDailyStatus[stuId][dateStr] = 'P';
+                                        } else if (status === 'A') {
+                                            studentDailyStatus[stuId][dateStr] = 'A';
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                    });
+                };
+
+                processSnap(curSnap);
+                processSnap(prevSnap);
+
+                let flaggedStudents = [];
+
+                Object.keys(studentDailyStatus).forEach(stuId => {
+                    // Sort dates descending (newest first)
+                    const dates = Object.keys(studentDailyStatus[stuId]).sort((a,b) => b.localeCompare(a)); 
+                    if (dates.length === 0) return;
+                    
+                    let consecutiveAbsences = 0;
+                    let lastAttendedDate = "Never in recent logs";
+                    
+                    for (let i = 0; i < dates.length; i++) {
+                        if (studentDailyStatus[stuId][dates[i]] === 'A') {
+                            consecutiveAbsences++;
+                        } else {
+                            lastAttendedDate = new Date(dates[i]).toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+                            break; // Stop counting once we hit a Present/Late day
+                        }
+                    }
+
+                    if (consecutiveAbsences >= 7) {
+                        const stu = studentsData.find(s => s.id === stuId);
+                        if (stu && stu.isActive !== false) { // Only alert for currently active students
+                            flaggedStudents.push({
+                                stu: stu,
+                                absentCount: consecutiveAbsences,
+                                lastPresent: lastAttendedDate
+                            });
+                        }
+                    }
+                });
+
+                if (flaggedStudents.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 rounded-2xl border-2 border-dashed border-emerald-200">✅ All Good! No active students have 7+ continuous absences.</td></tr>`;
+                    return;
+                }
+
+                // Sort by highest absence count
+                flaggedStudents.sort((a,b) => b.absentCount - a.absentCount);
+
+                let html = "";
+                flaggedStudents.forEach(f => {
+                    const contactNum = f.stu.whatsapp1 || f.stu.fMobile || f.stu.mMobile || 'N/A';
+                    let cleanPhone = contactNum.replace(/\D/g, '');
+                    if(cleanPhone.length === 10) cleanPhone = "91" + cleanPhone;
+                    
+                    const waIcon = contactNum !== 'N/A' ? `<a href="https://wa.me/${cleanPhone}" target="_blank" class="text-[#25D366] hover:scale-125 transition-transform inline-block ml-1" title="Message on WhatsApp">💬</a>` : '';
+                    
+                    html += `
+                        <tr class="border-b border-rose-100 hover:bg-rose-50 transition-colors bg-rose-50/40">
+                            <td class="p-4 font-black text-rose-700 tracking-widest">🚨 7+ DAYS ALERT</td>
+                            <td class="p-4 uppercase font-bold text-slate-700">Class ${f.stu.className}<br><span class="text-[10px] text-slate-500">Sec ${f.stu.section}</span></td>
+                            <td class="p-4 font-bold text-slate-600 text-[10px] uppercase">Last Present: <br><span class="text-emerald-600 font-black">${f.lastPresent}</span></td>
+                            <td class="p-4 font-mono font-bold text-slate-600">#${f.stu.rollNo || 'N/A'}</td>
+                            <td class="p-4 uppercase font-black text-slate-900">${f.stu.name}<br><span class="text-[9px] font-bold text-slate-500 uppercase mt-0.5 inline-block">📞 ${contactNum} ${waIcon}</span></td>
+                            <td class="p-4"><span class="bg-rose-600 text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase shadow-md animate-pulse whitespace-nowrap">${f.absentCount} Days Absent</span></td>
+                        </tr>
+                    `;
+                });
+                
+                tbody.innerHTML = html;
+
+            } catch (e) {
+                console.error(e);
+                tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest">Error scanning database for critical absentees.</td></tr>`;
             }
         }
 
