@@ -13,3 +13,13 @@ firebase.initializeApp({
 
 // Retrieve an instance of Firebase Messaging so that it can handle background messages.
 const messaging = firebase.messaging();
+
+// THIS IS THE NEW MISSING PIECE:
+messaging.onBackgroundMessage((payload) => {
+  const notificationTitle = payload.notification?.title || "🔔 Class Alert";
+  const notificationOptions = {
+    body: payload.notification?.body || "You have an upcoming lecture.",
+    icon: '/icon-192.png'
+  };
+  self.registration.showNotification(notificationTitle, notificationOptions);
+});
