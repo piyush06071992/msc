@@ -203,14 +203,12 @@ exports.sendPreClassReminders = onSchedule({
     return null;
 });
 
-
 // =======================================================
 // --- INSTANT TIMETABLE UPDATE ALERTS ---
 // Fires immediately when Admin saves timetable changes
 // =======================================================
 exports.sendInstantPushAlerts = onDocumentCreated({
-    document: "instant_alerts/{docId}",
-    region: "asia-south1"
+    document: "instant_alerts/{docId}"
 }, async (event) => {
     const data = event.data.data();
     const teachers = data.teachers || [];
