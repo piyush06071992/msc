@@ -3975,7 +3975,7 @@ function processSave(type) {
     }
 }
 
-     async function saveFutureMaster() {
+  async function saveFutureMaster() {
             const dateVal = document.getElementById('context-date-input').value;
             if(!dateVal) return alert("Please select a date from the calendar.");
             
@@ -4062,7 +4062,7 @@ function processSave(type) {
             // 🌟 FIX: CALCULATE DELTAS BEFORE WIPING MEMORY
                 const deltaChanges = getDeltaChanges(oldTimetableState, newSlots);
 
-               // 4. Send the Emails!
+               // 4. Send the Emails and Push Notifications!
                 if (teachersToNotify.length > 0) {
                     sendEmailNotification(teachersToNotify);
                 }
@@ -4083,7 +4083,7 @@ function processSave(type) {
                 const didSync = await checkForSmartSync(deltaChanges, dateVal);
                 if (!didSync) {
                     let msg = `✅ Success! New master schedule will apply starting ${dateVal}.`;
-                    if (teachersToNotify.length > 0) msg += `\n\nAutomated email alerts have been sent to affected teachers.`;
+                    if (teachersToNotify.length > 0) msg += `\n\nAutomated email & push alerts have been sent to affected teachers.`;
                     alert(msg);
                 }
                 
@@ -4224,12 +4224,11 @@ async function confirmMultiDates() {
                         const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
                         const masterSlots = masterSnap.docs.map(doc => doc.data());
                         
-                        // 3. RECONSTRUCT MASTER SLOTS (The part that was causing blanks)
+                        // 3. RECONSTRUCT MASTER SLOTS
                         const normalPortion = masterSlots.filter(ms => {
                             const key = `${norm(ms.className)}|${norm(ms.section)}`;
                             return !normalizedTargetKeys.includes(key);
                         }).map(slot => {
-                            // Ensure all time properties exist so the UI can render them
                             if (slot.start24 && slot.end24) {
                                 const [sh, sm] = slot.start24.split(':').map(Number);
                                 const [eh, em] = slot.end24.split(':').map(Number);
@@ -4261,7 +4260,21 @@ async function confirmMultiDates() {
 
                 await batch.commit();
                 await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
-                alert(`✅ Successfully Replicated. The remaining sections now correctly show the Master Schedule.`);
+                
+                // --- ADDED: TRIGGER PUSH NOTIFICATIONS FOR OVERRIDES ---
+                for (const payload of auditPayloads) {
+                    const dayName = new Date(payload.date).toLocaleDateString('en-US', { weekday: 'long' });
+                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                    const masterSlots = masterSnap.docs.map(d => d.data());
+                    const affected = detectTeacherChanges(masterSlots, payload.schedule);
+                    
+                    if (affected.length > 0) {
+                        sendEmailNotification(affected);
+                    }
+                }
+                // ------------------------------------------------------
+
+                alert(`✅ Successfully Replicated and notified affected teachers!`);
                 
                 for (const payload of auditPayloads) {
                     await auditBrokenLeaves(payload.date, payload.schedule);
