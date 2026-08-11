@@ -12,7 +12,7 @@ if (!admin.apps.length) {
 exports.sendPreClassReminders = onSchedule({
     schedule: "every 5 minutes",
     timeZone: "Asia/Kolkata",
-    region: "asia-south1" // Matches Mumbai
+    region: "asia-south1" // Matches Mumbai / Firestore
 }, async (event) => {
     
     // 1. TIMEZONE SYNC: Force evaluation in IST
@@ -208,7 +208,8 @@ exports.sendPreClassReminders = onSchedule({
 // Fires immediately when Admin saves timetable changes
 // =======================================================
 exports.sendInstantPushAlerts = onDocumentCreated({
-    document: "instant_alerts/{docId}"
+    document: "instant_alerts/{docId}",
+    region: "asia-south1" // Explicitly locked to Mumbai to match Firestore
 }, async (event) => {
     const data = event.data.data();
     const teachers = data.teachers || [];
