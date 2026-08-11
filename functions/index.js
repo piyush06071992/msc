@@ -8,7 +8,8 @@ if (!admin.apps.length) {
 // --- 10-MINUTE PRE-CLASS REMINDER CRON JOB ---
 exports.sendPreClassReminders = onSchedule({
     schedule: "every 5 minutes",
-    timeZone: "Asia/Kolkata"
+    timeZone: "Asia/Kolkata",
+    region: "asia-south1" // <--- CRITICAL: Matches your console region (Mumbai)
 }, async (event) => {
     const now = new Date();
     const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
