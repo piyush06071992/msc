@@ -24,8 +24,29 @@ exports.sendPreClassReminders = onSchedule({
     const month = String(istDate.getMonth() + 1).padStart(2, '0');
     const day = String(istDate.getDate()).padStart(2, '0');
     const todayIso = `${year}-${month}-${day}`;
+
+    // =======================================================
+    // 2. COST-SAVING GATEKEEPER (Zero Database Reads)
+    // =======================================================
+    const currentHour = istDate.getHours();
+    const currentDayNum = istDate.getDay(); // 0 is Sunday
+
+    // A. Sunday Check
+    if (currentDayNum === 0) {
+        console.log("[Gatekeeper] Sunday detected. System sleeping to save costs.");
+        return null; // Kills function instantly
+    }
+
+    // B. Outside Operating Hours Check
+    // Earliest class is 8:15 AM (Cron needs to run at 8:05 AM -> Hour 8)
+    // Latest class is 5:00 PM (Cron needs to run at 4:50 PM -> Hour 16)
+    if (currentHour < 8 || currentHour >= 17) {
+        console.log(`[Gatekeeper] Out of operating hours (${currentHour}:00). System sleeping to save costs.`);
+        return null; // Kills function instantly
+    }
+    // =======================================================
     
-    // 2. CRITICAL FIX: "TIME SNAPPING" TO FIX CRON DELAYS
+    // 3. CRITICAL FIX: "TIME SNAPPING" TO FIX CRON DELAYS
     const actualMins = istDate.getHours() * 60 + istDate.getMinutes();
     
     // Snaps 15:31, 15:32, 15:33, or 15:34 down to exactly 15:30
@@ -125,7 +146,7 @@ exports.sendPreClassReminders = onSchedule({
             }
 
             let targetToken = null;
-            let latestTokenTime = 0; // CRITICAL FIX: Protects against duplicate profiles pulling old tokens
+            let latestTokenTime = 0;
 
             if (staffSnap && !staffSnap.empty) {
                 staffSnap.forEach(staffDoc => {
@@ -139,7 +160,6 @@ exports.sendPreClassReminders = onSchedule({
                     ) {
                         if (staffData.fcmToken) {
                             const tokenTime = staffData.tokenUpdatedAt || 0;
-                            // Only overwrite if this token is newer!
                             if (tokenTime >= latestTokenTime) {
                                 targetToken = staffData.fcmToken;
                                 latestTokenTime = tokenTime;
@@ -165,7 +185,7 @@ exports.sendPreClassReminders = onSchedule({
                             vibrate: [300, 100, 300, 100, 300, 100, 500]
                         },
                         fcmOptions: {
-                            link: "https://minervaacademy.web.app/teacher-portal.html" // CRITICAL FIX: Bypasses Android spam filter
+                            link: "https://minervaacademy.web.app/teacher-portal.html" 
                         }
                     }
                 };
