@@ -1,11 +1,14 @@
 const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const admin = require("firebase-admin");
 
 if (!admin.apps.length) {
     admin.initializeApp();
 }
 
+// =======================================================
 // --- 10-MINUTE PRE-CLASS REMINDER CRON JOB ---
+// =======================================================
 exports.sendPreClassReminders = onSchedule({
     schedule: "every 5 minutes",
     timeZone: "Asia/Kolkata",
@@ -195,6 +198,97 @@ exports.sendPreClassReminders = onSchedule({
         }
     } catch (error) {
         console.error("[Reminders] Error:", error);
+    }
+
+    return null;
+});
+
+
+// =======================================================
+// --- INSTANT TIMETABLE UPDATE ALERTS ---
+// Fires immediately when Admin saves timetable changes
+// =======================================================
+exports.sendInstantPushAlerts = onDocumentCreated({
+    document: "instant_alerts/{docId}",
+    region: "asia-south1"
+}, async (event) => {
+    const data = event.data.data();
+    const teachers = data.teachers || [];
+
+    if (teachers.length === 0) return null;
+
+    let tokens = [];
+
+    // Loop through the affected teachers to find their device tokens
+    for (let t of teachers) {
+        if (!t.name && !t.email) continue;
+        
+        let staffSnap;
+        if (t.email) {
+             staffSnap = await admin.firestore().collection("staff_applications").where("email", "==", t.email).get();
+        } else if (t.name) {
+             staffSnap = await admin.firestore().collection("staff_applications").get();
+        }
+
+        if (!staffSnap || staffSnap.empty) continue;
+
+        let targetToken = null;
+        let latestTokenTime = 0;
+
+        staffSnap.forEach(doc => {
+            const staffData = doc.data();
+            const nameKey = Object.keys(staffData.details || {}).find(k => k.toLowerCase().includes('name'));
+            const staffFullName = nameKey ? staffData.details[nameKey] : (staffData.name || "");
+            
+            if (
+                (t.email && staffData.email === t.email) ||
+                (t.name && staffFullName.toLowerCase() === t.name.toLowerCase())
+            ) {
+                if (staffData.fcmToken) {
+                    const tokenTime = staffData.tokenUpdatedAt || 0;
+                    if (tokenTime >= latestTokenTime) {
+                        targetToken = staffData.fcmToken;
+                        latestTokenTime = tokenTime;
+                    }
+                }
+            }
+        });
+        
+        // Prevent sending duplicate notifications to the same device
+        if (targetToken && !tokens.includes(targetToken)) {
+            tokens.push(targetToken);
+        }
+    }
+
+    if (tokens.length === 0) {
+        console.log("[Instant Alerts] No active tokens found for affected teachers.");
+        return null;
+    }
+
+    // Build the Multicast Payload
+    const message = {
+        notification: {
+            title: "🚨 Timetable Updated!",
+            body: "The Admin has modified your upcoming schedule. Please tap to view your updated duties."
+        },
+        webpush: {
+            headers: { Urgency: "high" },
+            notification: {
+                requireInteraction: true,
+                vibrate: [300, 100, 300, 100, 300, 100, 500]
+            },
+            fcmOptions: {
+                link: "https://minervaacademy.web.app/teacher-portal.html"
+            }
+        },
+        tokens: tokens // Send to all affected teachers simultaneously
+    };
+
+    try {
+        const response = await admin.messaging().sendEachForMulticast(message);
+        console.log(`[Instant Alerts] Sent to ${tokens.length} devices. Success: ${response.successCount}, Fails: ${response.failureCount}`);
+    } catch (error) {
+        console.error("[Instant Alerts] Error sending multicast:", error);
     }
 
     return null;
