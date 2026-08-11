@@ -20,32 +20,31 @@ exports.sendPreClassReminders = onSchedule({
     const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const currentDay = daysArr[istDate.getDay()];
     
-    // Generate strict ISO Date for IST (e.g., "2026-08-11") to match history documents
     const year = istDate.getFullYear();
     const month = String(istDate.getMonth() + 1).padStart(2, '0');
     const day = String(istDate.getDate()).padStart(2, '0');
     const todayIso = `${year}-${month}-${day}`;
     
-    // Calculate current time in total minutes since midnight in IST
-    const currentMins = istDate.getHours() * 60 + istDate.getMinutes();
-    const targetMins = currentMins + 10; // Target classes starting in 10 minutes
+    // 2. CRITICAL FIX: "TIME SNAPPING" TO FIX CRON DELAYS
+    const actualMins = istDate.getHours() * 60 + istDate.getMinutes();
+    
+    // Snaps 15:31, 15:32, 15:33, or 15:34 down to exactly 15:30
+    const snappedCurrentMins = Math.floor(actualMins / 5) * 5; 
+    const targetMins = snappedCurrentMins + 10; 
 
     const targetHour = Math.floor(targetMins / 60).toString().padStart(2, '0');
     const targetMinute = (targetMins % 60).toString().padStart(2, '0');
     const targetTimeStr = `${targetHour}:${targetMinute}`;
 
-    console.log(`[Reminders] Checking Date: ${todayIso} (${currentDay}), Target: ${targetTimeStr}`);
+    console.log(`[Reminders] Executed at ${istDate.getHours()}:${istDate.getMinutes()}. Snapped Target: ${targetTimeStr}`);
 
     try {
         let notifications = [];
-        
-        // Define branch configurations
         const branches = [
             { prefix: "", name: "Ghumarwin" },
             { prefix: "dharamshala_", name: "Dharamshala" }
         ];
 
-        // 2. CHECK EACH BRANCH FOR OVERRIDES VS LIVE MASTER
         for (const branch of branches) {
             const historyCol = `${branch.prefix}timetable_history`;
             const masterCol = `${branch.prefix}timetable`;
@@ -53,20 +52,17 @@ exports.sendPreClassReminders = onSchedule({
             let branchSchedule = [];
             let isOverride = false;
 
-            // A. Check for Daily or Exam Overrides first
             const historyDoc = await admin.firestore().collection(historyCol).doc(todayIso).get();
             if (historyDoc.exists) {
                 const hData = historyDoc.data();
                 if (hData.type === "DAILY_OVERRIDE" || hData.type === "EXAM_OVERRIDE") {
                     isOverride = true;
                     branchSchedule = hData.schedule || [];
-                    console.log(`[Reminders] Found active OVERRIDE for ${branch.name} on ${todayIso}.`);
+                    console.log(`[Reminders] Found active OVERRIDE for ${branch.name}.`);
                 }
             }
 
-            // B. Extract the target slots
             if (isOverride) {
-                // Filter the JSON array from the override document
                 const targetSlots = branchSchedule.filter(slot => 
                     slot.day === currentDay && 
                     slot.start24 === targetTimeStr
@@ -86,7 +82,6 @@ exports.sendPreClassReminders = onSchedule({
                     }
                 });
             } else {
-                // Query the standard live master collection
                 const ttSnap = await admin.firestore().collection(masterCol)
                     .where("day", "==", currentDay)
                     .where("start24", "==", targetTimeStr)
@@ -116,18 +111,15 @@ exports.sendPreClassReminders = onSchedule({
 
         console.log(`[Reminders] Found ${notifications.length} classes. Processing push alerts...`);
 
-        // 3. SEND FCM HIGH-PRIORITY PUSH NOTIFICATIONS
         for (let notif of notifications) {
             let staffSnap = null;
             
-            // Try matching by exact email first
             if (notif.teacherEmail) {
                 staffSnap = await admin.firestore().collection("staff_applications")
                     .where("email", "==", notif.teacherEmail)
                     .get();
             }
 
-            // Fallback to searching all staff by name if email failed or was missing
             if ((!staffSnap || staffSnap.empty) && notif.teacherName) {
                 staffSnap = await admin.firestore().collection("staff_applications").get();
             }
@@ -159,11 +151,11 @@ exports.sendPreClassReminders = onSchedule({
                     },
                     webpush: {
                         headers: {
-                            Urgency: "high" // Forces Android wake up
+                            Urgency: "high"
                         },
                         notification: {
                             requireInteraction: true,
-                            vibrate: [300, 100, 300, 100, 300, 100, 500] // Aggressive ringing pattern
+                            vibrate: [300, 100, 300, 100, 300, 100, 500]
                         }
                     }
                 };
@@ -172,7 +164,7 @@ exports.sendPreClassReminders = onSchedule({
             }
         }
     } catch (error) {
-        console.error("[Reminders] Error executing pre-class reminders:", error);
+        console.error("[Reminders] Error:", error);
     }
 
     return null;
