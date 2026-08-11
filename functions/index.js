@@ -11,12 +11,16 @@ exports.sendPreClassReminders = onSchedule({
     timeZone: "Asia/Kolkata",
     region: "asia-south1" // <--- CRITICAL: Matches your console region (Mumbai)
 }, async (event) => {
-    const now = new Date();
+    
+    // 1. CRITICAL TIMEZONE FIX: Force the Date object to evaluate in IST
+    const utcDate = new Date();
+    const istDate = new Date(utcDate.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+    
     const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    const currentDay = daysArr[now.getDay()];
+    const currentDay = daysArr[istDate.getDay()];
     
     // Calculate current time in total minutes since midnight in IST
-    const currentMins = now.getHours() * 60 + now.getMinutes();
+    const currentMins = istDate.getHours() * 60 + istDate.getMinutes();
     const targetMins = currentMins + 10; // Target classes starting in 10 minutes
 
     const targetHour = Math.floor(targetMins / 60).toString().padStart(2, '0');
@@ -91,11 +95,21 @@ exports.sendPreClassReminders = onSchedule({
             }
 
             if (targetToken) {
+                // 2. CRITICAL NOTIFICATION FIX: Add high-priority webpush headers
                 const message = {
                     token: targetToken,
                     notification: {
                         title: "🔔 Class Starting in 10 Mins!",
                         body: `Your lecture for ${notif.subject} (Class ${notif.className} - Sec ${notif.section}) starts at ${notif.timeRange}.`
+                    },
+                    webpush: {
+                        headers: {
+                            Urgency: "high" // Forces Google Play Services to wake up Android instantly
+                        },
+                        notification: {
+                            requireInteraction: true, // Keeps banner on screen
+                            vibrate: [300, 100, 300, 100, 300, 100, 500] // Loud pattern
+                        }
                     }
                 };
                 await admin.messaging().send(message);
