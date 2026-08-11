@@ -9,15 +9,22 @@ if (!admin.apps.length) {
 exports.sendPreClassReminders = onSchedule({
     schedule: "every 5 minutes",
     timeZone: "Asia/Kolkata",
-    region: "asia-south1" // <--- CRITICAL: Matches your console region (Mumbai)
+    region: "asia-south1" // Matches Mumbai
 }, async (event) => {
     
-    // 1. CRITICAL TIMEZONE FIX: Force the Date object to evaluate in IST
+    // 1. TIMEZONE SYNC: Force evaluation in IST
     const utcDate = new Date();
-    const istDate = new Date(utcDate.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+    const istString = utcDate.toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
+    const istDate = new Date(istString);
     
     const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const currentDay = daysArr[istDate.getDay()];
+    
+    // Generate strict ISO Date for IST (e.g., "2026-08-11") to match history documents
+    const year = istDate.getFullYear();
+    const month = String(istDate.getMonth() + 1).padStart(2, '0');
+    const day = String(istDate.getDate()).padStart(2, '0');
+    const todayIso = `${year}-${month}-${day}`;
     
     // Calculate current time in total minutes since midnight in IST
     const currentMins = istDate.getHours() * 60 + istDate.getMinutes();
@@ -27,32 +34,79 @@ exports.sendPreClassReminders = onSchedule({
     const targetMinute = (targetMins % 60).toString().padStart(2, '0');
     const targetTimeStr = `${targetHour}:${targetMinute}`;
 
-    console.log(`[Reminders] Checking for day: ${currentDay}, target start time: ${targetTimeStr}`);
+    console.log(`[Reminders] Checking Date: ${todayIso} (${currentDay}), Target: ${targetTimeStr}`);
 
     try {
-        // Query timetable slots across branch collections matching today and the target start time
-        const collectionsToCheck = ["timetable", "dharamshala_timetable"];
         let notifications = [];
+        
+        // Define branch configurations
+        const branches = [
+            { prefix: "", name: "Ghumarwin" },
+            { prefix: "dharamshala_", name: "Dharamshala" }
+        ];
 
-        for (const colName of collectionsToCheck) {
-            const ttSnap = await admin.firestore().collection(colName)
-                .where("day", "==", currentDay)
-                .where("start24", "==", targetTimeStr)
-                .get();
+        // 2. CHECK EACH BRANCH FOR OVERRIDES VS LIVE MASTER
+        for (const branch of branches) {
+            const historyCol = `${branch.prefix}timetable_history`;
+            const masterCol = `${branch.prefix}timetable`;
+            
+            let branchSchedule = [];
+            let isOverride = false;
 
-            ttSnap.forEach(doc => {
-                const slot = doc.data();
-                if ((slot.teacherEmail || slot.teacherName || slot.teacher) && slot.subject) {
-                    notifications.push({
-                        teacherEmail: slot.teacherEmail || "",
-                        teacherName: slot.teacherName || slot.teacher || "",
-                        subject: slot.subject,
-                        className: slot.className,
-                        section: slot.section,
-                        timeRange: slot.timeRange || targetTimeStr
-                    });
+            // A. Check for Daily or Exam Overrides first
+            const historyDoc = await admin.firestore().collection(historyCol).doc(todayIso).get();
+            if (historyDoc.exists) {
+                const hData = historyDoc.data();
+                if (hData.type === "DAILY_OVERRIDE" || hData.type === "EXAM_OVERRIDE") {
+                    isOverride = true;
+                    branchSchedule = hData.schedule || [];
+                    console.log(`[Reminders] Found active OVERRIDE for ${branch.name} on ${todayIso}.`);
                 }
-            });
+            }
+
+            // B. Extract the target slots
+            if (isOverride) {
+                // Filter the JSON array from the override document
+                const targetSlots = branchSchedule.filter(slot => 
+                    slot.day === currentDay && 
+                    slot.start24 === targetTimeStr
+                );
+                
+                targetSlots.forEach(slot => {
+                    if ((slot.teacherEmail || slot.teacherName || slot.teacher) && slot.subject) {
+                        notifications.push({
+                            teacherEmail: slot.teacherEmail || "",
+                            teacherName: slot.teacherName || slot.teacher || "",
+                            subject: slot.subject,
+                            className: slot.className,
+                            section: slot.section,
+                            timeRange: slot.timeRange || targetTimeStr,
+                            branch: branch.name
+                        });
+                    }
+                });
+            } else {
+                // Query the standard live master collection
+                const ttSnap = await admin.firestore().collection(masterCol)
+                    .where("day", "==", currentDay)
+                    .where("start24", "==", targetTimeStr)
+                    .get();
+
+                ttSnap.forEach(doc => {
+                    const slot = doc.data();
+                    if ((slot.teacherEmail || slot.teacherName || slot.teacher) && slot.subject) {
+                        notifications.push({
+                            teacherEmail: slot.teacherEmail || "",
+                            teacherName: slot.teacherName || slot.teacher || "",
+                            subject: slot.subject,
+                            className: slot.className,
+                            section: slot.section,
+                            timeRange: slot.timeRange || targetTimeStr,
+                            branch: branch.name
+                        });
+                    }
+                });
+            }
         }
 
         if (notifications.length === 0) {
@@ -60,18 +114,20 @@ exports.sendPreClassReminders = onSchedule({
             return null;
         }
 
-        console.log(`[Reminders] Found ${notifications.length} classes starting soon. Processing notifications...`);
+        console.log(`[Reminders] Found ${notifications.length} classes. Processing push alerts...`);
 
-        // Send free FCM push notification to each matching teacher
+        // 3. SEND FCM HIGH-PRIORITY PUSH NOTIFICATIONS
         for (let notif of notifications) {
             let staffSnap = null;
             
+            // Try matching by exact email first
             if (notif.teacherEmail) {
                 staffSnap = await admin.firestore().collection("staff_applications")
                     .where("email", "==", notif.teacherEmail)
                     .get();
             }
 
+            // Fallback to searching all staff by name if email failed or was missing
             if ((!staffSnap || staffSnap.empty) && notif.teacherName) {
                 staffSnap = await admin.firestore().collection("staff_applications").get();
             }
@@ -95,7 +151,6 @@ exports.sendPreClassReminders = onSchedule({
             }
 
             if (targetToken) {
-                // 2. CRITICAL NOTIFICATION FIX: Add high-priority webpush headers
                 const message = {
                     token: targetToken,
                     notification: {
@@ -104,16 +159,16 @@ exports.sendPreClassReminders = onSchedule({
                     },
                     webpush: {
                         headers: {
-                            Urgency: "high" // Forces Google Play Services to wake up Android instantly
+                            Urgency: "high" // Forces Android wake up
                         },
                         notification: {
-                            requireInteraction: true, // Keeps banner on screen
-                            vibrate: [300, 100, 300, 100, 300, 100, 500] // Loud pattern
+                            requireInteraction: true,
+                            vibrate: [300, 100, 300, 100, 300, 100, 500] // Aggressive ringing pattern
                         }
                     }
                 };
                 await admin.messaging().send(message);
-                console.log(`[Reminders] Successfully sent notification to ${notif.teacherName || notif.teacherEmail}`);
+                console.log(`[Reminders] Successfully alerted ${notif.teacherName || notif.teacherEmail}`);
             }
         }
     } catch (error) {
