@@ -125,6 +125,8 @@ exports.sendPreClassReminders = onSchedule({
             }
 
             let targetToken = null;
+            let latestTokenTime = 0; // CRITICAL FIX: Protects against duplicate profiles pulling old tokens
+
             if (staffSnap && !staffSnap.empty) {
                 staffSnap.forEach(staffDoc => {
                     const staffData = staffDoc.data();
@@ -136,7 +138,12 @@ exports.sendPreClassReminders = onSchedule({
                         (notif.teacherName && staffFullName.toLowerCase() === notif.teacherName.toLowerCase())
                     ) {
                         if (staffData.fcmToken) {
-                            targetToken = staffData.fcmToken;
+                            const tokenTime = staffData.tokenUpdatedAt || 0;
+                            // Only overwrite if this token is newer!
+                            if (tokenTime >= latestTokenTime) {
+                                targetToken = staffData.fcmToken;
+                                latestTokenTime = tokenTime;
+                            }
                         }
                     }
                 });
@@ -156,6 +163,9 @@ exports.sendPreClassReminders = onSchedule({
                         notification: {
                             requireInteraction: true,
                             vibrate: [300, 100, 300, 100, 300, 100, 500]
+                        },
+                        fcmOptions: {
+                            link: "https://minervaacademy.web.app/teacher-portal.html" // CRITICAL FIX: Bypasses Android spam filter
                         }
                     }
                 };
