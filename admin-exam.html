@@ -1124,7 +1124,7 @@
         }
 
         // --- WHATSAPP SHARING ENGINE ---
-        function shareViaWhatsApp(dateStr, className = null, section = null, subject = null) {
+      function shareViaWhatsApp(dateStr, className = null, section = null, subject = null) {
             const rowData = window.examDataCache[dateStr];
             if (!rowData || rowData.length === 0) return alert("No data to share.");
 
@@ -1163,6 +1163,207 @@
 
             const encodedText = encodeURIComponent(textToShare);
             window.open(`https://wa.me/?text=${encodedText}`, '_blank');
+        }
+
+        // --- HOD EXAM MAPPING & CLUBBING ENGINE ---
+        let isUserHOD = false;
+        let hodDepartment = "";
+        let departmentTeachers = [];
+        let hodStagedExamsCache = [];
+
+        async function checkHODAuthority() {
+            try {
+                const docSnap = await db.collection("staff_applications").doc(activeStaff.uid).get();
+                if (docSnap.exists) {
+                    const data = docSnap.data();
+                    if (data.isHOD === true && data.hodDept) {
+                        isUserHOD = true;
+                        hodDepartment = data.hodDept;
+                        
+                        const btnContainer = document.getElementById('hod-mapping-btn-container');
+                        if (btnContainer) {
+                            btnContainer.innerHTML = `
+                                <button onclick="openHodMappingModal()" class="bg-amber-500 hover:bg-amber-400 text-slate-950 px-4 py-2.5 rounded-xl font-black uppercase tracking-widest text-xs sm:text-sm shadow-md transition-all flex items-center gap-2 border border-amber-400">
+                                    <span>⚙️</span> Teacher Exam Mapping (${hodDepartment})
+                                </button>
+                            `;
+                        }
+                    }
+                }
+                const staffSnap = await db.collection("staff_applications").where("status", "==", "approved").get();
+                departmentTeachers = staffSnap.docs.map(d => ({ id: d.id, ...d.data() })).filter(s => {
+                    const det = s.details || {};
+                    const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                    const sDept = deptKey ? det[deptKey] : (s.dept || '');
+                    return !isUserHOD || sDept.toLowerCase().includes(hodDepartment.toLowerCase());
+                });
+            } catch(e) { console.error("HOD Check Error:", e); }
+        }
+
+        function openHodMappingModal() {
+            const todayIso = document.getElementById('export-start-date').value || new Date().toISOString().slice(0, 10);
+            document.getElementById('map-exam-date').value = todayIso;
+            document.getElementById('map-branch').value = activeCenter;
+            document.getElementById('hod-modal-subtitle').innerText = `Department: ${hodDepartment}`;
+            document.getElementById('hod-mapping-modal').classList.replace('hidden', 'flex');
+            loadHodStagedExams();
+        }
+
+        function closeHodMappingModal() {
+            document.getElementById('hod-mapping-modal').classList.replace('flex', 'hidden');
+        }
+
+        async function loadHodStagedExams() {
+            const date = document.getElementById('map-exam-date').value;
+            const branch = document.getElementById('map-branch').value;
+            const body = document.getElementById('hod-mapping-body');
+            
+            if (!date) return;
+            body.innerHTML = `<div class="text-center py-12"><span class="loader border-t-indigo-600"></span></div>`;
+
+            try {
+                const prefix = branch === "GHUMARWIN" ? "" : branch.toLowerCase() + "_";
+                const [examSnap, mappingSnap] = await Promise.all([
+                    db.collection(prefix + "exam_schedules").where("date", "==", date).get(),
+                    db.collection(prefix + "exam_mappings").where("date", "==", date).where("department", "==", hodDepartment).get()
+                ]);
+
+                let exams = [];
+                examSnap.forEach(d => exams.push({ id: d.id, ...d.data() }));
+                
+                let existingMappings = {};
+                mappingSnap.forEach(d => {
+                    const m = d.data();
+                    (m.sections || []).forEach(sec => {
+                        existingMappings[`${sec.className}|${sec.section}|${m.subject}`] = { sNo: m.sNo, teacherEmail: m.assignedTeacherEmail, shortName: m.shortName };
+                    });
+                });
+
+                hodStagedExamsCache = exams;
+
+                if (exams.length === 0) {
+                    body.innerHTML = `<div class="text-center py-16 text-slate-400 font-bold uppercase text-xs">No exams staged for this date and branch.</div>`;
+                    return;
+                }
+
+                let bySubject = {};
+                exams.forEach(ex => {
+                    (ex.subjects || []).forEach(sub => {
+                        if (!bySubject[sub]) bySubject[sub] = [];
+                        bySubject[sub].push({ className: ex.className, section: ex.section, type: ex.type, packetId: ex.id });
+                    });
+                });
+
+                let html = "";
+                let sNoCounter = 1;
+
+                Object.keys(bySubject).sort().forEach(sub => {
+                    const sections = bySubject[sub];
+                    let classGroups = {};
+                    sections.forEach(sec => {
+                        if (!classGroups[sec.className]) classGroups[sec.className] = [];
+                        classGroups[sec.className].push(sec.section);
+                    });
+
+                    let subCardHtml = "";
+                    Object.keys(classGroups).sort().forEach(className => {
+                        const secList = classGroups[className].sort();
+                        const mapKey = `${className}|${secList[0]}|${sub}`;
+                        const mapped = existingMappings[mapKey] || { sNo: `S.No. ${sNoCounter++}`, teacherEmail: "", shortName: `${className}-${secList.join(',')}-${sub}` };
+
+                        let teacherOptions = `<option value="">-- Assign Teacher --</option>` + departmentTeachers.map(t => {
+                            const nameKey = Object.keys(t.details || {}).find(k => k.toLowerCase().includes('name'));
+                            const tName = nameKey ? t.details[nameKey] : t.email;
+                            const selected = mapped.teacherEmail === t.email ? 'selected' : '';
+                            return `<option value="${t.email}" ${selected}>${tName}</option>`;
+                        }).join('');
+
+                        subCardHtml += `
+                            <div class="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mapping-row" data-sub="${sub}" data-class="${className}" data-sections='${JSON.stringify(secList)}'>
+                                <div class="space-y-1">
+                                    <div class="flex items-center gap-2">
+                                        <input type="text" class="sno-input w-24 p-1.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-black uppercase text-indigo-700 text-center" value="${mapped.sNo}">
+                                        <span class="font-black text-slate-900 text-sm uppercase">Class ${className} (Secs: ${secList.join(', ')})</span>
+                                    </div>
+                                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Auto Code: <span class="text-teal-600 font-black">${className}-${secList.join(',')}-${sub}</span></p>
+                                </div>
+                                <div class="w-full sm:w-72">
+                                    <label class="block text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Assign Paper Setter</label>
+                                    <select class="teacher-select w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold text-slate-700 outline-none shadow-sm cursor-pointer">${teacherOptions}</select>
+                                </div>
+                            </div>
+                        `;
+                    });
+
+                    html += `
+                        <div class="bg-white border-2 border-indigo-100 rounded-[2rem] p-6 shadow-sm">
+                            <h4 class="font-black text-indigo-900 text-base uppercase tracking-widest mb-4 border-b pb-2 flex items-center justify-between">
+                                <span>📖 Subject: ${sub}</span>
+                                <span class="text-[10px] bg-indigo-50 text-indigo-600 px-3 py-1 rounded-full border border-indigo-200">Department Exam</span>
+                            </h4>
+                            <div class="space-y-3">${subCardHtml}</div>
+                        </div>
+                    `;
+                });
+
+                body.innerHTML = html;
+            } catch(e) {
+                console.error(e);
+                body.innerHTML = `<div class="text-center py-12 text-rose-500 font-bold uppercase text-xs">Error loading mapping configuration.</div>`;
+            }
+        }
+
+        async function saveHodExamMappings() {
+            const date = document.getElementById('map-exam-date').value;
+            const branch = document.getElementById('map-branch').value;
+            const rows = document.querySelectorAll('.mapping-row');
+            
+            if (rows.length === 0) return alert("No rows to save.");
+
+            try {
+                const prefix = branch === "GHUMARWIN" ? "" : branch.toLowerCase() + "_";
+                const batch = db.batch();
+
+                rows.forEach(row => {
+                    const sub = row.getAttribute('data-sub');
+                    const className = row.getAttribute('data-class');
+                    const sections = JSON.parse(row.getAttribute('data-sections'));
+                    const sNo = row.querySelector('.sno-input').value.trim() || "S.No. 01";
+                    const teacherEmail = row.querySelector('.teacher-select').value;
+                    
+                    const selectedTeacher = departmentTeachers.find(t => t.email === teacherEmail);
+                    let teacherName = "";
+                    if (selectedTeacher) {
+                        const nameKey = Object.keys(selectedTeacher.details || {}).find(k => k.toLowerCase().includes('name'));
+                        teacherName = nameKey ? selectedTeacher.details[nameKey] : selectedTeacher.email;
+                    }
+
+                    const shortName = `${className}-${sections.join(',')}-${sub}`;
+                    const mapRef = db.collection(prefix + "exam_mappings").doc(`${date}_${className}_${sub}`.replace(/[^a-zA-Z0-9_]/g, '_'));
+
+                    batch.set(mapRef, {
+                        date: date,
+                        branch: branch,
+                        department: hodDepartment,
+                        sNo: sNo,
+                        shortName: shortName,
+                        subject: sub,
+                        className: className,
+                        sections: sections.map(s => ({ className: className, section: s })),
+                        assignedTeacherEmail: teacherEmail,
+                        assignedTeacherName: teacherName,
+                        timestamp: Date.now()
+                    }, { merge: true });
+                });
+
+                await batch.commit();
+                alert("✅ All exam mappings and paper-setter assignments successfully saved!");
+                closeHodMappingModal();
+                listenForExams();
+            } catch(e) {
+                console.error(e);
+                alert("Failed to save mappings: " + e.message);
+            }
         }
 
     </script>
