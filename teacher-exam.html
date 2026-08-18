@@ -176,12 +176,12 @@
         </div>
     </div>
 
-   <!-- EXAM MAPPING FULL-SCREEN MODAL -->
+  <!-- EXAM MAPPING FULL-SCREEN MODAL -->
     <div id="exam-mapping-modal" class="fixed inset-0 bg-slate-900/85 backdrop-blur-md z-[350] hidden flex-col">
         <div class="bg-[#1e1b4b] text-white p-4 sm:px-8 sm:py-5 flex justify-between items-center border-b-4 border-indigo-500 shrink-0 shadow-xl">
             <div>
                 <h3 class="font-black text-xl sm:text-2xl uppercase tracking-tighter">Exam Mapping & Configuration</h3>
-                <p id="hod-modal-subtitle" class="text-[10px] sm:text-xs font-bold text-indigo-300 uppercase tracking-widest mt-0.5">Manage Modes, Creators, and Student Strengths</p>
+                <p id="hod-modal-subtitle" class="text-[10px] sm:text-xs font-bold text-indigo-300 uppercase tracking-widest mt-0.5">Excel View • Club by matching S.No. • Assign via Branch ➔ Dept ➔ Person</p>
             </div>
             <div class="flex items-center gap-3">
                 <button onclick="exportExamMappingExcel()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl font-black uppercase tracking-widest text-xs shadow-md transition-all flex items-center gap-2">
@@ -196,7 +196,7 @@
                 <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Select Date</label>
                 <input type="date" id="map-view-date" onchange="loadExamMappingData()" class="p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none shadow-sm cursor-pointer">
             </div>
-           <div>
+            <div>
                 <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Filter Branch</label>
                 <select id="map-view-branch" onchange="loadExamMappingData()" class="p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none shadow-sm cursor-pointer uppercase">
                     <option value="ALL">All Branches</option>
@@ -1445,7 +1445,7 @@ function insertSelectedSyllabus() {
             document.getElementById('exam-mapping-modal').classList.replace('flex', 'hidden');
         }
 
-     async function loadExamMappingData() {
+   async function loadExamMappingData() {
             const date = document.getElementById('map-view-date').value;
             const branchFilter = document.getElementById('map-view-branch').value;
             const container = document.getElementById('exam-mapping-table-container');
@@ -1482,19 +1482,9 @@ function insertSelectedSyllabus() {
                 gMapSnap.forEach(d => savedConfigs[d.id] = d.data());
                 dMapSnap.forEach(d => savedConfigs[d.id] = d.data());
 
-              // Fetch existing HOD mappings for clubbing support
-                let hodMappingConfigs = {};
-                [gMapSnap, dMapSnap].forEach(snap => {
-                    snap.forEach(d => {
-                        const m = d.data();
-                        if (m.department === hodDepartment || !isUserHOD) {
-                            hodMappingConfigs[d.id] = m;
-                        }
-                    });
-                });
+                let flatRows = [];
+                let sNoCounter = 1;
 
-                // Extract staged subjects by branch and group by subject for HOD clubbing
-                let subjectBuckets = {};
                 rawPackets.forEach(p => {
                     const processRow = (cName, secName, subs) => {
                         const subArr = Array.isArray(subs) ? subs : [subs];
@@ -1510,14 +1500,21 @@ function insertSelectedSyllabus() {
                                 }
                             }
 
-                            const branchKey = p.branch;
-                            if (!subjectBuckets[branchKey]) subjectBuckets[branchKey] = {};
-                            if (!subjectBuckets[branchKey][cleanSub]) subjectBuckets[branchKey][cleanSub] = [];
+                            const strength = studentsMap[p.branch].filter(s => s.className === cName && s.section === secName).length;
+                            const defaultSNo = `S.No. ${String(sNoCounter++).padStart(2, '0')}`;
+                            const shortCode = `${p.branch[0]}-${cName}-${secName}`.toUpperCase().substring(0, 99);
+                            const rowKey = `${p.branch}_${cName}_${secName}_${cleanSub}`.replace(/[^a-zA-Z0-9_]/g, '_');
 
-                            if (!subjectBuckets[branchKey][cleanSub].some(s => s.className === cName && s.section === secName)) {
-                                const strength = studentsMap[p.branch].filter(s => s.className === cName && s.section === secName).length;
-                                subjectBuckets[branchKey][cleanSub].push({ className: cName, section: secName, strength: strength });
-                            }
+                            flatRows.push({
+                                rowKey: rowKey,
+                                branch: p.branch,
+                                className: cName,
+                                section: secName,
+                                subject: cleanSub,
+                                shortCode: shortCode,
+                                strength: strength,
+                                defaultSNo: defaultSNo
+                            });
                         });
                     };
 
@@ -1534,127 +1531,124 @@ function insertSelectedSyllabus() {
                     }
                 });
 
-                window.globalStaffList = allStaffMembers;
-                window.departmentTeachersList = departmentTeachers;
-
-                let html = "";
-                let hasData = false;
-
-                Object.keys(subjectBuckets).sort().forEach(branch => {
-                    const subs = subjectBuckets[branch];
-                    Object.keys(subs).sort().forEach(sub => {
-                        hasData = true;
-                        const sectionsList = subs[sub].sort((a,b) => a.className.localeCompare(b.className, undefined, {numeric:true}) || a.section.localeCompare(b.section, undefined, {numeric:true}));
-
-                        // Find existing club groups for this branch & subject
-                        let existingGroups = [];
-                        Object.values(hodMappingConfigs).forEach(cfg => {
-                            if (cfg.branch === branch && cfg.subject === sub) {
-                                existingGroups.push(cfg);
-                            }
-                        });
-
-                        if (existingGroups.length === 0) {
-                            // Default: 1 group containing all sections
-                            existingGroups.push({
-                                sNo: "S.No. 01",
-                                assignedTeacherEmail: "",
-                                sections: sectionsList.map(s => ({ className: s.className, section: s.section }))
-                            });
-                        }
-
-                        let groupsHtml = "";
-                        existingGroups.forEach((grp, gIdx) => {
-                            let teacherOptions = `<option value="">-- Assign Paper Setter --</option>` + (isUserHOD ? departmentTeachers : allStaffMembers).map(t => {
-                                const nameKey = Object.keys(t.details || {}).find(k => k.toLowerCase().includes('name'));
-                                const tName = nameKey ? t.details[nameKey] : t.email;
-                                const selected = grp.assignedTeacherEmail === t.email ? 'selected' : '';
-                                return `<option value="${t.email}" ${selected}>${tName}</option>`;
-                            }).join('');
-
-                            let totalStrength = 0;
-                            (grp.sections || []).forEach(gs => {
-                                const found = sectionsList.find(s => s.className === gs.className && s.section === gs.section);
-                                if (found) totalStrength += found.strength;
-                            });
-
-                            groupsHtml += `
-                                <div class="bg-slate-50 border-2 border-slate-200 rounded-2xl p-4 shadow-sm space-y-3 club-group-row" data-subject="${sub}" data-branch="${branch}">
-                                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-                                        <div class="flex items-center gap-3 w-full sm:w-auto">
-                                            <input type="text" class="sno-input w-28 p-2 bg-white border border-slate-300 rounded-xl text-xs font-black uppercase text-indigo-700 text-center shadow-sm" value="${grp.sNo || 'S.No. 01'}" placeholder="S.No.">
-                                            <span class="text-xs font-black text-slate-700 uppercase tracking-widest">Group ${gIdx + 1} (Same Question Paper)</span>
-                                            <span class="bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-emerald-200 ml-auto sm:ml-0">🎓 Strength: ${totalStrength}</span>
-                                        </div>
-                                        <div class="w-full sm:w-72 flex items-center gap-2">
-                                            <select class="teacher-select w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-700 outline-none shadow-sm cursor-pointer">${teacherOptions}</select>
-                                            ${gIdx > 0 ? `<button onclick="this.closest('.club-group-row').remove()" class="text-rose-500 hover:text-rose-700 font-black p-2 text-sm" title="Remove Group">✕</button>` : ''}
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Select Sections sharing this Question Paper:</label>
-                                        <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2 bg-white p-3 rounded-xl border border-slate-200">
-                                            ${sectionsList.map(sec => {
-                                                const isChecked = (grp.sections || []).some(gs => gs.className === sec.className && gs.section === sec.section);
-                                                return `
-                                                    <label class="flex items-center gap-2 p-2 bg-slate-50 rounded-lg border border-slate-100 cursor-pointer hover:bg-indigo-50 transition-colors">
-                                                        <input type="checkbox" class="section-cb w-4 h-4 accent-indigo-600 rounded" value="${sec.className}|${sec.section}" ${isChecked ? 'checked' : ''}>
-                                                        <span class="text-[11px] font-black text-slate-800 uppercase">Class ${sec.className} - ${sec.section}</span>
-                                                    </label>
-                                                `;
-                                            }).join('')}
-                                        </div>
-                                    </div>
-                                </div>
-                            `;
-                        });
-
-                        html += `
-                            <div class="bg-white border-2 border-indigo-100 rounded-[2rem] p-6 shadow-sm mb-6 hod-subject-card" data-branch="${branch}" data-subject="${sub}">
-                                <div class="flex items-center justify-between mb-4 border-b pb-3">
-                                    <div>
-                                        <span class="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-100 mr-2">${branch}</span>
-                                        <h4 class="font-black text-indigo-900 text-base sm:text-lg uppercase tracking-widest inline-block">📖 Subject: ${sub}</h4>
-                                    </div>
-                                    <button onclick="addClubGroup(this)" class="bg-indigo-600 hover:bg-indigo-500 text-white px-3.5 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-sm transition-all">+ Add Club Group</button>
-                                </div>
-                                <div class="space-y-4 club-groups-wrapper">${groupsHtml}</div>
-                            </div>
-                        `;
-                    });
-                });
-
-                if (!hasData) {
-                    container.innerHTML = `<div class="text-center py-20 bg-white rounded-3xl border border-slate-200"><p class="text-slate-400 font-black uppercase text-xs tracking-widest">No matching exams found for your department on this date.</p></div>`;
+                if (flatRows.length === 0) {
+                    container.innerHTML = `<div class="text-center py-20 bg-white rounded-3xl border border-slate-200"><p class="text-slate-400 font-black uppercase text-xs tracking-widest">No matching exams found for this date.</p></div>`;
                     return;
                 }
 
-                container.innerHTML = html;
+                flatRows.sort((a,b) => {
+                    if (a.branch !== b.branch) return a.branch.localeCompare(b.branch);
+                    if (a.className !== b.className) return a.className.localeCompare(b.className, undefined, {numeric: true});
+                    if (a.section !== b.section) return a.section.localeCompare(b.section, undefined, {numeric: true});
+                    return a.subject.localeCompare(b.subject);
+                });
+
+                window.globalStaffList = allStaffMembers;
+                window.departmentTeachersList = departmentTeachers;
+
+                // Extract unique departments for the 3-tier selector
+                let deptsSet = new Set();
+                allStaffMembers.forEach(st => {
+                    const det = st.details || {};
+                    const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                    if (dKey && det[dKey]) deptsSet.add(String(det[dKey]).trim());
+                });
+                const deptOptionsHtml = Array.from(deptsSet).sort().map(d => `<option value="${d}">${d}</option>`).join('');
+
+                let tableHtml = `
+                    <div class="bg-white border border-slate-200 rounded-[2rem] shadow-sm overflow-hidden">
+                        <div class="overflow-x-auto custom-scroll">
+                            <table class="w-full text-left min-w-[1200px] border-collapse" id="mapping-export-table">
+                                <thead class="bg-slate-100 text-slate-600 text-[10px] uppercase tracking-widest font-black border-b border-slate-200">
+                                    <tr>
+                                        <th class="p-4 w-32">S.No.</th>
+                                        <th class="p-4 w-28">Branch</th>
+                                        <th class="p-4 w-24">Class</th>
+                                        <th class="p-4 w-32">Section</th>
+                                        <th class="p-4 w-40">Subjects</th>
+                                        <th class="p-4 w-56">Exam Name / Short Code</th>
+                                        <th class="p-4 w-32">Mode</th>
+                                        <th class="p-4">Assigner (Branch ➔ Dept ➔ Person)</th>
+                                        <th class="p-4 w-28 text-center">Strength</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100 text-xs font-bold text-slate-700">
+                `;
+
+                flatRows.forEach((r) => {
+                    const saved = savedConfigs[r.rowKey] || {};
+                    const sNoVal = saved.sNo || r.defaultSNo;
+                    const modeVal = saved.mode || "Offline";
+                    const cBranch = saved.creatorBranch || r.branch;
+                    const cDept = saved.creatorDept || "";
+                    const cPerson = saved.creatorPerson || "";
+
+                    // Filter staff for person dropdown based on selected branch & dept in this row
+                    const filteredStaff = allStaffMembers.filter(st => {
+                        const det = st.details || {};
+                        const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                        const sDept = dKey ? det[dKey] : '';
+                        const sCenter = Object.values(det).join(' ').toUpperCase();
+                        return (!cDept || String(sDept).includes(cDept)) && sCenter.includes(cBranch);
+                    });
+
+                    const personOptions = filteredStaff.map(st => {
+                        const nKey = Object.keys(st.details || {}).find(k => k.toLowerCase().includes('name'));
+                        const name = nKey ? st.details[nKey] : st.email;
+                        const selected = cPerson === name ? 'selected' : '';
+                        return `<option value="${name}" ${selected}>${name}</option>`;
+                    }).join('');
+
+                    tableHtml += `
+                        <tr class="hover:bg-slate-50/85 transition-colors mapping-row-item" data-key="${r.rowKey}" data-branch="${r.branch}" data-subject="${r.subject}">
+                            <td class="p-4">
+                                <input type="text" class="sno-input w-full p-2 bg-white border border-slate-300 rounded-xl text-xs font-black uppercase text-indigo-700 text-center shadow-sm" value="${sNoVal}" placeholder="S.No.">
+                            </td>
+                            <td class="p-4"><span class="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-100">${r.branch}</span></td>
+                            <td class="p-4 font-black uppercase">${r.className}</td>
+                            <td class="p-4 font-black uppercase text-indigo-600">${r.section}</td>
+                            <td class="p-4 font-black text-slate-800 uppercase">${r.subject}</td>
+                            <td class="p-4">
+                                <input type="text" maxlength="99" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold uppercase tracking-wider text-teal-800 code-input" value="${saved.shortCode || r.shortCode}">
+                            </td>
+                            <td class="p-4">
+                                <select class="w-full p-2 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase mode-select cursor-pointer">
+                                    <option value="Offline" ${modeVal === 'Offline' ? 'selected' : ''}>Offline</option>
+                                    <option value="Online" ${modeVal === 'Online' ? 'selected' : ''}>Online</option>
+                                </select>
+                            </td>
+                            <td class="p-4">
+                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                    <select onchange="updateMappingStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-branch cursor-pointer">
+                                        <option value="GHUMARWIN" ${cBranch === 'GHUMARWIN' ? 'selected' : ''}>Ghumarwin</option>
+                                        <option value="DHARAMSHALA" ${cBranch === 'DHARAMSHALA' ? 'selected' : ''}>Dharamshala</option>
+                                    </select>
+                                    <select onchange="updateMappingStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-dept cursor-pointer">
+                                        <option value="">-- Dept --</option>
+                                        ${deptOptionsHtml.replace(`value="${cDept}"`, `value="${cDept}" selected`)}
+                                    </select>
+                                    <select class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-person cursor-pointer">
+                                        <option value="">-- Person --</option>
+                                        ${personOptions}
+                                    </select>
+                                </div>
+                            </td>
+                            <td class="p-4 text-center">
+                                <span class="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-widest border border-emerald-200 shadow-sm inline-block">🎓 ${r.strength}</span>
+                            </td>
+                        </tr>
+                    `;
+                });
+
+                tableHtml += `</tbody></table></div></div>`;
+                container.innerHTML = tableHtml;
             } catch(e) {
                 console.error(e);
                 container.innerHTML = `<div class="text-center py-12 text-rose-500 font-bold uppercase text-xs">Error loading mapping configuration.</div>`;
             }
         }
 
-       function addClubGroup(btn) {
-            const card = btn.closest('.hod-subject-card');
-            const wrapper = card.querySelector('.club-groups-wrapper');
-            const branch = card.getAttribute('data-branch');
-            const sub = card.getAttribute('data-subject');
-            const firstRow = wrapper.querySelector('.club-group-row');
-            
-            if (!firstRow) return;
-
-            // Clone the first row template
-            const newRow = firstRow.cloneNode(true);
-            newRow.querySelector('.sno-input').value = `S.No. 0${wrapper.querySelectorAll('.club-group-row').length + 1}`;
-            newRow.querySelector('.teacher-select').selectedIndex = 0;
-            newRow.querySelectorAll('.section-cb').forEach(cb => cb.checked = false); // uncheck sections for new group
-
-            wrapper.appendChild(newRow);
-        }
-
-        function updateCreatorStaffList(element) {
+        function updateMappingStaffList(element) {
             const row = element.closest('tr');
             const branch = row.querySelector('.creator-branch').value;
             const dept = row.querySelector('.creator-dept').value;
@@ -1675,65 +1669,79 @@ function insertSelectedSyllabus() {
             }).join('');
         }
 
-  async function saveAllExamMappings() {
+        async function saveAllExamMappings() {
             const date = document.getElementById('map-view-date').value;
-            const subjectCards = document.querySelectorAll('.hod-subject-card');
-            if (subjectCards.length === 0) return alert("No mappings to save.");
+            const rows = document.querySelectorAll('.mapping-row-item');
+            if (rows.length === 0) return alert("No mappings to save.");
 
             try {
                 const batch = db.batch();
 
-                subjectCards.forEach(card => {
-                    const branch = card.getAttribute('data-branch');
-                    const sub = card.getAttribute('data-subject');
-                    const prefix = branch === "GHUMARWIN" ? "" : branch.toLowerCase() + "_";
-                    const groupRows = card.querySelectorAll('.club-group-row');
+                // Group rows by S.No. and Subject to support clubbing
+                let clubbedMap = {};
 
-                    groupRows.forEach(gRow => {
-                        const sNo = gRow.querySelector('.sno-input').value.trim() || "S.No. 01";
-                        const teacherEmail = gRow.querySelector('.teacher-select').value;
-                        const checkedSecs = Array.from(gRow.querySelectorAll('.section-cb:checked')).map(cb => {
-                            const [cName, sName] = cb.value.split('|');
-                            return { className: cName, section: sName };
-                        });
+                rows.forEach(row => {
+                    const rowKey = row.getAttribute('data-key');
+                    const branch = row.getAttribute('data-branch');
+                    const subject = row.getAttribute('data-subject');
+                    const sNo = row.querySelector('.sno-input').value.trim() || "S.No. 01";
+                    const shortCode = row.querySelector('.code-input').value.trim();
+                    const mode = row.querySelector('.mode-select').value;
+                    const cBranch = row.querySelector('.creator-branch').value;
+                    const cDept = row.querySelector('.creator-dept').value;
+                    const cPerson = row.querySelector('.creator-person').value;
+                    
+                    const className = row.children[2].innerText.trim();
+                    const sectionName = row.children[3].innerText.trim();
 
-                        if (checkedSecs.length === 0) return;
-
-                        const selectedTeacher = (window.departmentTeachersList || []).find(t => t.email === teacherEmail) || (window.globalStaffList || []).find(t => t.email === teacherEmail);
-                        let teacherName = "";
-                        if (selectedTeacher) {
-                            const nameKey = Object.keys(selectedTeacher.details || {}).find(k => k.toLowerCase().includes('name'));
-                            teacherName = nameKey ? selectedTeacher.details[nameKey] : selectedTeacher.email;
-                        }
-
-                        const firstClass = checkedSecs[0].className;
-                        const allSecNames = checkedSecs.map(s => s.section).join(',');
-                        const shortName = `${branch[0]}-${firstClass}-${allSecNames}-${sub}`.toUpperCase().substring(0, 99);
-                        const docId = `${date}_${firstClass}_${sub}_${sNo}`.replace(/[^a-zA-Z0-9_]/g, '_');
-                        const mapRef = db.collection(prefix + "exam_mappings").doc(docId);
-                        const configRef = db.collection(prefix + "exam_mapping_configs").doc(docId);
-
-                        const mappingPayload = {
+                    const clubKey = `${branch}_${subject}_${sNo}`;
+                    if (!clubbedMap[clubKey]) {
+                        clubbedMap[clubKey] = {
                             date: date,
                             branch: branch,
-                            department: hodDepartment || "Management",
+                            department: hodDepartment || cDept || "Management",
                             sNo: sNo,
-                            shortName: shortName,
-                            subject: sub,
-                            className: firstClass,
-                            sections: checkedSecs,
-                            assignedTeacherEmail: teacherEmail,
-                            assignedTeacherName: teacherName,
+                            shortCode: shortCode,
+                            subject: subject,
+                            className: className,
+                            sections: [],
+                            mode: mode,
+                            creatorBranch: cBranch,
+                            creatorDept: cDept,
+                            creatorPerson: cPerson,
                             timestamp: Date.now()
                         };
+                    }
+                    clubbedMap[clubKey].sections.push({ className: className, section: sectionName });
+                });
 
-                        batch.set(mapRef, mappingPayload, { merge: true });
-                        batch.set(configRef, { ...mappingPayload, rowKey: docId, mode: "Offline" }, { merge: true });
+                Object.keys(clubbedMap).forEach(clubKey => {
+                    const data = clubbedMap[clubKey];
+                    const prefix = data.branch === "GHUMARWIN" ? "" : data.branch.toLowerCase() + "_";
+                    const docId = clubKey.replace(/[^a-zA-Z0-9_]/g, '_');
+
+                    const mapRef = db.collection(prefix + "exam_mappings").doc(docId);
+                    const configRef = db.collection(prefix + "exam_mapping_configs").doc(docId);
+
+                    const selectedTeacher = (window.globalStaffList || []).find(t => {
+                        const nKey = Object.keys(t.details || {}).find(k => k.toLowerCase().includes('name'));
+                        const name = nKey ? t.details[nKey] : t.email;
+                        return name === data.creatorPerson;
                     });
+                    const teacherEmail = selectedTeacher ? selectedTeacher.email : "";
+
+                    const finalPayload = {
+                        ...data,
+                        assignedTeacherEmail: teacherEmail,
+                        assignedTeacherName: data.creatorPerson
+                    };
+
+                    batch.set(mapRef, finalPayload, { merge: true });
+                    batch.set(configRef, { ...finalPayload, rowKey: docId }, { merge: true });
                 });
 
                 await batch.commit();
-                alert("✅ Clubbed Exam Mappings and Paper-Setter Assignments successfully saved!");
+                alert("✅ All Exam Mappings and Clubbed Assignments successfully saved!");
                 closeExamMappingModal();
                 if (typeof listenForExams === 'function') listenForExams();
             } catch(e) {
@@ -1749,6 +1757,7 @@ function insertSelectedSyllabus() {
             let tableHtml = `<table border="1" style="border-collapse: collapse; font-family: sans-serif;">`;
             tableHtml += `
                 <tr style="background-color: #1e1b4b; color: #ffffff; text-align: center; font-weight: bold; font-size: 11pt;">
+                    <th style="padding: 10px;">S.No.</th>
                     <th style="padding: 10px;">Branch</th>
                     <th style="padding: 10px;">Class</th>
                     <th style="padding: 10px;">Section</th>
@@ -1762,23 +1771,25 @@ function insertSelectedSyllabus() {
 
             const rows = table.querySelectorAll('tbody tr');
             rows.forEach(tr => {
-                const branch = tr.children[0].innerText.trim();
-                const cls = tr.children[1].innerText.trim();
-                const sec = tr.children[2].innerText.trim();
-                const sub = tr.children[3].innerText.trim();
+                const sNo = tr.querySelector('.sno-input').value.trim();
+                const branch = tr.children[1].innerText.trim();
+                const cls = tr.children[2].innerText.trim();
+                const sec = tr.children[3].innerText.trim();
+                const sub = tr.children[4].innerText.trim();
                 const code = tr.querySelector('.code-input').value.trim();
                 const mode = tr.querySelector('.mode-select').value;
                 const cBranch = tr.querySelector('.creator-branch').value;
                 const cDept = tr.querySelector('.creator-dept').value;
                 const cPerson = tr.querySelector('.creator-person').value;
                 const creatorStr = `${cBranch} / ${cDept || 'N/A'} / ${cPerson || 'N/A'}`;
-                const strength = tr.children[7].innerText.replace('🎓', '').trim();
+                const strength = tr.children[8].innerText.replace('🎓', '').trim();
 
                 tableHtml += `
                     <tr>
+                        <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold; color: #4f46e5;">${sNo}</td>
                         <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold;">${branch}</td>
                         <td style="padding: 8px; text-align: center; vertical-align: top;">${cls}</td>
-                        <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold; color: #4f46e5;">${sec}</td>
+                        <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold;">${sec}</td>
                         <td style="padding: 8px; vertical-align: top; font-weight: bold;">${sub}</td>
                         <td style="padding: 8px; vertical-align: top; font-family: monospace; color: #0d9488;">${code}</td>
                         <td style="padding: 8px; text-align: center; vertical-align: top;">${mode}</td>
