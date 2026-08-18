@@ -196,9 +196,10 @@
                 <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Select Date</label>
                 <input type="date" id="map-view-date" onchange="loadExamMappingData()" class="p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none shadow-sm cursor-pointer">
             </div>
-            <div>
+           <div>
                 <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Filter Branch</label>
                 <select id="map-view-branch" onchange="loadExamMappingData()" class="p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none shadow-sm cursor-pointer uppercase">
+                    <option value="ALL">All Branches</option>
                     <option value="GHUMARWIN">Ghumarwin</option>
                     <option value="DHARAMSHALA">Dharamshala</option>
                 </select>
@@ -1444,37 +1445,46 @@ function insertSelectedSyllabus() {
             document.getElementById('exam-mapping-modal').classList.replace('flex', 'hidden');
         }
 
-        async function loadExamMappingData() {
+     async function loadExamMappingData() {
             const date = document.getElementById('map-view-date').value;
-            const branch = document.getElementById('map-view-branch').value;
+            const branchFilter = document.getElementById('map-view-branch').value;
             const container = document.getElementById('exam-mapping-table-container');
 
             if (!date) return;
             container.innerHTML = `<div class="text-center py-32"><span class="loader border-t-indigo-600"></span><p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-3">Fetching live exam & student data...</p></div>`;
 
             try {
-                const prefix = branch === "GHUMARWIN" ? "" : branch.toLowerCase() + "_";
-                const [examSnap, stuSnap, staffSnap, mapSnap] = await Promise.all([
-                    db.collection(prefix + "exam_schedules").where("date", "==", date).get(),
-                    db.collection(prefix + "students").get(),
+                const [gSnap, dSnap, gStuSnap, dStuSnap, staffSnap, gMapSnap, dMapSnap] = await Promise.all([
+                    branchFilter === "ALL" || branchFilter === "GHUMARWIN" ? db.collection("exam_schedules").where("date", "==", date).get() : Promise.resolve({ empty: true, forEach: () => {} }),
+                    branchFilter === "ALL" || branchFilter === "DHARAMSHALA" ? db.collection("dharamshala_exam_schedules").where("date", "==", date).get() : Promise.resolve({ empty: true, forEach: () => {} }),
+                    db.collection("students").get(),
+                    db.collection("dharamshala_students").get(),
                     db.collection("staff_applications").where("status", "==", "approved").get(),
-                    db.collection(prefix + "exam_mapping_configs").where("date", "==", date).get()
+                    branchFilter === "ALL" || branchFilter === "GHUMARWIN" ? db.collection("exam_mapping_configs").where("date", "==", date).get() : Promise.resolve({ empty: true, forEach: () => {} }),
+                    branchFilter === "ALL" || branchFilter === "DHARAMSHALA" ? db.collection("dharamshala_exam_mapping_configs").where("date", "==", date).get() : Promise.resolve({ empty: true, forEach: () => {} })
                 ]);
 
-                let exams = [];
-                examSnap.forEach(d => exams.push({ id: d.id, ...d.data() }));
+                let rawPackets = [];
+                if (branchFilter === "ALL" || branchFilter === "GHUMARWIN") {
+                    gSnap.forEach(d => rawPackets.push({ branch: "GHUMARWIN", id: d.id, ...d.data() }));
+                }
+                if (branchFilter === "ALL" || branchFilter === "DHARAMSHALA") {
+                    dSnap.forEach(d => rawPackets.push({ branch: "DHARAMSHALA", id: d.id, ...d.data() }));
+                }
 
-                let studentsList = [];
-                stuSnap.forEach(d => { const s = d.data(); if(s.isActive !== false) studentsList.push(s); });
+                let studentsMap = { GHUMARWIN: [], DHARAMSHALA: [] };
+                gStuSnap.forEach(d => { const s = d.data(); if(s.isActive !== false) studentsMap.GHUMARWIN.push(s); });
+                dStuSnap.forEach(d => { const s = d.data(); if(s.isActive !== false) studentsMap.DHARAMSHALA.push(s); });
 
                 let allStaffMembers = staffSnap.docs.map(d => d.data());
 
                 let savedConfigs = {};
-                mapSnap.forEach(d => savedConfigs[d.id] = d.data());
+                gMapSnap.forEach(d => savedConfigs[d.id] = d.data());
+                dMapSnap.forEach(d => savedConfigs[d.id] = d.data());
 
-             // Normalize and group packets by Class and Section (with strict HOD filtering)
+                // Normalize and group packets by Branch, Class, and Section (with strict HOD filtering)
                 let mapGroups = {};
-                exams.forEach(p => {
+                rawPackets.forEach(p => {
                     const processRow = (cName, secName, subs) => {
                         const subArr = Array.isArray(subs) ? subs : [subs];
                         subArr.forEach(sub => {
@@ -1490,11 +1500,11 @@ function insertSelectedSyllabus() {
                                 }
                             }
 
-                            const groupKey = `${cName}|${secName}`;
+                            const groupKey = `${p.branch}|${cName}|${secName}`;
                             if (!mapGroups[groupKey]) {
-                                const strength = studentsList.filter(s => s.className === cName && s.section === secName).length;
+                                const strength = studentsMap[p.branch].filter(s => s.className === cName && s.section === secName).length;
                                 mapGroups[groupKey] = {
-                                    branch: branch,
+                                    branch: p.branch,
                                     className: cName,
                                     section: secName,
                                     subjectsSet: new Set(),
@@ -1523,9 +1533,9 @@ function insertSelectedSyllabus() {
                     const g = mapGroups[k];
                     const sortedSubs = Array.from(g.subjectsSet).sort();
                     const subjectsStr = sortedSubs.join(', ');
-                    const shortCode = `${branch[0]}-${g.className}-${g.section}`.toUpperCase().substring(0, 99);
+                    const shortCode = `${g.branch[0]}-${g.className}-${g.section}`.toUpperCase().substring(0, 99);
                     rows.push({
-                        branch: branch,
+                        branch: g.branch,
                         className: g.className,
                         section: g.section,
                         subjectsStr: subjectsStr,
