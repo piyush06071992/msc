@@ -1448,7 +1448,7 @@ function insertSelectedSyllabus() {
             document.getElementById('exam-mapping-modal').classList.replace('flex', 'hidden');
         }
 
-  async function loadExamMappingData() {
+async function loadExamMappingData() {
             const date = document.getElementById('map-view-date').value;
             const branchFilter = document.getElementById('map-view-branch').value;
             const container = document.getElementById('exam-mapping-table-container');
@@ -1485,7 +1485,9 @@ function insertSelectedSyllabus() {
                 gMapSnap.forEach(d => savedConfigs[d.id] = d.data());
                 dMapSnap.forEach(d => savedConfigs[d.id] = d.data());
 
-                let flatRows = [];
+                // Group by (Branch, Subject, S.No.) so clubbed sections appear on a single line with comma-separated sections
+                let clubbedRowsMap = {};
+                let unmappedPackets = [];
 
                 rawPackets.forEach(p => {
                     const processRow = (cName, secName, subs) => {
@@ -1502,18 +1504,22 @@ function insertSelectedSyllabus() {
                                 }
                             }
 
-                            const strength = studentsMap[p.branch].filter(s => s.className === cName && s.section === secName).length;
-                            const shortCode = `${p.branch[0]}-${cName}-${secName}`.toUpperCase().substring(0, 99);
                             const rowKey = `${p.branch}_${cName}_${secName}_${cleanSub}`.replace(/[^a-zA-Z0-9_]/g, '_');
+                            const saved = savedConfigs[rowKey] || {};
+                            const strength = studentsMap[p.branch].filter(s => s.className === cName && s.section === secName).length;
 
-                            flatRows.push({
-                                rowKey: rowKey,
+                            unmappedPackets.push({
                                 branch: p.branch,
                                 className: cName,
                                 section: secName,
                                 subject: cleanSub,
-                                shortCode: shortCode,
-                                strength: strength
+                                strength: strength,
+                                savedSNo: saved.sNo || "",
+                                savedShortCode: saved.shortCode || "",
+                                savedMode: saved.mode || "Offline",
+                                savedCBranch: saved.creatorBranch || p.branch,
+                                savedCDept: saved.creatorDept || "",
+                                savedCPerson: saved.creatorPerson || ""
                             });
                         });
                     };
@@ -1531,29 +1537,50 @@ function insertSelectedSyllabus() {
                     }
                 });
 
-                if (flatRows.length === 0) {
+                if (unmappedPackets.length === 0) {
                     container.innerHTML = `<div class="text-center py-20 bg-white rounded-3xl border border-slate-200"><p class="text-slate-400 font-black uppercase text-xs tracking-widest">No matching exams found for this date.</p></div>`;
                     return;
                 }
 
-                flatRows.sort((a,b) => {
+                // Sort unmapped packets to assign clean sequential S.No. by default
+                unmappedPackets.sort((a,b) => {
                     if (a.branch !== b.branch) return a.branch.localeCompare(b.branch);
                     if (a.className !== b.className) return a.className.localeCompare(b.className, undefined, {numeric: true});
-                    if (a.section !== b.section) return a.section.localeCompare(b.section, undefined, {numeric: true});
                     return a.subject.localeCompare(b.subject);
                 });
 
-                // Assign default chronological S.No. if not saved in config
-                flatRows.forEach((r, idx) => {
-                    if (!savedConfigs[r.rowKey] || !savedConfigs[r.rowKey].sNo) {
-                        r.defaultSNo = `S.No. ${String(idx + 1).padStart(2, '0')}`;
+                let autoCounter = 1;
+                unmappedPackets.forEach(item => {
+                    const sNo = item.savedSNo || `S.No. ${String(autoCounter++).padStart(2, '0')}`;
+                    const groupKey = `${item.branch}_${item.subject}_${sNo}`;
+
+                    if (!clubbedRowsMap[groupKey]) {
+                        clubbedRowsMap[groupKey] = {
+                            sNo: sNo,
+                            branch: item.branch,
+                            className: item.className,
+                            sections: [],
+                            subject: item.subject,
+                            shortCode: item.savedShortCode || `${item.branch[0]}-${item.className}-${item.subject}`.toUpperCase().substring(0, 99),
+                            mode: item.savedMode,
+                            creatorBranch: item.savedCBranch,
+                            creatorDept: item.savedCDept,
+                            creatorPerson: item.savedCPerson,
+                            totalStrength: 0
+                        };
+                    }
+                    if (!clubbedRowsMap[groupKey].sections.includes(item.section)) {
+                        clubbedRowsMap[groupKey].sections.push(item.section);
+                        clubbedRowsMap[groupKey].totalStrength += item.strength;
                     }
                 });
+
+                let finalRows = Object.values(clubbedRowsMap);
+                finalRows.sort((a,b) => a.sNo.localeCompare(b.sNo, undefined, {numeric:true}));
 
                 window.globalStaffList = allStaffMembers;
                 window.departmentTeachersList = departmentTeachers;
 
-                // Extract unique departments for the 3-tier selector
                 let deptsSet = new Set();
                 allStaffMembers.forEach(st => {
                     const det = st.details || {};
@@ -1572,7 +1599,7 @@ function insertSelectedSyllabus() {
                                         <th class="p-4 w-28">S.No.</th>
                                         <th class="p-4 w-28">Branch</th>
                                         <th class="p-4 w-24">Class</th>
-                                        <th class="p-4 w-32">Section</th>
+                                        <th class="p-4">Section(s) [Comma-Separated]</th>
                                         <th class="p-4 w-40">Subjects</th>
                                         <th class="p-4 w-56">Exam Name / Short Code</th>
                                         <th class="p-4 w-32">Mode</th>
@@ -1583,58 +1610,51 @@ function insertSelectedSyllabus() {
                                 <tbody class="divide-y divide-slate-100 text-xs font-bold text-slate-700">
                 `;
 
-                flatRows.forEach((r) => {
-                    const saved = savedConfigs[r.rowKey] || {};
-                    const sNoVal = saved.sNo || r.defaultSNo;
-                    const modeVal = saved.mode || "Offline";
-                    const cBranch = saved.creatorBranch || r.branch;
-                    const cDept = saved.creatorDept || "";
-                    const cPerson = saved.creatorPerson || "";
-
-                    // Filter staff for person dropdown
+                finalRows.forEach((r) => {
+                    const sectionsJoined = r.sections.sort().join(', ');
                     const filteredStaff = allStaffMembers.filter(st => {
                         const det = st.details || {};
                         const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
                         const sDept = dKey ? det[dKey] : '';
                         const sCenter = Object.values(det).join(' ').toUpperCase();
-                        return (!cDept || String(sDept).includes(cDept)) && sCenter.includes(cBranch);
+                        return (!r.creatorDept || String(sDept).includes(r.creatorDept)) && sCenter.includes(r.creatorBranch);
                     });
 
                     const personOptions = filteredStaff.map(st => {
                         const nKey = Object.keys(st.details || {}).find(k => k.toLowerCase().includes('name'));
                         const name = nKey ? st.details[nKey] : st.email;
-                        const selected = cPerson === name ? 'selected' : '';
+                        const selected = r.creatorPerson === name ? 'selected' : '';
                         return `<option value="${name}" ${selected}>${name}</option>`;
                     }).join('');
 
                     tableHtml += `
-                        <tr class="hover:bg-slate-50/80 transition-colors mapping-row-item" data-key="${r.rowKey}" data-branch="${r.branch}" data-subject="${r.subject}">
+                        <tr class="hover:bg-slate-50/80 transition-colors mapping-row-item" data-branch="${r.branch}" data-subject="${r.subject}">
                             <td class="p-4 text-center"><input type="checkbox" class="row-select-cb w-4 h-4 accent-indigo-600"></td>
                             <td class="p-4">
-                                <input type="text" class="sno-input w-24 p-2 bg-white border border-slate-300 rounded-lg text-xs font-black uppercase text-indigo-700 text-center shadow-sm" value="${sNoVal}" placeholder="S.No.">
+                                <input type="text" class="sno-input w-24 p-2 bg-white border border-slate-300 rounded-lg text-xs font-black uppercase text-indigo-700 text-center shadow-sm" value="${r.sNo}" placeholder="S.No.">
                             </td>
                             <td class="p-4"><span class="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-100">${r.branch}</span></td>
                             <td class="p-4 font-black uppercase">${r.className}</td>
-                            <td class="p-4 font-black uppercase text-indigo-600">${r.section}</td>
+                            <td class="p-4 font-black uppercase text-indigo-600">${sectionsJoined}</td>
                             <td class="p-4 font-black text-slate-800 uppercase">${r.subject}</td>
                             <td class="p-4">
-                                <input type="text" maxlength="99" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold uppercase tracking-wider text-teal-800 code-input" value="${saved.shortCode || r.shortCode}">
+                                <input type="text" maxlength="99" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold uppercase tracking-wider text-teal-800 code-input" value="${r.shortCode}">
                             </td>
                             <td class="p-4">
                                 <select class="w-full p-2 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase mode-select cursor-pointer">
-                                    <option value="Offline" ${modeVal === 'Offline' ? 'selected' : ''}>Offline</option>
-                                    <option value="Online" ${modeVal === 'Online' ? 'selected' : ''}>Online</option>
+                                    <option value="Offline" ${r.mode === 'Offline' ? 'selected' : ''}>Offline</option>
+                                    <option value="Online" ${r.mode === 'Online' ? 'selected' : ''}>Online</option>
                                 </select>
                             </td>
                             <td class="p-4">
                                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                                     <select onchange="updateMappingStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-branch cursor-pointer">
-                                        <option value="GHUMARWIN" ${cBranch === 'GHUMARWIN' ? 'selected' : ''}>Ghumarwin</option>
-                                        <option value="DHARAMSHALA" ${cBranch === 'DHARAMSHALA' ? 'selected' : ''}>Dharamshala</option>
+                                        <option value="GHUMARWIN" ${r.creatorBranch === 'GHUMARWIN' ? 'selected' : ''}>Ghumarwin</option>
+                                        <option value="DHARAMSHALA" ${r.creatorBranch === 'DHARAMSHALA' ? 'selected' : ''}>Dharamshala</option>
                                     </select>
                                     <select onchange="updateMappingStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-dept cursor-pointer">
                                         <option value="">-- Dept --</option>
-                                        ${deptOptionsHtml.replace(`value="${cDept}"`, `value="${cDept}" selected`)}
+                                        ${deptOptionsHtml.replace(`value="${r.creatorDept}"`, `value="${r.creatorDept}" selected`)}
                                     </select>
                                     <select class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-person cursor-pointer">
                                         <option value="">-- Person --</option>
@@ -1643,11 +1663,19 @@ function insertSelectedSyllabus() {
                                 </div>
                             </td>
                             <td class="p-4 text-center">
-                                <span class="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-widest border border-emerald-200 shadow-sm inline-block">🎓 ${r.strength}</span>
+                                <span class="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-widest border border-emerald-200 shadow-sm inline-block">🎓 ${r.totalStrength}</span>
                             </td>
                         </tr>
                     `;
                 });
+
+                tableHtml += `</tbody></table></div></div>`;
+                container.innerHTML = tableHtml;
+            } catch(e) {
+                console.error(e);
+                container.innerHTML = `<div class="text-center py-12 text-rose-500 font-bold uppercase text-xs">Error loading mapping configuration.</div>`;
+            }
+        }
 
                 tableHtml += `</tbody></table></div></div>`;
                 container.innerHTML = tableHtml;
@@ -1678,18 +1706,16 @@ function insertSelectedSyllabus() {
             }).join('');
         }
 
-        async function saveAllExamMappings() {
+     async function saveAllExamMappings() {
             const date = document.getElementById('map-view-date').value;
             const rows = document.querySelectorAll('.mapping-row-item');
             if (rows.length === 0) return alert("No mappings to save.");
 
             try {
                 const batch = db.batch();
-
                 let clubbedMap = {};
 
                 rows.forEach(row => {
-                    const rowKey = row.getAttribute('data-key');
                     const branch = row.getAttribute('data-branch');
                     const subject = row.getAttribute('data-subject');
                     const sNo = row.querySelector('.sno-input').value.trim() || "S.No. 01";
@@ -1700,7 +1726,8 @@ function insertSelectedSyllabus() {
                     const cPerson = row.querySelector('.creator-person').value;
                     
                     const className = row.children[3].innerText.trim();
-                    const sectionName = row.children[4].innerText.trim();
+                    const sectionsText = row.children[4].innerText.trim();
+                    const sectionNames = sectionsText.split(',').map(s => s.trim()).filter(Boolean);
 
                     const clubKey = `${branch}_${subject}_${sNo}`;
                     if (!clubbedMap[clubKey]) {
@@ -1720,7 +1747,11 @@ function insertSelectedSyllabus() {
                             timestamp: Date.now()
                         };
                     }
-                    clubbedMap[clubKey].sections.push({ className: className, section: sectionName });
+                    sectionNames.forEach(secName => {
+                        if (!clubbedMap[clubKey].sections.some(s => s.className === className && s.section === secName)) {
+                            clubbedMap[clubKey].sections.push({ className: className, section: secName });
+                        }
+                    });
                 });
 
                 Object.keys(clubbedMap).forEach(clubKey => {
@@ -1758,69 +1789,7 @@ function insertSelectedSyllabus() {
             }
         }
 
-        function exportExamMappingExcel() {
-            const table = document.getElementById('mapping-export-table');
-            if (!table) return alert("No table data to export.");
-
-            let tableHtml = `<table border="1" style="border-collapse: collapse; font-family: sans-serif;">`;
-            tableHtml += `
-                <tr style="background-color: #1e1b4b; color: #ffffff; text-align: center; font-weight: bold; font-size: 11pt;">
-                    <th style="padding: 10px;">S.No.</th>
-                    <th style="padding: 10px;">Branch</th>
-                    <th style="padding: 10px;">Class</th>
-                    <th style="padding: 10px;">Section</th>
-                    <th style="padding: 10px;">Subjects</th>
-                    <th style="padding: 10px;">Exam Name / Short Code</th>
-                    <th style="padding: 10px;">Mode</th>
-                    <th style="padding: 10px;">Creator</th>
-                    <th style="padding: 10px;">Student Strength</th>
-                </tr>
-            `;
-
-            const rows = table.querySelectorAll('tbody tr');
-            rows.forEach(tr => {
-                const sNo = tr.querySelector('.sno-input').value.trim();
-                const branch = tr.children[2].innerText.trim();
-                const cls = tr.children[3].innerText.trim();
-                const sec = tr.children[4].innerText.trim();
-                const sub = tr.children[5].innerText.trim();
-                const code = tr.querySelector('.code-input').value.trim();
-                const mode = tr.querySelector('.mode-select').value;
-                const cBranch = tr.querySelector('.creator-branch').value;
-                const cDept = tr.querySelector('.creator-dept').value;
-                const cPerson = tr.querySelector('.creator-person').value;
-                const creatorStr = `${cBranch} / ${cDept || 'N/A'} / ${cPerson || 'N/A'}`;
-                const strength = tr.children[9].innerText.replace('🎓', '').trim();
-
-                tableHtml += `
-                    <tr>
-                        <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold; color: #4f46e5;">${sNo}</td>
-                        <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold;">${branch}</td>
-                        <td style="padding: 8px; text-align: center; vertical-align: top;">${cls}</td>
-                        <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold; color: #4f46e5;">${sec}</td>
-                        <td style="padding: 8px; vertical-align: top; font-weight: bold;">${sub}</td>
-                        <td style="padding: 8px; vertical-align: top; font-family: monospace; color: #0d9488;">${code}</td>
-                        <td style="padding: 8px; text-align: center; vertical-align: top;">${mode}</td>
-                        <td style="padding: 8px; vertical-align: top;">${creatorStr}</td>
-                        <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold;">${strength}</td>
-                    </tr>
-                `;
-            });
-
-            tableHtml += `</table>`;
-
-            const fullHTML = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"></head><body>${tableHtml}</body></html>`;
-            const blob = new Blob(['\ufeff', fullHTML], { type: 'application/vnd.ms-excel' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `Exam_Mapping_Report_${document.getElementById('map-view-date').value}.xls`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-        }
-
-     function clubSelectedExams() {
+        function clubSelectedExams() {
             const checkedBoxes = document.querySelectorAll('.row-select-cb:checked');
             if (checkedBoxes.length < 2) return alert("Please select at least two rows to club.");
 
