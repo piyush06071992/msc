@@ -68,8 +68,11 @@
                 </div>
             </div>
         </div>
-        <div class="flex flex-wrap items-center gap-2 sm:gap-3 w-full sm:w-auto justify-end">
-          <button onclick="openExportModal()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-3 rounded-xl font-black uppercase tracking-widest text-xs sm:text-sm transition-colors shadow-md border border-emerald-500 flex items-center gap-2">
+     <div class="flex flex-wrap items-center gap-2 sm:gap-3 w-full sm:w-auto justify-end">
+            <button onclick="openExamMappingModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-3 rounded-xl font-black uppercase tracking-widest text-xs sm:text-sm transition-colors shadow-md border border-indigo-500 flex items-center gap-2">
+                🗺️ Exam Mapping
+            </button>
+            <button onclick="openExportModal()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-3 rounded-xl font-black uppercase tracking-widest text-xs sm:text-sm transition-colors shadow-md border border-emerald-500 flex items-center gap-2">
                 📊 Export
             </button>
             <button id="auth-btn" onclick="openAuthModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-3 rounded-xl font-black uppercase tracking-widest text-xs sm:text-sm transition-colors shadow-md border border-indigo-500 flex items-center gap-2">
@@ -231,6 +234,44 @@
                     📊 Download .XLS File
                 </button>
             </div>
+        </div>
+    </div>
+
+   <!-- EXAM MAPPING FULL-SCREEN MODAL -->
+    <div id="exam-mapping-modal" class="fixed inset-0 bg-slate-900/85 backdrop-blur-md z-[250] hidden flex-col">
+        <div class="bg-[#1e1b4b] text-white p-4 sm:px-8 sm:py-5 flex justify-between items-center border-b-4 border-indigo-500 shrink-0 shadow-xl">
+            <div>
+                <h3 class="font-black text-xl sm:text-2xl uppercase tracking-tighter">Exam Mapping & Configuration</h3>
+                <p class="text-[10px] sm:text-xs font-bold text-indigo-300 uppercase tracking-widest mt-0.5">Manage Modes, Creators, and Student Strengths</p>
+            </div>
+            <div class="flex items-center gap-3">
+                <button onclick="exportExamMappingExcel()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl font-black uppercase tracking-widest text-xs shadow-md transition-all flex items-center gap-2">
+                    📊 Download Formatted Excel
+                </button>
+                <button onclick="closeExamMappingModal()" class="bg-white/10 hover:bg-rose-500 text-white w-10 h-10 rounded-full font-black text-xl transition-colors flex items-center justify-center">✕</button>
+            </div>
+        </div>
+
+        <div class="p-4 sm:p-6 bg-slate-100 border-b border-slate-200 flex flex-wrap gap-4 items-center shrink-0">
+            <div>
+                <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Select Date</label>
+                <input type="date" id="map-view-date" onchange="loadExamMappingData()" class="p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none shadow-sm cursor-pointer">
+            </div>
+            <div>
+                <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Filter Branch</label>
+                <select id="map-view-branch" onchange="loadExamMappingData()" class="p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none shadow-sm cursor-pointer uppercase">
+                    <option value="ALL">All Branches</option>
+                    <option value="GHUMARWIN">Ghumarwin</option>
+                    <option value="DHARAMSHALA">Dharamshala</option>
+                </select>
+            </div>
+            <div class="ml-auto">
+                <button onclick="saveAllExamMappings()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-xl font-black uppercase tracking-widest text-xs shadow-lg transition-all">💾 Save All Mappings</button>
+            </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto custom-scroll p-4 sm:p-6 bg-slate-50" id="exam-mapping-table-container">
+            <div class="text-center py-32"><span class="loader border-t-indigo-600"></span></div>
         </div>
     </div>
 
@@ -1123,8 +1164,334 @@
             `}).join('');
         }
 
+     // --- EXAM MAPPING FULL ENGINE ---
+        async function openExamMappingModal() {
+            const todayIso = document.getElementById('exam-date').value || new Date().toISOString().slice(0, 10);
+            document.getElementById('map-view-date').value = todayIso;
+            document.getElementById('exam-mapping-modal').classList.replace('hidden', 'flex');
+            await loadExamMappingData();
+        }
+
+        function closeExamMappingModal() {
+            document.getElementById('exam-mapping-modal').classList.replace('flex', 'hidden');
+        }
+
+        async function loadExamMappingData() {
+            const date = document.getElementById('map-view-date').value;
+            const branchFilter = document.getElementById('map-view-branch').value;
+            const container = document.getElementById('exam-mapping-table-container');
+
+            if (!date) return;
+            container.innerHTML = `<div class="text-center py-32"><span class="loader border-t-indigo-600"></span><p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-3">Fetching live exam & student data...</p></div>`;
+
+            try {
+                // Fetch schedules and student lists from both centers
+                const [gSnap, dSnap, gStuSnap, dStuSnap, staffSnap] = await Promise.all([
+                    db.collection("exam_schedules").where("date", "==", date).get(),
+                    db.collection("dharamshala_exam_schedules").where("date", "==", date).get(),
+                    db.collection("students").get(),
+                    db.collection("dharamshala_students").get(),
+                    db.collection("staff_applications").where("status", "==", "approved").get()
+                ]);
+
+                let rawPackets = [];
+                if (branchFilter === "ALL" || branchFilter === "GHUMARWIN") {
+                    gSnap.forEach(d => rawPackets.push({ branch: "GHUMARWIN", id: d.id, ...d.data() }));
+                }
+                if (branchFilter === "ALL" || branchFilter === "DHARAMSHALA") {
+                    dSnap.forEach(d => rawPackets.push({ branch: "DHARAMSHALA", id: d.id, ...d.data() }));
+                }
+
+                let studentsMap = { GHUMARWIN: [], DHARAMSHALA: [] };
+                gStuSnap.forEach(d => { const s = d.data(); if(s.isActive !== false) studentsMap.GHUMARWIN.push(s); });
+                dStuSnap.forEach(d => { const s = d.data(); if(s.isActive !== false) studentsMap.DHARAMSHALA.push(s); });
+
+                let allStaffMembers = staffSnap.docs.map(d => d.data());
+
+                // Fetch existing mappings from Firestore
+                const [gMapSnap, dMapSnap] = await Promise.all([
+                    db.collection("exam_mapping_configs").where("date", "==", date).get(),
+                    db.collection("dharamshala_exam_mapping_configs").where("date", "==", date).get()
+                ]);
+
+                let savedConfigs = {};
+                gMapSnap.forEach(d => savedConfigs[d.id] = d.data());
+                dMapSnap.forEach(d => savedConfigs[d.id] = d.data());
+
+                // Normalize packets into individual rows
+                let rows = [];
+                rawPackets.forEach(p => {
+                    const processRow = (cName, secName, subs) => {
+                        const subArr = Array.isArray(subs) ? subs : [subs];
+                        subArr.forEach(sub => {
+                            const strength = studentsMap[p.branch].filter(s => s.className === cName && s.section === secName).length;
+                            const shortCode = `${p.branch[0]}-${cName}-${secName}-${sub}`.toUpperCase().substring(0, 99);
+                            
+                            rows.push({
+                                branch: p.branch,
+                                className: cName,
+                                section: secName,
+                                subject: sub,
+                                shortCode: shortCode,
+                                strength: strength
+                            });
+                        });
+                    };
+
+                    if (p.targets && p.targets.length > 0) {
+                        p.targets.forEach(t => {
+                            t.sections.forEach(s => {
+                                let secName = typeof s === 'object' ? s.section : s;
+                                let subs = typeof s === 'object' && s.subjects ? s.subjects : (t.subjects || []);
+                                processRow(t.className, secName, subs);
+                            });
+                        });
+                    } else {
+                        processRow(p.className, p.section, p.subjects || []);
+                    }
+                });
+
+                if (rows.length === 0) {
+                    container.innerHTML = `<div class="text-center py-20 bg-white rounded-3xl border border-slate-200"><p class="text-slate-400 font-black uppercase text-xs tracking-widest">No exams found for this date.</p></div>`;
+                    return;
+                }
+
+                // Sort rows
+                rows.sort((a,b) => {
+                    if (a.branch !== b.branch) return a.branch.localeCompare(b.branch);
+                    if (a.className !== b.className) return a.className.localeCompare(b.className, undefined, {numeric: true});
+                    if (a.section !== b.section) return a.section.localeCompare(b.section, undefined, {numeric: true});
+                    return a.subject.localeCompare(b.subject);
+                });
+
+                window.currentMappingRows = rows;
+
+                let tableHtml = `
+                    <div class="bg-white border border-slate-200 rounded-[2rem] shadow-sm overflow-hidden">
+                        <div class="overflow-x-auto custom-scroll">
+                            <table class="w-full text-left min-w-[1100px] border-collapse" id="mapping-export-table">
+                                <thead class="bg-slate-100 text-slate-600 text-[10px] uppercase tracking-widest font-black border-b border-slate-200">
+                                    <tr>
+                                        <th class="p-4 w-28">Branch</th>
+                                        <th class="p-4 w-24">Class</th>
+                                        <th class="p-4 w-24">Section</th>
+                                        <th class="p-4 w-48">Subjects</th>
+                                        <th class="p-4 w-64">Exam Name / Short Code</th>
+                                        <th class="p-4 w-36">Mode</th>
+                                        <th class="p-4">Creator (Branch ➔ Dept ➔ Person)</th>
+                                        <th class="p-4 w-28 text-center">Strength</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100 text-xs font-bold text-slate-700">
+                `;
+
+                rows.forEach((r, idx) => {
+                    const rowKey = `${r.branch}_${r.className}_${r.section}_${r.subject}`.replace(/[^a-zA-Z0-9_]/g, '_');
+                    const saved = savedConfigs[rowKey] || {};
+
+                    const modeVal = saved.mode || "Offline";
+                    const cBranch = saved.creatorBranch || r.branch;
+                    const cDept = saved.creatorDept || "";
+                    const cPerson = saved.creatorPerson || "";
+
+                    // Extract departments from staff
+                    let deptsSet = new Set();
+                    allStaff.forEach(st => {
+                        const det = st.details || {};
+                        const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                        if (dKey && det[dKey]) deptsSet.add(String(det[dKey]).trim());
+                    });
+                    const deptOptions = Array.from(deptsSet).sort().map(d => `<option value="${d}" ${cDept === d ? 'selected' : ''}>${d}</option>`).join('');
+
+                    // Filter staff for person dropdown
+                    const filteredStaff = allStaff.filter(st => {
+                        const det = st.details || {};
+                        const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                        const sDept = dKey ? det[dKey] : '';
+                        const sCenter = Object.values(det).join(' ').toUpperCase();
+                        return (!cDept || String(sDept).includes(cDept)) && sCenter.includes(cBranch);
+                    });
+
+                    const personOptions = filteredStaff.map(st => {
+                        const nKey = Object.keys(st.details || {}).find(k => k.toLowerCase().includes('name'));
+                        const name = nKey ? st.details[nKey] : st.email;
+                        const selected = cPerson === name ? 'selected' : '';
+                        return `<option value="${name}" ${selected}>${name}</option>`;
+                    }).join('');
+
+                    tableHtml += `
+                        <tr class="hover:bg-slate-50/80 transition-colors mapping-row-item" data-key="${rowKey}" data-branch="${r.branch}">
+                            <td class="p-4"><span class="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-100">${r.branch}</span></td>
+                            <td class="p-4 font-black uppercase">${r.className}</td>
+                            <td class="p-4 font-black uppercase text-indigo-600">${r.section}</td>
+                            <td class="p-4 font-black text-slate-800 uppercase">${r.subject}</td>
+                            <td class="p-4">
+                                <input type="text" maxlength="99" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold uppercase tracking-wider text-teal-800 code-input" value="${saved.shortCode || r.shortCode}" title="Max 100 characters">
+                            </td>
+                            <td class="p-4">
+                                <select class="w-full p-2 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase mode-select cursor-pointer">
+                                    <option value="Offline" ${modeVal === 'Offline' ? 'selected' : ''}>Offline</option>
+                                    <option value="Online" ${modeVal === 'Online' ? 'selected' : ''}>Online</option>
+                                </select>
+                            </td>
+                            <td class="p-4">
+                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                    <select onchange="updateCreatorStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-branch cursor-pointer">
+                                        <option value="GHUMARWIN" ${cBranch === 'GHUMARWIN' ? 'selected' : ''}>Ghumarwin</option>
+                                        <option value="DHARAMSHALA" ${cBranch === 'DHARAMSHALA' ? 'selected' : ''}>Dharamshala</option>
+                                    </select>
+                                    <select onchange="updateCreatorStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-dept cursor-pointer">
+                                        <option value="">-- Dept --</option>
+                                        ${deptOptions}
+                                    </select>
+                                    <select class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-person cursor-pointer">
+                                        <option value="">-- Person --</option>
+                                        ${personOptions}
+                                    </select>
+                                </div>
+                            </td>
+                            <td class="p-4 text-center">
+                                <span class="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-widest border border-emerald-200 shadow-sm inline-block">🎓 ${r.strength}</span>
+                            </td>
+                        </tr>
+                    `;
+                });
+
+                tableHtml += `</tbody></table></div></div>`;
+                container.innerHTML = tableHtml;
+
+                window.globalStaffList = allStaff;
+            } catch (e) {
+                console.error(e);
+                container.innerHTML = `<div class="text-center py-20 text-rose-500 font-bold uppercase text-xs">Error loading exam mapping data.</div>`;
+            }
+        }
+
+        function updateCreatorStaffList(element) {
+            const row = element.closest('tr');
+            const branch = row.querySelector('.creator-branch').value;
+            const dept = row.querySelector('.creator-dept').value;
+            const personSelect = row.querySelector('.creator-person');
+
+            const filteredStaff = window.globalStaffList.filter(st => {
+                const det = st.details || {};
+                const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                const sDept = dKey ? det[dKey] : '';
+                const sCenter = Object.values(det).join(' ').toUpperCase();
+                return (!dept || String(sDept).includes(dept)) && sCenter.includes(branch);
+            });
+
+            personSelect.innerHTML = `<option value="">-- Person --</option>` + filteredStaff.map(st => {
+                const nKey = Object.keys(st.details || {}).find(k => k.toLowerCase().includes('name'));
+                const name = nKey ? st.details[nKey] : st.email;
+                return `<option value="${name}">${name}</option>`;
+            }).join('');
+        }
+
+        async function saveAllExamMappings() {
+            const date = document.getElementById('map-view-date').value;
+            const rows = document.querySelectorAll('.mapping-row-item');
+            if (rows.length === 0) return alert("No mappings to save.");
+
+            try {
+                const batch = db.batch();
+                rows.forEach(row => {
+                    const rowKey = row.getAttribute('data-key');
+                    const branch = row.getAttribute('data-branch');
+                    const shortCode = row.querySelector('.code-input').value.trim();
+                    const mode = row.querySelector('.mode-select').value;
+                    const cBranch = row.querySelector('.creator-branch').value;
+                    const cDept = row.querySelector('.creator-dept').value;
+                    const cPerson = row.querySelector('.creator-person').value;
+
+                    const prefix = branch === "GHUMARWIN" ? "" : "dharamshala_";
+                    const ref = db.collection(prefix + "exam_mapping_configs").doc(rowKey);
+
+                    batch.set(ref, {
+                        date: date,
+                        rowKey: rowKey,
+                        branch: branch,
+                        shortCode: shortCode,
+                        mode: mode,
+                        creatorBranch: cBranch,
+                        creatorDept: cDept,
+                        creatorPerson: cPerson,
+                        timestamp: Date.now()
+                    }, { merge: true });
+                });
+
+                await batch.commit();
+                alert("✅ All Exam Mappings successfully saved!");
+            } catch (e) {
+                console.error(e);
+                alert("Error saving mappings: " + e.message);
+            }
+        }
+
+        function exportExamMappingExcel() {
+            const table = document.getElementById('mapping-export-table');
+            if (!table) return alert("No table data to export.");
+
+            let tableHtml = `<table border="1" style="border-collapse: collapse; font-family: sans-serif;">`;
+            
+            // Header row with colorful styling
+            tableHtml += `
+                <tr style="background-color: #1e1b4b; color: #ffffff; text-align: center; font-weight: bold; font-size: 11pt;">
+                    <th style="padding: 10px;">Branch</th>
+                    <th style="padding: 10px;">Class</th>
+                    <th style="padding: 10px;">Section</th>
+                    <th style="padding: 10px;">Subjects</th>
+                    <th style="padding: 10px;">Exam Name / Short Code</th>
+                    <th style="padding: 10px;">Mode</th>
+                    <th style="padding: 10px;">Creator</th>
+                    <th style="padding: 10px;">Student Strength</th>
+                </tr>
+            `;
+
+            const rows = table.querySelectorAll('tbody tr');
+            rows.forEach(tr => {
+                const branch = tr.children[0].innerText.trim();
+                const cls = tr.children[1].innerText.trim();
+                const sec = tr.children[2].innerText.trim();
+                const sub = tr.children[3].innerText.trim();
+                const code = tr.querySelector('.code-input').value.trim();
+                const mode = tr.querySelector('.mode-select').value;
+                const cBranch = tr.querySelector('.creator-branch').value;
+                const cDept = tr.querySelector('.creator-dept').value;
+                const cPerson = tr.querySelector('.creator-person').value;
+                const creatorStr = `${cBranch} / ${cDept || 'N/A'} / ${cPerson || 'N/A'}`;
+                const strength = tr.children[7].innerText.replace('🎓', '').trim();
+
+                tableHtml += `
+                    <tr>
+                        <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold;">${branch}</td>
+                        <td style="padding: 8px; text-align: center; vertical-align: top;">${cls}</td>
+                        <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold; color: #4f46e5;">${sec}</td>
+                        <td style="padding: 8px; vertical-align: top; font-weight: bold;">${sub}</td>
+                        <td style="padding: 8px; vertical-align: top; font-family: monospace; color: #0d9488;">${code}</td>
+                        <td style="padding: 8px; text-align: center; vertical-align: top;">${mode}</td>
+                        <td style="padding: 8px; vertical-align: top;">${creatorStr}</td>
+                        <td style="padding: 8px; text-align: center; vertical-align: top; font-weight: bold;">${strength}</td>
+                    </tr>
+                `;
+            });
+
+            tableHtml += `</table>`;
+
+            const fullHTML = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"></head><body>${tableHtml}</body></html>`;
+            const blob = new Blob(['\ufeff', fullHTML], { type: 'application/vnd.ms-excel' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `Exam_Mapping_Report_${document.getElementById('map-view-date').value}.xls`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+        // ----------------------------------------
+
         // --- WHATSAPP SHARING ENGINE ---
-      function shareViaWhatsApp(dateStr, className = null, section = null, subject = null) {
+        function shareViaWhatsApp(dateStr, className = null, section = null, subject = null) {
             const rowData = window.examDataCache[dateStr];
             if (!rowData || rowData.length === 0) return alert("No data to share.");
 
