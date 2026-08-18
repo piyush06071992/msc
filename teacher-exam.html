@@ -1575,8 +1575,51 @@ async function loadExamMappingData() {
                     }
                 });
 
-                let finalRows = Object.values(clubbedRowsMap);
-                finalRows.sort((a,b) => a.sNo.localeCompare(b.sNo, undefined, {numeric:true}));
+      // Group unmapped packets into unique rows based on saved S.No. or Branch/Class/Subject/Mode configuration
+                let groupedRowsMap = {};
+                unmappedPackets.forEach(item => {
+                    // Check if a saved config exists for this specific section/subject combo
+                    const rowKey = item.rowKey;
+                    const saved = savedConfigs[rowKey] || {};
+                    const sNo = saved.sNo || item.savedSNo; // We will use S.No. as part of the grouping key if clubbed
+                    
+                    // If user already assigned a custom S.No., group them by Branch + Subject + S.No.
+                    // Otherwise keep separate by Class/Section initially until clubbed
+                    const groupingKey = saved.sNo ? `${item.branch}_${item.subject}_${saved.sNo}` : `${item.branch}_${item.className}_${item.section}_${item.subject}`;
+
+                    if (!groupedRowsMap[groupingKey]) {
+                        groupedRowsMap[groupingKey] = {
+                            sNo: saved.sNo || item.savedSNo,
+                            branch: item.branch,
+                            className: item.className,
+                            sectionsSet: new Set([item.section]),
+                            subject: item.subject,
+                            shortCode: saved.shortCode || item.savedShortCode || `${item.branch[0]}-${item.className}-${item.section}`.toUpperCase().substring(0, 99),
+                            mode: saved.mode || item.savedMode,
+                            creatorBranch: saved.creatorBranch || item.savedCBranch,
+                            creatorDept: saved.creatorDept || item.savedCDept,
+                            creatorPerson: saved.creatorPerson || item.savedCPerson,
+                            totalStrength: item.strength
+                        };
+                    } else {
+                        if (!groupedRowsMap[groupingKey].sectionsSet.has(item.section)) {
+                            groupedRowsMap[groupingKey].sectionsSet.add(item.section);
+                            groupedRowsMap[groupingKey].totalStrength += item.strength;
+                        }
+                    }
+                });
+
+                let finalRows = Object.values(groupedRowsMap).map((r, idx) => ({
+                    ...r,
+                    sections: Array.from(r.sectionsSet).sort((a,b) => a.localeCompare(b, undefined, {numeric:true})),
+                    sNo: r.sNo || `S.No. ${String(idx + 1).padStart(2, '0')}`
+                }));
+
+                finalRows.sort((a,b) => {
+                    if (a.branch !== b.branch) return a.branch.localeCompare(b.branch);
+                    if (a.className !== b.className) return a.className.localeCompare(b.className, undefined, {numeric: true});
+                    return a.sNo.localeCompare(b.sNo, undefined, {numeric: true});
+                });
 
                 window.globalStaffList = allStaffMembers;
                 window.departmentTeachersList = departmentTeachers;
@@ -1611,7 +1654,7 @@ async function loadExamMappingData() {
                 `;
 
                 finalRows.forEach((r) => {
-                    const sectionsJoined = r.sections.sort().join(', ');
+                    const sectionsJoined = r.sections.join(', ');
                     const filteredStaff = allStaffMembers.filter(st => {
                         const det = st.details || {};
                         const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
@@ -1628,7 +1671,7 @@ async function loadExamMappingData() {
                     }).join('');
 
                     tableHtml += `
-                        <tr class="hover:bg-slate-50/80 transition-colors mapping-row-item" data-branch="${r.branch}" data-subject="${r.subject}">
+                        <tr class="hover:bg-slate-50/80 transition-colors mapping-row-item" data-branch="${r.branch}" data-subject="${r.subject}" data-sections='${JSON.stringify(r.sections)}'>
                             <td class="p-4 text-center"><input type="checkbox" class="row-select-cb w-4 h-4 accent-indigo-600"></td>
                             <td class="p-4">
                                 <input type="text" class="sno-input w-24 p-2 bg-white border border-slate-300 rounded-lg text-xs font-black uppercase text-indigo-700 text-center shadow-sm" value="${r.sNo}" placeholder="S.No.">
@@ -1698,7 +1741,7 @@ async function loadExamMappingData() {
             }).join('');
         }
 
-     async function saveAllExamMappings() {
+   async function saveAllExamMappings() {
             const date = document.getElementById('map-view-date').value;
             const rows = document.querySelectorAll('.mapping-row-item');
             if (rows.length === 0) return alert("No mappings to save.");
