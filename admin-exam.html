@@ -22,6 +22,16 @@
         details > summary { list-style: none; }
         details > summary::-webkit-details-marker { display: none; }
 
+        /* MOBILE MAPPING CARDS */
+        @media (max-width: 767px) {
+            #exam-mapping-table-container .mapping-desktop-table { display: none !important; }
+            #exam-mapping-table-container .mapping-mobile-cards { display: flex !important; }
+        }
+        @media (min-width: 768px) {
+            #exam-mapping-table-container .mapping-desktop-table { display: block !important; }
+            #exam-mapping-table-container .mapping-mobile-cards { display: none !important; }
+        }
+
         /* STRICT BLACK & WHITE COMPACT PRINT STYLES */
         @media print {
             @page { size: A4 portrait; margin: 12mm; }
@@ -244,9 +254,15 @@
                 <h3 class="font-black text-xl sm:text-2xl uppercase tracking-tighter">Exam Mapping & Configuration</h3>
                 <p class="text-[10px] sm:text-xs font-bold text-indigo-300 uppercase tracking-widest mt-0.5">Manage Modes, Creators, and Student Strengths</p>
             </div>
-            <div class="flex items-center gap-3">
+                       <div class="flex items-center gap-3 flex-wrap justify-end">
+                <button onclick="adminClubSelectedExams()" class="bg-indigo-500 hover:bg-indigo-400 text-white px-4 py-2.5 rounded-xl font-black uppercase tracking-widest text-xs shadow-md transition-all flex items-center gap-2">
+                    🔗 Club Selected
+                </button>
+                <button onclick="adminDetachSelectedExams()" class="bg-amber-500 hover:bg-amber-400 text-slate-900 px-4 py-2.5 rounded-xl font-black uppercase tracking-widest text-xs shadow-md transition-all flex items-center gap-2">
+                    ✂️ Detach Selected
+                </button>
                 <button onclick="exportExamMappingExcel()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl font-black uppercase tracking-widest text-xs shadow-md transition-all flex items-center gap-2">
-                    📊 Download Formatted Excel
+                    📊 Download Excel
                 </button>
                 <button onclick="closeExamMappingModal()" class="bg-white/10 hover:bg-rose-500 text-white w-10 h-10 rounded-full font-black text-xl transition-colors flex items-center justify-center">✕</button>
             </div>
@@ -1176,23 +1192,621 @@
             document.getElementById('exam-mapping-modal').classList.replace('flex', 'hidden');
         }
 
+              // ── ADMIN COPY TOAST ──────────────────────────────────────────────
+        function showAdminCopyToast(message) {
+            let toast = document.getElementById('admin-copy-toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'admin-copy-toast';
+                toast.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%) translateY(20px);background:#0d9488;color:#fff;padding:12px 22px;border-radius:14px;font-weight:800;font-size:13px;letter-spacing:0.5px;box-shadow:0 10px 30px -5px rgba(0,0,0,0.3);z-index:9999;opacity:0;transition:all 0.3s ease;pointer-events:none;max-width:90vw;text-align:center;';
+                document.body.appendChild(toast);
+            }
+            toast.innerText = message;
+            void toast.offsetWidth;
+            toast.style.opacity = '1';
+            toast.style.transform = 'translateX(-50%) translateY(0)';
+            clearTimeout(window._adminCopyTimer);
+            window._adminCopyTimer = setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateX(-50%) translateY(20px)';
+            }, 2200);
+        }
+
+        function adminCopyCode(btn) {
+            const cell = btn.closest('td') || btn.closest('.admin-code-wrap');
+            const input = cell ? cell.querySelector('.code-input') : null;
+            const code = input ? input.value.trim() : "";
+            if (!code) return alert("No code to copy.");
+            const showCopied = () => {
+                const orig = btn.innerHTML;
+                btn.innerHTML = "✅";
+                setTimeout(() => { btn.innerHTML = orig; }, 1300);
+                showAdminCopyToast(`✅ Copied: ${code}`);
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(code).then(showCopied).catch(() => adminFallbackCopy(code, showCopied));
+            } else { adminFallbackCopy(code, showCopied); }
+        }
+
+        function adminFallbackCopy(text, onSuccess) {
+            const t = document.createElement('textarea');
+            t.value = text; t.style.position = 'fixed'; t.style.top = '-1000px'; t.style.opacity = '0';
+            document.body.appendChild(t); t.focus(); t.select();
+            try { document.execCommand('copy'); if (onSuccess) onSuccess(); } catch(e) { alert("Copy failed: " + text); }
+            document.body.removeChild(t);
+        }
+
+        // ── DATE SUFFIX ───────────────────────────────────────────────────
+        function getAdminMapDateSuffix() {
+            const el = document.getElementById('map-view-date');
+            const d = el ? el.value : "";
+            if (d) { const p = d.split('-'); if (p.length === 3) return `_${p[2]}${p[1]}`; }
+            return "";
+        }
+
+        function applyAdminDateSuffix(code, suffix) {
+            if (!suffix) return String(code || "");
+            let c = String(code || "");
+            if (c.toUpperCase().endsWith(suffix.toUpperCase())) return c.substring(0, 60);
+            return `${c}${suffix}`.substring(0, 60);
+        }
+
+        // ── BUILD SMART SHORT CODE ─────────────────────────────────────────
+        function buildAdminSmartCode(r, dSuffix) {
+            let subShort = r.subject.substring(0,4).toUpperCase();
+            if (r.subject.toUpperCase().includes('MATH')) subShort = 'MATH';
+            else if (r.subject.toUpperCase().includes('PHYS')) subShort = 'PHYS';
+            else if (r.subject.toUpperCase().includes('CHEM')) subShort = 'CHEM';
+            else if (r.subject.toUpperCase().includes('BIO'))  subShort = 'BIO';
+
+            const branches = Array.from(r.branchSet).sort();
+            let brShort = branches.map(b => b[0]).join('');
+            let clsShort = Array.from(r.classSet).sort((a,b) => a.localeCompare(b,undefined,{numeric:true})).map(c => c.replace(/[^0-9A-Z]/ig,'').substring(0,2)).join('');
+            let secShort = Array.from(r.sectionsSet).sort((a,b) => a.localeCompare(b,undefined,{numeric:true})).map(s => s.replace(/[^0-9A-Z]/ig,'').substring(0,3)).join('');
+            const smart = `${subShort}-${brShort}-${clsShort}-${secShort}`;
+            return applyAdminDateSuffix(smart, dSuffix).toUpperCase();
+        }
+
+        // ── MATRIX MAPPER ─────────────────────────────────────────────────
+        // Returns flat list of {branch, className, section, subject, strength, savedSNo, savedShortCode, savedMode, savedCBranch, savedCDept, savedCPerson, subExamCodes[]}
+        function buildMatrixRows(rawPackets, studentsMap, savedConfigs, hodMappings) {
+            let flat = [];
+            rawPackets.forEach(p => {
+                const processRow = (cName, secName, subs) => {
+                    (Array.isArray(subs) ? subs : [subs]).forEach(sub => {
+                        if (!sub) return;
+                        const cleanSub = sub.trim().toUpperCase();
+                        const rowKey = `${p.branch}_${cName}_${secName}_${cleanSub}`.replace(/[^a-zA-Z0-9_]/g, '_');
+                        const saved = savedConfigs[rowKey] || {};
+                        const strength = (studentsMap[p.branch] || []).filter(s => s.className === cName && s.section === secName).length;
+                        // sub-exam codes from HOD mappings
+                        const subCodes = (hodMappings[`${cName}|${secName}|${cleanSub}`] || []);
+                        flat.push({ branch: p.branch, className: cName, section: secName, subject: cleanSub, strength, rowKey,
+                            savedSNo: saved.sNo || "", savedShortCode: saved.shortCode || "",
+                            savedMode: saved.mode || "Offline",
+                            savedCBranch: saved.creatorBranch || p.branch,
+                            savedCDept: saved.creatorDept || "", savedCPerson: saved.creatorPerson || "",
+                            subExamCodes: subCodes });
+                    });
+                };
+                if (p.targets && p.targets.length > 0) {
+                    p.targets.forEach(t => t.sections.forEach(s => {
+                        const secName = typeof s === 'object' ? s.section : s;
+                        const subs = typeof s === 'object' && s.subjects ? s.subjects : (t.subjects || []);
+                        processRow(t.className, secName, subs);
+                    }));
+                } else { processRow(p.className, p.section, p.subjects || []); }
+            });
+            return flat;
+        }
+
+        // Group flat rows into clubbed display rows by sNo+subject
+        function groupIntoClubbed(flatRows, dSuffix, allStaffMembers) {
+            let autoCounter = 1;
+            let groupedMap = {};
+            flatRows.forEach(item => {
+                const sNo = item.savedSNo || `S.No. ${String(autoCounter++).padStart(2,'0')}`;
+                const groupKey = `${item.subject}_${sNo}`;
+                if (!groupedMap[groupKey]) {
+                    groupedMap[groupKey] = {
+                        sNo, subject: item.subject, packets: [],
+                        shortCode: item.savedShortCode || "",
+                        mode: item.savedMode,
+                        creatorBranch: item.savedCBranch, creatorDept: item.savedCDept, creatorPerson: item.savedCPerson,
+                        totalStrength: 0, branchSet: new Set(), classSet: new Set(), sectionsSet: new Set(),
+                        subExamCodes: [], allRowKeys: []
+                    };
+                }
+                const g = groupedMap[groupKey];
+                g.packets.push(item);
+                g.totalStrength += item.strength;
+                g.branchSet.add(item.branch);
+                g.classSet.add(item.className);
+                g.sectionsSet.add(item.section);
+                g.allRowKeys.push(item.rowKey);
+                item.subExamCodes.forEach(c => { if (!g.subExamCodes.includes(c)) g.subExamCodes.push(c); });
+            });
+
+            return Object.values(groupedMap).map(r => {
+                const smart = buildAdminSmartCode(r, dSuffix);
+                return { ...r,
+                    branches: Array.from(r.branchSet).sort(),
+                    classes: Array.from(r.classSet).sort((a,b) => a.localeCompare(b,undefined,{numeric:true})),
+                    sections: Array.from(r.sectionsSet).sort((a,b) => a.localeCompare(b,undefined,{numeric:true})),
+                    shortCode: r.shortCode ? applyAdminDateSuffix(r.shortCode, dSuffix) : smart
+                };
+            }).sort((a,b) => a.sNo.localeCompare(b.sNo, undefined, {numeric:true}));
+        }
+
+        // ── RENDER TABLE ROW ──────────────────────────────────────────────
+        function renderAdminMappingRow(r, deptOptionsHtml, allStaffMembers) {
+            const packetsJson = JSON.stringify(r.packets).replace(/'/g,"&apos;").replace(/"/g,"&quot;");
+            const filteredStaff = (allStaffMembers || []).filter(st => {
+                const det = st.details || {};
+                const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                const sDept = dKey ? det[dKey] : '';
+                const sCenter = Object.values(det).join(' ').toUpperCase();
+                return (!r.creatorDept || String(sDept).includes(r.creatorDept)) && sCenter.includes(r.creatorBranch);
+            });
+            const personOptions = filteredStaff.map(st => {
+                const nKey = Object.keys(st.details||{}).find(k => k.toLowerCase().includes('name'));
+                const name = nKey ? st.details[nKey] : st.email;
+                return `<option value="${name}" ${r.creatorPerson===name?'selected':''}>${name}</option>`;
+            }).join('');
+
+            const assigneeChips = r.creatorPerson ? `
+                <div class="flex flex-wrap gap-1 mb-2">
+                    ${r.creatorBranch?`<span class="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-[9px] font-black uppercase border border-indigo-200">📍${r.creatorBranch}</span>`:''}
+                    ${r.creatorDept?`<span class="bg-teal-100 text-teal-700 px-2 py-0.5 rounded text-[9px] font-black uppercase border border-teal-200">🏷️${r.creatorDept}</span>`:''}
+                    <span class="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded text-[9px] font-black uppercase border border-emerald-300">👤${r.creatorPerson}</span>
+                </div>` : '';
+
+            const subExamCodesHtml = r.subExamCodes && r.subExamCodes.length > 0
+                ? `<div class="mt-1 flex flex-wrap gap-1">${r.subExamCodes.map(c=>`<span class="bg-purple-100 text-purple-700 px-2 py-0.5 rounded text-[9px] font-black uppercase border border-purple-200 font-mono">🔗${c}</span>`).join('')}</div>` : '';
+
+            const sectionChips = r.packets.map(p => `<span class="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-[9px] font-black uppercase border border-slate-200">${p.branch[0]}·${p.className}·${p.section}</span>`).join(' ');
+
+            return `
+                <tr class="hover:bg-slate-50/80 transition-colors admin-mapping-row" data-subject="${r.subject}" data-packets="${packetsJson}" data-allkeys='${JSON.stringify(r.allRowKeys)}'>
+                    <td class="p-3 text-center"><input type="checkbox" class="admin-row-cb w-4 h-4 accent-indigo-600"></td>
+                    <td class="p-3">
+                        <input type="text" class="sno-input w-24 p-2 bg-white border border-slate-300 rounded-lg text-xs font-black uppercase text-indigo-700 text-center shadow-sm" value="${r.sNo}" placeholder="S.No.">
+                    </td>
+                    <td class="p-3">
+                        <div class="font-black text-slate-800 uppercase text-xs mb-1">${r.subject}</div>
+                        <div class="flex flex-wrap gap-1">${sectionChips}</div>
+                        ${subExamCodesHtml}
+                    </td>
+                    <td class="p-3">
+                        <div class="flex items-center gap-1.5 admin-code-wrap">
+                            <input type="text" maxlength="99" class="flex-1 p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold uppercase tracking-wider text-teal-800 code-input" value="${r.shortCode}">
+                            <button type="button" onclick="adminCopyCode(this)" class="shrink-0 bg-teal-600 hover:bg-teal-500 text-white w-9 h-9 rounded-lg font-black text-sm shadow-sm transition-colors flex items-center justify-center active:scale-90" title="Copy">📋</button>
+                        </div>
+                        <div class="text-[9px] text-slate-400 font-bold uppercase mt-1">Strength: <span class="text-emerald-700 font-black">${r.totalStrength}</span> • ${r.branches.join('+')} • ${r.classes.join('/')} • Secs: ${r.sections.join(',')}</div>
+                    </td>
+                    <td class="p-3">
+                        <select class="w-full p-2 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase mode-select cursor-pointer">
+                            <option value="Offline" ${r.mode==='Offline'?'selected':''}>Offline</option>
+                            <option value="Online" ${r.mode==='Online'?'selected':''}>Online</option>
+                        </select>
+                    </td>
+                    <td class="p-3">
+                        ${assigneeChips}
+                        <div class="grid grid-cols-1 gap-1.5">
+                            <select onchange="adminUpdateStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[10px] font-bold uppercase creator-branch cursor-pointer">
+                                <option value="GHUMARWIN" ${r.creatorBranch==='GHUMARWIN'?'selected':''}>Ghumarwin</option>
+                                <option value="DHARAMSHALA" ${r.creatorBranch==='DHARAMSHALA'?'selected':''}>Dharamshala</option>
+                            </select>
+                            <select onchange="adminUpdateStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[10px] font-bold uppercase creator-dept cursor-pointer">
+                                <option value="">-- Dept --</option>
+                                ${deptOptionsHtml.replace(`value="${r.creatorDept}"`,`value="${r.creatorDept}" selected`)}
+                            </select>
+                            <select class="p-2 bg-white border border-slate-300 rounded-lg text-[10px] font-bold uppercase creator-person cursor-pointer">
+                                <option value="">-- Person --</option>
+                                ${personOptions}
+                            </select>
+                        </div>
+                    </td>
+                </tr>`;
+        }
+
+        // ── RENDER MOBILE CARD ────────────────────────────────────────────
+        function renderAdminMappingCard(r, deptOptionsHtml, allStaffMembers) {
+            const packetsJson = JSON.stringify(r.packets).replace(/'/g,"&apos;").replace(/"/g,"&quot;");
+            const filteredStaff = (allStaffMembers || []).filter(st => {
+                const det = st.details || {};
+                const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                const sDept = dKey ? det[dKey] : '';
+                const sCenter = Object.values(det).join(' ').toUpperCase();
+                return (!r.creatorDept || String(sDept).includes(r.creatorDept)) && sCenter.includes(r.creatorBranch);
+            });
+            const personOptions = filteredStaff.map(st => {
+                const nKey = Object.keys(st.details||{}).find(k => k.toLowerCase().includes('name'));
+                const name = nKey ? st.details[nKey] : st.email;
+                return `<option value="${name}" ${r.creatorPerson===name?'selected':''}>${name}</option>`;
+            }).join('');
+
+            const assigneeChips = r.creatorPerson ? `
+                <div class="flex flex-wrap gap-1.5 mb-2">
+                    ${r.creatorBranch?`<span class="bg-indigo-100 text-indigo-700 px-2 py-1 rounded text-[10px] font-black uppercase border border-indigo-200">📍 ${r.creatorBranch}</span>`:''}
+                    ${r.creatorDept?`<span class="bg-teal-100 text-teal-700 px-2 py-1 rounded text-[10px] font-black uppercase border border-teal-200">🏷️ ${r.creatorDept}</span>`:''}
+                    <span class="bg-emerald-100 text-emerald-800 px-2 py-1 rounded text-[10px] font-black uppercase border border-emerald-300">👤 ${r.creatorPerson}</span>
+                </div>` : '';
+
+            const subExamCodesHtml = r.subExamCodes && r.subExamCodes.length > 0
+                ? r.subExamCodes.map(c=>`<span class="bg-purple-100 text-purple-700 px-2 py-1 rounded-lg text-[10px] font-black uppercase border border-purple-200 font-mono">🔗 ${c}</span>`).join(' ') : '';
+
+            const sectionChips = r.packets.map(p => `<span class="bg-slate-100 text-slate-700 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase border border-slate-200">${p.branch[0]} · ${p.className} · Sec ${p.section}</span>`).join(' ');
+
+            return `
+                <div class="bg-white border-2 border-slate-200 rounded-2xl p-4 shadow-sm admin-mapping-row" data-subject="${r.subject}" data-packets="${packetsJson}" data-allkeys='${JSON.stringify(r.allRowKeys)}'>
+                    <div class="flex items-center justify-between mb-3">
+                        <div class="flex items-center gap-2">
+                            <input type="checkbox" class="admin-row-cb w-5 h-5 accent-indigo-600 rounded">
+                            <input type="text" class="sno-input w-28 p-2 bg-white border border-slate-300 rounded-lg text-xs font-black uppercase text-indigo-700 text-center shadow-sm" value="${r.sNo}">
+                        </div>
+                        <span class="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl text-xs font-black uppercase border border-emerald-200">🎓 ${r.totalStrength}</span>
+                    </div>
+                    <div class="mb-3">
+                        <span class="bg-slate-800 text-white px-3 py-1.5 rounded-lg text-xs font-black uppercase mr-2">${r.subject}</span>
+                        <div class="flex flex-wrap gap-1.5 mt-2">${sectionChips}</div>
+                        ${subExamCodesHtml ? `<div class="flex flex-wrap gap-1.5 mt-2">${subExamCodesHtml}</div>` : ''}
+                    </div>
+                    <div class="mb-3">
+                        <div class="text-[9px] font-black text-slate-400 uppercase mb-1">Exam Code</div>
+                        <div class="flex items-center gap-2 admin-code-wrap">
+                            <input type="text" maxlength="99" class="flex-1 p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold uppercase text-teal-800 code-input" value="${r.shortCode}">
+                            <button type="button" onclick="adminCopyCode(this)" class="shrink-0 bg-teal-600 hover:bg-teal-500 text-white w-9 h-9 rounded-lg font-black text-sm flex items-center justify-center active:scale-90">📋</button>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <div class="text-[9px] font-black text-slate-400 uppercase mb-1">Mode</div>
+                        <select class="w-full p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase mode-select cursor-pointer">
+                            <option value="Offline" ${r.mode==='Offline'?'selected':''}>Offline</option>
+                            <option value="Online" ${r.mode==='Online'?'selected':''}>Online</option>
+                        </select>
+                    </div>
+                    <div>
+                        <div class="text-[9px] font-black text-slate-400 uppercase mb-1">Assigned Teacher</div>
+                        ${assigneeChips}
+                        <div class="grid grid-cols-1 gap-2">
+                            <select onchange="adminUpdateStaffList(this)" class="p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase creator-branch cursor-pointer">
+                                <option value="GHUMARWIN" ${r.creatorBranch==='GHUMARWIN'?'selected':''}>Ghumarwin</option>
+                                <option value="DHARAMSHALA" ${r.creatorBranch==='DHARAMSHALA'?'selected':''}>Dharamshala</option>
+                            </select>
+                            <select onchange="adminUpdateStaffList(this)" class="p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase creator-dept cursor-pointer">
+                                <option value="">-- Dept --</option>
+                                ${deptOptionsHtml.replace(`value="${r.creatorDept}"`,`value="${r.creatorDept}" selected`)}
+                            </select>
+                            <select class="p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase creator-person cursor-pointer">
+                                <option value="">-- Person --</option>
+                                ${personOptions}
+                            </select>
+                        </div>
+                    </div>
+                </div>`;
+        }
+
+        // ── MAIN LOAD ─────────────────────────────────────────────────────
         async function loadExamMappingData() {
             const date = document.getElementById('map-view-date').value;
             const branchFilter = document.getElementById('map-view-branch').value;
             const container = document.getElementById('exam-mapping-table-container');
-
             if (!date) return;
-            container.innerHTML = `<div class="text-center py-32"><span class="loader border-t-indigo-600"></span><p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-3">Fetching live exam & student data...</p></div>`;
+            container.innerHTML = `<div class="text-center py-32"><span class="loader border-t-indigo-600"></span><p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-3">Building matrix view...</p></div>`;
 
             try {
-                // Fetch schedules and student lists from both centers
-                const [gSnap, dSnap, gStuSnap, dStuSnap, staffSnap] = await Promise.all([
-                    db.collection("exam_schedules").where("date", "==", date).get(),
-                    db.collection("dharamshala_exam_schedules").where("date", "==", date).get(),
+                const [gSnap, dSnap, gStuSnap, dStuSnap, staffSnap, gCfgSnap, dCfgSnap, gHodSnap, dHodSnap] = await Promise.all([
+                    branchFilter==="ALL"||branchFilter==="GHUMARWIN" ? db.collection("exam_schedules").where("date","==",date).get() : Promise.resolve({forEach:()={}}),
+                    branchFilter==="ALL"||branchFilter==="DHARAMSHALA" ? db.collection("dharamshala_exam_schedules").where("date","==",date).get() : Promise.resolve({forEach:()={}}),
                     db.collection("students").get(),
                     db.collection("dharamshala_students").get(),
-                    db.collection("staff_applications").where("status", "==", "approved").get()
+                    db.collection("staff_applications").where("status","==","approved").get(),
+                    branchFilter==="ALL"||branchFilter==="GHUMARWIN" ? db.collection("exam_mapping_configs").where("date","==",date).get() : Promise.resolve({forEach:()={}}),
+                    branchFilter==="ALL"||branchFilter==="DHARAMSHALA" ? db.collection("dharamshala_exam_mapping_configs").where("date","==",date).get() : Promise.resolve({forEach:()={}}),
+                    branchFilter==="ALL"||branchFilter==="GHUMARWIN" ? db.collection("exam_mappings").where("date","==",date).get() : Promise.resolve({forEach:()={}}),
+                    branchFilter==="ALL"||branchFilter==="DHARAMSHALA" ? db.collection("dharamshala_exam_mappings").where("date","==",date).get() : Promise.resolve({forEach:()={}})
                 ]);
+
+                let rawPackets = [];
+                if (branchFilter==="ALL"||branchFilter==="GHUMARWIN") gSnap.forEach(d => rawPackets.push({branch:"GHUMARWIN",id:d.id,...d.data()}));
+                if (branchFilter==="ALL"||branchFilter==="DHARAMSHALA") dSnap.forEach(d => rawPackets.push({branch:"DHARAMSHALA",id:d.id,...d.data()}));
+
+                let studentsMap = {GHUMARWIN:[],DHARAMSHALA:[]};
+                gStuSnap.forEach(d => { const s=d.data(); if(s.isActive!==false) studentsMap.GHUMARWIN.push(s); });
+                dStuSnap.forEach(d => { const s=d.data(); if(s.isActive!==false) studentsMap.DHARAMSHALA.push(s); });
+
+                let allStaffMembers = staffSnap.docs.map(d => d.data());
+                window.adminGlobalStaffList = allStaffMembers;
+
+                let savedConfigs = {};
+                gCfgSnap.forEach(d => savedConfigs[d.id] = d.data());
+                dCfgSnap.forEach(d => savedConfigs[d.id] = d.data());
+
+                // HOD mappings — collect sub-exam short codes per class|section|subject
+                let hodMappings = {};
+                const collectHod = (snap) => snap.forEach(d => {
+                    const m = d.data();
+                    const code = m.shortCode || m.shortName || "";
+                    (m.sections || []).forEach(sec => {
+                        const k = `${sec.className}|${sec.section}|${(m.subject||"").toUpperCase()}`;
+                        if (!hodMappings[k]) hodMappings[k] = [];
+                        if (code && !hodMappings[k].includes(code)) hodMappings[k].push(code);
+                    });
+                });
+                collectHod(gHodSnap); collectHod(dHodSnap);
+
+                if (rawPackets.length === 0) {
+                    container.innerHTML = `<div class="text-center py-20 bg-white rounded-3xl border border-slate-200"><p class="text-slate-400 font-black uppercase text-xs tracking-widest">No exams found for this date.</p></div>`;
+                    return;
+                }
+
+                const dSuffix = getAdminMapDateSuffix();
+                const flatRows = buildMatrixRows(rawPackets, studentsMap, savedConfigs, hodMappings);
+                const finalRows = groupIntoClubbed(flatRows, dSuffix, allStaffMembers);
+
+                let deptsSet = new Set();
+                allStaffMembers.forEach(st => {
+                    const det = st.details||{};
+                    const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department')||k.toLowerCase().includes('subject'));
+                    if (dKey && det[dKey]) deptsSet.add(String(det[dKey]).trim());
+                });
+                const deptOptionsHtml = Array.from(deptsSet).sort().map(d => `<option value="${d}">${d}</option>`).join('');
+
+                window.adminFinalRows = finalRows;
+                window.adminDeptOptionsHtml = deptOptionsHtml;
+
+                renderAdminMappingView(finalRows, deptOptionsHtml, allStaffMembers, container);
+
+            } catch(e) {
+                console.error(e);
+                container.innerHTML = `<div class="text-center py-20 text-rose-500 font-bold uppercase text-xs">Error loading exam mapping: ${e.message}</div>`;
+            }
+        }
+
+        function renderAdminMappingView(finalRows, deptOptionsHtml, allStaffMembers, container) {
+            let tableHtml = `
+                <div class="bg-white border border-slate-200 rounded-[2rem] shadow-sm overflow-hidden">
+                    <div class="overflow-x-auto custom-scroll">
+                        <table class="w-full text-left min-w-[900px] border-collapse" id="mapping-export-table">
+                            <thead class="bg-slate-100 text-slate-600 text-[10px] uppercase tracking-widest font-black border-b border-slate-200">
+                                <tr>
+                                    <th class="p-3 w-10 text-center">Sel</th>
+                                    <th class="p-3 w-28">S.No.</th>
+                                    <th class="p-3">Subject / Sections / Sub-Codes</th>
+                                    <th class="p-3 w-52">Exam Code</th>
+                                    <th class="p-3 w-28">Mode</th>
+                                    <th class="p-3">Assigned Teacher</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100 text-xs font-bold text-slate-700">
+                                ${finalRows.map(r => renderAdminMappingRow(r, deptOptionsHtml, allStaffMembers)).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>`;
+
+            const mobileHtml = `<div class="flex flex-col gap-4">${finalRows.map(r => renderAdminMappingCard(r, deptOptionsHtml, allStaffMembers)).join('')}</div>`;
+
+            container.innerHTML = `
+                <div class="mapping-desktop-table">${tableHtml}</div>
+                <div class="mapping-mobile-cards" style="display:none;">${mobileHtml}</div>`;
+        }
+
+        // ── STAFF DROPDOWN UPDATE ─────────────────────────────────────────
+        function adminUpdateStaffList(element) {
+            const row = element.closest('tr') || element.closest('.admin-mapping-row');
+            const branch = row.querySelector('.creator-branch').value;
+            const dept = row.querySelector('.creator-dept').value;
+            const personSelect = row.querySelector('.creator-person');
+            const filtered = (window.adminGlobalStaffList || []).filter(st => {
+                const det = st.details||{};
+                const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department')||k.toLowerCase().includes('subject'));
+                const sDept = dKey ? det[dKey] : '';
+                const sCenter = Object.values(det).join(' ').toUpperCase();
+                return (!dept || String(sDept).includes(dept)) && sCenter.includes(branch);
+            });
+            personSelect.innerHTML = `<option value="">-- Person --</option>` + filtered.map(st => {
+                const nKey = Object.keys(st.details||{}).find(k => k.toLowerCase().includes('name'));
+                const name = nKey ? st.details[nKey] : st.email;
+                return `<option value="${name}">${name}</option>`;
+            }).join('');
+        }
+
+        // ── CLUB / DETACH ─────────────────────────────────────────────────
+        function adminClubSelectedExams() {
+            const checked = document.querySelectorAll('.admin-row-cb:checked');
+            if (checked.length < 2) return alert("Select at least two rows to club.");
+            const firstSub = checked[0].closest('.admin-mapping-row').getAttribute('data-subject');
+            let ok = true;
+            checked.forEach(cb => { if (cb.closest('.admin-mapping-row').getAttribute('data-subject') !== firstSub) ok = false; });
+            if (!ok) return alert("You can only club exams of the same subject.");
+            const allSNos = Array.from(document.querySelectorAll('.sno-input')).map(i => i.value.trim());
+            let max = 0;
+            allSNos.forEach(s => { const m = s.match(/\d+/); if (m && parseInt(m[0])>max) max=parseInt(m[0]); });
+            const newSNo = `S.No. ${String(max+1).padStart(2,'0')}`;
+            checked.forEach(cb => { cb.closest('.admin-mapping-row').querySelector('.sno-input').value = newSNo; cb.checked = false; });
+            adminRefreshFromDOM();
+        }
+
+        function adminDetachSelectedExams() {
+            const checked = document.querySelectorAll('.admin-row-cb:checked');
+            if (checked.length === 0) return alert("Select at least one row to detach.");
+            const allSNos = Array.from(document.querySelectorAll('.sno-input')).map(i => i.value.trim());
+            let max = 0;
+            allSNos.forEach(s => { const m = s.match(/\d+/); if (m && parseInt(m[0])>max) max=parseInt(m[0]); });
+            let detached = false;
+            checked.forEach(cb => {
+                const row = cb.closest('.admin-mapping-row');
+                const packets = JSON.parse((row.getAttribute('data-packets')||'[]').replace(/&quot;/g,'"').replace(/&apos;/g,"'"));
+                if (packets.length > 1) {
+                    detached = true;
+                    const sub = row.getAttribute('data-subject');
+                    const shortCode = row.querySelector('.code-input').value.trim();
+                    const mode = row.querySelector('.mode-select').value;
+                    const cBranch = row.querySelector('.creator-branch').value;
+                    const cDept = row.querySelector('.creator-dept').value;
+                    const cPerson = row.querySelector('.creator-person').value;
+                    packets.forEach(p => {
+                        max++;
+                        const mockRow = document.createElement('div');
+                        mockRow.className = 'admin-mapping-row';
+                        mockRow.setAttribute('data-subject', sub);
+                        mockRow.setAttribute('data-packets', JSON.stringify([p]).replace(/'/g,"&apos;").replace(/"/g,"&quot;"));
+                        mockRow.setAttribute('data-allkeys', JSON.stringify([p.rowKey]));
+                        mockRow.innerHTML = `
+                            <input class="sno-input" value="S.No. ${String(max).padStart(2,'0')}">
+                            <input class="code-input" value="${shortCode}">
+                            <select class="mode-select"><option value="${mode}">${mode}</option></select>
+                            <select class="creator-branch"><option value="${cBranch}">${cBranch}</option></select>
+                            <select class="creator-dept"><option value="${cDept}">${cDept}</option></select>
+                            <select class="creator-person"><option value="${cPerson}">${cPerson}</option></select>`;
+                        row.parentNode.insertBefore(mockRow, row);
+                    });
+                    row.remove();
+                } else { cb.checked = false; }
+            });
+            if (detached) adminRefreshFromDOM(); else alert("Selected rows are already individual.");
+        }
+
+        function adminRefreshFromDOM() {
+            const rows = document.querySelectorAll('.admin-mapping-row');
+            let groupedMap = {};
+            rows.forEach(row => {
+                const subject = row.getAttribute('data-subject');
+                const sNoEl = row.querySelector('.sno-input'); if (!sNoEl) return;
+                const sNo = sNoEl.value.trim();
+                const shortCode = (row.querySelector('.code-input')||{value:''}).value.trim();
+                const mode = (row.querySelector('.mode-select')||{value:'Offline'}).value;
+                const cBranch = (row.querySelector('.creator-branch')||{value:'GHUMARWIN'}).value;
+                const cDept = (row.querySelector('.creator-dept')||{value:''}).value;
+                const cPerson = (row.querySelector('.creator-person')||{value:''}).value;
+                const packets = JSON.parse((row.getAttribute('data-packets')||'[]').replace(/&quot;/g,'"').replace(/&apos;/g,"'"));
+                const allKeys = JSON.parse(row.getAttribute('data-allkeys')||'[]');
+                const subCodes = JSON.parse(row.getAttribute('data-subcodes')||'[]');
+                const groupKey = `${subject}_${sNo}`;
+                if (!groupedMap[groupKey]) {
+                    groupedMap[groupKey] = { sNo, subject, packets:[], shortCode, mode, creatorBranch:cBranch, creatorDept:cDept, creatorPerson:cPerson,
+                        totalStrength:0, branchSet:new Set(), classSet:new Set(), sectionsSet:new Set(), allRowKeys:[], subExamCodes:subCodes };
+                }
+                const g = groupedMap[groupKey];
+                packets.forEach(p => { g.packets.push(p); g.totalStrength+=p.strength; g.branchSet.add(p.branch); g.classSet.add(p.className); g.sectionsSet.add(p.section); });
+                allKeys.forEach(k => { if(!g.allRowKeys.includes(k)) g.allRowKeys.push(k); });
+            });
+            const dSuffix = getAdminMapDateSuffix();
+            const finalRows = Object.values(groupedMap).map(r => {
+                const smart = buildAdminSmartCode(r, dSuffix);
+                return { ...r,
+                    branches: Array.from(r.branchSet).sort(),
+                    classes: Array.from(r.classSet).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})),
+                    sections: Array.from(r.sectionsSet).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})),
+                    shortCode: r.shortCode ? applyAdminDateSuffix(r.shortCode,dSuffix) : smart };
+            }).sort((a,b) => a.sNo.localeCompare(b.sNo,undefined,{numeric:true}));
+
+            const container = document.getElementById('exam-mapping-table-container');
+            renderAdminMappingView(finalRows, window.adminDeptOptionsHtml||'', window.adminGlobalStaffList||[], container);
+        }
+
+        // ── SAVE ALL ──────────────────────────────────────────────────────
+        async function saveAllExamMappings() {
+            const date = document.getElementById('map-view-date').value;
+            const rows = document.querySelectorAll('.admin-mapping-row');
+            if (rows.length === 0) return alert("No mappings to save.");
+            try {
+                const batch = db.batch();
+                let saved = false;
+                rows.forEach(row => {
+                    const subject = row.getAttribute('data-subject');
+                    const sNo = row.querySelector('.sno-input').value.trim() || "S.No. 01";
+                    const shortCode = row.querySelector('.code-input').value.trim();
+                    const mode = row.querySelector('.mode-select').value;
+                    const cBranch = row.querySelector('.creator-branch').value;
+                    const cDept = row.querySelector('.creator-dept').value;
+                    const cPerson = row.querySelector('.creator-person').value;
+                    const packets = JSON.parse((row.getAttribute('data-packets')||'[]').replace(/&quot;/g,'"').replace(/&apos;/g,"'"));
+                    const allKeys = JSON.parse(row.getAttribute('data-allkeys')||'[]');
+
+                    const selectedTeacher = (window.adminGlobalStaffList||[]).find(t => {
+                        const nKey = Object.keys(t.details||{}).find(k=>k.toLowerCase().includes('name'));
+                        return (nKey ? t.details[nKey] : t.email) === cPerson;
+                    });
+                    const teacherEmail = selectedTeacher ? selectedTeacher.email : "";
+
+                    let branchMap = {};
+                    packets.forEach(p => {
+                        if (!branchMap[p.branch]) branchMap[p.branch] = { sections:[], firstClass:p.className };
+                        if (!branchMap[p.branch].sections.some(s=>s.className===p.className&&s.section===p.section))
+                            branchMap[p.branch].sections.push({className:p.className, section:p.section});
+                    });
+
+                    Object.keys(branchMap).forEach(branch => {
+                        const bData = branchMap[branch];
+                        const prefix = branch==="GHUMARWIN" ? "" : branch.toLowerCase()+"_";
+                        const docId = `${date}_${bData.firstClass}_${subject}_${sNo}`.replace(/[^a-zA-Z0-9_]/g,'_');
+                        batch.set(db.collection(prefix+"exam_mappings").doc(docId), {
+                            date, branch, sNo, shortCode, subject, className:bData.firstClass,
+                            sections:bData.sections, mode, creatorBranch:cBranch, creatorDept:cDept, creatorPerson:cPerson,
+                            assignedTeacherEmail:teacherEmail, assignedTeacherName:cPerson, timestamp:Date.now()
+                        }, {merge:true});
+                        saved = true;
+                    });
+
+                    allKeys.forEach(key => {
+                        const branch = packets.find(p=>p.rowKey===key)?.branch || "GHUMARWIN";
+                        const prefix = branch==="GHUMARWIN" ? "" : branch.toLowerCase()+"_";
+                        batch.set(db.collection(prefix+"exam_mapping_configs").doc(key), {
+                            date, branch, sNo, shortCode, mode, creatorBranch:cBranch, creatorDept:cDept, creatorPerson:cPerson
+                        }, {merge:true});
+                    });
+                });
+
+                if (saved) { await batch.commit(); alert("✅ All Admin Exam Mappings saved!"); }
+                else alert("Nothing to save.");
+            } catch(e) { console.error(e); alert("Save failed: "+e.message); }
+        }
+
+        // ── EXCEL EXPORT ──────────────────────────────────────────────────
+        function exportExamMappingExcel() {
+            const table = document.getElementById('mapping-export-table');
+            if (!table) return alert("No table to export.");
+
+            let html = `<table border="1" style="border-collapse:collapse;font-family:sans-serif;">
+                <tr style="background:#1e1b4b;color:#fff;font-weight:bold;">
+                    <th style="padding:10px;">S.No.</th>
+                    <th style="padding:10px;">Subject</th>
+                    <th style="padding:10px;">Branches</th>
+                    <th style="padding:10px;">Classes</th>
+                    <th style="padding:10px;">Sections</th>
+                    <th style="padding:10px;">Sub-Exam Codes</th>
+                    <th style="padding:10px;">Exam Code</th>
+                    <th style="padding:10px;">Mode</th>
+                    <th style="padding:10px;">Assigned</th>
+                    <th style="padding:10px;">Strength</th>
+                </tr>`;
+
+            (window.adminFinalRows||[]).forEach(r => {
+                const subCodes = (r.subExamCodes||[]).join(' | ') || '—';
+                html += `<tr>
+                    <td style="padding:8px;font-weight:bold;color:#4f46e5;">${r.sNo}</td>
+                    <td style="padding:8px;font-weight:bold;">${r.subject}</td>
+                    <td style="padding:8px;">${r.branches.join(', ')}</td>
+                    <td style="padding:8px;">${r.classes.join(', ')}</td>
+                    <td style="padding:8px;">${r.sections.join(', ')}</td>
+                    <td style="padding:8px;color:#7c3aed;font-family:monospace;">${subCodes}</td>
+                    <td style="padding:8px;color:#0d9488;font-family:monospace;">${r.shortCode}</td>
+                    <td style="padding:8px;text-align:center;">${r.mode}</td>
+                    <td style="padding:8px;">${r.creatorBranch||''} / ${r.creatorDept||'—'} / ${r.creatorPerson||'—'}</td>
+                    <td style="padding:8px;text-align:center;font-weight:bold;">${r.totalStrength}</td>
+                </tr>`;
+            });
+            html += '</table>';
+
+            const full = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"></head><body>${html}</body></html>`;
+            const blob = new Blob(['\ufeff', full], {type:'application/vnd.ms-excel'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href=url; a.download=`Admin_Exam_Mapping_${document.getElementById('map-view-date').value}.xls`;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        }
 
                 let rawPackets = [];
                 if (branchFilter === "ALL" || branchFilter === "GHUMARWIN") {
@@ -1385,7 +1999,8 @@
             }
         }
 
-        function updateCreatorStaffList(element) {
+        function updateCreatorStaffList(element) { adminUpdateStaffList(element); }
+        function _old_updateCreatorStaffList(element) {
             const row = element.closest('tr');
             const branch = row.querySelector('.creator-branch').value;
             const dept = row.querySelector('.creator-dept').value;
@@ -1403,10 +2018,11 @@
                 const nKey = Object.keys(st.details || {}).find(k => k.toLowerCase().includes('name'));
                 const name = nKey ? st.details[nKey] : st.email;
                 return `<option value="${name}">${name}</option>`;
-            }).join('');
+                      }).join('');
         }
 
-        async function saveAllExamMappings() {
+        // saveAllExamMappings is now defined above in the matrix engine — skip old one
+        async function _old_saveAllExamMappings() {
             const date = document.getElementById('map-view-date').value;
             const rows = document.querySelectorAll('.mapping-row-item');
             if (rows.length === 0) return alert("No mappings to save.");
@@ -1442,11 +2058,11 @@
                 alert("✅ All Exam Mappings successfully saved!");
             } catch (e) {
                 console.error(e);
-                alert("Error saving mappings: " + e.message);
+                            alert("Error saving mappings: " + e.message);
             }
         }
 
-        function exportExamMappingExcel() {
+        function _old_exportExamMappingExcel() {
             const table = document.getElementById('mapping-export-table');
             if (!table) return alert("No table data to export.");
 
