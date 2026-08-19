@@ -589,89 +589,109 @@
             }
         }
 
-      async function init() {
-            // Updated to fetch the correct student session data
-            activeStudent = JSON.parse(sessionStorage.getItem('minervaStudentData') || 'null');
-            activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff') || 'null');
-            
-            // Sends unauthenticated users back to the main hub
-            if (!activeStaff && !isAdmin && !activeStudent) return window.location.replace('index.html');
-            
-         let safeName = "Admin";
-            if (activeStudent) {
-                safeName = activeStudent.name || activeStudent.email || "Student";
-                activeCenter = String(activeStudent.center || "").toUpperCase().includes('DHARAMSHALA') ? "DHARAMSHALA" : "GHUMARWIN";
-            } else if (activeStaff) {
-                safeName = activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : activeStaff.email;
-            }
-            
-if (isAdmin) {
-                document.getElementById('admin-branch-container').style.display = 'flex';
-                document.getElementById('admin-nav-tabs').style.display = 'flex';
-                activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
-                document.getElementById('branch-selector').value = activeCenter;
-                document.getElementById('user-badge').innerText = `God Mode (${activeCenter}) - Read Only`;
-                document.getElementById('header-title').innerText = "Attendance Audit Desk";
-                await fetchData("Admin");
-                listenForMissingAttendance(); // <--- Initialize Scanner Here
+    async function init() {
+        // Updated to fetch the correct student session data
+        activeStudent = JSON.parse(sessionStorage.getItem('minervaStudentData') || 'null');
+        activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff') || 'null');
+        
+        // Sends unauthenticated users back to the main hub
+        if (!activeStaff && !isAdmin && !activeStudent) return window.location.replace('index.html');
+        
+        let safeName = "Admin";
+        if (activeStudent) {
+            safeName = activeStudent.name || activeStudent.email || "Student";
+            activeCenter = String(activeStudent.center || "").toUpperCase().includes('DHARAMSHALA') ? "DHARAMSHALA" : "GHUMARWIN";
+        } else if (activeStaff) {
+            safeName = activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : activeStaff.email;
+        }
+        
+        if (isAdmin) {
+            document.getElementById('admin-branch-container').style.display = 'flex';
+            document.getElementById('admin-nav-tabs').style.display = 'flex';
+            activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
+            document.getElementById('branch-selector').value = activeCenter;
+            document.getElementById('user-badge').innerText = `God Mode (${activeCenter}) - Read Only`;
+            document.getElementById('header-title').innerText = "Attendance Audit Desk";
+            await fetchData("Admin");
+            listenForMissingAttendance();
 
-                // Live listener for pending edit requests to update tab badge
-                db.collection("attendance_edit_requests")
-                  .where("center", "==", activeCenter)
-                  .where("status", "==", "PENDING")
-                  .onSnapshot(snap => {
-                      const badge = document.getElementById('edit-req-badge');
-                      if(badge) {
-                          if (snap.size > 0) {
-                              badge.innerText = snap.size;
-                              badge.classList.remove('hidden');
-                          } else {
-                              badge.classList.add('hidden');
-                          }
+            db.collection("attendance_edit_requests")
+              .where("center", "==", activeCenter)
+              .where("status", "==", "PENDING")
+              .onSnapshot(snap => {
+                  const badge = document.getElementById('edit-req-badge');
+                  if(badge) {
+                      if (snap.size > 0) {
+                          badge.innerText = snap.size;
+                          badge.classList.remove('hidden');
+                      } else {
+                          badge.classList.add('hidden');
                       }
-                  });
-            } else if (activeStudent) {
-                document.getElementById('user-badge').innerText = `Student: ${safeName} (${activeStudent.className}-${activeStudent.section})`;
-                document.getElementById('header-title').innerText = "My Attendance Register";
-                await fetchDataForStudent(activeStudent);
-           } else {
-                document.getElementById('user-badge').innerText = `Teacher: ${safeName}`;
-                try {
-                    const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
-                    if (!staffSnap.empty) {
-                        const data = staffSnap.docs[0].data();
-                        const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
-                        if (centerKey) activeCenter = String(data.details[centerKey]).toUpperCase().includes('DHARAMSHALA') ? 'DHARAMSHALA' : 'GHUMARWIN';
+                  }
+              });
+        } else if (activeStudent) {
+            document.getElementById('user-badge').innerText = `Student: ${safeName} (${activeStudent.className}-${activeStudent.section})`;
+            document.getElementById('header-title').innerText = "My Attendance Register";
+            await fetchDataForStudent(activeStudent);
+        } else {
+            document.getElementById('user-badge').innerText = `Teacher: ${safeName}`;
+            try {
+                const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                if (!staffSnap.empty) {
+                    const data = staffSnap.docs[0].data();
+                    const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                    if (centerKey) activeCenter = String(data.details[centerKey]).toUpperCase().includes('DHARAMSHALA') ? 'DHARAMSHALA' : 'GHUMARWIN';
+                    
+                    // Elevate delegated teacher to Admin view automatically
+                    if (data.attendancePermission === "VIEW_ALL") {
+                        isAdmin = true;
+                        document.getElementById('admin-branch-container').style.display = 'flex';
+                        document.getElementById('admin-nav-tabs').style.display = 'flex';
+                        document.getElementById('user-badge').innerText = `Delegated Admin (${activeCenter})`;
+                        document.getElementById('header-title').innerText = "Attendance Audit Desk";
+                        listenForMissingAttendance();
                         
-                        // Elevate to Full Admin if delegation is active
-                        if (data.attendancePermission === "VIEW_ALL") {
-                            isAdmin = true;
-                            document.getElementById('admin-branch-container').style.display = 'flex';
-                            document.getElementById('admin-nav-tabs').style.display = 'flex';
-                            document.getElementById('user-badge').innerText = `Delegated Admin (${activeCenter})`;
-                            document.getElementById('header-title').innerText = "Attendance Audit Desk";
-                            listenForMissingAttendance();
-                            
-                            db.collection("attendance_edit_requests")
-                              .where("center", "==", activeCenter)
-                              .where("status", "==", "PENDING")
-                              .onSnapshot(snap => {
-                                  const badge = document.getElementById('edit-req-badge');
-                                  if(badge) {
-                                      if (snap.size > 0) {
-                                          badge.innerText = snap.size;
-                                          badge.classList.remove('hidden');
-                                      } else {
-                                          badge.classList.add('hidden');
-                                      }
+                        db.collection("attendance_edit_requests")
+                          .where("center", "==", activeCenter)
+                          .where("status", "==", "PENDING")
+                          .onSnapshot(snap => {
+                              const badge = document.getElementById('edit-req-badge');
+                              if(badge) {
+                                  if (snap.size > 0) {
+                                      badge.innerText = snap.size;
+                                      badge.classList.remove('hidden');
+                                  } else {
+                                      badge.classList.add('hidden');
                                   }
-                              });
-                        }
+                              }
+                          });
                     }
-                } catch (e) { console.error(e); }
-                await fetchData(safeName);
-            }
-            }
+                }
+            } catch (e) { console.error(e); }
+            await fetchData(safeName);
+        }
+
+        const today = new Date();
+        const offset = today.getTimezoneOffset() * 60000;
+        todayISO = new Date(today - offset).toISOString().split('T')[0];
+        document.getElementById('daily-date-picker').value = todayISO;
+        document.getElementById('daily-date-picker').max = todayISO;
+        document.getElementById('audit-date-filter').value = todayISO;
+        document.getElementById('corr-date').value = todayISO;
+        if (document.getElementById('global-rem-start-date')) {
+            document.getElementById('global-rem-start-date').value = todayISO;
+            document.getElementById('global-rem-end-date').value = todayISO;
+        }
+
+        const monthSelect = document.getElementById('ledger-month');
+        let mHtml = "";
+        for(let i=0; i<6; i++) {
+            let d = new Date(); d.setMonth(d.getMonth() - i);
+            let val = `${d.getFullYear()}_${String(d.getMonth()+1).padStart(2,'0')}`;
+            mHtml += `<option value="${val}">${monthNames[d.getMonth()]} ${d.getFullYear()}</option>`;
+        }
+        monthSelect.innerHTML = mHtml;
+    }
 
           const today = new Date();
             const offset = today.getTimezoneOffset() * 60000;
