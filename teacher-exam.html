@@ -1476,7 +1476,7 @@
                        document.body.removeChild(temp);
         }
 
-        function buildMobileMappingCards(finalRows, deptOptionsHtml) {
+        function buildMobileMappingCards(finalRows, deptsArray) {
             if (!finalRows || finalRows.length === 0) return '<p class="text-slate-400 font-black uppercase text-xs text-center py-10">No exams found.</p>';
 
             return finalRows.map(r => {
@@ -1485,19 +1485,28 @@
                 const sectionsJoined = r.sections.join(', ');
                 const packetsJson = JSON.stringify(r.packets).replace(/'/g, "&apos;").replace(/"/g, "&quot;");
 
+                const targetDeptUpper = String(r.creatorDept || "").trim().toUpperCase();
+                const targetBranchUpper = String(r.creatorBranch || "").trim().toUpperCase();
+                const targetPersonUpper = String(r.creatorPerson || "").trim().toUpperCase();
+
                 const filteredStaff = (window.globalStaffList || []).filter(st => {
                     const det = st.details || {};
                     const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                    const sDept = dKey ? det[dKey] : '';
+                    const sDept = dKey ? String(det[dKey]).trim().toUpperCase() : '';
                     const sCenter = Object.values(det).join(' ').toUpperCase();
-                    return (!r.creatorDept || String(sDept).includes(r.creatorDept)) && sCenter.includes(r.creatorBranch);
+                    return (!targetDeptUpper || sDept.includes(targetDeptUpper)) && sCenter.includes(targetBranchUpper);
                 });
 
                 const personOptions = filteredStaff.map(st => {
                     const nKey = Object.keys(st.details || {}).find(k => k.toLowerCase().includes('name'));
-                    const name = nKey ? st.details[nKey] : st.email;
-                    const selected = r.creatorPerson === name ? 'selected' : '';
+                    const name = nKey ? String(st.details[nKey]) : String(st.email);
+                    const selected = targetPersonUpper === name.toUpperCase() ? 'selected' : '';
                     return `<option value="${name}" ${selected}>${name}</option>`;
+                }).join('');
+
+                const dynamicDeptOptions = `<option value="">-- Dept --</option>` + deptsArray.map(d => {
+                    const isSel = d === targetDeptUpper ? 'selected' : '';
+                    return `<option value="${d}" ${isSel}>${d}</option>`;
                 }).join('');
 
                 const assigneeChips = r.creatorPerson ? `
@@ -1556,12 +1565,11 @@
                             ${assigneeChips}
                             <div class="grid grid-cols-1 gap-2">
                                 <select onchange="updateMappingStaffList(this)" class="p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase creator-branch cursor-pointer">
-                                    <option value="GHUMARWIN" ${r.creatorBranch === 'GHUMARWIN' ? 'selected' : ''}>Ghumarwin</option>
-                                    <option value="DHARAMSHALA" ${r.creatorBranch === 'DHARAMSHALA' ? 'selected' : ''}>Dharamshala</option>
+                                    <option value="GHUMARWIN" ${targetBranchUpper === 'GHUMARWIN' ? 'selected' : ''}>Ghumarwin</option>
+                                    <option value="DHARAMSHALA" ${targetBranchUpper === 'DHARAMSHALA' ? 'selected' : ''}>Dharamshala</option>
                                 </select>
                                 <select onchange="updateMappingStaffList(this)" class="p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase creator-dept cursor-pointer">
-                                    <option value="">-- Dept --</option>
-                                    ${deptOptionsHtml.replace(`value="${r.creatorDept}"`, `value="${r.creatorDept}" selected`)}
+                                    ${dynamicDeptOptions}
                                 </select>
                                 <select class="p-2.5 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase creator-person cursor-pointer">
                                     <option value="">-- Person --</option>
@@ -1908,63 +1916,74 @@ async function loadExamMappingData() {
                     else if (r.subject.toUpperCase().includes('CHEM')) subShort = 'CHEM';
                     else if (r.subject.toUpperCase().includes('BIO')) subShort = 'BIO';
 
-                    let brShort = branches.map(b => b[0]).join('');
-                    let clsShort = classes.map(c => c.replace(/[^0-9A-Z]/ig, '').substring(0,2)).join('');
-                    let secShort = sections.map(s => s.replace(/[^0-9A-Z]/ig, '').substring(0,3)).join('');
-                                      let smartCode = `${subShort}-${brShort}-${clsShort}-${secShort}`.toUpperCase().substring(0, 50);
+                    let branchSegments = branches.map(b => {
+                        let bPackets = r.packets.filter(p => p.branch === b);
+                        let bClasses = [...new Set(bPackets.map(p => String(p.className).replace(/[^0-9A-Z]/ig, '').substring(0,2)))].sort().join('');
+                        let bSections = [...new Set(bPackets.map(p => String(p.section).replace(/[^0-9A-Z]/ig, '').substring(0,3)))].sort().join('');
+                        return `${b[0]}-${bClasses}-${bSections}`;
+                    });
+                    
+                    // Fetch current date and format as DDMM for the suffix
+                    const mapDate = document.getElementById('map-view-date').value || "";
+                    let dSuffix = "";
+                    if (mapDate) {
+                        const dParts = mapDate.split('-');
+                        if (dParts.length === 3) dSuffix = `_${dParts[2]}${dParts[1]}`;
+                    }
 
-                    const dSuffix = getMapDateSuffix();
-                    const baseCode = r.packets.length > 1 ? smartCode : r.shortCode;
+                                      let smartCode = `${subShort}_${branchSegments.join('_')}${dSuffix}`.toUpperCase().substring(0, 50);
 
                     return {
                         ...r,
                         branches: branches,
                         classes: classes,
                         sections: sections,
-                        shortCode: applyDateSuffix(baseCode, dSuffix)
+                        shortCode: r.packets.length > 1 ? smartCode : applyDateSuffix(r.shortCode, dSuffix)
                     };
                 });
 
-                finalRows.sort((a,b) => {
-                    return a.sNo.localeCompare(b.sNo, undefined, {numeric: true});
-                });
+            finalRows.sort((a,b) => {
+                return a.sNo.localeCompare(b.sNo, undefined, {numeric: true});
+            });
 
-                window.globalStaffList = allStaffMembers;
+            window.globalStaffList = allStaffMembers;
 
-                let deptsSet = new Set();
-                allStaffMembers.forEach(st => {
-                    const det = st.details || {};
-                    const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                    if (dKey && det[dKey]) deptsSet.add(String(det[dKey]).trim());
-                });
-                const deptOptionsHtml = Array.from(deptsSet).sort().map(d => `<option value="${d}">${d}</option>`).join('');
+            let deptsSet = new Set();
+            allStaffMembers.forEach(st => {
+                const det = st.details || {};
+                const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                if (dKey && det[dKey]) deptsSet.add(String(det[dKey]).trim().toUpperCase());
+            });
+            const deptsArray = Array.from(deptsSet).sort();
 
-                let tableHtml = `
-                    <div class="bg-white border border-slate-200 rounded-[2rem] shadow-sm overflow-hidden">
-                        <div class="overflow-x-auto custom-scroll">
-                            <table class="w-full text-left min-w-[1200px] border-collapse" id="mapping-export-table">
-                                <thead class="bg-slate-100 text-slate-600 text-[10px] uppercase tracking-widest font-black border-b border-slate-200">
-                                    <tr>
-                                        <th class="p-4 w-12 text-center">Select</th>
-                                        <th class="p-4 w-28">S.No.</th>
-                                        <th class="p-4 w-32">Branch(es)</th>
-                                        <th class="p-4 w-24">Class(es)</th>
-                                        <th class="p-4">Section(s) [Comma-Separated]</th>
-                                        <th class="p-4 w-40">Subjects</th>
-                                        <th class="p-4 w-56">Exam Name / Short Code</th>
-                                        <th class="p-4 w-32">Mode</th>
-                                        <th class="p-4">Assigner (Branch ➔ Dept ➔ Person)</th>
-                                        <th class="p-4 w-28 text-center">Strength</th>
-                                    </tr>
-                                </thead>
-                                <tbody class="divide-y divide-slate-100 text-xs font-bold text-slate-700">
-                `;
+            const container = document.getElementById('exam-mapping-table-container');
 
-                finalRows.forEach((r) => {
-                    const branchesJoined = r.branches.join(', ');
-                    const classesJoined = r.classes.join(', ');
-                    const sectionsJoined = r.sections.join(', ');
-                    const packetsJson = JSON.stringify(r.packets).replace(/'/g, "&apos;").replace(/"/g, "&quot;");
+            let tableHtml = `
+                <div class="bg-white border border-slate-200 rounded-[2rem] shadow-sm overflow-hidden">
+                    <div class="overflow-x-auto custom-scroll">
+                        <table class="w-full text-left min-w-[1200px] border-collapse" id="mapping-export-table">
+                            <thead class="bg-slate-100 text-slate-600 text-[10px] uppercase tracking-widest font-black border-b border-slate-200">
+                                <tr>
+                                    <th class="p-4 w-12 text-center">Select</th>
+                                    <th class="p-4 w-28">S.No.</th>
+                                    <th class="p-4 w-32">Branch(es)</th>
+                                    <th class="p-4 w-24">Class(es)</th>
+                                    <th class="p-4">Section(s) [Comma-Separated]</th>
+                                    <th class="p-4 w-40">Subjects</th>
+                                    <th class="p-4 w-56">Exam Name / Short Code</th>
+                                    <th class="p-4 w-32">Mode</th>
+                                    <th class="p-4 min-w-[320px]">Assigner (Branch ➔ Dept ➔ Person)</th>
+                                    <th class="p-4 w-28 text-center">Strength</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100 text-xs font-bold text-slate-700">
+            `;
+
+            finalRows.forEach((r) => {
+                const branchesJoined = r.branches.join(', ');
+                const classesJoined = r.classes.join(', ');
+                const sectionsJoined = r.sections.join(', ');
+                const packetsJson = JSON.stringify(r.packets).replace(/'/g, "&apos;").replace(/"/g, "&quot;");
 
                 const targetDeptUpper = String(r.creatorDept || "").trim().toUpperCase();
                 const targetBranchUpper = String(r.creatorBranch || "").trim().toUpperCase();
@@ -1980,70 +1999,74 @@ async function loadExamMappingData() {
 
                 const personOptions = filteredStaff.map(st => {
                     const nKey = Object.keys(st.details || {}).find(k => k.toLowerCase().includes('name'));
-                    const name = nKey ? String(st.details[nKey]) : String(st.email);
-                    const selected = targetPersonUpper === name.toUpperCase() ? 'selected' : '';
-                    return `<option value="${name}" ${selected}>${name}</option>`;
+                    const nameStr = nKey ? String(st.details[nKey]) : String(st.email);
+                    const selected = targetPersonUpper === nameStr.toUpperCase() ? 'selected' : '';
+                    return `<option value="${nameStr}" ${selected}>${nameStr}</option>`;
                 }).join('');
 
-                    tableHtml += `
-                        <tr class="hover:bg-slate-50/80 transition-colors mapping-row-item" data-subject="${r.subject}" data-packets="${packetsJson}">
-                            <td class="p-4 text-center"><input type="checkbox" class="row-select-cb w-4 h-4 accent-indigo-600"></td>
-                            <td class="p-4">
-                                <input type="text" class="sno-input w-24 p-2 bg-white border border-slate-300 rounded-lg text-xs font-black uppercase text-indigo-700 text-center shadow-sm" value="${r.sNo}" placeholder="S.No.">
-                            </td>
-                            <td class="p-4"><span class="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-100">${branchesJoined}</span></td>
-                            <td class="p-4 font-black uppercase">${classesJoined}</td>
-                            <td class="p-4 font-black uppercase text-indigo-600">${sectionsJoined}</td>
-                            <td class="p-4 font-black text-slate-800 uppercase">${r.subject}</td>
-                                                       <td class="p-4">
-                                <div class="flex items-center gap-1.5">
-                                    <input type="text" maxlength="99" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold uppercase tracking-wider text-teal-800 code-input" value="${r.shortCode}">
-                                    <button type="button" onclick="copyShortCode(this)" title="Copy Short Code" class="shrink-0 bg-teal-600 hover:bg-teal-500 text-white w-9 h-9 rounded-lg font-black text-sm shadow-sm transition-colors flex items-center justify-center active:scale-90">📋</button>
-                                </div>
-                            </td>
-                            <td class="p-4">
-                                <select class="w-full p-2 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase mode-select cursor-pointer">
-                                    <option value="Offline" ${r.mode === 'Offline' ? 'selected' : ''}>Offline</option>
-                                    <option value="Online" ${r.mode === 'Online' ? 'selected' : ''}>Online</option>
+                const dynamicDeptOptions = `<option value="">-- Dept --</option>` + deptsArray.map(d => {
+                    const isSel = d === targetDeptUpper ? 'selected' : '';
+                    return `<option value="${d}" ${isSel}>${d}</option>`;
+                }).join('');
+
+                tableHtml += `
+                    <tr class="hover:bg-slate-50/80 transition-colors mapping-row-item" data-subject="${r.subject}" data-packets="${packetsJson}">
+                        <td class="p-4 text-center"><input type="checkbox" class="row-select-cb w-4 h-4 accent-indigo-600"></td>
+                        <td class="p-4">
+                            <input type="text" class="sno-input w-24 p-2 bg-white border border-slate-300 rounded-lg text-xs font-black uppercase text-indigo-700 text-center shadow-sm" value="${r.sNo}" placeholder="S.No.">
+                        </td>
+                        <td class="p-4"><span class="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-100">${branchesJoined}</span></td>
+                        <td class="p-4 font-black uppercase">${classesJoined}</td>
+                        <td class="p-4 font-black uppercase text-indigo-600">${sectionsJoined}</td>
+                        <td class="p-4 font-black text-slate-800 uppercase">${r.subject}</td>
+                        <td class="p-4">
+                            <div class="flex items-center gap-1.5">
+                                <input type="text" maxlength="99" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold uppercase tracking-wider text-teal-800 code-input" value="${r.shortCode}">
+                                <button type="button" onclick="copyShortCode(this)" title="Copy Short Code" class="shrink-0 bg-teal-600 hover:bg-teal-500 text-white w-9 h-9 rounded-lg font-black text-sm shadow-sm transition-colors flex items-center justify-center active:scale-90">📋</button>
+                            </div>
+                        </td>
+                        <td class="p-4">
+                            <select class="w-full p-2 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase mode-select cursor-pointer">
+                                <option value="Offline" ${r.mode === 'Offline' ? 'selected' : ''}>Offline</option>
+                                <option value="Online" ${r.mode === 'Online' ? 'selected' : ''}>Online</option>
+                            </select>
+                        </td>
+                        <td class="p-4 min-w-[320px]">
+                            ${r.creatorPerson ? `
+                            <div class="flex flex-wrap gap-1.5 mb-2">
+                                ${r.creatorBranch ? `<span class="bg-indigo-100 text-indigo-700 px-2 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-200">📍 ${r.creatorBranch}</span>` : ''}
+                                ${r.creatorDept ? `<span class="bg-teal-100 text-teal-700 px-2 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-teal-200">🏷️ ${r.creatorDept}</span>` : ''}
+                                <span class="bg-emerald-100 text-emerald-800 px-2 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-emerald-300">👤 ${r.creatorPerson}</span>
+                            </div>` : ''}
+                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                <select onchange="updateMappingStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-branch cursor-pointer">
+                                    <option value="GHUMARWIN" ${targetBranchUpper === 'GHUMARWIN' ? 'selected' : ''}>Ghumarwin</option>
+                                    <option value="DHARAMSHALA" ${targetBranchUpper === 'DHARAMSHALA' ? 'selected' : ''}>Dharamshala</option>
                                 </select>
-                            </td>
-                                                       <td class="p-4">
-                                ${r.creatorPerson ? `
-                                <div class="flex flex-wrap gap-1.5 mb-2">
-                                    ${r.creatorBranch ? `<span class="bg-indigo-100 text-indigo-700 px-2 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-200">📍 ${r.creatorBranch}</span>` : ''}
-                                    ${r.creatorDept ? `<span class="bg-teal-100 text-teal-700 px-2 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-teal-200">🏷️ ${r.creatorDept}</span>` : ''}
-                                    <span class="bg-emerald-100 text-emerald-800 px-2 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-emerald-300">👤 ${r.creatorPerson}</span>
-                                </div>` : ''}
-                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                    <select onchange="updateMappingStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-branch cursor-pointer">
-                                        <option value="GHUMARWIN" ${r.creatorBranch === 'GHUMARWIN' ? 'selected' : ''}>Ghumarwin</option>
-                                        <option value="DHARAMSHALA" ${r.creatorBranch === 'DHARAMSHALA' ? 'selected' : ''}>Dharamshala</option>
-                                    </select>
-                                    <select onchange="updateMappingStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-dept cursor-pointer">
-                                        <option value="">-- Dept --</option>
-                                        ${deptOptionsHtml.replace(`value="${r.creatorDept}"`, `value="${r.creatorDept}" selected`)}
-                                    </select>
-                                    <select class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-person cursor-pointer">
-                                        <option value="">-- Person --</option>
-                                        ${personOptions}
-                                    </select>
-                                </div>
-                            </td>
-                            <td class="p-4 text-center">
-                                <span class="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-widest border border-emerald-200 shadow-sm inline-block">🎓 ${r.totalStrength}</span>
-                            </td>
-                        </tr>
-                    `;
-                });
-
-                tableHtml += `</tbody></table></div></div>`;
-
-                const mobileCardsHtml = buildMobileMappingCards(finalRows, deptOptionsHtml);
-
-                container.innerHTML = `
-                    <div class="mapping-desktop-table">${tableHtml}</div>
-                    <div class="mapping-mobile-cards flex-col gap-4 p-1">${mobileCardsHtml}</div>
+                                <select onchange="updateMappingStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-dept cursor-pointer">
+                                    ${dynamicDeptOptions}
+                                </select>
+                                <select class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-person cursor-pointer">
+                                    <option value="">-- Person --</option>
+                                    ${personOptions}
+                                </select>
+                            </div>
+                        </td>
+                        <td class="p-4 text-center">
+                            <span class="bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl text-xs font-black uppercase tracking-widest border border-emerald-200 shadow-sm inline-block">🎓 ${r.totalStrength}</span>
+                        </td>
+                    </tr>
                 `;
+            });
+
+            tableHtml += `</tbody></table></div></div>`;
+
+            const mobileCardsHtml = buildMobileMappingCards(finalRows, deptsArray);
+
+            container.innerHTML = `
+                <div class="mapping-desktop-table">${tableHtml}</div>
+                <div class="mapping-mobile-cards flex-col gap-4 p-1">${mobileCardsHtml}</div>
+            `;
             } catch(e) {
                 console.error(e);
                 container.innerHTML = `<div class="text-center py-12 text-rose-500 font-bold uppercase text-xs">Error loading mapping configuration.</div>`;
@@ -2052,22 +2075,22 @@ async function loadExamMappingData() {
 
         function updateMappingStaffList(element) {
             const row = element.closest('tr');
-            const branch = row.querySelector('.creator-branch').value;
-            const dept = row.querySelector('.creator-dept').value;
+            const branch = String(row.querySelector('.creator-branch').value).toUpperCase();
+            const dept = String(row.querySelector('.creator-dept').value).toUpperCase();
             const personSelect = row.querySelector('.creator-person');
 
             const filteredStaff = window.globalStaffList.filter(st => {
                 const det = st.details || {};
                 const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                const sDept = dKey ? det[dKey] : '';
+                const sDept = dKey ? String(det[dKey]).toUpperCase() : '';
                 const sCenter = Object.values(det).join(' ').toUpperCase();
-                return (!dept || String(sDept).includes(dept)) && sCenter.includes(branch);
+                return (!dept || sDept.includes(dept)) && sCenter.includes(branch);
             });
 
             personSelect.innerHTML = `<option value="">-- Person --</option>` + filteredStaff.map(st => {
                 const nKey = Object.keys(st.details || {}).find(k => k.toLowerCase().includes('name'));
-                const name = nKey ? st.details[nKey] : st.email;
-                return `<option value="${name}">${name}</option>`;
+                const nameStr = nKey ? String(st.details[nKey]) : String(st.email);
+                return `<option value="${nameStr}">${nameStr}</option>`;
             }).join('');
         }
 
@@ -2094,8 +2117,8 @@ async function loadExamMappingData() {
 
                     const selectedTeacher = (window.globalStaffList || []).find(t => {
                         const nKey = Object.keys(t.details || {}).find(k => k.toLowerCase().includes('name'));
-                        const name = nKey ? t.details[nKey] : t.email;
-                        return name === cPerson;
+                        const name = nKey ? String(t.details[nKey]).toUpperCase() : String(t.email).toUpperCase();
+                        return name === String(cPerson).toUpperCase();
                     });
                     const teacherEmail = selectedTeacher ? selectedTeacher.email : "";
 
@@ -2303,6 +2326,7 @@ async function loadExamMappingData() {
                     groupedRowsMap[groupKey].creatorBranch = cBranch;
                     groupedRowsMap[groupKey].creatorDept = cDept;
                     groupedRowsMap[groupKey].creatorPerson = cPerson;
+                    groupedRowsMap[groupKey].mode = mode;
                 }
 
                 packets.forEach(p => {
@@ -2340,7 +2364,7 @@ let branchSegments = branches.map(b => {
                         if (dParts.length === 3) dSuffix = `_${dParts[2]}${dParts[1]}`;
                     }
 
-                                    let smartCode = `${subShort}_${branchSegments.join('_')}${dSuffix}`.toUpperCase().substring(0, 50);
+                                      let smartCode = `${subShort}_${branchSegments.join('_')}${dSuffix}`.toUpperCase().substring(0, 50);
 
                     return {
                         ...r,
@@ -2358,15 +2382,12 @@ let branchSegments = branches.map(b => {
             const container = document.getElementById('exam-mapping-table-container');
 
          let deptsSet = new Set();
-                allStaffMembers.forEach(st => {
+                window.globalStaffList.forEach(st => {
                     const det = st.details || {};
                     const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
                     if (dKey && det[dKey]) deptsSet.add(String(det[dKey]).trim().toUpperCase());
                 });
-                const deptOptionsHtml = Array.from(deptsSet).sort().map(d => {
-                    const isSel = String(r.creatorDept || "").trim().toUpperCase() === d ? 'selected' : '';
-                    return `<option value="${d}" ${isSel}>${d}</option>`;
-                }).join('');
+                const deptsArray = Array.from(deptsSet).sort();
 
             let tableHtml = `
                 <div class="bg-white border border-slate-200 rounded-[2rem] shadow-sm overflow-hidden">
@@ -2382,7 +2403,7 @@ let branchSegments = branches.map(b => {
                                     <th class="p-4 w-40">Subjects</th>
                                     <th class="p-4 w-56">Exam Name / Short Code</th>
                                     <th class="p-4 w-32">Mode</th>
-                                    <th class="p-4">Assigner (Branch ➔ Dept ➔ Person)</th>
+                                    <th class="p-4 min-w-[320px]">Assigner (Branch ➔ Dept ➔ Person)</th>
                                     <th class="p-4 w-28 text-center">Strength</th>
                                 </tr>
                             </thead>
@@ -2395,19 +2416,28 @@ let branchSegments = branches.map(b => {
                 const sectionsJoined = r.sections.join(', ');
                 const packetsJson = JSON.stringify(r.packets).replace(/'/g, "&apos;").replace(/"/g, "&quot;");
 
-                const filteredStaff = (window.globalStaffList || []).filter(st => {
+                const targetDeptUpper = String(r.creatorDept || "").trim().toUpperCase();
+                const targetBranchUpper = String(r.creatorBranch || "").trim().toUpperCase();
+                const targetPersonUpper = String(r.creatorPerson || "").trim().toUpperCase();
+
+                const filteredStaff = window.globalStaffList.filter(st => {
                     const det = st.details || {};
                     const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                    const sDept = dKey ? det[dKey] : '';
+                    const sDept = dKey ? String(det[dKey]).trim().toUpperCase() : '';
                     const sCenter = Object.values(det).join(' ').toUpperCase();
-                    return (!r.creatorDept || String(sDept).includes(r.creatorDept)) && sCenter.includes(r.creatorBranch);
+                    return (!targetDeptUpper || sDept.includes(targetDeptUpper)) && sCenter.includes(targetBranchUpper);
                 });
 
                 const personOptions = filteredStaff.map(st => {
                     const nKey = Object.keys(st.details || {}).find(k => k.toLowerCase().includes('name'));
-                    const name = nKey ? st.details[nKey] : st.email;
-                    const selected = r.creatorPerson === name ? 'selected' : '';
-                    return `<option value="${name}" ${selected}>${name}</option>`;
+                    const nameStr = nKey ? String(st.details[nKey]) : String(st.email);
+                    const selected = targetPersonUpper === nameStr.toUpperCase() ? 'selected' : '';
+                    return `<option value="${nameStr}" ${selected}>${nameStr}</option>`;
+                }).join('');
+
+                const dynamicDeptOptions = `<option value="">-- Dept --</option>` + deptsArray.map(d => {
+                    const isSel = d === targetDeptUpper ? 'selected' : '';
+                    return `<option value="${d}" ${isSel}>${d}</option>`;
                 }).join('');
 
                 tableHtml += `
@@ -2419,7 +2449,7 @@ let branchSegments = branches.map(b => {
                         <td class="p-4"><span class="bg-indigo-50 text-indigo-700 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-100">${branchesJoined}</span></td>
                         <td class="p-4 font-black uppercase">${classesJoined}</td>
                         <td class="p-4 font-black uppercase text-indigo-600">${sectionsJoined}</td>
-                                               <td class="p-4 font-black text-slate-800 uppercase">${r.subject}</td>
+                        <td class="p-4 font-black text-slate-800 uppercase">${r.subject}</td>
                         <td class="p-4">
                             <div class="flex items-center gap-1.5">
                                 <input type="text" maxlength="99" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold uppercase tracking-wider text-teal-800 code-input" value="${r.shortCode}">
@@ -2432,7 +2462,7 @@ let branchSegments = branches.map(b => {
                                 <option value="Online" ${r.mode === 'Online' ? 'selected' : ''}>Online</option>
                             </select>
                         </td>
-                                             <td class="p-4">
+                        <td class="p-4 min-w-[320px]">
                             ${r.creatorPerson ? `
                             <div class="flex flex-wrap gap-1.5 mb-2">
                                 ${r.creatorBranch ? `<span class="bg-indigo-100 text-indigo-700 px-2 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border border-indigo-200">📍 ${r.creatorBranch}</span>` : ''}
@@ -2441,12 +2471,11 @@ let branchSegments = branches.map(b => {
                             </div>` : ''}
                             <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
                                 <select onchange="updateMappingStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-branch cursor-pointer">
-                                    <option value="GHUMARWIN" ${r.creatorBranch === 'GHUMARWIN' ? 'selected' : ''}>Ghumarwin</option>
-                                    <option value="DHARAMSHALA" ${r.creatorBranch === 'DHARAMSHALA' ? 'selected' : ''}>Dharamshala</option>
+                                    <option value="GHUMARWIN" ${targetBranchUpper === 'GHUMARWIN' ? 'selected' : ''}>Ghumarwin</option>
+                                    <option value="DHARAMSHALA" ${targetBranchUpper === 'DHARAMSHALA' ? 'selected' : ''}>Dharamshala</option>
                                 </select>
                                 <select onchange="updateMappingStaffList(this)" class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-dept cursor-pointer">
-                                    <option value="">-- Dept --</option>
-                                    ${deptOptionsHtml.replace(`value="${r.creatorDept}"`, `value="${r.creatorDept}" selected`)}
+                                    ${dynamicDeptOptions}
                                 </select>
                                 <select class="p-2 bg-white border border-slate-300 rounded-lg text-[11px] font-bold uppercase creator-person cursor-pointer">
                                     <option value="">-- Person --</option>
@@ -2463,7 +2492,7 @@ let branchSegments = branches.map(b => {
 
             tableHtml += `</tbody></table></div></div>`;
 
-            const mobileCardsHtml = buildMobileMappingCards(finalRows, deptOptionsHtml);
+            const mobileCardsHtml = buildMobileMappingCards(finalRows, deptsArray);
 
             container.innerHTML = `
                 <div class="mapping-desktop-table">${tableHtml}</div>
@@ -2533,6 +2562,6 @@ let branchSegments = branches.map(b => {
             document.body.removeChild(a);
         }
     </script>
-   
+    
 </body>
 </html>
