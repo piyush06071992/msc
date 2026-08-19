@@ -757,15 +757,28 @@
             const person = document.getElementById('coord-person').value;
             if (!person) return alert("Please select a coordinator.");
 
-            // Generate combined code: BRANCHES-CLASS-SECTIONS-EXAMTYPE-DDMM
+         // Generate combined code: [Subject Short]/[Section Code]/.../[DDMM]
             const date = document.getElementById('map-view-date').value||'';
-            const examType = (g.examType||'EXAM').toUpperCase().replace(/\s+/g,'');
+            const subName = Array.from(g.subjectSet)[0] || 'EXAM';
+            let subShort = subName.substring(0,4).toUpperCase();
+            if (subName.toUpperCase().includes('MATH')) subShort = 'MATH';
+            else if (subName.toUpperCase().includes('PHYS')) subShort = 'PHYS';
+            else if (subName.toUpperCase().includes('CHEM')) subShort = 'CHEM';
+            else if (subName.toUpperCase().includes('BIO')) subShort = 'BIO';
+
+            let secCodes = g.sectionKeys.map(sk => {
+                const parts = sk.split('|');
+                const branch = parts[0], className = parts[1], section = parts[2];
+                const key = `${branch}_${className}_${section}`.toUpperCase();
+                return (typeof secCodeMap !== 'undefined' ? secCodeMap[key] : null) || section;
+            });
+            let uniqueSecCodes = [...new Set(secCodes)];
+
+            let dSuffix = '';
             const dParts = date.split('-');
-            const dateSuffix = dParts.length===3 ? dParts[2]+dParts[1] : '';
-            const branchShort = Array.from(g.branchSet).sort().map(b=>b[0]).join('');
-            const secShort = g.sectionKeys.map(sk=>{ const parts=sk.split('|'); return parts[parts.length-1].replace(/[^a-zA-Z0-9]/g,''); }).sort().join('');
-            const clsShort = g.className.replace(/[^0-9A-Za-z]/g,'').substring(0,4);
-            const combinedCode = (branchShort+'-'+clsShort+'-'+secShort+'-'+examType+(dateSuffix?'-'+dateSuffix:'')).toUpperCase().substring(0,60);
+            if (dParts.length === 3) dSuffix = `/${dParts[2]}${dParts[1]}`;
+
+            const combinedCode = `${subShort}/${uniqueSecCodes.join('/')}${dSuffix}`.toUpperCase().substring(0, 50);
 
             // Save to Firestore: admin_paper_groups collection
             try {
@@ -796,13 +809,29 @@
 
             try {
                 const emptySnap = {forEach:()=>{}};
-                const [gExSnap, dExSnap, gHodSnap, dHodSnap, pgSnap] = await Promise.all([
+              const [gExSnap, dExSnap, gHodSnap, dHodSnap, pgSnap, gStructSnap, dStructSnap] = await Promise.all([
                     branchFilter==="ALL"||branchFilter==="GHUMARWIN" ? db.collection("exam_schedules").where("date","==",date).get() : Promise.resolve(emptySnap),
                     branchFilter==="ALL"||branchFilter==="DHARAMSHALA" ? db.collection("dharamshala_exam_schedules").where("date","==",date).get() : Promise.resolve(emptySnap),
                     branchFilter==="ALL"||branchFilter==="GHUMARWIN" ? db.collection("exam_mappings").where("date","==",date).get() : Promise.resolve(emptySnap),
                     branchFilter==="ALL"||branchFilter==="DHARAMSHALA" ? db.collection("dharamshala_exam_mappings").where("date","==",date).get() : Promise.resolve(emptySnap),
-                    db.collection("admin_paper_groups").where("date","==",date).get()
+                    db.collection("admin_paper_groups").where("date","==",date).get(),
+                    db.collection("institute_structure").get(),
+                    db.collection("dharamshala_institute_structure").get()
                 ]);
+
+                let secCodeMap = {};
+                gStructSnap.forEach(d => {
+                    const s = d.data();
+                    if(s.className && s.sectionName) {
+                        secCodeMap[`GHUMARWIN_${String(s.className).trim().toUpperCase()}_${String(s.sectionName).trim().toUpperCase()}`] = s.shortCode || s.sectionName;
+                    }
+                });
+                dStructSnap.forEach(d => {
+                    const s = d.data();
+                    if(s.className && s.sectionName) {
+                        secCodeMap[`DHARAMSHALA_${String(s.className).trim().toUpperCase()}_${String(s.sectionName).trim().toUpperCase()}`] = s.shortCode || s.sectionName;
+                    }
+                });
 
                 // ── 1. BUILD SECTION→SUBJECT LIST FROM EXAM SCHEDULES ────
                 // sectionSubjects[branch|class|section] = [SUBJECT1, SUBJECT2, ...]
