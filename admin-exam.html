@@ -950,16 +950,89 @@
                     });
                 });
 
-                // ── 3. LOAD SAVED ADMIN PAPER GROUPS ────────────────────
+         // ── 3. LOAD SAVED ADMIN PAPER GROUPS & HOD MAPPINGS ─────
                 let savedPaperGroups = {};
                 pgSnap.forEach(doc=>{ const d=doc.data(); savedPaperGroups[d.groupKey]=d; });
 
-                // ── 4. COMPUTE PER-SECTION STATUS ────────────────────────
-                // For each section: check each of its subjects → does it have an HOD code?
-                // status: 'ready' (all mapped), 'partial' (some mapped), 'pending' (none mapped)
+                // Also check if HODs saved explicit multi-branch/clubbed exam_mappings directly
+                let hodExplicitGroups = {}; // shortCode -> { branchSet, classSet, sections, subject, mode, ... }
+                const processHodMappingDoc = (m, branchName) => {
+                    const code = (m.shortCode||'').trim();
+                    const sub = (m.subject||'').trim().toUpperCase();
+                    if (!code || !sub) return;
+                    const mapKey = sub+'||'+code;
+                    if (!hodExplicitGroups[mapKey]) {
+                        hodExplicitGroups[mapKey] = {
+                            subject: sub, shortCode: code, mode: m.mode||'Offline',
+                            coordinatorPerson: m.assignedTeacherName||m.creatorPerson||'',
+                            coordinatorBranch: m.creatorBranch||branchName,
+                            coordinatorDept: m.creatorDept||'',
+                            branchSet: new Set(), classSet: new Set(), sectionKeys: [], sections: []
+                        };
+                    }
+                    hodExplicitGroups[mapKey].branchSet.add(branchName);
+                    const secs = m.sections || [];
+                    secs.forEach(s => {
+                        let cn = typeof s === 'object' ? s.className : m.className;
+                        let sn = typeof s === 'object' ? s.section : s;
+                        if (cn && sn) {
+                            hodExplicitGroups[mapKey].classSet.add(cn);
+                            hodExplicitGroups[mapKey].sections.push(sn);
+                            hodExplicitGroups[mapKey].sectionKeys.push(branchName+'|'+cn+'|'+sn);
+                        }
+                    });
+                };
+                gHodSnap.forEach(doc => processHodMappingDoc(doc.data(), "GHUMARWIN"));
+                dHodSnap.forEach(doc => processHodMappingDoc(doc.data(), "DHARAMSHALA"));
+
+                let paperGroups = [];
+                window._paperGroupMap = {};
+                let processedSecKeys = new Set();
+
+                // Build groups from HOD explicit mappings first (so clubbed papers merge correctly)
+                Object.keys(hodExplicitGroups).forEach(mapKey => {
+                    const eg = hodExplicitGroups[mapKey];
+                    const uniqueSecKeys = [...new Set(eg.sectionKeys)];
+                    uniqueSecKeys.forEach(sk => processedSecKeys.add(sk));
+
+                    const branches = eg.branchSet;
+                    const classes = eg.classSet;
+                    const className = Array.from(classes).sort().join('/');
+                    const sections = [...new Set(eg.sections)].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+                    const subjects = [eg.subject];
+
+                    let subjectDetails = {};
+                    subjects.forEach(sub => {
+                        subjectDetails[sub] = { shortCode: eg.shortCode, teacherName: eg.coordinatorPerson, mode: eg.mode };
+                    });
+
+                    const isCombined = uniqueSecKeys.length > 1 || branches.size > 1;
+                    const groupKey = 'hod_'+mapKey.replace(/[^a-zA-Z0-9]/g,'_');
+
+                    const g = {
+                        fingerprint: mapKey, groupKey, sectionKeys: uniqueSecKeys, isCombined,
+                        branchSet: branches, classSet: classes, className,
+                        sections, subjectSet: new Set(subjects), subjectDetails,
+                        examType: 'EXAM', status: 'ready',
+                        combinedCode: eg.shortCode,
+                        coordinator: eg.coordinatorPerson,
+                        coordinatorBranch: eg.coordinatorBranch,
+                        coordinatorDept: eg.coordinatorDept,
+                        coordinatorPerson: eg.coordinatorPerson
+                    };
+                    paperGroups.push(g);
+                    window._paperGroupMap[groupKey] = g;
+                });
+
+                // For remaining sections not covered by explicit HOD multi-mappings, run standard fingerprint engine
+                let remainingSectionSubjects = {};
+                Object.keys(sectionSubjects).forEach(sk => {
+                    if (!processedSecKeys.has(sk)) remainingSectionSubjects[sk] = sectionSubjects[sk];
+                });
+
                 let sectionStatus = {};
-                Object.keys(sectionSubjects).forEach(secKey => {
-                    const subjects = Array.from(sectionSubjects[secKey]);
+                Object.keys(remainingSectionSubjects).forEach(secKey => {
+                    const subjects = Array.from(remainingSectionSubjects[secKey]);
                     let mapped = 0;
                     subjects.forEach(sub => { if (hodMap[secKey+'|'+sub]&&hodMap[secKey+'|'+sub].shortCode) mapped++; });
                     if (mapped===0) sectionStatus[secKey]='pending';
@@ -967,51 +1040,34 @@
                     else sectionStatus[secKey]='ready';
                 });
 
-                // ── 5. COMPUTE FINGERPRINT PER SECTION ───────────────────
-                // Fingerprint = sorted list of "SUBJECT:shortCode" pairs
-                // Only computable for 'ready' sections
-                // For pending/partial: fingerprint is null
                 let sectionFingerprint = {};
-                Object.keys(sectionSubjects).forEach(secKey => {
+                Object.keys(remainingSectionSubjects).forEach(secKey => {
                     if (sectionStatus[secKey]!=='ready') { sectionFingerprint[secKey]=null; return; }
-                    const subjects = Array.from(sectionSubjects[secKey]).sort();
+                    const subjects = Array.from(remainingSectionSubjects[secKey]).sort();
                     const fp = subjects.map(sub => sub+':'+((hodMap[secKey+'|'+sub]||{}).shortCode||'')).join('||');
                     sectionFingerprint[secKey] = fp;
                 });
 
-                // ── 6. GROUP SECTIONS BY FINGERPRINT ─────────────────────
-                // Sections with identical fingerprint share the same paper set → combined
-                let fingerprintGroups = {}; // fingerprint → [secKeys]
-                let noFingerprintSections = []; // pending or partial
-                Object.keys(sectionSubjects).forEach(secKey => {
+                let fingerprintGroups = {};
+                Object.keys(remainingSectionSubjects).forEach(secKey => {
                     const fp = sectionFingerprint[secKey];
-                    if (!fp) { noFingerprintSections.push(secKey); return; }
+                    if (!fp) return;
                     if (!fingerprintGroups[fp]) fingerprintGroups[fp]=[];
                     fingerprintGroups[fp].push(secKey);
                 });
 
-                // ── 7. BUILD PAPER GROUP OBJECTS ─────────────────────────
-                let paperGroups = [];
-                window._paperGroupMap = {};
-
-                // Matched groups (same fingerprint = same paper)
                 Object.keys(fingerprintGroups).forEach(fp => {
                     const secKeys = fingerprintGroups[fp];
-                    // Parse branch, class, section from keys (format: branch|class|section)
                     const parts = secKeys.map(k=>k.split('|'));
                     const branches = new Set(parts.map(p=>p[0]));
                     const classes = new Set(parts.map(p=>p[1]));
                     const sections = parts.map(p=>p[2]);
                     const className = Array.from(classes).sort().join('/');
                     const examType = examTypeBySection[secKeys[0]]||'EXAM';
+                    const subjects = Array.from(remainingSectionSubjects[secKeys[0]]).sort();
 
-                    // Subjects from first section (all identical)
-                    const subjects = Array.from(sectionSubjects[secKeys[0]]).sort();
-
-                    // HOD details per subject (all sections share same codes)
                     let subjectDetails = {};
                     subjects.forEach(sub => {
-                        // Collect from all sections (any of them, since same code)
                         for (const sk of secKeys) {
                             const hd = hodMap[sk+'|'+sub];
                             if (hd) { subjectDetails[sub]=hd; break; }
@@ -1020,8 +1076,6 @@
 
                     const isCombined = secKeys.length>1;
                     const groupKey = fp.substring(0,40).replace(/[^a-zA-Z0-9]/g,'_')+'_'+Array.from(branches).sort().join('')+'_'+Array.from(classes).sort().join('');
-
-                    // Check for saved admin assignment
                     const saved = Object.values(savedPaperGroups).find(s=>s.fingerprint===fp)||null;
 
                     const g = {
@@ -1040,6 +1094,31 @@
                     window._paperGroupMap[groupKey] = g;
                 });
 
+                Object.keys(remainingSectionSubjects).forEach(secKey => {
+                    if (sectionFingerprint[secKey]) return; // already handled
+                    const parts = secKey.split('|');
+                    const branch=parts[0], className=parts[1], section=parts[2];
+                    const subjects = Array.from(remainingSectionSubjects[secKey]).sort();
+                    const examType = examTypeBySection[secKey]||'EXAM';
+
+                    let subjectDetails = {};
+                    subjects.forEach(sub => {
+                        const hd = hodMap[secKey+'|'+sub];
+                        if (hd) subjectDetails[sub]=hd;
+                    });
+
+                    const groupKey = 'nofp_'+secKey.replace(/[^a-zA-Z0-9]/g,'_');
+                    const g = {
+                        fingerprint:null, groupKey, sectionKeys:[secKey], isCombined:false,
+                        branchSet:new Set([branch]), classSet:new Set([className]), className,
+                        sections:[section], subjectSet:new Set(subjects), subjectDetails,
+                        examType, status:sectionStatus[secKey]||'pending',
+                        combinedCode:'', coordinator:'',
+                        coordinatorBranch:'', coordinatorDept:'', coordinatorPerson:''
+                    };
+                    paperGroups.push(g);
+                    window._paperGroupMap[groupKey] = g;
+                });
                 // Non-ready sections (pending/partial)
                 noFingerprintSections.forEach(secKey => {
                     const parts = secKey.split('|');
