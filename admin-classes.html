@@ -203,14 +203,38 @@ async function init() {
             }
         }
 
-        function renderCheckboxes() {
+      function renderCheckboxes(selectedSubjects = [], optionalList = []) {
             const container = document.getElementById('dept-checkboxes');
-            container.innerHTML = availableDepartments.map(dept => `
-                <label class="flex items-center gap-3 p-3 bg-white border-2 border-slate-100 rounded-xl cursor-pointer hover:border-blue-200 transition-all shadow-sm">
-                    <input type="checkbox" value="${dept}" class="custom-checkbox cb-subject shrink-0">
-                    <span class="text-xs font-bold text-slate-700 truncate">${dept}</span>
-                </label>
-            `).join('');
+            container.innerHTML = availableDepartments.map(dept => {
+                const isChecked = selectedSubjects.includes(dept);
+                const isOpt = optionalList.includes(dept);
+                return `
+                <div class="bg-white border-2 ${isChecked ? 'border-blue-300 bg-blue-50/20' : 'border-slate-100'} rounded-xl p-3 shadow-sm space-y-2 subject-row transition-all" data-subject="${dept}">
+                    <label class="flex items-center gap-3 cursor-pointer">
+                        <input type="checkbox" value="${dept}" class="custom-checkbox cb-subject shrink-0" ${isChecked ? 'checked' : ''} onchange="toggleSubjectType(this)">
+                        <span class="text-xs font-black text-slate-800 truncate">${dept}</span>
+                    </label>
+                    <div class="subject-type-wrap ${isChecked ? '' : 'hidden'} pl-6 pt-1.5 border-t border-slate-100 flex items-center justify-between">
+                        <span class="text-[9px] font-black text-slate-400 uppercase">Type:</span>
+                        <select class="sub-type-select p-1 bg-white border border-slate-200 rounded-lg text-[10px] font-black uppercase text-slate-700 outline-none cursor-pointer shadow-sm">
+                            <option value="COMPULSORY" ${!isOpt ? 'selected' : ''}>Compulsory</option>
+                            <option value="OPTIONAL" ${isOpt ? 'selected' : ''}>Optional</option>
+                        </select>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function toggleSubjectType(checkbox) {
+            const row = checkbox.closest('.subject-row');
+            const wrap = row.querySelector('.subject-type-wrap');
+            if (checkbox.checked) {
+                wrap.classList.remove('hidden');
+                row.classList.add('border-blue-300', 'bg-blue-50/20');
+            } else {
+                wrap.classList.add('hidden');
+                row.classList.remove('border-blue-300', 'bg-blue-50/20');
+            }
         }
 
         function populateClassDropdown() {
@@ -280,8 +304,15 @@ async function init() {
                         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 `;
 
-                sections.forEach(sec => {
-                    const subjectsHtml = sec.subjects.map(s => `<span class="px-2 py-1 ${theme.bg} ${theme.text} rounded-md text-[9px] font-black uppercase tracking-wider">${s}</span>`).join('');
+             sections.forEach(sec => {
+                    const optionals = sec.optionalSubjects || [];
+                    const subjectsHtml = sec.subjects.map(s => {
+                        if (optionals.includes(s)) {
+                            return `<span class="px-2.5 py-1 bg-amber-50 text-amber-800 rounded-md text-[9px] font-black uppercase tracking-wider border border-amber-200 shadow-sm" title="Optional Subject">${s} <span class="text-[7px] text-amber-600 font-bold ml-1">(Opt)</span></span>`;
+                        } else {
+                            return `<span class="px-2 py-1 ${theme.bg} ${theme.text} rounded-md text-[9px] font-black uppercase tracking-wider shadow-sm">${s}</span>`;
+                        }
+                    }).join('');
                     
                     groupHtml += `
                         <div class="glass p-6 rounded-[2rem] border-2 border-transparent shadow-lg relative group transition-all ${theme.hover} hover:shadow-xl flex flex-col justify-between min-h-[160px]">
@@ -323,7 +354,7 @@ function openModal() {
             document.getElementById('new-class-input').classList.add('hidden');
             document.getElementById('sec-name').value = '';
             document.getElementById('sec-code').value = '';
-            document.querySelectorAll('.cb-subject').forEach(cb => cb.checked = false);
+            renderCheckboxes([], []);
             document.getElementById('section-modal').classList.replace('hidden', 'flex'); 
         }
 
@@ -340,10 +371,7 @@ function openModal() {
             document.getElementById('sec-name').value = sec.sectionName;
             document.getElementById('sec-code').value = sec.shortCode || '';
             
-            document.querySelectorAll('.cb-subject').forEach(cb => {
-                cb.checked = sec.subjects.includes(cb.value);
-            });
-            
+            renderCheckboxes(sec.subjects || [], sec.optionalSubjects || []);
             document.getElementById('section-modal').classList.replace('hidden', 'flex');
         }
 
@@ -358,8 +386,19 @@ async function saveStructure() {
             const shortCodeVal = document.getElementById('sec-code').value.trim();
             
             const className = (selectVal === 'NEW') ? newClassVal : selectVal;
-            const checkboxes = document.querySelectorAll('.cb-subject:checked');
-            const subjects = Array.from(checkboxes).map(cb => cb.value);
+            
+            let subjects = [];
+            let optionalSubjects = [];
+
+            document.querySelectorAll('.cb-subject:checked').forEach(cb => {
+                const sub = cb.value;
+                subjects.push(sub);
+                const row = cb.closest('.subject-row');
+                const typeSelect = row.querySelector('.sub-type-select');
+                if (typeSelect && typeSelect.value === 'OPTIONAL') {
+                    optionalSubjects.push(sub);
+                }
+            });
 
             if (!className || !secName) return alert("Please provide both a Class Name and a Section Name.");
             if (subjects.length === 0) return alert("Please select at least one Required Department/Subject.");
@@ -375,7 +414,8 @@ async function saveStructure() {
                         className: className,
                         sectionName: secName,
                         shortCode: shortCodeVal,
-                        subjects: subjects
+                        subjects: subjects,
+                        optionalSubjects: optionalSubjects
                     });
 
                     if (oldSec.className !== className || oldSec.sectionName !== secName) {
@@ -405,11 +445,12 @@ async function saveStructure() {
                         return alert(`Error: Section '${secName}' already exists in '${className}'.`);
                     }
 
-                    await getCollection("institute_structure").add({
+                 await getCollection("institute_structure").add({
                         className: className,
                         sectionName: secName,
                         shortCode: shortCodeVal,
                         subjects: subjects,
+                        optionalSubjects: optionalSubjects,
                         createdAt: firebase.firestore.FieldValue.serverTimestamp()
                     });
                 }
