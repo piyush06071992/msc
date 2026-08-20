@@ -345,8 +345,9 @@
                 }
             });
 
-            listenForExams();
+          listenForExams();
             loadMyAssignedPapers();
+            loadCoordinatorDuties();
         };
 
         async function checkAdminAuthority() {
@@ -1663,6 +1664,115 @@
             } catch(e) {
                 console.error("Assigned papers load failed:", e);
                 card.classList.add('hidden');
+            }
+        }
+
+        async function loadCoordinatorDuties() {
+            const card = document.getElementById('coordinator-duties-card');
+            const container = document.getElementById('coordinator-duties-list');
+            if (!card || !container) return;
+
+            const myName = (activeStaff.name || "").trim();
+            if (!myName) return;
+
+            const offset = (new Date()).getTimezoneOffset() * 60000;
+            const todayIso = (new Date(Date.now() - offset)).toISOString().split('T')[0];
+
+            try {
+                const snap = await db.collection('admin_paper_groups')
+                    .where('coordinatorPerson', '==', myName)
+                    .where('date', '>=', todayIso)
+                    .orderBy('date', 'asc')
+                    .get();
+
+                if (snap.empty) {
+                    card.classList.add('hidden');
+                    return;
+                }
+
+                let html = "";
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    if (!data.isCombined) return; // Only show merged exams
+
+                    const prettyDate = new Date(data.date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+                    const branches = Array.isArray(data.branches) ? data.branches.join(', ') : 'N/A';
+                    
+                    let sectionsSet = new Set();
+                    (data.sectionKeys || []).forEach(sk => {
+                        const parts = sk.split('|');
+                        if (parts[2]) sectionsSet.add(parts[2]);
+                    });
+                    const sections = Array.from(sectionsSet).sort().join(', ');
+                    const mode = data.mode || 'Offline';
+                    const modeColor = mode === 'Online' ? 'bg-sky-100 text-sky-700 border-sky-200' : 'bg-amber-100 text-amber-700 border-amber-200';
+                    const safeCode = String(data.combinedCode || "").replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+                    let subExamsHtml = "";
+                    if (data.subExams) {
+                        Object.keys(data.subExams).forEach(sub => {
+                            subExamsHtml += `
+                                <div class="flex items-center justify-between py-2 border-b border-indigo-100 last:border-0">
+                                    <span class="text-[10px] font-black text-indigo-900 uppercase">${sub}</span>
+                                    <div class="flex items-center gap-2">
+                                        <span class="font-mono text-[10px] font-black text-teal-700 bg-white px-2 py-1 rounded border border-teal-200">${data.subExams[sub] || 'N/A'}</span>
+                                        <button onclick="copyAssignedCode(this, '${String(data.subExams[sub] || "").replace(/'/g, "\\'")}')" class="text-slate-400 hover:text-teal-600 transition-colors" title="Copy Sub-Code">📋</button>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                    }
+
+                    html += `
+                        <div class="bg-indigo-50 border-2 border-indigo-200 rounded-2xl p-4 sm:p-5 shadow-sm">
+                            <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-3 mb-4 pb-3 border-b border-indigo-200">
+                                <div class="flex items-center gap-3">
+                                    <span class="bg-indigo-600 text-white px-3 py-1.5 rounded-lg text-sm font-black shadow-inner">📅</span>
+                                    <div>
+                                        <div class="font-black text-indigo-900 uppercase text-sm sm:text-base tracking-tight">${prettyDate}</div>
+                                        <div class="text-[10px] font-black text-indigo-600 uppercase tracking-widest mt-0.5">${data.examType || 'EXAM'} • Class ${data.className}</div>
+                                    </div>
+                                </div>
+                                <span class="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border shadow-sm ${modeColor} self-start sm:self-auto">${mode} Mode</span>
+                            </div>
+
+                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+                                <div class="bg-white/70 rounded-xl p-3 border border-indigo-100">
+                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Branch(es)</div>
+                                    <div class="font-black text-slate-800 uppercase text-xs break-words">${branches}</div>
+                                </div>
+                                <div class="bg-white/70 rounded-xl p-3 border border-indigo-100">
+                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Section(s)</div>
+                                    <div class="font-black text-slate-800 uppercase text-xs break-words">${sections}</div>
+                                </div>
+                            </div>
+
+                            <div class="bg-white/70 rounded-xl p-3 border border-indigo-100 mb-4">
+                                <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2 border-b border-indigo-50 pb-2">Sub-Exams to Merge</div>
+                                <div class="flex flex-col">${subExamsHtml || '<span class="text-xs text-slate-400">No sub-exams data available</span>'}</div>
+                            </div>
+
+                            <div class="bg-slate-900 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                <div class="flex-1 min-w-0">
+                                    <div class="text-[9px] font-black text-teal-300 uppercase tracking-widest mb-1">Final Merged Code</div>
+                                    <div class="font-black text-white text-lg sm:text-xl tracking-wider break-words" style="font-family: monospace;">${data.combinedCode || '—'}</div>
+                                </div>
+                                <button type="button" onclick="copyAssignedCode(this, '${safeCode}')" class="shrink-0 bg-teal-500 hover:bg-teal-400 text-white px-5 py-3 rounded-xl font-black text-xs uppercase tracking-widest shadow-lg transition-all flex items-center justify-center gap-2 active:scale-95">
+                                    📋 Copy Final Code
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                });
+
+                if (html) {
+                    container.innerHTML = html;
+                    card.classList.remove('hidden');
+                } else {
+                    card.classList.add('hidden');
+                }
+            } catch(e) {
+                console.error("Failed to load coordinator duties:", e);
             }
         }
 
