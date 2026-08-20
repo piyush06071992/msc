@@ -65,11 +65,19 @@
                     </div>
                 </div>
 
-                <div>
+               <div>
                     <label class="block text-[10px] font-black text-slate-400 uppercase mb-3">Required Departments / Subjects</label>
                     <div id="dept-checkboxes" class="grid grid-cols-2 gap-3 max-h-48 overflow-y-auto p-2 border-2 border-slate-50 rounded-2xl bg-slate-50/50">
                         <span class="text-xs text-slate-400 font-bold col-span-2 text-center py-4">Scanning admin forms...</span>
                     </div>
+                </div>
+
+                <div class="border-t border-slate-100 pt-4 mt-2">
+                    <div class="flex justify-between items-center mb-3">
+                        <label class="block text-[10px] font-black text-slate-400 uppercase">Mutually Exclusive Optionals</label>
+                        <button type="button" onclick="addChoiceGroup()" class="text-[9px] font-black text-amber-700 bg-amber-100 hover:bg-amber-200 px-3 py-1.5 rounded-lg transition-colors shadow-sm tracking-widest uppercase flex items-center gap-1"><span>🔗</span> Add Choice Group</button>
+                    </div>
+                    <div id="choice-groups-container" class="space-y-3 max-h-40 overflow-y-auto custom-scroll pr-1"></div>
                 </div>
 
                 <div class="flex gap-3 pt-4">
@@ -280,8 +288,23 @@ async function init() {
                         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 `;
 
-                sections.forEach(sec => {
-                    const subjectsHtml = sec.subjects.map(s => `<span class="px-2 py-1 ${theme.bg} ${theme.text} rounded-md text-[9px] font-black uppercase tracking-wider">${s}</span>`).join('');
+               sections.forEach(sec => {
+                    let subjectsHtml = '';
+                    const optionals = sec.optionalGroups || [];
+                    const flattenedOptionals = new Set(optionals.flat());
+                    
+                    // Render Mandatory Subjects
+                    sec.subjects.forEach(s => {
+                        if (!flattenedOptionals.has(s)) {
+                            subjectsHtml += `<span class="px-2 py-1 ${theme.bg} ${theme.text} rounded-md text-[9px] font-black uppercase tracking-wider shadow-sm border border-${theme.bg.split('-')[1]}-200">${s}</span>`;
+                        }
+                    });
+
+                    // Render Choice Groups as connected blocks
+                    optionals.forEach(group => {
+                        const groupStr = group.join(' <span class="text-amber-300 mx-1">/</span> ');
+                        subjectsHtml += `<div class="flex items-center bg-amber-50 border border-amber-200 px-2 py-1 rounded-md shadow-sm"><span class="text-[9px] font-black text-amber-700 uppercase tracking-wider">${groupStr}</span></div>`;
+                    });
                     
                     groupHtml += `
                         <div class="glass p-6 rounded-[2rem] border-2 border-transparent shadow-lg relative group transition-all ${theme.hover} hover:shadow-xl flex flex-col justify-between min-h-[160px]">
@@ -316,7 +339,32 @@ async function init() {
             populateClassDropdown();
         }
 
-function openModal() { 
+function addChoiceGroup(existingSelections = []) {
+            const container = document.getElementById('choice-groups-container');
+            const groupId = 'cg_' + Date.now() + Math.random().toString(36).substr(2, 5);
+            
+            let checkboxesHtml = availableDepartments.map(dept => {
+                const isChecked = existingSelections.includes(dept) ? 'checked' : '';
+                return `
+                <label class="flex items-center gap-1.5 bg-white px-2 py-1 rounded border border-amber-100 cursor-pointer hover:border-amber-300 shadow-sm">
+                    <input type="checkbox" value="${dept}" class="group-sub-cb w-3 h-3 accent-amber-600" ${isChecked}>
+                    <span class="text-[9px] font-bold text-amber-900 truncate max-w-[80px]" title="${dept}">${dept}</span>
+                </label>`;
+            }).join('');
+
+            const html = `
+                <div class="choice-group-box bg-amber-50 border border-amber-200 p-3 rounded-xl relative shadow-sm" id="${groupId}">
+                    <button type="button" onclick="document.getElementById('${groupId}').remove()" class="absolute top-2 right-2 text-rose-500 hover:text-rose-700 font-black text-[10px] w-5 h-5 flex items-center justify-center bg-white rounded-full shadow-sm">✕</button>
+                    <div class="text-[9px] font-black text-amber-700 uppercase tracking-widest mb-2 pr-6">Choice Group (Select Concurrent Subjects)</div>
+                    <div class="flex flex-wrap gap-2">
+                        ${checkboxesHtml}
+                    </div>
+                </div>
+            `;
+            container.insertAdjacentHTML('beforeend', html);
+        }
+
+        function openModal() { 
             editingSectionId = null; 
             document.getElementById('modal-title').innerText = "Define Section Layout";
             document.getElementById('class-select').value = '';
@@ -324,6 +372,7 @@ function openModal() {
             document.getElementById('sec-name').value = '';
             document.getElementById('sec-code').value = '';
             document.querySelectorAll('.cb-subject').forEach(cb => cb.checked = false);
+            document.getElementById('choice-groups-container').innerHTML = '';
             document.getElementById('section-modal').classList.replace('hidden', 'flex'); 
         }
 
@@ -343,6 +392,12 @@ function openModal() {
             document.querySelectorAll('.cb-subject').forEach(cb => {
                 cb.checked = sec.subjects.includes(cb.value);
             });
+
+            const cgContainer = document.getElementById('choice-groups-container');
+            cgContainer.innerHTML = '';
+            if (sec.optionalGroups && sec.optionalGroups.length > 0) {
+                sec.optionalGroups.forEach(grp => addChoiceGroup(grp));
+            }
             
             document.getElementById('section-modal').classList.replace('hidden', 'flex');
         }
@@ -358,8 +413,22 @@ async function saveStructure() {
             const shortCodeVal = document.getElementById('sec-code').value.trim();
             
             const className = (selectVal === 'NEW') ? newClassVal : selectVal;
-            const checkboxes = document.querySelectorAll('.cb-subject:checked');
-            const subjects = Array.from(checkboxes).map(cb => cb.value);
+            
+            let allSubjectsSet = new Set();
+            document.querySelectorAll('.cb-subject:checked').forEach(cb => allSubjectsSet.add(cb.value));
+
+            // Extract Choice Groups
+            let optionalGroups = [];
+            document.querySelectorAll('.choice-group-box').forEach(box => {
+                const checkedInGroup = Array.from(box.querySelectorAll('.group-sub-cb:checked')).map(cb => cb.value);
+                if (checkedInGroup.length > 1) {
+                    optionalGroups.push(checkedInGroup);
+                    // Ensure grouped subjects are auto-added to the master subjects array
+                    checkedInGroup.forEach(sub => allSubjectsSet.add(sub));
+                }
+            });
+
+            const subjects = Array.from(allSubjectsSet);
 
             if (!className || !secName) return alert("Please provide both a Class Name and a Section Name.");
             if (subjects.length === 0) return alert("Please select at least one Required Department/Subject.");
@@ -375,7 +444,8 @@ async function saveStructure() {
                         className: className,
                         sectionName: secName,
                         shortCode: shortCodeVal,
-                        subjects: subjects
+                        subjects: subjects,
+                        optionalGroups: optionalGroups
                     });
 
                     if (oldSec.className !== className || oldSec.sectionName !== secName) {
@@ -394,7 +464,7 @@ async function saveStructure() {
                     }
                     alert("Section updated successfully!");
 
-                } else {
+              } else {
                     const checkSnap = await getCollection("institute_structure")
                         .where("className", "==", className)
                         .where("sectionName", "==", secName)
@@ -410,6 +480,7 @@ async function saveStructure() {
                         sectionName: secName,
                         shortCode: shortCodeVal,
                         subjects: subjects,
+                        optionalGroups: optionalGroups,
                         createdAt: firebase.firestore.FieldValue.serverTimestamp()
                     });
                 }
