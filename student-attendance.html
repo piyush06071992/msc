@@ -2681,7 +2681,7 @@ async function listenForMissingAttendance() {
                     const dayName = daysArr[dateObj.getDay()];
                     const schedule = getScheduleSnapshot(dateStr).filter(s => s.day === dayName);
                     
-                    schedule.forEach(slot => {
+schedule.forEach(slot => {
                         const sub = slot.subject || "";
                         if (SPECIAL_SUBJECTS.includes(sub.toUpperCase())) return;
                         if (!slot.teacher || slot.teacher === "NONE") return;
@@ -2694,6 +2694,55 @@ async function listenForMissingAttendance() {
                         if (!slot.end24) return;
                         const [eh, em] = slot.end24.split(':').map(Number);
                         const endMins = eh * 60 + em;
+
+                        // --- HOLIDAY / HALF-DAY SCANNER LOGIC ---
+                        let isHoliday = false;
+                        if (typeof holidaysData !== 'undefined' && holidaysData.length > 0) {
+                            for (let h of holidaysData) {
+                                if (h.suspendClasses === false || !h.startDate) continue;
+
+                                const [sy, sm, sd] = h.startDate.split('-');
+                                let hs = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd));
+                                let he = hs;
+                                if (h.endDate) {
+                                    const [ey, em, ed] = h.endDate.split('-');
+                                    he = new Date(parseInt(ey), parseInt(em)-1, parseInt(ed), 23, 59, 59);
+                                } else {
+                                    he = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd), 23, 59, 59);
+                                }
+
+                                if (dateObj >= hs && dateObj <= he) {
+                                    const targetCls = `${norm(slot.className)}|${norm(slot.section)}`;
+                                    const matchesClass = h.targetClasses.some(tc => {
+                                        if (tc === 'ALL') return true;
+                                        const parts = tc.split('|');
+                                        const tcNorm = norm(parts[0]) + (parts[1] ? '|' + norm(parts[1]) : '');
+                                        return tcNorm === targetCls || norm(parts[0]) === norm(slot.className);
+                                    });
+
+                                    if (matchesClass) {
+                                        if (h.isFullDay) {
+                                            isHoliday = true; break;
+                                        } else if (h.startTime && h.endTime) {
+                                            const [sh, sm] = (slot.start24 || "00:00").split(':').map(Number);
+                                            const startMins = sh * 60 + sm;
+                                            const [hsh, hsm] = h.startTime.split(':').map(Number);
+                                            const [heh, hem] = h.endTime.split(':').map(Number);
+                                            const hStartMins = hsh * 60 + hsm;
+                                            const hEndMins = heh * 60 + hem;
+                                            
+                                            // Check if this specific class slot overlaps with the event timeframe
+                                            if (startMins < hEndMins && endMins > hStartMins) {
+                                                isHoliday = true; break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (isHoliday) return; // Skip requesting attendance for suspended classes
+                        // --- END HOLIDAY SCANNER LOGIC ---
+
                         if (isToday && (currentMins < endMins + 30)) return;
 
                         // Did they mark it?
