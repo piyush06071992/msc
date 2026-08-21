@@ -688,17 +688,27 @@ if (isAdmin) {
             return activeCenter === "GHUMARWIN" ? db.collection(name) : db.collection(`${activeCenter.toLowerCase()}_${name}`);
         }
 
-        function getActiveStudentsForDate(c, s, dateStr) {
+      function getActiveStudentsForDate(c, s, dateStr) {
             return studentsData.filter(stu => {
                 const isCurrentClass = normMatch(stu.className) === normMatch(c) && normMatch(stu.section) === normMatch(s);
                 const isPrevClass = normMatch(stu.prevClass) === normMatch(c) && normMatch(stu.prevSection) === normMatch(s);
-                
+
+                let belongsToClass = false;
                 if (stu.transferDate && dateStr) {
-                    if (isCurrentClass && dateStr >= stu.transferDate) return true;
-                    if (isPrevClass && dateStr < stu.transferDate) return true;
-                    return false;
+                    if (isCurrentClass && dateStr >= stu.transferDate) belongsToClass = true;
+                    else if (isPrevClass && dateStr < stu.transferDate) belongsToClass = true;
+                } else {
+                    belongsToClass = isCurrentClass;
                 }
-                return isCurrentClass;
+                
+                if (!belongsToClass) return false;
+
+                // Hide inactive students on or after their effective leave date
+                if (stu.isActive === false && stu.statusChangeDate && dateStr) {
+                    if (dateStr >= stu.statusChangeDate) return false;
+                }
+
+                return true;
             }).sort((a,b) => String(a.name).localeCompare(String(b.name)));
         }
 
@@ -815,10 +825,14 @@ function switchMainTab(tab) {
                 remedialDataMap = {};
                 remSnap.forEach(d => { remedialDataMap[d.id] = d.data(); });
 
-                studentsData = [];
-                stuSnap.forEach(d => { if (d.data().isActive !== false) studentsData.push({ id: d.id, ...d.data() }); });
+              studentsData = [];
+                stuSnap.forEach(d => { 
+                    const data = d.data();
+                    if (data.admissionStatus !== 'PENDING') {
+                        studentsData.push({ id: d.id, ...data }); 
+                    }
+                });
                 staffList = staffSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-
                 if (isAdmin) loadStaffListForPerms();
 
              const classFilterSelect = document.getElementById('audit-class-filter');
@@ -2376,17 +2390,29 @@ function shareWholeClassWhatsApp() {
                    }
                 });
 
-                const myStudents = studentsData.filter(stu => {
+         const myStudents = studentsData.filter(stu => {
                     const isCurrentClass = normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s);
                     const isPrevClass = normMatch(stu.prevClass) === normMatch(currentReg.c) && normMatch(stu.prevSection) === normMatch(currentReg.s);
+                    
+                    let belongs = false;
                     if (stu.transferDate) {
                         const [ty, tm] = stu.transferDate.split('-');
                         const transferMonth = `${ty}_${tm}`;
-                        if (isCurrentClass) return true;
-                        if (isPrevClass && transferMonth >= monthVal) return true;
-                        return false;
+                        if (isCurrentClass) belongs = true;
+                        if (isPrevClass && transferMonth >= monthVal) belongs = true;
+                    } else {
+                        belongs = isCurrentClass;
                     }
-                    return isCurrentClass;
+                    
+                    if (!belongs) return false;
+                    
+                    if (stu.isActive === false && stu.statusChangeDate) {
+                        const [sy, sm] = stu.statusChangeDate.split('-');
+                        const statusMonth = `${sy}_${sm}`;
+                        if (statusMonth < monthVal) return false; // Left before this month started, do not show
+                    }
+                    
+                    return true;
                 }).sort((a,b) => String(a.name).localeCompare(String(b.name)));
 
                 if (myStudents.length === 0) { container.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs">No students in section.</div>`; return; }
@@ -2507,13 +2533,17 @@ function shareWholeClassWhatsApp() {
                             cellContent = ""; 
                         } 
                         else {
-                            let shouldGreyOut = false;
+                        let shouldGreyOut = false;
                             const isCurrentClass = normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s);
                             const isPrevClass = normMatch(stu.prevClass) === normMatch(currentReg.c) && normMatch(stu.prevSection) === normMatch(currentReg.s);
 
                             if (stu.transferDate) {
                                 if (isCurrentClass && ds.date < stu.transferDate) shouldGreyOut = true;
                                 if (isPrevClass && ds.date >= stu.transferDate) shouldGreyOut = true;
+                            }
+                            
+                            if (stu.isActive === false && stu.statusChangeDate && ds.date >= stu.statusChangeDate) {
+                                shouldGreyOut = true;
                             }
 
                             if (shouldGreyOut) {
@@ -2532,7 +2562,7 @@ function shareWholeClassWhatsApp() {
                     const grandTotalAtt = stuPrevAtt + pCount;
                     let percentage = grandTotalWorking > 0 ? Math.round((grandTotalAtt / grandTotalWorking) * 100) : 0;
 
-                    let remarks = "";
+                   let remarks = "";
                     if (percentage < 75 && grandTotalWorking > 0) remarks = `Short (${percentage}%)`;
 
                     const isCurrentClass = normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s);
@@ -2545,6 +2575,11 @@ function shareWholeClassWhatsApp() {
                         } else if (isPrevClass && isCurrentClass === false) {
                             remarks = `Shifted to ${stu.className} Sec ${stu.section} on ${tDatePretty}`;
                         }
+                    }
+                    
+                    if (stu.isActive === false && stu.statusChangeDate) {
+                        const sDatePretty = new Date(stu.statusChangeDate).toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+                        remarks = `Left ${sDatePretty}: ${stu.statusRemark || 'Inactive'}`;
                     }
 
               tableHtml += `<tr>
