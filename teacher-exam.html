@@ -1815,12 +1815,17 @@ function renderAssignedPaperCard(r, index, totalCards) {
             const offset = (new Date()).getTimezoneOffset() * 60000;
             const todayIso = (new Date(Date.now() - offset)).toISOString().split('T')[0];
 
-            try {
+         try {
                 // Fetching by date only to bypass Firebase Composite Index restrictions, then filtering by name
-                const snap = await db.collection('admin_paper_groups')
-                    .where('date', '>=', todayIso)
-                    .orderBy('date', 'asc')
-                    .get();
+                const [snap, gStuSnap, dStuSnap] = await Promise.all([
+                    db.collection('admin_paper_groups').where('date', '>=', todayIso).orderBy('date', 'asc').get(),
+                    db.collection("students").get(),
+                    db.collection("dharamshala_students").get()
+                ]);
+
+                let studentsMap = { GHUMARWIN: [], DHARAMSHALA: [] };
+                gStuSnap.forEach(d => { const s = d.data(); if(s.isActive !== false) studentsMap.GHUMARWIN.push(s); });
+                dStuSnap.forEach(d => { const s = d.data(); if(s.isActive !== false) studentsMap.DHARAMSHALA.push(s); });
 
                 let html = "";
                 snap.forEach(doc => {
@@ -1831,17 +1836,37 @@ function renderAssignedPaperCard(r, index, totalCards) {
                     if (coord !== myName && coord !== myEmail) return;
 
                     const prettyDate = new Date(data.date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-                    const branches = Array.isArray(data.branches) ? data.branches.join(', ') : 'N/A';
-                    
-                    let sectionsSet = new Set();
-                    (data.sectionKeys || []).forEach(sk => {
-                        const parts = sk.split('|');
-                        if (parts[2]) sectionsSet.add(parts[2]);
-                    });
-                    const sections = Array.from(sectionsSet).sort().join(', ');
                     const mode = data.mode || 'Offline';
                     const modeColor = mode === 'Online' ? 'bg-sky-100 text-sky-700 border-sky-200' : 'bg-amber-100 text-amber-700 border-amber-200';
                     const safeCode = String(data.combinedCode || "").replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+                    let totalStrength = 0;
+                    let branchTotals = {};
+                    let secStrengthHtml = [];
+                    let branchStrengthHtml = [];
+
+                    // Calculate strengths accurately
+                    (data.sectionKeys || []).forEach(sk => {
+                        const parts = sk.split('|');
+                        const b = parts[0] || 'UNKNOWN';
+                        const c = parts[1] || '';
+                        const s = parts[2] || '';
+                        
+                        let count = 0;
+                        if (studentsMap[b]) {
+                            count = studentsMap[b].filter(stu => String(stu.className) === String(c) && String(stu.section) === String(s)).length;
+                        }
+                        
+                        if(!branchTotals[b]) branchTotals[b] = 0;
+                        branchTotals[b] += count;
+                        totalStrength += count;
+
+                        secStrengthHtml.push(`<span class="bg-indigo-100/50 text-indigo-700 px-1.5 py-0.5 rounded text-[9px] font-black border border-indigo-200/50 shadow-sm">${b.substring(0,4)}: Sec ${s} <span class="text-indigo-400">(${count})</span></span>`);
+                    });
+
+                    Object.keys(branchTotals).forEach(b => {
+                        branchStrengthHtml.push(`<span class="bg-white px-2 py-0.5 rounded-md border border-slate-200 shadow-sm text-[9px] font-black text-slate-600">${b}: <span class="text-indigo-600">${branchTotals[b]}</span></span>`);
+                    });
 
             let subExamsHtml = "";
                     if (data.subExams) {
@@ -1885,14 +1910,18 @@ function renderAssignedPaperCard(r, index, totalCards) {
                                 <span class="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border shadow-sm ${modeColor} self-start sm:self-auto">${mode} Mode</span>
                             </div>
 
-                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-                                <div class="bg-white/70 rounded-xl p-3 border border-indigo-100">
-                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Branch(es)</div>
-                                    <div class="font-black text-slate-800 uppercase text-xs break-words">${branches}</div>
+                         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                                <div class="bg-white/70 rounded-xl p-3 border border-indigo-100 flex flex-col justify-center">
+                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Branch Distribution</div>
+                                    <div class="flex flex-wrap gap-1">${branchStrengthHtml.join('') || '<span class="text-xs font-bold text-slate-400">—</span>'}</div>
                                 </div>
-                                <div class="bg-white/70 rounded-xl p-3 border border-indigo-100">
-                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Section(s)</div>
-                                    <div class="font-black text-slate-800 uppercase text-xs break-words">${sections}</div>
+                                <div class="bg-white/70 rounded-xl p-3 border border-indigo-100 flex flex-col justify-center">
+                                    <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Section Breakdown</div>
+                                    <div class="flex flex-wrap gap-1">${secStrengthHtml.join('') || '<span class="text-xs font-bold text-slate-400">—</span>'}</div>
+                                </div>
+                                <div class="bg-indigo-600 rounded-xl p-3 border border-indigo-500 flex flex-col justify-center items-center text-white shadow-inner">
+                                    <div class="text-[9px] font-black text-indigo-200 uppercase tracking-widest mb-0.5">Total Print Count</div>
+                                    <div class="text-lg font-black tracking-widest">${totalStrength} <span class="text-[10px] text-indigo-300">Copies</span></div>
                                 </div>
                             </div>
 
