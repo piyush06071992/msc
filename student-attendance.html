@@ -2372,13 +2372,18 @@ function shareWholeClassWhatsApp() {
                     getCollection("attendance_records").where("monthKey", "==", prevMonthKey).get()
                 ]);
 
-                let curRecords = {};
+              let curRecords = {};
                 let curStats = {};
                 let prevStats = {};
+                
+                let oldSectionRecords = {};
+                let oldSectionPrevStats = {};
 
                 curQuerySnap.forEach(doc => {
                     const data = doc.data();
-                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s) && normMatch(data.subject) === normMatch(currentReg.sub)) {
+                    if (normMatch(data.subject) !== normMatch(currentReg.sub)) return;
+
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
                         if (data.records) {
                             Object.keys(data.records).forEach(dKey => {
                                 curRecords[dKey] = { ...(curRecords[dKey] || {}), ...data.records[dKey] };
@@ -2387,14 +2392,36 @@ function shareWholeClassWhatsApp() {
                         if (data.aggregatedStats) {
                             curStats = { ...curStats, ...data.aggregatedStats };
                         }
+                    } else {
+                        if (data.records) {
+                            Object.keys(data.records).forEach(dKey => {
+                                Object.entries(data.records[dKey]).forEach(([stuId, status]) => {
+                                    if (!oldSectionRecords[stuId]) oldSectionRecords[stuId] = { P: 0, A: 0, L: 0 };
+                                    if (status === 'P' || status === 'A' || status === 'L') oldSectionRecords[stuId][status]++;
+                                });
+                            });
+                        }
+                        if (data.aggregatedStats && data.aggregatedStats.students) {
+                            Object.entries(data.aggregatedStats.students).forEach(([stuId, count]) => {
+                                oldSectionPrevStats[stuId] = (oldSectionPrevStats[stuId] || 0) + count;
+                            });
+                        }
                     }
                 });
 
-            prevQuerySnap.forEach(doc => {
+                prevQuerySnap.forEach(doc => {
                     const data = doc.data();
-                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s) && normMatch(data.subject) === normMatch(currentReg.sub)) {
+                    if (normMatch(data.subject) !== normMatch(currentReg.sub)) return;
+
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
                         if (data.aggregatedStats) {
                             prevStats = { ...prevStats, ...data.aggregatedStats };
+                        }
+                   } else {
+                        if (data.aggregatedStats && data.aggregatedStats.students) {
+                            Object.entries(data.aggregatedStats.students).forEach(([stuId, count]) => {
+                                oldSectionPrevStats[stuId] = (oldSectionPrevStats[stuId] || 0) + count;
+                            });
                         }
                    }
                 });
@@ -2534,52 +2561,59 @@ function shareWholeClassWhatsApp() {
                     <tr class="maroon-bg print-maroon-header">${dayHeaders}</tr>
                 </thead><tbody class="text-[12px] font-bold text-black bg-white">`;
 
-                myStudents.forEach((stu, rowIndex) => {
-                    const stuPrevAtt = curStats.students && curStats.students[stu.id] !== undefined ? curStats.students[stu.id] : (prevStats.students ? (prevStats.students[stu.id] || 0) : 0);
+          myStudents.forEach((stu, rowIndex) => {
+                    const isCurrentClass = normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s);
+                    const isPrevClass = normMatch(stu.prevClass) === normMatch(currentReg.c) && normMatch(stu.prevSection) === normMatch(currentReg.s);
+
+                    let stuPrevAtt = curStats.students && curStats.students[stu.id] !== undefined ? curStats.students[stu.id] : (prevStats.students ? (prevStats.students[stu.id] || 0) : 0);
+                    if (stuPrevAtt === 0 && isCurrentClass && stu.transferDate && oldSectionPrevStats[stu.id]) {
+                        stuPrevAtt = oldSectionPrevStats[stu.id];
+                    }
+
                     let pCount = 0; let lCount = 0; let aCount = 0; let rowHtml = "";
+
+                    if (isCurrentClass && stu.transferDate && oldSectionRecords[stu.id]) {
+                        pCount += oldSectionRecords[stu.id].P || 0;
+                        aCount += oldSectionRecords[stu.id].A || 0;
+                        lCount += oldSectionRecords[stu.id].L || 0;
+                    }
 
                  dayStatuses.forEach(ds => {
                         let cellContent = ""; let inlineStyle = "";
                         
-                        if (ds.verticalReason) {
+                        let shouldGreyOut = false;
+                        if (stu.transferDate) {
+                            if (isCurrentClass && ds.date < stu.transferDate) shouldGreyOut = true;
+                            if (isPrevClass && ds.date >= stu.transferDate) shouldGreyOut = true;
+                        }
+                        
+                        if (stu.isActive === false) {
+                            if (stu.statusChangeDate && ds.date >= stu.statusChangeDate) {
+                                shouldGreyOut = true;
+                            } else if (!stu.statusChangeDate && ds.date >= todayISO) {
+                                shouldGreyOut = true;
+                            }
+                        }
+
+                        if (shouldGreyOut) {
+                            cellContent = "-";
+                            inlineStyle = "color: #ef4444; font-weight: 900; background-color: #f1f5f9;";
+                        } else if (ds.verticalReason) {
                             if (rowIndex < ds.verticalReason.length) {
                                 cellContent = ds.verticalReason[rowIndex];
                             } else {
                                 cellContent = ""; 
                             }
                             inlineStyle = "font-weight: 900; background-color: #f1f5f9; color: #ca8a04;";
-                        }
-                    else if (ds.isFuture) { 
+                        } else if (ds.isFuture) { 
                             cellContent = ""; 
-                        } 
-                        else {
-                        let shouldGreyOut = false;
-                            const isCurrentClass = normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s);
-                            const isPrevClass = normMatch(stu.prevClass) === normMatch(currentReg.c) && normMatch(stu.prevSection) === normMatch(currentReg.s);
-
-                            if (stu.transferDate) {
-                                if (isCurrentClass && ds.date < stu.transferDate) shouldGreyOut = true;
-                                if (isPrevClass && ds.date >= stu.transferDate) shouldGreyOut = true;
-                            }
-                            
-                     if (stu.isActive === false) {
-                                if (stu.statusChangeDate && ds.date >= stu.statusChangeDate) {
-                                    shouldGreyOut = true;
-                                } else if (!stu.statusChangeDate && ds.date >= todayISO) {
-                                    shouldGreyOut = true;
-                                }
-                            }
-
-                            if (shouldGreyOut) {
-                                cellContent = "-";
-                                inlineStyle = "color: #ef4444; font-weight: 900; background-color: #f1f5f9;";
-                            } else if (curRecords[ds.date] && curRecords[ds.date][stu.id]) {
-                                const val = curRecords[ds.date][stu.id];
-                                if (val === 'P') { cellContent = "P"; inlineStyle = "color: #000080; font-weight: 900;"; pCount++; }
-                                else if (val === 'A') { cellContent = "A"; inlineStyle = "color: #dc2626; font-weight: 900;"; aCount++; }
-                                else if (val === 'L') { cellContent = "L"; inlineStyle = "color: #dc2626; font-weight: 900;"; lCount++; }
-                            }
+                        } else if (curRecords[ds.date] && curRecords[ds.date][stu.id]) {
+                            const val = curRecords[ds.date][stu.id];
+                            if (val === 'P') { cellContent = "P"; inlineStyle = "color: #000080; font-weight: 900;"; pCount++; }
+                            else if (val === 'A') { cellContent = "A"; inlineStyle = "color: #dc2626; font-weight: 900;"; aCount++; }
+                            else if (val === 'L') { cellContent = "L"; inlineStyle = "color: #dc2626; font-weight: 900;"; lCount++; }
                         }
+                        
                         rowHtml += `<td class="border border-black" style="${inlineStyle}">${cellContent}</td>`;
                     });
 
