@@ -1150,27 +1150,39 @@ window._examMapView = 'class'; // Default view mode
                 return;
             }
 
-            // ── TEACHER-WISE VIEW LAYOUT ──────────────────────────────────
+       // ── TEACHER-WISE VIEW LAYOUT ──────────────────────────────────
             if (window._examMapView === 'teacher') {
                 let teacherMap = {};
+                let unassignedCounter = 0;
+
                 filtered.forEach(g => {
-                    const branches = Array.from(g.branchSet).sort().join(' + ');
                     Array.from(g.subjectSet).forEach(sub => {
                         if (selectedSubject !== 'ALL' && sub !== selectedSubject) return;
                         const hd = g.subjectDetails[sub] || {};
                         const tName = (hd.teacherName && hd.teacherName !== 'PENDING') ? hd.teacherName : 'UNASSIGNED / PENDING';
-                        if (!teacherMap[tName]) teacherMap[tName] = [];
-                        teacherMap[tName].push({
-                            branch: branches,
-                            className: g.className,
-                            sections: g.sections.join(', '),
-                            subject: sub,
-                            shortCode: hd.shortCode || '—',
-                            mode: hd.mode || 'Offline',
-                            examType: g.examType,
-                            status: g.status,
-                            combinedCode: g.combinedCode
-                        });
+                        
+                        if (!teacherMap[tName]) teacherMap[tName] = {};
+
+                        const sCode = hd.shortCode || '—';
+                        // Group by short code. If missing, keep separate.
+                        const paperKey = sCode !== '—' ? `${sub}_${sCode}` : `pending_${unassignedCounter++}`;
+
+                        if (!teacherMap[tName][paperKey]) {
+                            teacherMap[tName][paperKey] = {
+                                branchSet: new Set(),
+                                classSet: new Set(),
+                                subject: sub,
+                                shortCode: sCode,
+                                mode: hd.mode || 'Offline',
+                                copyCount: 0
+                            };
+                        }
+
+                        g.branchSet.forEach(b => teacherMap[tName][paperKey].branchSet.add(b));
+                        g.classSet.forEach(c => teacherMap[tName][paperKey].classSet.add(c));
+                        
+                        // Count the physical copies needed (1 per section in this group)
+                        teacherMap[tName][paperKey].copyCount += g.sections.length;
                     });
                 });
 
@@ -1179,21 +1191,33 @@ window._examMapView = 'class'; // Default view mode
                 const sortedTeachers = Object.keys(teacherMap).sort();
 
                 sortedTeachers.forEach((tName, tIdx) => {
-                    const assignments = teacherMap[tName];
+                    const assignments = Object.values(teacherMap[tName]);
+                    assignments.sort((a,b) => a.subject.localeCompare(b.subject) || a.shortCode.localeCompare(b.shortCode));
+
                     let subAssignRows = assignments.map((asgn, aIdx) => {
-                        return '<tr class="border-b border-slate-100 last:border-0 hover:bg-slate-50"><td class="p-3 text-center font-black text-slate-400">'+(aIdx+1)+'</td><td class="p-3"><span class="bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded text-[9px] font-black uppercase">'+asgn.branch+'</span></td><td class="p-3 font-black text-slate-800 text-xs uppercase">'+asgn.className+'</td><td class="p-3"><span class="bg-slate-100 text-slate-700 border border-slate-200 px-2 py-0.5 rounded text-[9px] font-black uppercase">Sec '+asgn.sections+'</span></td><td class="p-3 font-black text-indigo-600 text-xs uppercase">'+asgn.subject+'</td><td class="p-3"><div class="flex items-center gap-1.5"><span class="bg-teal-50 text-teal-700 border border-teal-200 font-mono text-[10px] font-black px-2 py-0.5 rounded">'+asgn.shortCode+'</span>'+(asgn.shortCode !== '—' ? '<button onclick="adminCopyCode(\''+asgn.shortCode+'\')" class="text-slate-400 hover:text-teal-600">📋</button>' : '')+'</div></td><td class="p-3"><span class="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-[8px] font-black uppercase">'+asgn.mode+'</span></td></tr>';
+                        const branches = Array.from(asgn.branchSet).sort().join(', ');
+                        const classes = Array.from(asgn.classSet).sort((a,b) => a.localeCompare(b, undefined, {numeric:true})).join(', ');
+                        const copies = asgn.copyCount;
+                        const copyText = copies > 0 ? `${copies} Cop${copies>1?'ies':'y'} + 1 Backup` : '1 Copy + 1 Backup';
+
+                        return '<tr class="border-b border-slate-100 last:border-0 hover:bg-slate-50"><td class="p-3 text-center font-black text-slate-400">'+(aIdx+1)+'</td><td class="p-3"><span class="bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded text-[9px] font-black uppercase">'+branches+'</span></td><td class="p-3 font-black text-slate-800 text-xs uppercase">'+classes+'</td><td class="p-3"><span class="bg-slate-100 text-slate-700 border border-slate-200 px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest">'+copyText+'</span></td><td class="p-3 font-black text-indigo-600 text-xs uppercase">'+asgn.subject+'</td><td class="p-3"><div class="flex items-center gap-1.5"><span class="bg-teal-50 text-teal-700 border border-teal-200 font-mono text-[10px] font-black px-2 py-0.5 rounded">'+asgn.shortCode+'</span>'+(asgn.shortCode !== '—' ? '<button onclick="adminCopyCode(\''+asgn.shortCode+'\')" class="text-slate-400 hover:text-teal-600">📋</button>' : '')+'</div></td><td class="p-3"><span class="bg-slate-100 text-slate-600 px-2 py-0.5 rounded text-[8px] font-black uppercase">'+asgn.mode+'</span></td></tr>';
                     }).join('');
 
-                    teacherRows += '<tr class="bg-slate-50 border-t-2 border-slate-200"><td colspan="7" class="p-3 font-black text-indigo-900 text-sm uppercase tracking-wider">👨‍🏫 '+tName+' <span class="text-xs font-bold text-slate-400 ml-2">('+assignments.length+' assignment'+(assignments.length>1?'s':'')+')</span></td></tr>'+subAssignRows;
+                    teacherRows += '<tr class="bg-slate-50 border-t-2 border-slate-200"><td colspan="7" class="p-3 font-black text-indigo-900 text-sm uppercase tracking-wider">👨‍🏫 '+tName+' <span class="text-xs font-bold text-slate-400 ml-2">('+assignments.length+' unique paper'+(assignments.length>1?'s':'')+')</span></td></tr>'+subAssignRows;
 
                     const cardItems = assignments.map(asgn => {
-                        return '<div class="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-col gap-1.5 shadow-sm"><div class="flex justify-between items-center"><span class="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded text-[8px] font-black uppercase">'+asgn.branch+'</span><span class="font-black text-indigo-600 text-xs uppercase">'+asgn.subject+'</span></div><div class="text-[11px] font-black text-slate-800 uppercase">Class '+asgn.className+' • Sec '+asgn.sections+'</div><div class="flex justify-between items-center pt-1 border-t border-slate-200"><span class="font-mono text-[10px] font-black text-teal-700 bg-teal-50 px-2 py-0.5 rounded border border-teal-200">Code: '+asgn.shortCode+'</span><span class="text-[8px] font-black uppercase bg-slate-200 text-slate-600 px-2 py-0.5 rounded">'+asgn.mode+'</span></div></div>';
+                        const branches = Array.from(asgn.branchSet).sort().join(', ');
+                        const classes = Array.from(asgn.classSet).sort((a,b) => a.localeCompare(b, undefined, {numeric:true})).join(', ');
+                        const copies = asgn.copyCount;
+                        const copyText = copies > 0 ? `${copies} Cop${copies>1?'ies':'y'} + 1 Backup` : '1 Copy + 1 Backup';
+
+                        return '<div class="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-col gap-1.5 shadow-sm"><div class="flex justify-between items-center"><span class="bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded text-[8px] font-black uppercase">'+branches+'</span><span class="font-black text-indigo-600 text-xs uppercase">'+asgn.subject+'</span></div><div class="text-[11px] font-black text-slate-800 uppercase">Class '+classes+' • <span class="text-slate-500">'+copyText+'</span></div><div class="flex justify-between items-center pt-1 border-t border-slate-200"><span class="font-mono text-[10px] font-black text-teal-700 bg-teal-50 px-2 py-0.5 rounded border border-teal-200">Code: '+asgn.shortCode+'</span><span class="text-[8px] font-black uppercase bg-slate-200 text-slate-600 px-2 py-0.5 rounded">'+asgn.mode+'</span></div></div>';
                     }).join('');
 
-                    teacherCards += '<div class="bg-white border-2 border-indigo-100 rounded-2xl p-4 shadow-sm mb-4"><h4 class="font-black text-indigo-900 text-sm uppercase mb-3 border-b pb-2 flex items-center justify-between"><span>👨‍🏫 '+tName+'</span><span class="bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded text-[10px]">'+assignments.length+'</span></h4><div class="space-y-2">'+cardItems+'</div></div>';
+                    teacherCards += '<div class="bg-white border-2 border-indigo-100 rounded-2xl p-4 shadow-sm mb-4"><h4 class="font-black text-indigo-900 text-sm uppercase mb-3 border-b pb-2 flex items-center justify-between"><span>👨‍🏫 '+tName+'</span><span class="bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded text-[10px]">'+assignments.length+' paper'+(assignments.length>1?'s':'')+'</span></h4><div class="space-y-2">'+cardItems+'</div></div>';
                 });
 
-                container.innerHTML = '<div class="bg-white border border-slate-200 rounded-[2rem] shadow-sm overflow-hidden hidden md:block"><table class="w-full text-left border-collapse"><thead><tr class="bg-slate-100 text-slate-500 text-[9px] uppercase tracking-widest font-black border-b border-slate-200"><th class="p-3 w-10 text-center">#</th><th class="p-3">Branch</th><th class="p-3">Class</th><th class="p-3">Section</th><th class="p-3">Subject</th><th class="p-3">HOD Code</th><th class="p-3">Mode</th></tr></thead><tbody>'+teacherRows+'</tbody></table></div><div class="md:hidden">'+teacherCards+'</div>';
+                container.innerHTML = '<div class="bg-white border border-slate-200 rounded-[2rem] shadow-sm overflow-hidden hidden md:block"><table class="w-full text-left border-collapse"><thead><tr class="bg-slate-100 text-slate-500 text-[9px] uppercase tracking-widest font-black border-b border-slate-200"><th class="p-3 w-10 text-center">#</th><th class="p-3">Branch</th><th class="p-3">Classes</th><th class="p-3">Copies Needed</th><th class="p-3">Subject</th><th class="p-3">HOD Code</th><th class="p-3">Mode</th></tr></thead><tbody>'+teacherRows+'</tbody></table></div><div class="md:hidden">'+teacherCards+'</div>';
                 return;
             }
 
