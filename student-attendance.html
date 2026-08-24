@@ -692,10 +692,45 @@ if (isAdmin) {
             return activeCenter === "GHUMARWIN" ? db.collection(name) : db.collection(`${activeCenter.toLowerCase()}_${name}`);
         }
 
- function getActiveStudentsForDate(c, s, dateStr) {
+function getActiveStudentsForDate(c, s, dateStr) {
+            // Support combined section strings (e.g. "S-28, S-29")
+            let targetSections = s ? s.split(',').map(sec => sec.trim().replace('Sec', '').trim()) : [];
+
             return studentsData.filter(stu => {
-                const isCurrentClass = normMatch(stu.className) === normMatch(c) && normMatch(stu.section) === normMatch(s);
-                const isPrevClass = normMatch(stu.prevClass) === normMatch(c) && normMatch(stu.prevSection) === normMatch(s);
+                if (normMatch(stu.className) !== normMatch(c)) return false;
+
+                const inTargetSections = targetSections.length > 0 ? targetSections.some(sec => normMatch(stu.section) === normMatch(sec)) : (normMatch(stu.section) === normMatch(s));
+                if (!inTargetSections) return false;
+
+                const currentSub = currentReg ? currentReg.sub : "";
+                let isOptional = false;
+                if (window.instituteStructures) {
+                    window.instituteStructures.filter(st => normMatch(st.className) === normMatch(c)).forEach(st => {
+                        if (st.optionalSubjects && st.optionalSubjects.some(os => normMatch(os) === normMatch(currentSub))) {
+                            isOptional = true;
+                        }
+                    });
+                }
+
+                if (isOptional) {
+                    const stuOpt = normMatch(stu.optionalSubject || "");
+                    if (stuOpt !== normMatch(currentSub)) return false;
+                }
+
+                if (stu.isActive === false) {
+                    const hasRecordOnDate = currentMonthDoc && currentMonthDoc[dateStr] && currentMonthDoc[dateStr][stu.id];
+                    if (hasRecordOnDate) return true;
+
+                    if (stu.statusChangeDate && dateStr) {
+                        if (dateStr >= stu.statusChangeDate) return false;
+                    } else {
+                        if (dateStr >= todayISO) return false;
+                    }
+                }
+
+                return true;
+            }).sort((a,b) => String(a.name).localeCompare(String(b.name)));
+        }
 
                 let belongsToClass = false;
                 if (stu.transferDate && dateStr) {
@@ -932,18 +967,46 @@ function switchMainTab(tab) {
                     });
                     container.innerHTML = html;
               } else {
-                    let regMap = new Map();
-                    let myRegMap = new Map();
-                    
-                    timetableData.forEach(t => {
-                        let subjectName = t.subject || t.title || "";
-                        let key = `${normMatch(t.className)}|${normMatch(t.section || t.sectionName)}|${normMatch(subjectName)}`;
-                        if (subjectsWithTeachers.has(key) && (normMatch(t.teacherName) === mySafeName || normMatch(t.teacher) === mySafeName)) {
-                            let entry = { c: t.className, s: t.section || t.sectionName, sub: subjectName, canEdit: true };
-                            regMap.set(key, entry);
-                            myRegMap.set(key, entry);
+                  let regMap = new Map();
+                let myRegMap = new Map();
+                let slotMap = new Map();
+
+                timetableData.forEach(t => {
+                    let subjectName = t.subject || t.title || "";
+                    let teacher = (t.teacherName || t.teacher || "").trim();
+                    let sec = t.section || t.sectionName || "";
+                    let subLower = subjectName.toLowerCase();
+                    let key = `${normMatch(t.className)}|${normMatch(sec)}|${normMatch(subjectName)}`;
+
+                    if (subjectsWithTeachers.has(key) && teacher && teacher.toLowerCase() !== "none" && teacher.toLowerCase() !== "n/a" && !subLower.includes("break") && !subLower.includes("lunch")) {
+                        // Group sections sharing the exact same class, subject, time slot, and teacher into one card
+                        let slotKey = `${normMatch(t.className)}|${normMatch(subjectName)}|${t.start24 || ''}|${t.end24 || ''}|${normMatch(teacher)}`;
+                        if (!slotMap.has(slotKey)) {
+                            slotMap.set(slotKey, {
+                                c: t.className,
+                                sub: subjectName,
+                                sections: new Set([sec]),
+                                canEdit: (normMatch(t.teacherName) === mySafeName || normMatch(t.teacher) === mySafeName)
+                            });
+                        } else {
+                            if (sec) slotMap.get(slotKey).sections.add(sec);
+                            if (normMatch(t.teacherName) === mySafeName || normMatch(t.teacher) === mySafeName) {
+                                slotMap.get(slotKey).canEdit = true;
+                            }
                         }
-                    });
+                    }
+                });
+
+                slotMap.forEach((val, key) => {
+                    let sortedSecs = Array.from(val.sections).sort();
+                    let secDisplay = sortedSecs.join(', ');
+                    let entry = { c: val.c, s: secDisplay, sub: val.sub, canEdit: val.canEdit };
+                    
+                    if (val.canEdit) {
+                        myRegMap.set(key, entry);
+                    }
+                    regMap.set(key, entry);
+                });
 
                     const staffPermDoc = staffList.find(st => st.email === activeStaff.email);
                     window.hasViewAllAttendancePermission = false;
