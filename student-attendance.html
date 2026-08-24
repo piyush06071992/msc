@@ -395,7 +395,8 @@
                     <p class="text-[9px] font-bold text-slate-500 uppercase tracking-widest" id="daily-stats-label">0 Present | 0 Absent</p>
                     <p class="text-[9px] font-black text-indigo-600 uppercase tracking-widest mt-0.5" id="scheduled-teacher-badge">Subject Daily Sync</p>
                 </div>
-                <div class="flex gap-2 items-center flex-wrap justify-end">
+               <div class="flex gap-2 items-center flex-wrap justify-end">
+                    <button id="btn-manage-roster" onclick="openElectiveRosterModal()" class="hidden bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-md transition-all items-center gap-1 shrink-0"></button>
                     <input type="date" id="daily-date-picker" onchange="loadDailyAttendance()" class="border border-slate-300 rounded-lg px-2 py-1.5 text-xs font-bold text-slate-600 outline-none shadow-sm cursor-pointer bg-white">
                     <button id="tts-btn" onclick="toggleTTS()" class="bg-amber-100 text-amber-700 hover:bg-amber-200 p-1.5 sm:px-3 sm:py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors border border-amber-200 shadow-sm flex items-center gap-1"><span class="text-sm">🔊</span> <span class="hidden sm:inline">Auto Roll</span></button>
                     <button onclick="shareWholeClassWhatsApp()" class="bg-[#25D366] text-white hover:bg-[#128C7E] px-3 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors shadow-sm flex items-center gap-1"><span>💬</span> <span class="hidden sm:inline">Share Report</span></button>
@@ -731,24 +732,29 @@ if (isAdmin) {
                 }
             }
 
+        let classSections = new Set(targetSections);
             let isOptional = false;
-            if (typeof structureData !== 'undefined') {
-                structureData.filter(st => normMatch(st.className) === normMatch(c)).forEach(st => {
+            if (window.instituteStructures) {
+                window.instituteStructures.filter(st => normMatch(st.className) === normMatch(c)).forEach(st => {
+                    if (st.sectionName) classSections.add(st.sectionName);
                     if (st.optionalSubjects && st.optionalSubjects.some(os => normMatch(os) === normMatch(currentSub))) {
                         isOptional = true;
                     }
                 });
             }
 
+            const finalTargetSections = isOptional ? Array.from(classSections) : targetSections;
+
             return studentsData.filter(stu => {
                 if (normMatch(stu.className) !== normMatch(c)) return false;
 
-                const inTargetSections = targetSections.some(sec => normMatch(stu.section) === normMatch(sec));
+                const inTargetSections = finalTargetSections.some(sec => normMatch(stu.section) === normMatch(sec));
                 if (!inTargetSections) return false;
 
                 if (isOptional) {
                     const stuOpt = normMatch(stu.optionalSubject || "");
-                    if (stuOpt && stuOpt !== normMatch(currentSub)) return false;
+                    // STRICT: Only show students explicitly assigned to this elective
+                    if (stuOpt !== normMatch(currentSub)) return false;
                 }
 
                 if (stu.isActive === false) {
@@ -1549,18 +1555,37 @@ function updateAuditSectionFilter() {
             if(corrBtn) corrBtn.classList.add('hidden');
             if(augBtn) augBtn.classList.add('hidden');
 
-            if (activeStudent) {
+  if (activeStudent) {
                 // Completely block students from viewing the class register
                 tabDailyBtn.style.display = 'none';
                 tabLedgerBtn.style.display = 'none';
                 document.querySelector('button[onclick="printLedgerPDF()"]').style.display = 'none';
-                
+
                 switchTab('personal');
             } else {
                 tabDailyBtn.style.display = 'block';
                 tabLedgerBtn.style.display = 'block';
                 document.querySelector('button[onclick="printLedgerPDF()"]').style.display = 'flex';
-                
+
+                let isOptional = false;
+                if (window.instituteStructures) {
+                    window.instituteStructures.filter(st => normMatch(st.className) === normMatch(c)).forEach(st => {
+                        if (st.optionalSubjects && st.optionalSubjects.some(os => normMatch(os) === normMatch(sub))) {
+                            isOptional = true;
+                        }
+                    });
+                }
+
+                const rosterBtn = document.getElementById('btn-manage-roster');
+                if (rosterBtn) {
+                    if (canEdit && !isAdmin && isOptional) {
+                        rosterBtn.style.display = 'flex';
+                        rosterBtn.innerText = `👥 Mark ${sub} Students`;
+                    } else {
+                        rosterBtn.style.display = 'none';
+                    }
+                }
+
                 if (isAdmin) {
                     if(augBtn) augBtn.classList.remove('hidden');
                     currentReg.canEdit = false;
@@ -3288,11 +3313,157 @@ function updateStudentAuditFilters() {
             }
         }
 
-        function printLedgerPDF() {
+     function printLedgerPDF() {
             window.print();
+        }
+
+        function openElectiveRosterModal() {
+            if (!currentReg) return;
+            const modal = document.getElementById('elective-roster-modal');
+            const listContainer = document.getElementById('er-students-list');
+            document.getElementById('er-modal-title').innerText = `Manage Roster: ${currentReg.sub}`;
+            document.getElementById('er-search').value = "";
+
+            // Find all students across all sections of this class
+            const classStudents = studentsData.filter(s => normMatch(s.className) === normMatch(currentReg.c)).sort((a,b) => {
+                if (a.section !== b.section) return a.section.localeCompare(b.section);
+                return String(a.name).localeCompare(String(b.name));
+            });
+
+            if (classStudents.length === 0) {
+                listContainer.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase text-xs">No students found for Class ${currentReg.c}.</div>`;
+                modal.style.display = 'flex';
+                return;
+            }
+
+            let html = "";
+            let lastSec = "";
+            let availableCount = 0;
+            
+            classStudents.forEach(stu => {
+                const currentOpt = normMatch(stu.optionalSubject || "");
+                const targetSubNorm = normMatch(currentReg.sub);
+                
+                // CORE RULE: If student is already assigned to a DIFFERENT elective subject, hide them!
+                if (currentOpt && currentOpt !== targetSubNorm) {
+                    return; 
+                }
+
+                availableCount++;
+
+                if (stu.section !== lastSec) {
+                    lastSec = stu.section;
+                    html += `<div class="bg-purple-900 text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest mt-3 mb-1 shadow-sm">Section ${lastSec}</div>`;
+                }
+
+                const isAssigned = currentOpt === targetSubNorm;
+                html += `
+                    <div class="er-row flex justify-between items-center bg-white p-3 rounded-xl border border-slate-200 shadow-sm transition-all hover:bg-slate-50" data-search="${normMatch(stu.name)}">
+                        <div class="text-xs font-black text-slate-800 uppercase flex items-center gap-2">
+                            <span class="bg-slate-100 text-slate-500 font-mono text-[9px] px-2 py-0.5 rounded border border-slate-200">#${stu.rollNo || 'N/A'}</span>
+                            ${stu.name}
+                        </div>
+                        <label class="cursor-pointer relative flex items-center p-1">
+                            <input type="checkbox" class="er-stu-cb w-5 h-5 accent-indigo-600 cursor-pointer" value="${stu.id}" ${isAssigned ? 'checked' : ''}>
+                        </label>
+                    </div>
+                `;
+            });
+
+            if (availableCount === 0) {
+                listContainer.innerHTML = `<div class="text-center py-10 text-slate-500 font-bold uppercase text-xs border-2 border-dashed border-slate-300 rounded-2xl">All students in this class have already been claimed by other elective subjects.</div>`;
+            } else {
+                listContainer.innerHTML = html;
+            }
+            
+            modal.style.display = 'flex';
+        }
+
+        function filterElectiveModalList() {
+            const query = normMatch(document.getElementById('er-search').value);
+            document.querySelectorAll('.er-row').forEach(row => {
+                const text = row.getAttribute('data-search');
+                row.style.display = text.includes(query) ? 'flex' : 'none';
+            });
+        }
+
+        async function saveElectiveRoster() {
+            const checkboxes = document.querySelectorAll('.er-stu-cb');
+            const batch = db.batch();
+            let updateCount = 0;
+
+            checkboxes.forEach(cb => {
+                const stuId = cb.value;
+                const isChecked = cb.checked;
+                const stu = studentsData.find(s => s.id === stuId);
+                if (!stu) return;
+
+                const currentOpt = normMatch(stu.optionalSubject || "");
+                const targetSubNorm = normMatch(currentReg.sub);
+
+                if (isChecked && currentOpt !== targetSubNorm) {
+                    const docRef = getCollection("students").doc(stuId);
+                    batch.update(docRef, { optionalSubject: currentReg.sub });
+                    stu.optionalSubject = currentReg.sub; // Update local memory immediately
+                    updateCount++;
+                } else if (!isChecked && currentOpt === targetSubNorm) {
+                    const docRef = getCollection("students").doc(stuId);
+                    batch.update(docRef, { optionalSubject: "" });
+                    stu.optionalSubject = ""; // Update local memory immediately
+                    updateCount++;
+                }
+            });
+
+            if (updateCount > 0) {
+                try {
+                    const btn = document.querySelector('button[onclick="saveElectiveRoster()"]');
+                    const orig = btn.innerText;
+                    btn.innerText = "⏳ Saving Database...";
+                    btn.disabled = true;
+                    
+                    await batch.commit();
+                    
+                    btn.innerText = orig;
+                    btn.disabled = false;
+                    
+                    alert(`✅ Database Updated! (${updateCount} student records synced globally).`);
+                    document.getElementById('elective-roster-modal').style.display = 'none';
+                    loadDailyAttendance(); // Instantly refresh the roll call screen
+                } catch (e) {
+                    console.error(e);
+                    alert("Failed to sync student optional subjects to database.");
+                }
+            } else {
+                document.getElementById('elective-roster-modal').style.display = 'none';
+            }
         }
 
         init();
     </script>
+
+    <!-- ELECTIVE ROSTER MANAGEMENT MODAL HTML -->
+    <div id="elective-roster-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[200] hidden items-center justify-center p-4 no-print">
+        <div class="bg-white rounded-[2rem] w-full max-w-2xl shadow-2xl p-6 space-y-4 flex flex-col max-h-[85vh]">
+            <div class="flex justify-between items-center border-b pb-3 shrink-0">
+                <div>
+                    <h3 id="er-modal-title" class="font-black text-slate-900 text-base uppercase tracking-wider">Manage Subject Batch</h3>
+                    <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">Select students who study this subject</p>
+                </div>
+                <button onclick="document.getElementById('elective-roster-modal').style.display='none'" class="text-slate-400 hover:text-slate-700 font-black">✕</button>
+            </div>
+            
+            <div class="flex gap-2 shrink-0">
+                <input type="text" id="er-search" onkeyup="filterElectiveModalList()" placeholder="🔍 Search student name..." class="flex-1 border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-slate-50 outline-none focus:border-indigo-500">
+                <button onclick="document.querySelectorAll('.er-stu-cb').forEach(c=>c.checked=true)" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors">Select All</button>
+                <button onclick="document.querySelectorAll('.er-stu-cb').forEach(c=>c.checked=false)" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors">Clear All</button>
+            </div>
+
+            <div class="flex-1 overflow-y-auto custom-scroll border border-slate-200 rounded-xl p-3 bg-slate-50 space-y-2" id="er-students-list">
+                <!-- Dynamically Populated -->
+            </div>
+
+            <button onclick="saveElectiveRoster()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-md shrink-0 transition-colors">Save Enrolled Students</button>
+        </div>
+    </div>
 </body>
 </html>
