@@ -2184,6 +2184,69 @@ async function saveDailyAttendance() {
             const monthKey = `${y}_${m}`;
 
             try {
+                // Flatten the sectioned records into a single object for the discrepancy scanner
+                const todaysData = Object.assign({}, ...Object.values(recordsBySection));
+                
+                // --- DISCREPANCY CHECK START ---
+                let discrepancies = [];
+                let activeSecs = Object.keys(recordsBySection).map(s => normMatch(s));
+                
+                const otherSubSnap = await getCollection("attendance_records")
+                    .where("monthKey", "==", monthKey)
+                    .where("className", "==", currentReg.c)
+                    .get();
+
+                otherSubSnap.forEach(doc => {
+                    const data = doc.data();
+                    if (!activeSecs.includes(normMatch(data.section))) return;
+                    
+                    if (normMatch(data.subject) !== normMatch(currentReg.sub) && data.records && data.records[dateStr]) {
+                        const otherRecs = data.records[dateStr];
+                        Object.keys(todaysData).forEach(stuId => {
+                            const curStat = todaysData[stuId];
+                            const othStat = otherRecs[stuId];
+                            // Detect Present vs Absent Mismatch
+                            if (othStat && curStat && ((curStat === 'P' && othStat === 'A') || (curStat === 'A' && othStat === 'P'))) {
+                                const stu = studentsData.find(s => s.id === stuId);
+                                discrepancies.push({
+                                    stuName: stu ? stu.name : 'Unknown', rollNo: stu ? stu.rollNo : 'N/A', stuId: stuId, section: data.section,
+                                    currentStatus: curStat, otherSubject: data.subject, otherStatus: othStat
+                                });
+                            }
+                        });
+                    }
+                });
+
+                if (discrepancies.length > 0) {
+                    let msg = `⚠️ WARNING: ${discrepancies.length} DISCREPANCY(IES) FOUND!\n\n`;
+                    discrepancies.slice(0, 5).forEach(d => {
+                        msg += `• #${d.rollNo} ${d.stuName}: Marked ${d.currentStatus==='P'?'Present':'Absent'} here, but was marked ${d.otherStatus==='P'?'Present':'Absent'} in ${d.otherSubject}.\n`;
+                    });
+                    if (discrepancies.length > 5) msg += `...and ${discrepancies.length - 5} more.\n`;
+                    msg += `\nDo you want to proceed and save anyway? (Admin will be notified)`;
+
+                    if (!confirm(msg)) {
+                        btn.innerHTML = origText; btn.disabled = false;
+                        return; // Abort saving completely BEFORE touching the database
+                    }
+
+                    // Log to Admin Discrepancy Database
+                    const batch2 = db.batch();
+                    discrepancies.forEach(d => {
+                        const logRef = db.collection("attendance_discrepancies").doc();
+                        batch2.set(logRef, {
+                            date: dateStr, center: activeCenter, className: currentReg.c, section: d.section,
+                            currentSubject: currentReg.sub, currentStatus: d.currentStatus, teacherEmail: activeStaff.email,
+                            otherSubject: d.otherSubject, otherStatus: d.otherStatus, 
+                            studentId: d.stuId, studentName: d.stuName, rollNo: d.rollNo, timestamp: Date.now()
+                        });
+                    });
+                    await batch2.commit();
+                }
+                
+                btn.innerHTML = "⏳ Saving Database...";
+                // --- DISCREPANCY CHECK END ---
+
                 const batch = db.batch();
                 for (const [secName, secRecords] of Object.entries(recordsBySection)) {
                     const secDocId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(secName)}_${normDoc(currentReg.sub)}_${monthKey}`;
@@ -2205,68 +2268,10 @@ async function saveDailyAttendance() {
                     batch.set(secDocRef, docData);
                 }
 
-             await batch.commit();
+                await batch.commit();
 
-                // Flatten the sectioned records into a single object for the discrepancy scanner
-                const todaysData = Object.assign({}, ...Object.values(recordsBySection));
-                
                 if(!currentMonthDoc) currentMonthDoc = {};
                 currentMonthDoc[dateStr] = todaysData;
-                // --- DISCREPANCY CHECK START ---
-                let discrepancies = [];
-                const otherSubSnap = await getCollection("attendance_records")
-                    .where("monthKey", "==", monthKey)
-                    .where("className", "==", currentReg.c)
-                    .where("section", "==", currentReg.s)
-                    .get();
-
-                otherSubSnap.forEach(doc => {
-                    const data = doc.data();
-                    if (normMatch(data.subject) !== normMatch(currentReg.sub) && data.records && data.records[dateStr]) {
-                        const otherRecs = data.records[dateStr];
-                        Object.keys(todaysData).forEach(stuId => {
-                            const curStat = todaysData[stuId];
-                            const othStat = otherRecs[stuId];
-                            // Detect Present vs Absent Mismatch
-                            if (othStat && curStat && ((curStat === 'P' && othStat === 'A') || (curStat === 'A' && othStat === 'P'))) {
-                                const stu = studentsData.find(s => s.id === stuId);
-                                discrepancies.push({
-                                    stuName: stu ? stu.name : 'Unknown', rollNo: stu ? stu.rollNo : 'N/A', stuId: stuId,
-                                    currentStatus: curStat, otherSubject: data.subject, otherStatus: othStat
-                                });
-                            }
-                        });
-                    }
-                });
-
-                if (discrepancies.length > 0) {
-                    let msg = `⚠️ WARNING: ${discrepancies.length} DISCREPANCY(IES) FOUND!\n\n`;
-                    discrepancies.slice(0, 5).forEach(d => {
-                        msg += `• #${d.rollNo} ${d.stuName}: Marked ${d.currentStatus==='P'?'Present':'Absent'} here, but was marked ${d.otherStatus==='P'?'Present':'Absent'} in ${d.otherSubject}.\n`;
-                    });
-                    if (discrepancies.length > 5) msg += `...and ${discrepancies.length - 5} more.\n`;
-                    msg += `\nDo you want to proceed and save anyway? (Admin will be notified)`;
-
-                    if (!confirm(msg)) {
-                        btn.innerHTML = origText; btn.disabled = false;
-                        return; // Abort saving
-                    }
-
-                    // Log to Admin Discrepancy Database
-                    const batch = db.batch();
-                    discrepancies.forEach(d => {
-                        const logRef = db.collection("attendance_discrepancies").doc();
-                        batch.set(logRef, {
-                            date: dateStr, center: activeCenter, className: currentReg.c, section: currentReg.s,
-                            currentSubject: currentReg.sub, currentStatus: d.currentStatus, teacherEmail: activeStaff.email,
-                            otherSubject: d.otherSubject, otherStatus: d.otherStatus, 
-                            studentId: d.stuId, studentName: d.stuName, rollNo: d.rollNo, timestamp: Date.now()
-                        });
-                    });
-                    await batch.commit();
-                }
-       btn.innerHTML = "⏳ Saving...";
-                // --- DISCREPANCY CHECK END ---
                 
                 // Consume token so it can only be used ONCE
                 if (window.activeEditTokenId) {
