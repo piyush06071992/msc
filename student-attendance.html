@@ -691,37 +691,78 @@ if (isAdmin) {
             return activeCenter === "GHUMARWIN" ? db.collection(name) : db.collection(`${activeCenter.toLowerCase()}_${name}`);
         }
 
-      function getActiveStudentsForDate(c, s, dateStr) {
-            return studentsData.filter(stu => {
-                const isCurrentClass = normMatch(stu.className) === normMatch(c) && normMatch(stu.section) === normMatch(s);
-                const isPrevClass = normMatch(stu.prevClass) === normMatch(c) && normMatch(stu.prevSection) === normMatch(s);
+    function getActiveStudentsForDate(c, s, dateStr) {
+            let targetSections = [s];
+            const [y, m, d] = dateStr.split('-');
+            const checkD = new Date(parseInt(y), parseInt(m)-1, parseInt(d));
+            const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+            const dayName = dayNames[checkD.getDay()];
 
-                let belongsToClass = false;
-                if (stu.transferDate && dateStr) {
-                    if (isCurrentClass && dateStr >= stu.transferDate) belongsToClass = true;
-                    else if (isPrevClass && dateStr < stu.transferDate) belongsToClass = true;
-                } else {
-                    belongsToClass = isCurrentClass;
+            let schedule = [];
+            const override = timetableHistoryData.find(o => o.date === dateStr && o.type !== "FUTURE_MASTER");
+            if (override && override.schedule) {
+                schedule = override.schedule;
+            } else {
+                schedule = timetableData;
+            }
+
+            const currentSub = currentReg ? currentReg.sub : "";
+            const matchingSlots = schedule.filter(t => 
+                t.day === dayName && 
+                normMatch(t.className) === normMatch(c) && 
+                normMatch(t.subject || t.title) === normMatch(currentSub)
+            );
+
+            if (matchingSlots.length > 0) {
+                const primarySlot = matchingSlots.find(t => normMatch(t.section || t.sectionName) === normMatch(s));
+                if (primarySlot) {
+                    matchingSlots.forEach(t => {
+                        const sameTime = t.start24 === primarySlot.start24 && t.end24 === primarySlot.end24;
+                        const sameTeacher = primarySlot.teacher && t.teacher && normMatch(t.teacher) === normMatch(primarySlot.teacher);
+                        const sameRoom = primarySlot.room && t.room && normMatch(t.room) === normMatch(primarySlot.room);
+                        
+                        if (sameTime || sameTeacher || sameRoom) {
+                            const secName = t.section || t.sectionName;
+                            if (secName && !targetSections.includes(secName)) {
+                                targetSections.push(secName);
+                            }
+                        }
+                    });
                 }
-                
-                if (!belongsToClass) return false;
+            }
 
-         // Check inactive status against the target date
+            let isOptional = false;
+            if (typeof structureData !== 'undefined') {
+                structureData.filter(st => normMatch(st.className) === normMatch(c)).forEach(st => {
+                    if (st.optionalSubjects && st.optionalSubjects.some(os => normMatch(os) === normMatch(currentSub))) {
+                        isOptional = true;
+                    }
+                });
+            }
+
+            return studentsData.filter(stu => {
+                if (normMatch(stu.className) !== normMatch(c)) return false;
+
+                const inTargetSections = targetSections.some(sec => normMatch(stu.section) === normMatch(sec));
+                if (!inTargetSections) return false;
+
+                if (isOptional) {
+                    const stuOpt = normMatch(stu.optionalSubject || "");
+                    if (stuOpt && stuOpt !== normMatch(currentSub)) return false;
+                }
+
                 if (stu.isActive === false) {
-                    // If attendance was already marked on this specific date, always show the student
                     const hasRecordOnDate = currentMonthDoc && currentMonthDoc[dateStr] && currentMonthDoc[dateStr][stu.id];
                     if (hasRecordOnDate) return true;
-
-                    if (stu.statusChangeDate && dateStr) {
-                        if (dateStr >= stu.statusChangeDate) return false;
-                    } else {
-                        // For legacy inactive students without a statusChangeDate: hide on current/future dates, show on past dates
-                        if (dateStr >= todayISO) return false;
-                    }
+                    if (stu.statusChangeDate && dateStr >= stu.statusChangeDate) return false;
+                    if (!stu.statusChangeDate && dateStr >= todayISO) return false;
                 }
 
                 return true;
-            }).sort((a,b) => String(a.name).localeCompare(String(b.name)));
+            }).sort((a, b) => {
+                if (a.section !== b.section) return a.section.localeCompare(b.section);
+                return String(a.name).localeCompare(String(b.name));
+            });
         }
 
         function getRawDept(s) {
@@ -1862,12 +1903,21 @@ async function loadStudentPersonalView() {
                 
             const todaysData = currentMonthDoc[dateStr] || {};
                 let html = "";
-             // Check if editing past date is permitted via admin approval token
+       // Check if editing past date is permitted via admin approval token
                 const isPastDateCheck = dateStr < todayISO;
                 let isEditPermitted = !isPastDateCheck;
 
-                // Async check for edit token in database (handled via attached attribute or state check)
+                let lastSec = "";
                 myStudents.forEach((stu, index) => {
+                    if (stu.section !== lastSec) {
+                        lastSec = stu.section;
+                        html += `
+                            <div class="col-span-full bg-purple-900 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest mt-4 mb-2 shadow-sm flex items-center justify-between">
+                                <span>📁 Section ${lastSec} Group</span>
+                            </div>
+                        `;
+                    }
+
                     const val = todaysData[stu.id]; 
                     
                     let attControls = "";
@@ -1893,13 +1943,13 @@ async function loadStudentPersonalView() {
                             attControls = `<div class="px-4 py-1.5 rounded border text-[10px] font-black uppercase tracking-widest text-slate-400 bg-slate-100 border-slate-200 shadow-inner">Unmarked</div>`;
                         }
                     }
-            
+        
                     
                     html += `
 <div id="row_${stu.id}" class="student-row bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center transition-all duration-300">
                             <div class="flex items-center gap-2 sm:gap-3">
                                 <span class="bg-indigo-50 text-indigo-700 font-mono text-[9px] sm:text-[10px] font-black px-2 py-1 rounded border border-indigo-100">S.No ${index + 1}</span>
-                                <span class="bg-slate-100 text-slate-500 font-mono text-[10px] sm:text-xs font-black px-2 py-1 rounded border border-slate-200" title="Admission No">Adm: ${stu.admNo || '-'}</span>
+                                <span class="bg-purple-100 text-purple-700 font-mono text-[9px] sm:text-[10px] font-black px-2 py-1 rounded border border-purple-200 uppercase">Sec ${stu.section}</span>
                                 <span class="bg-slate-100 text-slate-500 font-mono text-[10px] sm:text-xs font-black px-2 py-1 rounded border border-slate-200" title="Roll No">#${stu.rollNo || 'N/A'}</span>
                                 <div>
                                     <h4 class="student-name font-black text-slate-800 text-xs sm:text-sm uppercase tracking-tight" data-name="${stu.name}">${stu.name}</h4>
@@ -2098,7 +2148,7 @@ function shareWholeClassWhatsApp() {
         }
         function stopTTS() { if(ttsActive) toggleTTS(); }
 
-    async function saveDailyAttendance() {
+async function saveDailyAttendance() {
             if(!currentReg.canEdit || activeStudent || isAdmin) return;
             const dateStr = document.getElementById('daily-date-picker').value;
             const btn = document.getElementById('save-daily-btn');
@@ -2127,33 +2177,60 @@ function shareWholeClassWhatsApp() {
             }
 
             const myStudents = getActiveStudentsForDate(currentReg.c, currentReg.s, dateStr);
-            let todaysData = {};
+            let recordsBySection = {};
             absentWhatsAppList = [];
 
-       myStudents.forEach(stu => {
+            myStudents.forEach(stu => {
                 const checked = document.querySelector(`input[name="att_${stu.id}"]:checked`);
                 if(checked) {
-                    todaysData[stu.id] = checked.value;
+                    const sec = stu.section;
+                    if (!recordsBySection[sec]) recordsBySection[sec] = {};
+                    recordsBySection[sec][stu.id] = checked.value;
                     if(checked.value === 'A' || checked.value === 'L') {
-                        absentWhatsAppList.push({ name: stu.name, roll: stu.rollNo, id: stu.id, status: checked.value });
+                        absentWhatsAppList.push({ name: stu.name, roll: stu.rollNo, id: stu.id, status: checked.value, section: sec });
                     }
                 }
             });
 
-            // STRICT VALIDATION: Ensure every student has an attendance status
-            if (Object.keys(todaysData).length !== myStudents.length) {
+            let markedTotal = 0;
+            Object.values(recordsBySection).forEach(secMap => { markedTotal += Object.keys(secMap).length; });
+
+            if (markedTotal !== myStudents.length) {
                 return alert("🚨 Action Blocked: You must mark attendance (Present, Absent, or Leave) for ALL students before saving.");
             }
 
-        if(Object.keys(todaysData).length === 0) return;
-            const origText = btn.innerHTML; btn.innerHTML = "⏳ Checking..."; btn.disabled = true;
+            if(markedTotal === 0) return;
+            const origText = btn.innerHTML; btn.innerHTML = "⏳ Saving..."; btn.disabled = true;
 
             const [y, m, d] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
-            const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthKey}`;
-            const docRef = getCollection("attendance_records").doc(docId);
 
-        try {
+            try {
+                const batch = db.batch();
+                for (const [secName, secRecords] of Object.entries(recordsBySection)) {
+                    const secDocId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(secName)}_${normDoc(currentReg.sub)}_${monthKey}`;
+                    const secDocRef = getCollection("attendance_records").doc(secDocId);
+                    
+                    const docSnap = await secDocRef.get();
+                    let docData = docSnap.exists ? docSnap.data() : {
+                        className: currentReg.c,
+                        section: secName,
+                        subject: currentReg.sub,
+                        monthKey: monthKey,
+                        records: {}
+                    };
+
+                    if (!docData.records) docData.records = {};
+                    docData.records[dateStr] = secRecords;
+                    docData.lastUpdated = Date.now();
+
+                    batch.set(secDocRef, docData);
+                }
+
+                await batch.commit();
+
+                if(!currentMonthDoc) currentMonthDoc = {};
+                currentMonthDoc[dateStr] = Object.assign({}, ...Object.values(recordsBySection));
                 // --- DISCREPANCY CHECK START ---
                 let discrepancies = [];
                 const otherSubSnap = await getCollection("attendance_records")
