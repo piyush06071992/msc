@@ -693,24 +693,63 @@ if (isAdmin) {
         }
 
 function getActiveStudentsForDate(c, s, dateStr) {
-            // Support combined section strings (e.g. "S-28, S-29")
-            let targetSections = s ? s.split(',').map(sec => sec.trim().replace('Sec', '').trim()) : [];
+            let targetSections = [s];
+            const [y, m, d] = dateStr.split('-');
+            const checkD = new Date(parseInt(y), parseInt(m)-1, parseInt(d));
+            const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+            const dayName = dayNames[checkD.getDay()];
+
+            let schedule = [];
+            const override = timetableHistoryData.find(o => o.date === dateStr && o.type !== "FUTURE_MASTER");
+            if (override && override.schedule) {
+                schedule = override.schedule;
+            } else {
+                schedule = timetableData;
+            }
+
+            const currentSub = currentReg ? currentReg.sub : "";
+            const matchingSlots = schedule.filter(t => 
+                t.day === dayName && 
+                normMatch(t.className) === normMatch(c) && 
+                normMatch(t.subject || t.title) === normMatch(currentSub)
+            );
+
+            if (matchingSlots.length > 0) {
+                const primarySlot = matchingSlots.find(t => normMatch(t.section || t.sectionName) === normMatch(s));
+                if (primarySlot) {
+                    matchingSlots.forEach(t => {
+                        const sameTime = t.start24 === primarySlot.start24 && t.end24 === primarySlot.end24;
+                        const sameTeacher = primarySlot.teacher && t.teacher && normMatch(t.teacher) === normMatch(primarySlot.teacher);
+                        const sameRoom = primarySlot.room && t.room && normMatch(t.room) === normMatch(primarySlot.room);
+
+                        if (sameTime || sameTeacher || sameRoom) {
+                            const secName = t.section || t.sectionName;
+                            if (secName && !targetSections.includes(secName)) {
+                                targetSections.push(secName);
+                            }
+                        }
+                    });
+                }
+            }
+
+            let classSections = new Set(targetSections);
+            let isOptional = false;
+            if (window.instituteStructures) {
+                window.instituteStructures.filter(st => normMatch(st.className) === normMatch(c)).forEach(st => {
+                    if (st.sectionName) classSections.add(st.sectionName);
+                    if (st.optionalSubjects && st.optionalSubjects.some(os => normMatch(os) === normMatch(currentSub))) {
+                        isOptional = true;
+                    }
+                });
+            }
+
+            const finalTargetSections = isOptional ? Array.from(classSections) : targetSections;
 
             return studentsData.filter(stu => {
                 if (normMatch(stu.className) !== normMatch(c)) return false;
 
-                const inTargetSections = targetSections.length > 0 ? targetSections.some(sec => normMatch(stu.section) === normMatch(sec)) : (normMatch(stu.section) === normMatch(s));
+                const inTargetSections = finalTargetSections.some(sec => normMatch(stu.section) === normMatch(sec));
                 if (!inTargetSections) return false;
-
-                const currentSub = currentReg ? currentReg.sub : "";
-                let isOptional = false;
-                if (window.instituteStructures) {
-                    window.instituteStructures.filter(st => normMatch(st.className) === normMatch(c)).forEach(st => {
-                        if (st.optionalSubjects && st.optionalSubjects.some(os => normMatch(os) === normMatch(currentSub))) {
-                            isOptional = true;
-                        }
-                    });
-                }
 
                 if (isOptional) {
                     const stuOpt = normMatch(stu.optionalSubject || "");
@@ -720,16 +759,15 @@ function getActiveStudentsForDate(c, s, dateStr) {
                 if (stu.isActive === false) {
                     const hasRecordOnDate = currentMonthDoc && currentMonthDoc[dateStr] && currentMonthDoc[dateStr][stu.id];
                     if (hasRecordOnDate) return true;
-
-                    if (stu.statusChangeDate && dateStr) {
-                        if (dateStr >= stu.statusChangeDate) return false;
-                    } else {
-                        if (dateStr >= todayISO) return false;
-                    }
+                    if (stu.statusChangeDate && dateStr >= stu.statusChangeDate) return false;
+                    if (!stu.statusChangeDate && dateStr >= todayISO) return false;
                 }
 
-              return true;
-            }).sort((a,b) => String(a.name).localeCompare(String(b.name)));
+                return true;
+            }).sort((a, b) => {
+                if (a.section !== b.section) return a.section.localeCompare(b.section);
+                return String(a.name).localeCompare(String(b.name));
+            });
         }
         
         function getRawDept(s) {
@@ -928,45 +966,17 @@ function switchMainTab(tab) {
                     });
                     container.innerHTML = html;
               } else {
-                  let regMap = new Map();
+     let regMap = new Map();
                 let myRegMap = new Map();
-                let slotMap = new Map();
-
+                
                 timetableData.forEach(t => {
                     let subjectName = t.subject || t.title || "";
-                    let teacher = (t.teacherName || t.teacher || "").trim();
-                    let sec = t.section || t.sectionName || "";
-                    let subLower = subjectName.toLowerCase();
-                    let key = `${normMatch(t.className)}|${normMatch(sec)}|${normMatch(subjectName)}`;
-
-                    if (subjectsWithTeachers.has(key) && teacher && teacher.toLowerCase() !== "none" && teacher.toLowerCase() !== "n/a" && !subLower.includes("break") && !subLower.includes("lunch")) {
-                        // Group sections sharing the exact same class, subject, time slot, and teacher into one card
-                        let slotKey = `${normMatch(t.className)}|${normMatch(subjectName)}|${t.start24 || ''}|${t.end24 || ''}|${normMatch(teacher)}`;
-                        if (!slotMap.has(slotKey)) {
-                            slotMap.set(slotKey, {
-                                c: t.className,
-                                sub: subjectName,
-                                sections: new Set([sec]),
-                                canEdit: (normMatch(t.teacherName) === mySafeName || normMatch(t.teacher) === mySafeName)
-                            });
-                        } else {
-                            if (sec) slotMap.get(slotKey).sections.add(sec);
-                            if (normMatch(t.teacherName) === mySafeName || normMatch(t.teacher) === mySafeName) {
-                                slotMap.get(slotKey).canEdit = true;
-                            }
-                        }
-                    }
-                });
-
-                slotMap.forEach((val, key) => {
-                    let sortedSecs = Array.from(val.sections).sort();
-                    let secDisplay = sortedSecs.join(', ');
-                    let entry = { c: val.c, s: secDisplay, sub: val.sub, canEdit: val.canEdit };
-                    
-                    if (val.canEdit) {
+                    let key = `${normMatch(t.className)}|${normMatch(t.section || t.sectionName)}|${normMatch(subjectName)}`;
+                    if (subjectsWithTeachers.has(key) && (normMatch(t.teacherName) === mySafeName || normMatch(t.teacher) === mySafeName)) {
+                        let entry = { c: t.className, s: t.section || t.sectionName, sub: subjectName, canEdit: true };
+                        regMap.set(key, entry);
                         myRegMap.set(key, entry);
                     }
-                    regMap.set(key, entry);
                 });
 
                     const staffPermDoc = staffList.find(st => st.email === activeStaff.email);
