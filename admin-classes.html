@@ -541,6 +541,7 @@
                     await getCollection("institute_structure").doc(editingSectionId).update(payload);
 
                     if (oldSec.className !== className || oldSec.sectionName !== secName) {
+                        // 1. Automatically update Timetables
                         const ttSnap = await getCollection("timetable")
                             .where("className", "==", oldSec.className)
                             .where("section", "==", oldSec.sectionName)
@@ -553,8 +554,47 @@
                             });
                             await batch.commit();
                         }
+
+                        // 2. Automatically update Lesson Planners
+                        const lpSnap = await getCollection("lesson_planners")
+                            .where("className", "==", oldSec.className)
+                            .where("section", "==", oldSec.sectionName)
+                            .get();
+                        
+                        if (!lpSnap.empty) {
+                            const batchLp = db.batch();
+                            lpSnap.docs.forEach(doc => {
+                                batchLp.update(doc.ref, { className: className, section: secName });
+                            });
+                            await batchLp.commit();
+                        }
+
+                        // 3. Automatically migrate Attendance Records & their unique Document IDs
+                        const attSnap = await getCollection("attendance_records")
+                            .where("className", "==", oldSec.className)
+                            .where("section", "==", oldSec.sectionName)
+                            .get();
+                        
+                        if (!attSnap.empty) {
+                            for (const doc of attSnap.docs) {
+                                const data = doc.data();
+                                const monthKey = data.monthKey;
+                                const subject = data.subject;
+                                
+                                const newDocId = `att_${activeCenter}_${normDoc(className)}_${normDoc(secName)}_${normDoc(subject)}_${monthKey}`;
+                                const newDocRef = getCollection("attendance_records").doc(newDocId);
+                                
+                                data.className = className;
+                                data.section = secName;
+                                
+                                const batchMigrate = db.batch();
+                                batchMigrate.set(newDocRef, data);
+                                batchMigrate.delete(doc.ref);
+                                await batchMigrate.commit();
+                            }
+                        }
                     }
-                    alert("Section updated successfully!");
+                    alert("Section and all connected records updated successfully!");
 
                 } else {
                     const checkSnap = await getCollection("institute_structure")
