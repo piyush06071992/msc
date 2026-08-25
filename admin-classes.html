@@ -131,7 +131,7 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-    let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
+        let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
         sessionStorage.setItem('minervaAdminCenter', activeCenter);
 
         const normDoc = (val) => String(val || "").replace(/\s/g, '_').toUpperCase();
@@ -544,40 +544,50 @@
                     await getCollection("institute_structure").doc(editingSectionId).update(payload);
 
                     if (oldSec.className !== className || oldSec.sectionName !== secName) {
-                        // 1. Automatically update Timetables
-                        const ttSnap = await getCollection("timetable")
-                            .where("className", "==", oldSec.className)
-                            .where("section", "==", oldSec.sectionName)
-                            .get();
-                        
-                        if (!ttSnap.empty) {
-                            const batch = db.batch();
-                            ttSnap.docs.forEach(doc => {
-                                batch.update(doc.ref, { className: className, section: secName });
-                            });
-                            await batch.commit();
+                        const oldC = oldSec.className;
+                        const oldS = oldSec.sectionName;
+
+                        // Helper to update fields across any collection
+                        async function updateCollFields(colName, queryFieldC, queryFieldS, updateData) {
+                            const snap = await getCollection(colName).where(queryFieldC, "==", oldC).where(queryFieldS, "==", oldS).get();
+                            if (!snap.empty) {
+                                const batch = db.batch();
+                                snap.docs.forEach(doc => batch.update(doc.ref, updateData));
+                                await batch.commit();
+                            }
                         }
+
+                        // 1. Automatically update Timetables
+                        await updateCollFields("timetable", "className", "section", { className: className, section: secName });
 
                         // 2. Automatically update Lesson Planners
-                        const lpSnap = await getCollection("lesson_planners")
-                            .where("className", "==", oldSec.className)
-                            .where("section", "==", oldSec.sectionName)
-                            .get();
-                        
-                        if (!lpSnap.empty) {
-                            const batchLp = db.batch();
-                            lpSnap.docs.forEach(doc => {
-                                batchLp.update(doc.ref, { className: className, section: secName });
-                            });
-                            await batchLp.commit();
-                        }
+                        await updateCollFields("lesson_planners", "className", "section", { className: className, section: secName });
 
-                        // 3. Automatically migrate Attendance Records & their unique Document IDs
-                        const attSnap = await getCollection("attendance_records")
-                            .where("className", "==", oldSec.className)
-                            .where("section", "==", oldSec.sectionName)
-                            .get();
-                        
+                        // 3. Automatically update Student Records
+                        await updateCollFields("students", "className", "section", { className: className, section: secName });
+
+                        // 4. Automatically update Attendance Edit Requests
+                        try {
+                            const reqSnap = await db.collection("attendance_edit_requests").where("center", "==", activeCenter).where("className", "==", oldC).where("section", "==", oldS).get();
+                            if (!reqSnap.empty) {
+                                const b = db.batch();
+                                reqSnap.docs.forEach(doc => b.update(doc.ref, { className: className, section: secName }));
+                                await b.commit();
+                            }
+                        } catch(e) { console.error(e); }
+
+                        // 5. Automatically update Attendance Discrepancies
+                        try {
+                            const discSnap = await db.collection("attendance_discrepancies").where("center", "==", activeCenter).where("className", "==", oldC).where("section", "==", oldS).get();
+                            if (!discSnap.empty) {
+                                const b = db.batch();
+                                discSnap.docs.forEach(doc => b.update(doc.ref, { className: className, section: secName }));
+                                await b.commit();
+                            }
+                        } catch(e) { console.error(e); }
+
+                        // 6. Automatically migrate Attendance Records & their unique Document IDs
+                        const attSnap = await getCollection("attendance_records").where("className", "==", oldC).where("section", "==", oldS).get();
                         if (!attSnap.empty) {
                             for (const doc of attSnap.docs) {
                                 const data = doc.data();
@@ -597,7 +607,7 @@
                             }
                         }
                     }
-                    alert("Section and all connected records updated successfully!");
+                    alert("Section and all connected ERP records updated successfully!");
 
                 } else {
                     const checkSnap = await getCollection("institute_structure")
