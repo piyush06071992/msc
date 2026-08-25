@@ -55,10 +55,13 @@
         <div class="flex items-center gap-3 flex-wrap justify-end w-full sm:w-auto">
             <div class="bg-white/10 px-4 py-2 rounded-xl border border-white/20 flex items-center gap-3">
                 <label class="text-[10px] font-black uppercase tracking-widest text-amber-300">Exam Date:</label>
-                <select id="seating-exam-date" class="bg-slate-900 text-white text-xs font-black px-3 py-1.5 rounded-lg outline-none cursor-pointer border border-slate-700 shadow-inner uppercase">
+                <select id="seating-exam-date" onchange="onExamDateChange()" class="bg-slate-900 text-white text-xs font-black px-3 py-1.5 rounded-lg outline-none cursor-pointer border border-slate-700 shadow-inner uppercase">
                     <option value="">-- Loading Exam Dates --</option>
                 </select>
             </div>
+            <button onclick="generateSeatingPlan()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all border border-indigo-400 flex items-center gap-1.5">
+                🎲 Generate Seating Plan
+            </button>
             <div id="total-seating-badge" class="bg-emerald-600 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md">
                 0 Total Capacity
             </div>
@@ -125,17 +128,15 @@
     </main>
 
     <script>
-    // --- SECURITY GUARD: BLOCK DIRECT URL ACCESS ---
+        // --- SECURITY GUARD: BLOCK DIRECT URL ACCESS ---
         const seatingToken = localStorage.getItem('minervaSeatingToken');
         const tokenTime = seatingToken ? parseInt(seatingToken, 10) : 0;
         const currentTime = Date.now();
 
-        // Token is valid only if generated within the last 15 seconds
         if (!seatingToken || (currentTime - tokenTime) > 15000) {
             alert("Unauthorized Access. Please open the Seating Plan directly from the Exam Manager.");
             window.location.replace('admin-exam.html');
         } else {
-            // Consume the token so it cannot be bookmarked or re-used directly
             localStorage.removeItem('minervaSeatingToken');
         }
 
@@ -173,13 +174,40 @@
         let roomsDatabase = [];
         let activeRoomId = null;
         let isSidebarOpen = true;
+        let currentAllocations = {}; // seatId -> student object
 
         window.onload = async () => {
             await fetchAvailableExamDates();
             initLiveRoomsListener();
         };
 
-        // --- TOGGLE SIDEBAR MENU (THREE-LINE BUTTON) ---
+        async function onExamDateChange() {
+            const date = document.getElementById('seating-exam-date').value;
+            if (date) {
+                await loadSeatingAllocations(date);
+            } else {
+                currentAllocations = {};
+                if (activeRoomId) selectRoom(activeRoomId, false);
+            }
+        }
+
+        async function loadSeatingAllocations(date) {
+            try {
+                const docRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${date}`);
+                const docSnap = await docRef.get();
+                if (docSnap.exists) {
+                    currentAllocations = docSnap.data().allocations || {};
+                } else {
+                    currentAllocations = {};
+                }
+                if (activeRoomId) selectRoom(activeRoomId, false);
+            } catch (e) {
+                console.error("Error loading seating allocations:", e);
+                currentAllocations = {};
+            }
+        }
+
+        // --- TOGGLE SIDEBAR MENU ---
         function toggleSidebar() {
             const sidebar = document.getElementById('room-sidebar');
             isSidebarOpen = !isSidebarOpen;
@@ -221,6 +249,10 @@
                     const types = Array.from(examMap[d]).join(', ') || 'EXAM';
                     return `<option value="${d}">${pretty} — [${types}]</option>`;
                 }).join('');
+
+                if (dateSelect.value) {
+                    await loadSeatingAllocations(dateSelect.value);
+                }
             } catch (e) {
                 console.error("Error fetching exam dates:", e);
                 document.getElementById('seating-exam-date').innerHTML = '<option value="">Error loading exam dates</option>';
@@ -231,12 +263,10 @@
         function initLiveRoomsListener() {
             getCollection("infrastructure_rooms").onSnapshot(snapshot => {
                 roomsDatabase = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                // Strict alphabetical & numerical sorting
                 roomsDatabase.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base', numeric: true }));
                 
                 renderRoomSidebarList();
 
-                // If a room is currently active, live-refresh its view!
                 if (activeRoomId) {
                     selectRoom(activeRoomId, false);
                 }
@@ -246,7 +276,7 @@
             });
         }
 
-        // --- RENDER SIDEBAR ROOM LIST (ALPHABETICAL) ---
+        // --- RENDER SIDEBAR ROOM LIST ---
         function renderRoomSidebarList() {
             const listArea = document.getElementById('sidebar-rooms-list');
             const search = (document.getElementById('room-search').value || "").trim().toUpperCase();
@@ -280,7 +310,7 @@
             }).join('');
         }
 
-        // --- SELECT & DISPLAY SINGLE ROOM CONFIGURATION ---
+        // --- SELECT & DISPLAY SINGLE ROOM CONFIGURATION & ASSIGNED STUDENTS ---
         function selectRoom(id, updateActive = true) {
             const room = roomsDatabase.find(r => r.id === id);
             if (!room) return;
@@ -311,11 +341,23 @@
                     for (let sIdx = 0; sIdx < row.seats; sIdx++) {
                         const seatNum = String(sIdx + 1).padStart(2, '0');
                         const seatId = `${room.name}-R${rowNum}-S${seatNum}`;
-                        seatsHtml += `
-                        <div class="seat-badge bg-white border border-slate-300 text-slate-800 rounded-xl p-2.5 shadow-sm flex flex-col items-center justify-center min-w-[80px] aspect-square cursor-pointer hover:border-amber-500 hover:bg-amber-50/40" title="Seat ID: ${seatId}">
-                            <span class="text-sm">🪑</span>
-                            <span class="text-[9px] font-mono font-black text-indigo-700 mt-1">${seatId}</span>
-                        </div>`;
+                        const assignedStu = currentAllocations[seatId];
+
+                        if (assignedStu) {
+                            seatsHtml += `
+                            <div class="seat-badge bg-indigo-50 border border-indigo-300 text-indigo-900 rounded-xl p-2 shadow-sm flex flex-col items-center justify-center min-w-[95px] aspect-square cursor-pointer hover:border-indigo-500" title="Seat: ${seatId} | ${assignedStu.name} (Sec ${assignedStu.section})">
+                                <span class="text-[9px] font-mono font-black text-indigo-600">${seatId}</span>
+                                <span class="text-[10px] font-black uppercase tracking-tighter truncate w-full text-center mt-0.5">${assignedStu.name}</span>
+                                <span class="text-[8px] font-bold text-slate-500 uppercase">Sec ${assignedStu.section} • #${assignedStu.rollNo || '—'}</span>
+                            </div>`;
+                        } else {
+                            seatsHtml += `
+                            <div class="seat-badge bg-white border border-slate-300 text-slate-400 rounded-xl p-2 shadow-sm flex flex-col items-center justify-center min-w-[85px] aspect-square cursor-pointer hover:border-amber-500 hover:bg-amber-50/40" title="Seat ID: ${seatId} (Vacant)">
+                                <span class="text-xs">💑</span>
+                                <span class="text-[9px] font-mono font-black text-slate-600 mt-1">${seatId}</span>
+                                <span class="text-[7px] font-bold uppercase text-slate-400">Vacant</span>
+                            </div>`;
+                        }
                     }
 
                     rowsHtml += `
@@ -324,14 +366,13 @@
                             <span class="text-[9px] font-black text-amber-900 bg-amber-100 px-3 py-1 rounded-md uppercase tracking-wider border border-amber-200">
                                 Row ${rowNum} ${rIdx === 0 ? '(Front / Door)' : ''}
                             </span>
-                            <span class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">(${row.seats} Seats Mapped)</span>
+                            <span class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">(${row.seats} Seats)</span>
                         </div>
                         <div class="flex flex-wrap gap-2.5 items-center pt-1">
                             ${seatsHtml}
                         </div>
                     </div>`;
 
-                    // Walking Aisle Display if toggled in admin-rooms.html
                     if (row.hasAisleAfter) {
                         rowsHtml += `
                         <div class="w-full py-3 flex items-center justify-center opacity-75">
@@ -348,11 +389,23 @@
                     for (let eIdx = 0; eIdx < extra; eIdx++) {
                         const extraNum = String(eIdx + 1).padStart(2, '0');
                         const extraId = `${room.name}-EX-${extraNum}`;
-                        extraHtml += `
-                        <div class="seat-badge bg-amber-50 border border-amber-300 text-amber-900 rounded-xl p-2.5 shadow-sm flex flex-col items-center justify-center min-w-[80px] aspect-square cursor-pointer hover:border-amber-600" title="Extra Seat ID: ${extraId}">
-                            <span class="text-sm">🪑</span>
-                            <span class="text-[9px] font-mono font-black text-amber-800 mt-1">${extraId}</span>
-                        </div>`;
+                        const assignedStu = currentAllocations[extraId];
+
+                        if (assignedStu) {
+                            extraHtml += `
+                            <div class="seat-badge bg-indigo-50 border border-indigo-300 text-indigo-900 rounded-xl p-2 shadow-sm flex flex-col items-center justify-center min-w-[95px] aspect-square cursor-pointer hover:border-indigo-500" title="Seat: ${extraId} | ${assignedStu.name}">
+                                <span class="text-[9px] font-mono font-black text-indigo-600">${extraId}</span>
+                                <span class="text-[10px] font-black uppercase tracking-tighter truncate w-full text-center mt-0.5">${assignedStu.name}</span>
+                                <span class="text-[8px] font-bold text-slate-500 uppercase">Sec ${assignedStu.section}</span>
+                            </div>`;
+                        } else {
+                            extraHtml += `
+                            <div class="seat-badge bg-amber-50 border border-amber-300 text-amber-900 rounded-xl p-2 shadow-sm flex flex-col items-center justify-center min-w-[85px] aspect-square cursor-pointer hover:border-amber-600" title="Extra Seat ID: ${extraId} (Vacant)">
+                                <span class="text-xs">💑</span>
+                                <span class="text-[9px] font-mono font-black text-amber-800 mt-1">${extraId}</span>
+                                <span class="text-[7px] font-bold uppercase text-amber-600">Vacant</span>
+                            </div>`;
+                        }
                     }
 
                     rowsHtml += `
@@ -371,6 +424,134 @@
             }
 
             matrixArea.innerHTML = rowsHtml;
+        }
+
+        // --- AUTOMATED INTERLEAVED SHUFFLING SEATING ENGINE ---
+        async function generateSeatingPlan() {
+            const date = document.getElementById('seating-exam-date').value;
+            if (!date) return alert("Please select an exam date first.");
+
+            if (!confirm(`Generate and shuffle seating plan for exam date ${date}?\n\nThis will organize students using an interleaved round-robin queue across sections to prevent cheating.`)) return;
+
+            try {
+                // 1. Get exam schedule for this date
+                const examSnap = await getCollection("exam_schedules").where("date", "==", date).get();
+                if (examSnap.empty) return alert("No exams scheduled for this date in Admin Exam.");
+
+                let targetSections = new Set(); // "ClassName|SectionName"
+                examSnap.forEach(doc => {
+                    const data = doc.data();
+                    if (data.className && data.section) {
+                        targetSections.add(`${data.className}|${data.section}`);
+                    }
+                    if (data.targets) {
+                        data.targets.forEach(t => {
+                            t.sections.forEach(s => {
+                                const secName = typeof s === 'object' ? s.section : s;
+                                targetSections.add(`${t.className}|${secName}`);
+                            });
+                        });
+                    }
+                });
+
+                if (targetSections.size === 0) return alert("No target classes/sections found in the exam schedule for this date.");
+
+                // 2. Fetch all active students matching these classes/sections
+                const stuSnap = await getCollection("students").where("admissionStatus", "==", "APPROVED").get();
+                let sectionQueues = {}; // "ClassName|SectionName" -> [student objects]
+
+                stuSnap.forEach(doc => {
+                    const stu = { id: doc.id, ...doc.data() };
+                    if (stu.isActive === false) return;
+                    const key = `${stu.className}|${stu.section}`;
+                    if (targetSections.has(key)) {
+                        if (!sectionQueues[key]) sectionQueues[key] = [];
+                        sectionQueues[key].push(stu);
+                    }
+                });
+
+                // Sort students in each section by roll number
+                Object.keys(sectionQueues).forEach(k => {
+                    sectionQueues[k].sort((a, b) => String(a.rollNo || "").localeCompare(String(b.rollNo || ""), undefined, { numeric: true }));
+                });
+
+                // 3. Interleaved Round-Robin Shuffling across sections
+                let masterQueue = [];
+                let keys = Object.keys(sectionQueues);
+                let active = true;
+                while (active) {
+                    active = false;
+                    for (let k of keys) {
+                        if (sectionQueues[k].length > 0) {
+                            masterQueue.push(sectionQueues[k].shift());
+                            active = true;
+                        }
+                    }
+                }
+
+                if (masterQueue.length === 0) return alert("No students found in the targeted sections.");
+
+                // 4. Calculate total available room capacity
+                let totalCapacity = 0;
+                roomsDatabase.forEach(r => totalCapacity += (r.capacity || 0));
+
+                if (masterQueue.length > totalCapacity) {
+                    alert(`⚠️ Warning: Total students (${masterQueue.length}) exceeds total room capacity (${totalCapacity}). Some students may not get assigned.`);
+                }
+
+                // 5. Map students to physical seats across rooms
+                let allocations = {}; // seatId -> student object
+                let queueIdx = 0;
+
+                for (let room of roomsDatabase) {
+                    const roomName = room.name;
+                    const rows = room.rows || [];
+                    
+                    for (let rIdx = 0; rIdx < rows.length; rIdx++) {
+                        const rowNum = rIdx + 1;
+                        const row = rows[rIdx];
+                        for (let sIdx = 0; sIdx < row.seats; sIdx++) {
+                            if (queueIdx >= masterQueue.length) break;
+                            const seatNum = String(sIdx + 1).padStart(2, '0');
+                            const seatId = `${roomName}-R${rowNum}-S${seatNum}`;
+                            allocations[seatId] = masterQueue[queueIdx++];
+                        }
+                        if (queueIdx >= masterQueue.length) break;
+                    }
+                    if (queueIdx >= masterQueue.length) break;
+
+                    const extra = room.extraSeats || 0;
+                    for (let eIdx = 0; eIdx < extra; eIdx++) {
+                        if (queueIdx >= masterQueue.length) break;
+                        const extraNum = String(eIdx + 1).padStart(2, '0');
+                        const extraId = `${roomName}-EX-${extraNum}`;
+                        allocations[extraId] = masterQueue[queueIdx++];
+                    }
+                    if (queueIdx >= masterQueue.length) break;
+                }
+
+                // 6. Save allocations to Firestore
+                const batch = db.batch();
+                const allocDocId = `${activeCenter}_${date}`;
+                const allocRef = db.collection("exam_seating_allocations").doc(allocDocId);
+
+                batch.set(allocRef, {
+                    date: date,
+                    center: activeCenter,
+                    allocations: allocations,
+                    totalAssigned: Object.keys(allocations).length,
+                    timestamp: Date.now()
+                });
+
+                await batch.commit();
+                alert(`✅ Seating plan generated successfully! Assigned ${Object.keys(allocations).length} students across rooms.`);
+                
+                await loadSeatingAllocations(date);
+
+            } catch (e) {
+                console.error(e);
+                alert("Error generating seating plan: " + e.message);
+            }
         }
     </script>
 </body>
