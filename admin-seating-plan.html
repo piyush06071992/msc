@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seating Plan & Master Matrix | Minerva</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
+        
+        .glass-card { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.5); }
+        .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        
+        /* Excel-Style Grid Cells */
+        .seat-badge {
+            transition: all 0.2s ease;
+        }
+        .seat-badge:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body class="min-h-screen pb-12 relative overflow-x-hidden">
+
+    <div class="fixed top-0 left-0 w-full h-full overflow-hidden -z-10 pointer-events-none">
+        <div class="absolute top-[-10%] right-[-5%] w-72 sm:w-96 h-72 sm:h-96 bg-amber-100 rounded-full mix-blend-multiply filter blur-3xl opacity-50"></div>
+        <div class="absolute bottom-[-10%] left-[-10%] w-72 sm:w-96 h-72 sm:h-96 bg-sky-100 rounded-full mix-blend-multiply filter blur-3xl opacity-50"></div>
+    </div>
+
+    <header class="bg-[#1e1b4b] text-white px-6 py-4 flex flex-col sm:flex-row items-center justify-between shadow-lg sticky top-0 z-[100] gap-4 border-b-4 border-amber-500">
+        <div class="flex items-center gap-4 w-full sm:w-auto">
+            <button onclick="window.close()" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-colors shadow-sm shrink-0 border border-white/10">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
+            </button>
+            <div>
+                <div class="flex items-center gap-3">
+                    <h1 class="text-lg sm:text-xl font-black tracking-widest uppercase text-amber-400 leading-none">Seating Plan Matrix</h1>
+                    <select id="global-center-switch" onchange="switchAdminCenter(this.value)" class="text-[10px] font-black text-amber-900 bg-amber-50 border border-amber-200 outline-none rounded px-2.5 py-1 cursor-pointer uppercase tracking-widest shadow-sm">
+                        <option value="GHUMARWIN">📍 Ghumarwin</option>
+                        <option value="DHARAMSHALA">📍 Dharamshala</option>
+                    </select>
+                </div>
+                <p class="text-[10px] text-slate-300 font-bold uppercase tracking-widest mt-1">Live Infrastructure & Room Sync</p>
+            </div>
+        </div>
+
+        <div class="flex items-center gap-3 flex-wrap justify-end w-full sm:w-auto">
+            <div class="bg-white/10 px-4 py-2 rounded-xl border border-white/20 flex items-center gap-3">
+                <label class="text-[10px] font-black uppercase tracking-widest text-amber-300">Exam Date:</label>
+                <input type="date" id="seating-exam-date" class="bg-slate-900 text-white text-xs font-black px-3 py-1.5 rounded-lg outline-none cursor-pointer border border-slate-700 shadow-inner">
+            </div>
+            <div id="total-seating-badge" class="bg-emerald-600 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md">
+                0 Total Capacity
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-[1700px] mx-auto p-4 sm:p-8 space-y-6">
+        
+        <!-- Controls & Filters Bar -->
+        <div class="glass-card p-4 sm:p-6 rounded-2xl shadow-sm flex flex-wrap justify-between items-center gap-4">
+            <div class="flex items-center gap-3 flex-wrap">
+                <span class="text-xs font-black text-slate-700 uppercase tracking-widest">🗂️ Live Room Grid View</span>
+                <span class="text-xs font-bold text-slate-400">|</span>
+                <span id="room-count-badge" class="text-xs font-black text-indigo-600 bg-indigo-50 px-3 py-1 rounded-lg border border-indigo-100 uppercase">0 Rooms Mapped</span>
+            </div>
+            <div class="flex items-center gap-3">
+                <input type="text" id="room-search" onkeyup="renderMasterSeatingGrid()" placeholder="🔍 Search room name..." class="bg-white border border-slate-300 rounded-xl px-4 py-2 text-xs font-bold outline-none focus:border-amber-500 shadow-sm w-64 uppercase">
+            </div>
+        </div>
+
+        <!-- Master Excel-Style Seating Grid Container -->
+        <div id="master-seating-container" class="space-y-6">
+            <div class="text-center py-24 text-slate-400 font-black text-xs uppercase tracking-widest animate-pulse bg-white rounded-3xl border border-slate-200 shadow-sm">
+                Syncing Live Rooms & Seat Matrix...
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        // --- FIREBASE CONFIGURATION ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
+            authDomain: "shop-portal-bbbbb.firebaseapp.com",
+            projectId: "shop-portal-bbbbb",
+            storageBucket: "shop-portal-bbbbb.firebasestorage.app",
+            messagingSenderId: "701377739976",
+            appId: "1:701377739976:web:99998220272090e56e79fd"
+        };
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        // --- MULTI-CENTER DYNAMIC DB ROUTER ---
+        let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
+        sessionStorage.setItem('minervaAdminCenter', activeCenter);
+        document.getElementById('global-center-switch').value = activeCenter;
+
+        function getCollection(name) {
+            const globalCollections = ['configs', 'staff_applications'];
+            if (globalCollections.includes(name)) return db.collection(name);
+            
+            if (activeCenter === "GHUMARWIN") return db.collection(name);
+            return db.collection(`${activeCenter.toLowerCase()}_${name}`);
+        }
+
+        function switchAdminCenter(centerName) {
+            sessionStorage.setItem('minervaAdminCenter', centerName);
+            window.location.reload();
+        }
+
+        // --- GLOBAL DATA ---
+        let roomsDatabase = [];
+
+        window.onload = async () => {
+            // Set default date to today
+            const today = new Date();
+            const offset = today.getTimezoneOffset() * 60000;
+            const localISO = (new Date(today - offset)).toISOString().slice(0, 10);
+            document.getElementById('seating-exam-date').value = localISO;
+
+            // Initialize Real-Time Live Sync with admin-rooms.html database
+            initLiveRoomsListener();
+        };
+
+        // --- REAL-TIME LIVE SYNC LISTENER ---
+        function initLiveRoomsListener() {
+            getCollection("infrastructure_rooms").onSnapshot(snapshot => {
+                roomsDatabase = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                // Natural alphabetical sorting
+                roomsDatabase.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base', numeric: true }));
+                renderMasterSeatingGrid();
+            }, error => {
+                console.error("Live sync error:", error);
+                document.getElementById('master-seating-container').innerHTML = `<div class="text-center py-20 text-rose-500 font-bold uppercase text-xs">Error syncing rooms: ${error.message}</div>`;
+            });
+        }
+
+        // --- RENDER EXCEL-STYLE FULL MASTER GRID ---
+        function renderMasterSeatingGrid() {
+            const container = document.getElementById('master-seating-container');
+            const search = (document.getElementById('room-search').value || "").trim().toUpperCase();
+            
+            const filteredRooms = roomsDatabase.filter(r => !search || r.name.toUpperCase().includes(search));
+            
+            document.getElementById('room-count-badge').innerText = `${filteredRooms.length} Rooms Mapped`;
+            
+            let grandTotalCapacity = 0;
+            roomsDatabase.forEach(r => grandTotalCapacity += (r.capacity || 0));
+            document.getElementById('total-seating-badge').innerText = `${grandTotalCapacity} Total Capacity`;
+
+            if (filteredRooms.length === 0) {
+                container.innerHTML = `<div class="bg-white border-2 border-dashed border-slate-200 p-16 rounded-3xl text-center text-slate-400 font-black text-xs uppercase tracking-widest">No rooms found matching your search.</div>`;
+                return;
+            }
+
+            container.innerHTML = filteredRooms.map(room => {
+                const roomName = room.name;
+                const rows = room.rows || [];
+                const extra = room.extraSeats || 0;
+                const capacity = room.capacity || 0;
+
+                let rowsHtml = "";
+
+                if (rows.length === 0 && extra === 0) {
+                    rowsHtml = `<div class="text-slate-400 font-bold text-xs uppercase italic py-4 text-center">No seating rows or extra seats configured for this room yet.</div>`;
+                } else {
+                    // Render Mapped Rows
+                    rows.forEach((row, rIdx) => {
+                        const rowNum = rIdx + 1;
+                        let seatsHtml = "";
+                        
+                        for (let sIdx = 0; sIdx < row.seats; sIdx++) {
+                            const seatNum = String(sIdx + 1).padStart(2, '0');
+                            const seatId = `${roomName}-R${rowNum}-S${seatNum}`;
+                            seatsHtml += `
+                            <div class="seat-badge bg-white border border-slate-300 text-slate-800 rounded-lg p-2 shadow-sm flex flex-col items-center justify-center min-w-[75px] aspect-square cursor-pointer hover:border-amber-500 hover:bg-amber-50/30" title="Seat ID: ${seatId}">
+                                <span class="text-xs">🪑</span>
+                                <span class="text-[9px] font-mono font-black text-indigo-700 mt-1">${seatId}</span>
+                            </div>`;
+                        }
+
+                        rowsHtml += `
+                        <div class="space-y-1.5 mb-3">
+                            <div class="flex items-center gap-2">
+                                <span class="text-[9px] font-black text-amber-900 bg-amber-100 px-2.5 py-0.5 rounded-md uppercase tracking-wider border border-amber-200">
+                                    Row ${rowNum} ${rIdx === 0 ? '(Front / Door)' : ''}
+                                </span>
+                                <span class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">(${row.seats} Seats)</span>
+                            </div>
+                            <div class="flex flex-wrap gap-2 items-center">
+                                ${seatsHtml}
+                            </div>
+                        </div>`;
+
+                        // Walking Aisle Display if toggled in admin-rooms.html
+                        if (row.hasAisleAfter) {
+                            rowsHtml += `
+                            <div class="w-full py-2 flex items-center justify-center opacity-60 my-1">
+                                <div class="w-full border-b border-dashed border-sky-400 flex items-center justify-center">
+                                    <span class="bg-slate-50 px-3 text-[8px] font-black text-sky-600 uppercase tracking-widest">🚶 Walking Aisle / Corridor</span>
+                                </div>
+                            </div>`;
+                        }
+                    });
+
+                    // Render Extra/Overflow Seats if any
+                    if (extra > 0) {
+                        let extraHtml = "";
+                        for (let eIdx = 0; eIdx < extra; eIdx++) {
+                            const extraNum = String(eIdx + 1).padStart(2, '0');
+                            const extraId = `${roomName}-EX-${extraNum}`;
+                            extraHtml += `
+                            <div class="seat-badge bg-amber-50 border border-amber-300 text-amber-900 rounded-lg p-2 shadow-sm flex flex-col items-center justify-center min-w-[75px] aspect-square cursor-pointer hover:border-amber-600" title="Extra Seat ID: ${extraId}">
+                                <span class="text-xs">🪑</span>
+                                <span class="text-[9px] font-mono font-black text-amber-800 mt-1">${extraId}</span>
+                            </div>`;
+                        }
+
+                        rowsHtml += `
+                        <div class="space-y-1.5 mt-4 pt-4 border-t border-slate-200">
+                            <div class="flex items-center gap-2">
+                                <span class="text-[9px] font-black text-amber-900 bg-amber-200 px-2.5 py-0.5 rounded-md uppercase tracking-wider border border-amber-300">
+                                    Extra / Overflow Chairs
+                                </span>
+                                <span class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">(${extra} Seats)</span>
+                            </div>
+                            <div class="flex flex-wrap gap-2 items-center">
+                                ${extraHtml}
+                            </div>
+                        </div>`;
+                    }
+                }
+
+                return `
+                <div class="bg-white rounded-3xl p-6 shadow-sm border border-slate-200 space-y-4">
+                    <div class="flex flex-col sm:flex-row justify-between sm:items-center border-b border-slate-100 pb-4 gap-3">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 bg-amber-100 text-amber-700 rounded-xl flex items-center justify-center font-black text-lg shadow-inner">🏫</div>
+                            <div>
+                                <h3 class="text-lg font-black text-slate-900 uppercase tracking-tight">${roomName}</h3>
+                                <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">${rows.length} Rows Configured</p>
+                            </div>
+                        </div>
+                        <div class="bg-emerald-100 text-emerald-800 px-4 py-1.5 rounded-xl text-xs font-black uppercase tracking-widest border border-emerald-200 shadow-sm self-start sm:self-auto">
+                            Capacity: ${capacity} Seats
+                        </div>
+                    </div>
+
+                    <div class="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
+                        ${rowsHtml}
+                    </div>
+                </div>`;
+            }).join('');
+        }
+    </script>
+</body>
+</html>
