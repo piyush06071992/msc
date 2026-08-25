@@ -534,83 +534,27 @@
                 }
             }
 
-          try {
+            try {
                 if (editingSectionId) {
                     const oldSec = allSectionsData.find(s => s.id === editingSectionId);
                     
                     await getCollection("institute_structure").doc(editingSectionId).update(payload);
 
                     if (oldSec.className !== className || oldSec.sectionName !== secName) {
-                        const oldC = oldSec.className;
-                        const oldS = oldSec.sectionName;
-
-                        // 1. Save Section Alias Registry entry in Firestore for audit & history tracking
-                        try {
-                            const aliasRef = db.collection("configs").doc("section_aliases");
-                            const aliasDoc = await aliasRef.get();
-                            let aliases = aliasDoc.exists ? (aliasDoc.data().mappings || {}) : {};
-                            
-                            const aliasKey = `${activeCenter}_${normDoc(oldC)}_${normDoc(oldS)}`;
-                            aliases[aliasKey] = {
-                                className: className,
-                                sectionName: secName,
-                                updatedAt: new Date().toISOString()
-                            };
-                            await aliasRef.set({ mappings: aliases }, { merge: true });
-                        } catch (aliasErr) {
-                            console.error("Alias registry warning:", aliasErr);
-                        }
-
-                        // Helper to update fields across core collections cleanly
-                        async function updateCollFields(colName, queryFieldC) {
-                            const snap = await getCollection(colName).where(queryFieldC, "==", oldC).get();
-                            if (!snap.empty) {
-                                const batch = db.batch();
-                                snap.docs.forEach(doc => {
-                                    const d = doc.data();
-                                    if (d.section === oldS || d.sectionName === oldS || d.sec === oldS) {
-                                        batch.update(doc.ref, { 
-                                            className: className, 
-                                            section: secName, 
-                                            sectionName: secName 
-                                        });
-                                    }
-                                });
-                                await batch.commit();
-                            }
-                        }
-
-                        // 2. Synchronize Active Records
-                        await updateCollFields("timetable", "className");
-                        await updateCollFields("timetable_history", "className");
-                        await updateCollFields("lesson_planners", "className");
-                        await updateCollFields("students", "className");
-
-                        // 3. Migrate Attendance Records & Document IDs
-                        const attSnap = await getCollection("attendance_records").where("className", "==", oldC).get();
-                        if (!attSnap.empty) {
-                            for (const doc of attSnap.docs) {
-                                const data = doc.data();
-                                if (data.section === oldS || data.sectionName === oldS) {
-                                    const monthKey = data.monthKey;
-                                    const subject = data.subject;
-                                    
-                                    const newDocId = `att_${activeCenter}_${normDoc(className)}_${normDoc(secName)}_${normDoc(subject)}_${monthKey}`;
-                                    const newDocRef = getCollection("attendance_records").doc(newDocId);
-                                    
-                                    data.className = className;
-                                    data.section = secName;
-                                    data.sectionName = secName;
-                                    
-                                    const batchMigrate = db.batch();
-                                    batchMigrate.set(newDocRef, data);
-                                    batchMigrate.delete(doc.ref);
-                                    await batchMigrate.commit();
-                                }
-                            }
+                        const ttSnap = await getCollection("timetable")
+                            .where("className", "==", oldSec.className)
+                            .where("section", "==", oldSec.sectionName)
+                            .get();
+                        
+                        if (!ttSnap.empty) {
+                            const batch = db.batch();
+                            ttSnap.docs.forEach(doc => {
+                                batch.update(doc.ref, { className: className, section: secName });
+                            });
+                            await batch.commit();
                         }
                     }
-                    alert("Section updated successfully, alias registered, and records synchronized!");
+                    alert("Section updated successfully!");
 
                 } else {
                     const checkSnap = await getCollection("institute_structure")
