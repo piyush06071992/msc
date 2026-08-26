@@ -31,7 +31,7 @@
             <button onclick="toggleSidebar()" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-colors shadow-sm shrink-0 border border-white/10 flex items-center justify-center text-amber-400 font-black text-lg" title="Toggle Room Menu">
                 ☰
             </button>
-         <button onclick="window.location.href = 'admin-exam.html'" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-colors shadow-sm shrink-0 border border-white/10" title="Back to Exam Manager">
+            <button onclick="window.location.href = 'admin-exam.html'" class="p-2.5 bg-white/10 hover:bg-white/20 rounded-xl transition-colors shadow-sm shrink-0 border border-white/10" title="Back to Exam Manager">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
             </button>
             <div>
@@ -213,11 +213,11 @@
         let roomsDatabase = [];
         let activeRoomId = null;
         let isSidebarOpen = true;
-        let currentAllocations = {}; // seatId -> student object
-        let busyRoomsMap = {}; // roomName -> { isBusy: true, reason: "..." }
-        let examSectionsMap = {}; // "ClassName|SectionName" -> true for active exam dates
+        let currentAllocations = {}; 
+        let busyRoomsMap = {}; 
+        let examSectionsMap = {}; 
         let allApprovedStudents = [];
-        let activeRowContext = null; // { roomName, rIdx, rowSeats }
+        let activeRowContext = null; 
 
         const SECTION_COLORS = [
             { bg: 'bg-indigo-50', border: 'border-indigo-300', text: 'text-indigo-950', badge: 'bg-indigo-600 text-white' },
@@ -313,37 +313,122 @@
             }
         }
 
-    // --- TIMETABLE ASSEMBLY AUDITOR FOR ROOMS ---
+        // --- TIMETABLE AUDITOR FOR ROOMS (EXAMS & ASSEMBLY CHECK) ---
         async function auditBusyRoomsForDate(dateStr) {
             busyRoomsMap = {};
             try {
-                // Fetch timetable for this specific date (override or live master)
+                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+                // 1. Get exam schedules for this date to determine which sections HAVE exams
+                const examSnap = await getCollection("exam_schedules").where("date", "==", dateStr).get();
+                
+                let examSections = new Set();
+                let examStartMin = 24 * 60, examEndMin = 0;
+
+                if (!examSnap.empty) {
+                    const bellDoc = await getCollection("configs").doc("bell_schedules").get();
+                    const bellRules = bellDoc.exists ? bellDoc.data() : {};
+
+                    examSnap.forEach(doc => {
+                        const data = doc.data();
+                        if (data.className && data.section) examSections.add(`${norm(data.className)}|${norm(data.section)}`);
+                        if (data.targets) {
+                            data.targets.forEach(t => {
+                                t.sections.forEach(s => {
+                                    const secName = typeof s === 'object' ? s.section : s;
+                                    examSections.add(`${norm(t.className)}|${norm(secName)}`);
+                                });
+                            });
+                        }
+
+                        // Calculate global exam time window
+                        const typeKey = (data.type || 'UT').toLowerCase();
+                        const rules = bellRules[typeKey] || { examStart: '09:00', examEnd: '10:30' };
+                        
+                        const [sh, sm] = (rules.examStart || '09:00').split(':').map(Number);
+                        const [eh, em] = (rules.examEnd || '10:30').split(':').map(Number);
+                        
+                        const sM = sh * 60 + sm;
+                        const eM = eh * 60 + em;
+                        if (sM < examStartMin) examStartMin = sM;
+                        if (eM > examEndMin) examEndMin = eM;
+                    });
+                }
+
+                if (examEndMin <= examStartMin) {
+                    examStartMin = 9 * 60;
+                    examEndMin = 12 * 60; // Default fallback window
+                }
+
+                // 2. Fetch the correct timetable for this specific date (Live, Override, or Future Master)
                 const dateObj = new Date(dateStr + 'T00:00:00');
                 const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
 
                 const historySnap = await getCollection("timetable_history").doc(dateStr).get();
                 let daySlots = [];
-                if (historySnap.exists && historySnap.data().schedule) {
-                    daySlots = historySnap.data().schedule.filter(s => s.day === dayName);
+
+                if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
+                    daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
                 } else {
-                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                    daySlots = masterSnap.docs.map(d => d.data());
+                    // Check for active Future Master
+                    const futureSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+                    let activeMasters = [];
+                    futureSnap.docs.forEach(doc => { if (doc.id <= dateStr) activeMasters.push(doc.data()); });
+                    
+                    if (activeMasters.length > 0) {
+                        activeMasters.sort((a, b) => b.date.localeCompare(a.date));
+                        daySlots = (activeMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                    } else {
+                        // Fall back to normal Live Master
+                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                        daySlots = masterSnap.docs.map(d => d.data());
+                    }
                 }
 
-                // Check for ASSEMBLY slots and mark their rooms as busy for the date
+                // 3. Scan timetable slots for room conflicts
                 daySlots.forEach(slot => {
+                    const roomName = (slot.room || '').trim().toUpperCase();
+                    if (!roomName || roomName === 'TBD' || roomName === 'NONE') return;
+
                     const subUpper = (slot.subject || '').toUpperCase();
-                    if (subUpper === 'ASSEMBLY' && slot.room && slot.room !== 'TBD' && slot.room !== 'NONE') {
-                        busyRoomsMap[slot.room.toUpperCase()] = {
+                    
+                    // Rule A: Assembly always blocks the room
+                    if (subUpper === 'ASSEMBLY') {
+                        busyRoomsMap[roomName] = {
                             isBusy: true,
                             reason: `Busy: Assembly (${slot.className} Sec ${slot.section})`
                         };
+                        return;
+                    }
+
+                    // Rule B: Sections NOT having an exam stay in their rooms during regular classes
+                    const slotKey = `${norm(slot.className)}|${norm(slot.section)}`;
+                    const isExamSection = examSections.has(slotKey);
+                    const isSpecialSub = ['BREAK', 'LUNCH BREAK', 'EXAM', 'UT', 'OT'].includes(subUpper);
+
+                    if (!isExamSection && !isSpecialSub) {
+                        let sM = 0, eM = 0;
+                        if (slot.start24 && slot.end24) {
+                            const [sh, sm] = slot.start24.split(':').map(Number);
+                            const [eh, em] = slot.end24.split(':').map(Number);
+                            sM = sh * 60 + sm; eM = eh * 60 + em;
+                        } else if (slot.sMins !== undefined && slot.eMins !== undefined) {
+                            sM = slot.sMins; eM = slot.eMins;
+                        }
+
+                        // Check intersection with exam window
+                        if (sM < examEndMin && eM > examStartMin) {
+                            busyRoomsMap[roomName] = {
+                                isBusy: true,
+                                reason: `Busy: Reg. Class (${slot.className} Sec ${slot.section})`
+                            };
+                        }
                     }
                 });
 
                 renderRoomSidebarList();
             } catch (e) {
-                console.error("Error auditing assembly rooms:", e);
+                console.error("Error auditing busy rooms:", e);
             }
         }
 
@@ -420,7 +505,7 @@
             
             let availableCap = 0;
             roomsDatabase.forEach(r => {
-                if (!busyRoomsMap[r.name.toUpperCase()]) availableCap += (r.capacity || 0);
+                if (!busyRoomsMap[cleanRoom(r.name)]) availableCap += (r.capacity || 0);
             });
             document.getElementById('total-seating-badge').innerText = `${availableCap} Available Capacity`;
 
@@ -468,7 +553,7 @@
 
             const busyInfo = busyRoomsMap[cleanRoom(room.name)];
             if (busyInfo) {
-                alert(`⚠️ Room ${room.name} is unavailable because it is occupied by a regular class (${busyInfo.reason}).`);
+                alert(`⚠️ Room ${room.name} is unavailable because it is occupied: ${busyInfo.reason}`);
                 return;
             }
 
@@ -500,7 +585,7 @@
                         const seatId = `${room.name}-R${rowNum}-S${seatNum}`;
                         const assignedStu = currentAllocations[seatId];
 
-                    if (assignedStu) {
+                        if (assignedStu) {
                             filledCount++;
                             const secTheme = getSectionColor(assignedStu.className, assignedStu.section);
                             seatsHtml += `
@@ -720,7 +805,7 @@
 
                 // Save to Firestore
                 const allocDocId = `${activeCenter}_${date}`;
-              await db.collection("exam_seating_allocations").doc(allocDocId).set({
+                await db.collection("exam_seating_allocations").doc(allocDocId).set({
                     date: date,
                     center: activeCenter,
                     allocations: currentAllocations,
