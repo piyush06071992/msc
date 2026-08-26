@@ -170,23 +170,27 @@
             window.location.reload();
         }
 
-        // --- GLOBAL DATA ---
+       // --- GLOBAL DATA ---
         let roomsDatabase = [];
         let activeRoomId = null;
         let isSidebarOpen = true;
         let currentAllocations = {}; // seatId -> student object
+        let busyRoomsMap = {}; // roomName -> { isBusy: true, reason: "..." }
 
         window.onload = async () => {
             await fetchAvailableExamDates();
             initLiveRoomsListener();
         };
 
-        async function onExamDateChange() {
+   async function onExamDateChange() {
             const date = document.getElementById('seating-exam-date').value;
             if (date) {
+                await auditBusyRoomsForDate(date);
                 await loadSeatingAllocations(date);
             } else {
                 currentAllocations = {};
+                busyRoomsMap = {};
+                renderRoomSidebarList();
                 if (activeRoomId) selectRoom(activeRoomId, false);
             }
         }
@@ -204,6 +208,101 @@
             } catch (e) {
                 console.error("Error loading seating allocations:", e);
                 currentAllocations = {};
+            }
+        }
+
+        // --- TIMETABLE CONFLICT AUDITOR FOR ROOMS ---
+        async function auditBusyRoomsForDate(dateStr) {
+            busyRoomsMap = {};
+            try {
+                // 1. Get exam schedules for this date to determine the global exam time window
+                const examSnap = await getCollection("exam_schedules").where("date", "==", dateStr).get();
+                if (examSnap.empty) return;
+
+                let examSections = new Set();
+                examSnap.forEach(doc => {
+                    const data = doc.data();
+                    if (data.className && data.section) examSections.add(`${data.className}|${data.section}`);
+                    if (data.targets) {
+                        data.targets.forEach(t => {
+                            t.sections.forEach(s => {
+                                const secName = typeof s === 'object' ? s.section : s;
+                                examSections.add(`${t.className}|${secName}`);
+                            });
+                        });
+                    }
+                });
+
+                // 2. Fetch timetable for this specific weekday (or override)
+                const dateObj = new Date(dateStr + 'T00:00:00');
+                const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
+
+                const historySnap = await getCollection("timetable_history").doc(dateStr).get();
+                let daySlots = [];
+                if (historySnap.exists && historySnap.data().schedule) {
+                    daySlots = historySnap.data().schedule.filter(s => s.day === dayName);
+                } else {
+                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                    daySlots = masterSnap.docs.map(d => d.data());
+                }
+
+                // Find global exam start and end minutes across all exams on this day
+                let examStartMin = 24 * 60, examEndMin = 0;
+                
+                // We check bell schedule templates or fallback defaults
+                const bellDoc = await getCollection("configs").doc("bell_schedules").get();
+                const bellRules = bellDoc.exists ? bellDoc.data() : {};
+
+                examSnap.forEach(doc => {
+                    const d = doc.data();
+                    const typeKey = (d.type || 'UT').toLowerCase();
+                    const rules = bellRules[typeKey] || { examStart: '09:00', examEnd: '10:30' };
+                    
+                    const [sh, sm] = (rules.examStart || '09:00').split(':').map(Number);
+                    const [eh, em] = (rules.examEnd || '10:30').split(':').map(Number);
+                    
+                    const sM = sh * 60 + sm;
+                    const eM = eh * 60 + em;
+                    if (sM < examStartMin) examStartMin = sM;
+                    if (eM > examEndMin) examEndMin = eM;
+                });
+
+                if (examEndMin <= examStartMin) {
+                    examStartMin = 9 * 60;
+                    examEndMin = 12 * 60; // Default fallback window
+                }
+
+                // 3. Scan timetable slots for regular/non-exam classes using rooms during this window
+                daySlots.forEach(slot => {
+                    const key = `${slot.className}|${slot.section}`;
+                    const isExamSection = examSections.has(key);
+                    const isSpecialSub = ['BREAK', 'LUNCH BREAK', 'EXAM', 'UT', 'OT'].includes((slot.subject || '').toUpperCase());
+
+                    // If this section is NOT writing an exam and has a room assigned
+                    if (!isExamSection && !isSpecialSub && slot.room && slot.room !== 'TBD' && slot.room !== 'NONE') {
+                        // Calculate slot minutes
+                        let sM = 0, eM = 0;
+                        if (slot.start24 && slot.end24) {
+                            const [sh, sm] = slot.start24.split(':').map(Number);
+                            const [eh, em] = slot.end24.split(':').map(Number);
+                            sM = sh * 60 + sm; eM = eh * 60 + em;
+                        } else if (slot.sMins !== undefined && slot.eMins !== undefined) {
+                            sM = slot.sMins; eM = mism = slot.eMins;
+                        }
+
+                        // Check intersection with exam window
+                        if (sM < examEndMin && eM > examStartMin) {
+                            busyRoomsMap[slot.room.toUpperCase()] = {
+                                isBusy: true,
+                                reason: `Busy: Class ${slot.className} Sec ${slot.section} (${slot.subject})`
+                            };
+                        }
+                    }
+                });
+
+                renderRoomSidebarList();
+            } catch (e) {
+                console.error("Error auditing busy rooms:", e);
             }
         }
 
@@ -276,7 +375,7 @@
             });
         }
 
-        // --- RENDER SIDEBAR ROOM LIST ---
+    // --- RENDER SIDEBAR ROOM LIST ---
         function renderRoomSidebarList() {
             const listArea = document.getElementById('sidebar-rooms-list');
             const search = (document.getElementById('room-search').value || "").trim().toUpperCase();
@@ -286,8 +385,11 @@
             document.getElementById('room-count-badge').innerText = `${roomsDatabase.length} Rooms`;
             
             let grandTotalCapacity = 0;
-            roomsDatabase.forEach(r => grandTotalCapacity += (r.capacity || 0));
-            document.getElementById('total-seating-badge').innerText = `${grandTotalCapacity} Total Capacity`;
+            roomsDatabase.forEach(r => {
+                const busyInfo = busyRoomsMap[r.name.toUpperCase()];
+                if (!busyInfo) grandTotalCapacity += (r.capacity || 0);
+            });
+            document.getElementById('total-seating-badge').innerText = `${grandTotalCapacity} Available Capacity`;
 
             if (filteredRooms.length === 0) {
                 listArea.innerHTML = `<div class="bg-slate-50 border-2 border-dashed border-slate-200 p-6 rounded-2xl text-center text-[10px] font-black text-slate-400 uppercase tracking-widest">No rooms found.</div>`;
@@ -296,6 +398,22 @@
 
             listArea.innerHTML = filteredRooms.map(room => {
                 const isActive = room.id === activeRoomId;
+                const busyInfo = busyRoomsMap[room.name.toUpperCase()];
+
+                if (busyInfo) {
+                    return `
+                    <div class="p-3.5 rounded-2xl border bg-slate-100 border-slate-200 opacity-70 cursor-not-allowed flex justify-between items-center" title="${busyInfo.reason}">
+                        <div class="flex items-center gap-3">
+                            <div class="bg-slate-300 text-slate-600 w-9 h-9 rounded-xl flex items-center justify-center font-black text-base">🔒</div>
+                            <div>
+                                <h4 class="font-black uppercase tracking-tighter text-sm text-slate-600">${room.name}</h4>
+                                <div class="text-[8px] font-black text-rose-600 uppercase tracking-widest mt-0.5 truncate max-w-[150px]">${busyInfo.reason}</div>
+                            </div>
+                        </div>
+                        <div class="bg-rose-100 text-rose-700 px-2.5 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest">Busy</div>
+                    </div>`;
+                }
+
                 return `
                 <div onclick="selectRoom('${room.id}', true)" class="p-3.5 rounded-2xl border transition-all cursor-pointer group flex justify-between items-center ${isActive ? 'bg-amber-50 border-amber-300 shadow-md' : 'bg-white border-slate-100 hover:border-amber-200 hover:shadow-sm'}">
                     <div class="flex items-center gap-3">
@@ -499,12 +617,16 @@
                     alert(`⚠️ Warning: Total students (${masterQueue.length}) exceeds total room capacity (${totalCapacity}). Some students may not get assigned.`);
                 }
 
-                // 5. Map students to physical seats across rooms
+           // 5. Map students to physical seats across rooms (excluding busy rooms)
                 let allocations = {}; // seatId -> student object
                 let queueIdx = 0;
 
                 for (let room of roomsDatabase) {
                     const roomName = room.name;
+                    
+                    // Skip room if it is locked due to regular class timetable overlap
+                    if (busyRoomsMap[roomName.toUpperCase()]) continue;
+
                     const rows = room.rows || [];
                     
                     for (let rIdx = 0; rIdx < rows.length; rIdx++) {
