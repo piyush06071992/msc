@@ -7,6 +7,8 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <!-- SheetJS for Excel Processing -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
@@ -47,6 +49,21 @@
         </div>
 
         <div class="flex items-center gap-3 flex-wrap justify-end w-full sm:w-auto">
+            
+            <!-- NEW: Excel Bulk Upload Tools -->
+            <button onclick="downloadSeatingTemplate()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-widest shadow-md flex items-center gap-2 transition-all active:scale-95">
+                ⬇️ Template
+            </button>
+            
+            <div class="relative">
+                <input type="file" id="seating-upload" accept=".xlsx, .xls" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" onchange="handleExcelUpload(event)">
+                <button class="bg-sky-600 hover:bg-sky-500 text-white px-4 py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-widest shadow-md flex items-center gap-2 transition-all">
+                    📂 Upload
+                </button>
+            </div>
+
+            <div class="h-8 w-px bg-white/20 mx-2 hidden sm:block"></div>
+
             <div class="bg-white/10 px-4 py-2 rounded-xl border border-white/20 flex items-center gap-3">
                 <label class="text-[10px] font-black uppercase tracking-widest text-amber-300">Exam Date:</label>
                 <select id="seating-exam-date" onchange="onExamDateChange()" class="bg-slate-900 text-white text-xs font-black px-3 py-1.5 rounded-lg outline-none cursor-pointer border border-slate-700 shadow-inner uppercase">
@@ -168,6 +185,40 @@
         </div>
     </div>
 
+    <!-- EXCEL PREVIEW MODAL -->
+    <div id="excel-preview-modal" class="fixed inset-0 bg-slate-900/90 backdrop-blur-sm z-[300] hidden items-center justify-center p-0 sm:p-4">
+        <div class="bg-white sm:rounded-[2.5rem] w-full h-full sm:w-[98vw] sm:h-[95vh] shadow-2xl overflow-hidden flex flex-col transition-all">
+            <div class="p-6 bg-gradient-to-r from-sky-600 to-indigo-700 text-white flex justify-between items-center shrink-0">
+                <div>
+                    <h3 class="font-black text-xl sm:text-2xl uppercase tracking-tight">Review Bulk Seating Upload</h3>
+                    <p class="text-[10px] font-bold text-sky-200 uppercase tracking-widest mt-1">Please verify assignments and clear any errors</p>
+                </div>
+                <button onclick="closeExcelPreviewModal()" class="w-10 h-10 bg-white/10 hover:bg-rose-600 rounded-full font-black text-lg transition-colors flex items-center justify-center">✕</button>
+            </div>
+
+            <div class="p-4 sm:p-6 bg-slate-50 flex-1 overflow-y-auto custom-scroll">
+                
+                <div id="excel-cheat-warning" class="hidden mb-6 bg-rose-100 border border-rose-300 p-4 rounded-xl flex items-start gap-4 shadow-sm">
+                    <span class="text-3xl animate-bounce">⚠️</span>
+                    <div>
+                        <h4 class="font-black text-rose-800 uppercase tracking-widest text-sm">Anti-Cheat Alert Triggered</h4>
+                        <p class="text-[10px] font-bold text-rose-600 uppercase mt-1">We detected students sitting side-by-side who share the exact same question paper (Highlighted in Red below). If you proceed, these seats will be permanently marked with a warning badge for invigilators.</p>
+                    </div>
+                </div>
+
+                <div id="excel-preview-content" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <!-- Preview tables generate here -->
+                </div>
+            </div>
+
+            <div class="p-4 bg-white border-t border-slate-200 flex flex-col sm:flex-row gap-3 shrink-0">
+                <button onclick="closeExcelPreviewModal()" class="flex-1 py-4 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-black uppercase text-xs tracking-widest transition-colors shadow-sm">Cancel</button>
+                <button onclick="saveExcelAllocations('MERGE')" id="excel-merge-btn" class="flex-1 py-4 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-lg transition-all active:scale-95">💾 Merge With Existing</button>
+                <button onclick="saveExcelAllocations('OVERWRITE')" id="excel-save-btn" class="flex-1 py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-lg transition-all active:scale-95">🚨 Overwrite Entire Date</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         // --- SECURITY GUARD ---
         const seatingToken = localStorage.getItem('minervaSeatingToken');
@@ -216,6 +267,7 @@
         let currentAllocations = {}; 
         let busyRoomsMap = {}; 
         let examSectionsMap = {}; 
+        let sectionPaperMap = {}; // NEW: Stores paper fingerprints for anti-cheat
         let allApprovedStudents = [];
         let activeRowContext = null; 
 
@@ -260,15 +312,70 @@
         async function onExamDateChange() {
             const date = document.getElementById('seating-exam-date').value;
             if (date) {
+                await buildPaperMap(date); // Load paper fingerprints
                 await auditExamSectionsForDate(date);
                 await auditBusyRoomsForDate(date);
                 await loadSeatingAllocations(date);
             } else {
                 examSectionsMap = {};
+                sectionPaperMap = {};
                 currentAllocations = {};
                 busyRoomsMap = {};
                 renderRoomSidebarList();
                 if (activeRoomId) selectRoom(activeRoomId, false);
+            }
+        }
+
+        // --- ANTI-CHEAT PAPER MAPPER ---
+        async function buildPaperMap(dateStr) {
+            sectionPaperMap = {};
+            try {
+                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const [examSnap, groupSnap] = await Promise.all([
+                    getCollection("exam_schedules").where("date", "==", dateStr).get(),
+                    db.collection("admin_paper_groups").where("date", "==", dateStr).get()
+                ]);
+
+                // 1. Build base subject lists
+                examSnap.forEach(doc => {
+                    const data = doc.data();
+                    const proc = (cName, sName, subs) => {
+                        const key = `${norm(cName)}|${norm(sName)}`;
+                        if (!sectionPaperMap[key]) sectionPaperMap[key] = [];
+                        subs.forEach(sub => sectionPaperMap[key].push({ subject: sub.toUpperCase(), code: 'UNMAPPED' }));
+                    };
+                    
+                    if (data.targets && data.targets.length > 0) {
+                        data.targets.forEach(t => t.sections.forEach(s => {
+                            const secName = typeof s === 'object' ? s.section : s;
+                            const subs = typeof s === 'object' && s.subjects ? s.subjects : (t.subjects || []);
+                            proc(t.className, secName, subs);
+                        }));
+                    } else if (data.className && data.section) {
+                        proc(data.className, data.section, data.subjects || []);
+                    }
+                });
+
+                // 2. Overlay specific HOD Shortcodes to handle combined vs single papers
+                groupSnap.forEach(doc => {
+                    const g = doc.data();
+                    (g.sectionKeys||[]).forEach(sk => {
+                        const parts = sk.split('|');
+                        if (parts.length < 3) return;
+                        const key = `${norm(parts[1])}|${norm(parts[2])}`; // Class|Sec
+                        
+                        if (sectionPaperMap[key]) {
+                            (g.subjects||[]).forEach(sub => {
+                                const detail = (g.subExams && g.subExams[sub]) ? g.subExams[sub] : {};
+                                const code = detail.shortCode || 'UNMAPPED';
+                                const entry = sectionPaperMap[key].find(e => e.subject === sub.toUpperCase());
+                                if (entry) entry.code = code;
+                            });
+                        }
+                    });
+                });
+            } catch (e) {
+                console.error("Error building paper map:", e);
             }
         }
 
@@ -313,7 +420,7 @@
             }
         }
 
-        // --- TIMETABLE AUDITOR FOR ROOMS (EXAMS & ASSEMBLY CHECK) ---
+        // --- TIMETABLE CONFLICT AUDITOR FOR ROOMS ---
         async function auditBusyRoomsForDate(dateStr) {
             busyRoomsMap = {};
             try {
@@ -385,9 +492,8 @@
                     }
                 }
 
-   // 3. Scan timetable slots for room conflicts
+                // 3. Scan timetable slots for room conflicts
                 daySlots.forEach(slot => {
-                    // CRITICAL FIX: Use cleanRoom() to strip all spaces before saving to memory!
                     const roomName = cleanRoom(slot.room);
                     if (!roomName || roomName === 'TBD' || roomName === 'NONE') return;
 
@@ -475,6 +581,7 @@
                 }).join('');
 
                 if (dateSelect.value) {
+                    await buildPaperMap(dateSelect.value);
                     await auditExamSectionsForDate(dateSelect.value);
                     await auditBusyRoomsForDate(dateSelect.value);
                     await loadSeatingAllocations(dateSelect.value);
@@ -589,8 +696,11 @@
                         if (assignedStu) {
                             filledCount++;
                             const secTheme = getSectionColor(assignedStu.className, assignedStu.section);
+                            const cheatIcon = assignedStu.cheatRisk ? `<div class="absolute -top-2 -right-2 bg-rose-600 text-white w-6 h-6 rounded-full flex items-center justify-center shadow-md animate-pulse text-xs z-10" title="⚠️ Cheat Risk: Adjacent student has the same paper!">⚠️</div>` : '';
+                            
                             seatsHtml += `
-                            <div class="seat-badge ${secTheme.bg} border ${secTheme.border} ${secTheme.text} rounded-xl p-2 shadow-sm flex flex-col items-center justify-center min-w-[95px] aspect-square cursor-pointer" title="Seat: ${seatId} | ${assignedStu.name} (Roll #${assignedStu.rollNo || '—'})">
+                            <div class="relative seat-badge ${secTheme.bg} border ${assignedStu.cheatRisk ? 'border-rose-500 shadow-[0_0_10px_rgba(244,63,94,0.5)]' : secTheme.border} ${secTheme.text} rounded-xl p-2 shadow-sm flex flex-col items-center justify-center min-w-[95px] aspect-square cursor-pointer" title="Seat: ${seatId} | ${assignedStu.name} (Roll #${assignedStu.rollNo || '—'})">
+                                ${cheatIcon}
                                 <span class="text-[9px] font-mono font-black opacity-75">${seatId}</span>
                                 <span class="text-[10px] font-black uppercase tracking-tighter truncate w-full text-center mt-0.5">${assignedStu.name}</span>
                                 <span class="text-[8px] font-black uppercase px-1.5 py-0.5 rounded mt-0.5 ${secTheme.badge}">#${assignedStu.rollNo || '—'} • Sec ${assignedStu.section}</span>
@@ -768,6 +878,49 @@
             }
         }
 
+        // --- CORE ANTI-CHEAT EVALUATOR ---
+        function evaluateCheatRisks(allocObj, roomObj) {
+            let riskDetected = false;
+            let riskMessages = [];
+            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+            // Clear old flags in the evaluating scope
+            Object.values(allocObj).forEach(stu => { if(stu) delete stu.cheatRisk; });
+
+            const rows = roomObj.rows || [];
+            rows.forEach((row, rIdx) => {
+                const rowNum = rIdx + 1;
+                // Evaluate horizontal side-by-side neighbors in this row
+                for (let sIdx = 0; sIdx < row.seats - 1; sIdx++) {
+                    const seatId1 = `${roomObj.name}-R${rowNum}-S${String(sIdx + 1).padStart(2, '0')}`;
+                    const seatId2 = `${roomObj.name}-R${rowNum}-S${String(sIdx + 2).padStart(2, '0')}`;
+
+                    const stu1 = allocObj[seatId1];
+                    const stu2 = allocObj[seatId2];
+
+                    if (stu1 && stu2) {
+                        const key1 = `${norm(stu1.className)}|${norm(stu1.section)}`;
+                        const key2 = `${norm(stu2.className)}|${norm(stu2.section)}`;
+
+                        const papers1 = sectionPaperMap[key1] || [];
+                        const papers2 = sectionPaperMap[key2] || [];
+
+                        const shared = papers1.find(p1 => 
+                            papers2.some(p2 => p1.subject === p2.subject && p1.code === p2.code)
+                        );
+
+                        if (shared) {
+                            riskDetected = true;
+                            stu1.cheatRisk = true;
+                            stu2.cheatRisk = true;
+                            riskMessages.push(`Row ${rowNum}: ${stu1.name} & ${stu2.name} share '${shared.subject}'`);
+                        }
+                    }
+                }
+            });
+            return { riskDetected, riskMessages };
+        }
+
         async function saveRowAllocation() {
             const date = document.getElementById('seating-exam-date').value;
             if (!date || !activeRowContext) return;
@@ -795,14 +948,30 @@
             btn.innerHTML = "⏳ Saving..."; btn.disabled = true;
 
             try {
-                // Map selected students to vacant seats
+                // Map selected students to vacant seats in a temporary object
+                let tempAllocations = { ...currentAllocations };
                 checkedCbs.forEach((cb, idx) => {
                     const stuId = cb.value;
                     const stuObj = allApprovedStudents.find(s => s.id === stuId);
                     if (stuObj && vacantSeatIds[idx]) {
-                        currentAllocations[vacantSeatIds[idx]] = stuObj;
+                        delete stuObj.cheatRisk; // Clear any old flags before mapping
+                        tempAllocations[vacantSeatIds[idx]] = stuObj;
                     }
                 });
+
+                // --- ANTI-CHEAT ALGORITHM: Evaluate horizontal side-by-side neighbors ---
+                const roomObj = roomsDatabase.find(r => r.name === roomName);
+                const cheatCheck = evaluateCheatRisks(tempAllocations, roomObj);
+
+                if (cheatCheck.riskDetected) {
+                    const msg = `⚠️ CHEAT RISK DETECTED\n\nThe following side-by-side students share the exact same question paper:\n\n- ${cheatCheck.riskMessages.join('\n- ')}\n\nDo you want to proceed anyway? A red warning icon will be permanently placed on their seats.`;
+                    if (!confirm(msg)) {
+                        btn.innerHTML = orig; btn.disabled = false;
+                        return; // User aborted save
+                    }
+                }
+
+                currentAllocations = tempAllocations;
 
                 // Save to Firestore
                 const allocDocId = `${activeCenter}_${date}`;
@@ -862,6 +1031,197 @@
             } catch (e) {
                 console.error(e);
                 alert("Error clearing room: " + e.message);
+            }
+        }
+
+        // --- EXCEL SEATING PLAN ENGINE ---
+        function downloadSeatingTemplate() {
+            const date = document.getElementById('seating-exam-date').value;
+            if (!date) return alert("Please select an exam date from the top menu first.");
+            
+            const wb = XLSX.utils.book_new();
+            let hasRooms = false;
+
+            roomsDatabase.forEach(room => {
+                if (busyRoomsMap[cleanRoom(room.name)]) return; // Skip busy rooms
+                hasRooms = true;
+                
+                let wsData = [
+                    ["Seat ID", "Row No", "Seat No", "Roll No (Type Here)", "Current Assigned (Info)"]
+                ];
+
+                (room.rows || []).forEach((row, rIdx) => {
+                    const rowNum = rIdx + 1;
+                    for (let sIdx = 0; sIdx < row.seats; sIdx++) {
+                        const seatNum = String(sIdx + 1).padStart(2, '0');
+                        const seatId = `${room.name}-R${rowNum}-S${seatNum}`;
+                        const currentStu = currentAllocations[seatId];
+                        const roll = currentStu ? currentStu.rollNo : "";
+                        const info = currentStu ? `${currentStu.name} (${currentStu.className} Sec ${currentStu.section})` : "Vacant";
+                        wsData.push([seatId, `Row ${rowNum}`, `Seat ${sIdx+1}`, roll, info]);
+                    }
+                });
+
+                const ws = XLSX.utils.aoa_to_sheet(wsData);
+                ws['!cols'] = [{wch:15}, {wch:10}, {wch:10}, {wch:20}, {wch:35}];
+                XLSX.utils.book_append_sheet(wb, ws, room.name.substring(0, 31)); // Sheet name max 31 chars
+            });
+
+            if (!hasRooms) return alert("No available rooms for this date. All rooms are busy.");
+            XLSX.writeFile(wb, `Seating_Template_${date}.xlsx`);
+        }
+
+        let uploadedAllocations = {};
+        function handleExcelUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const date = document.getElementById('seating-exam-date').value;
+            if (!date) {
+                alert("Please select an exam date before uploading.");
+                event.target.value = ""; return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, {type: 'array'});
+                    
+                    uploadedAllocations = {};
+                    let errors = [];
+                    let previewHtml = "";
+                    let hasCheatRisk = false;
+
+                    workbook.SheetNames.forEach(sheetName => {
+                        const sheet = workbook.Sheets[sheetName];
+                        const jsonData = XLSX.utils.sheet_to_json(sheet);
+                        const roomObj = roomsDatabase.find(r => r.name.substring(0,31) === sheetName);
+                        
+                        if (!roomObj) return; // Skip sheets that don't match our rooms
+                        if (busyRoomsMap[cleanRoom(roomObj.name)]) return; // Room is busy, ignore sheet data
+
+                        // Temporary object for this room to run cheat check
+                        let tempRoomAlloc = {};
+
+                        jsonData.forEach(row => {
+                            const seatId = row["Seat ID"];
+                            const rollNo = String(row["Roll No (Type Here)"] || "").trim();
+                            
+                            if (seatId && rollNo) {
+                                // Find student in database
+                                const stu = allApprovedStudents.find(s => String(s.rollNo).toUpperCase() === rollNo.toUpperCase());
+                                if (stu) {
+                                    // Check duplicate within the entire upload so far
+                                    const isDup = Object.values(uploadedAllocations).some(s => s.id === stu.id) || Object.values(tempRoomAlloc).some(s=>s.id === stu.id);
+                                    if (isDup) {
+                                        errors.push(`Roll ${rollNo} assigned multiple times in Excel.`);
+                                    } else {
+                                        tempRoomAlloc[seatId] = {...stu}; // Clone object so we can add cheat flags
+                                        uploadedAllocations[seatId] = tempRoomAlloc[seatId];
+                                    }
+                                } else {
+                                    errors.push(`Roll ${rollNo} not found in database.`);
+                                }
+                            }
+                        });
+
+                        // Run Anti-Cheat Engine for this room
+                        const cheatCheck = evaluateCheatRisks(tempRoomAlloc, roomObj);
+                        if (cheatCheck.riskDetected) hasCheatRisk = true;
+
+                        // Generate Preview UI for this room
+                        let rowsHtml = "";
+                        Object.keys(tempRoomAlloc).forEach(sId => {
+                            const st = tempRoomAlloc[sId];
+                            rowsHtml += `<tr class="border-b border-slate-100 ${st.cheatRisk?'bg-rose-50':'bg-white'}">
+                                <td class="p-2 font-mono text-[10px] text-slate-500">${sId}</td>
+                                <td class="p-2 font-black text-slate-800">${st.rollNo}</td>
+                                <td class="p-2 text-xs font-bold text-slate-700">${st.name} <span class="text-[9px] font-black text-slate-400 block sm:inline">(${st.className}-${st.section})</span></td>
+                                <td class="p-2 text-center">${st.cheatRisk?'<span class="text-[9px] bg-rose-500 text-white font-black px-2 py-0.5 rounded shadow-sm animate-pulse tracking-widest uppercase">⚠️ Cheat Risk</span>':'<span class="text-[9px] bg-emerald-100 text-emerald-700 font-black px-2 py-0.5 rounded uppercase tracking-widest">✅ OK</span>'}</td>
+                            </tr>`;
+                        });
+                        
+                        if (rowsHtml) {
+                            previewHtml += `<div class="bg-white border border-slate-200 shadow-sm rounded-2xl overflow-hidden flex flex-col h-full max-h-[60vh]">
+                            <div class="bg-indigo-600 text-white p-3 shrink-0"><h4 class="font-black uppercase tracking-widest text-sm leading-none">${roomObj.name}</h4></div>
+                            <div class="flex-1 overflow-y-auto custom-scroll">
+                            <table class="w-full text-left text-xs">
+                                <thead class="bg-slate-100 text-slate-500 sticky top-0 border-b border-slate-200 shadow-sm uppercase tracking-widest text-[9px] font-black z-10"><tr><th class="p-2">Seat</th><th class="p-2">Roll</th><th class="p-2">Name</th><th class="p-2 text-center">Status</th></tr></thead>
+                                <tbody>${rowsHtml}</tbody>
+                            </table>
+                            </div></div>`;
+                        }
+                    });
+
+                    if (errors.length > 0) {
+                        alert("⚠️ Validation Errors found in Excel:\n\n- " + errors.join('\n- '));
+                        event.target.value = ""; return;
+                    }
+
+                    if (!previewHtml) {
+                        alert("No valid seating assignments found in Excel.");
+                        event.target.value = ""; return;
+                    }
+
+                    document.getElementById('excel-preview-content').innerHTML = previewHtml;
+                    
+                    const cheatWarnBox = document.getElementById('excel-cheat-warning');
+                    if (hasCheatRisk) {
+                        cheatWarnBox.classList.remove('hidden');
+                        document.getElementById('excel-save-btn').innerText = "⚠️ Overwrite Entire Date (Ignore Risks)";
+                        document.getElementById('excel-save-btn').classList.replace('bg-indigo-600', 'bg-rose-600');
+                        document.getElementById('excel-save-btn').classList.replace('hover:bg-indigo-500', 'hover:bg-rose-500');
+                    } else {
+                        cheatWarnBox.classList.add('hidden');
+                        document.getElementById('excel-save-btn').innerText = "🚨 Overwrite Entire Date";
+                        document.getElementById('excel-save-btn').classList.replace('bg-rose-600', 'bg-indigo-600');
+                        document.getElementById('excel-save-btn').classList.replace('hover:bg-rose-500', 'hover:bg-indigo-500');
+                    }
+
+                    document.getElementById('excel-preview-modal').classList.replace('hidden', 'flex');
+
+                } catch (err) {
+                    console.error(err);
+                    alert("Failed to parse Excel. Use the official template.");
+                }
+                event.target.value = ""; 
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        function closeExcelPreviewModal() {
+            document.getElementById('excel-preview-modal').classList.replace('flex', 'hidden');
+            uploadedAllocations = {};
+        }
+
+        async function saveExcelAllocations(mode) {
+            const date = document.getElementById('seating-exam-date').value;
+            
+            if (mode === 'OVERWRITE') {
+                if(!confirm("⚠️ OVERWRITE WARNING: This will delete ALL existing manual seating arrangements for this date and replace them completely with the Excel data. Are you sure?")) return;
+                currentAllocations = uploadedAllocations;
+            } else {
+                currentAllocations = { ...currentAllocations, ...uploadedAllocations };
+            }
+
+            try {
+                const allocDocId = `${activeCenter}_${date}`;
+                await db.collection("exam_seating_allocations").doc(allocDocId).set({
+                    date: date,
+                    center: activeCenter,
+                    allocations: currentAllocations,
+                    totalAssigned: Object.keys(currentAllocations).length,
+                    timestamp: Date.now()
+                }, { merge: true });
+
+                alert("✅ Excel Seating Plan Applied Successfully!");
+                closeExcelPreviewModal();
+                
+                if (activeRoomId) selectRoom(activeRoomId, false);
+
+            } catch (e) {
+                console.error(e);
+                alert("Error saving: " + e.message);
             }
         }
     </script>
