@@ -313,27 +313,11 @@
             }
         }
 
+    // --- TIMETABLE ASSEMBLY AUDITOR FOR ROOMS ---
         async function auditBusyRoomsForDate(dateStr) {
             busyRoomsMap = {};
             try {
-                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                const examSnap = await getCollection("exam_schedules").where("date", "==", dateStr).get();
-                if (examSnap.empty) return;
-
-                let examSections = new Set();
-                examSnap.forEach(doc => {
-                    const data = doc.data();
-                    if (data.className && data.section) examSections.add(`${norm(data.className)}|${norm(data.section)}`);
-                    if (data.targets) {
-                        data.targets.forEach(t => {
-                            t.sections.forEach(s => {
-                                const secName = typeof s === 'object' ? s.section : s;
-                                examSections.add(`${norm(t.className)}|${norm(secName)}`);
-                            });
-                        });
-                    }
-                });
-
+                // Fetch timetable for this specific date (override or live master)
                 const dateObj = new Date(dateStr + 'T00:00:00');
                 const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
 
@@ -346,56 +330,20 @@
                     daySlots = masterSnap.docs.map(d => d.data());
                 }
 
-                let examStartMin = 24 * 60, examEndMin = 0;
-                const bellDoc = await getCollection("configs").doc("bell_schedules").get();
-                const bellRules = bellDoc.exists ? bellDoc.data() : {};
-
-                examSnap.forEach(doc => {
-                    const d = doc.data();
-                    const typeKey = (d.type || 'UT').toLowerCase();
-                    const rules = bellRules[typeKey] || { examStart: '09:00', examEnd: '10:30' };
-                    
-                    const [sh, sm] = (rules.examStart || '09:00').split(':').map(Number);
-                    const [eh, em] = (rules.examEnd || '10:30').split(':').map(Number);
-                    
-                    const sM = sh * 60 + sm;
-                    const eM = eh * 60 + em;
-                    if (sM < examStartMin) examStartMin = sM;
-                    if (eM > examEndMin) examEndMin = eM;
-                });
-
-                if (examEndMin <= examStartMin) {
-                    examStartMin = 9 * 60;
-                    examEndMin = 12 * 60;
-                }
-
+                // Check for ASSEMBLY slots and mark their rooms as busy for the date
                 daySlots.forEach(slot => {
-                    const slotKey = `${norm(slot.className)}|${norm(slot.section)}`;
-                    const isExamSection = examSections.has(slotKey);
-                    const isSpecialSub = ['BREAK', 'LUNCH BREAK', 'EXAM', 'UT', 'OT'].includes((slot.subject || '').toUpperCase());
-
-                    if (!isExamSection && !isSpecialSub && slot.room && slot.room !== 'TBD' && slot.room !== 'NONE') {
-                        let sM = 0, eM = 0;
-                        if (slot.start24 && slot.end24) {
-                            const [sh, sm] = slot.start24.split(':').map(Number);
-                            const [eh, em] = slot.end24.split(':').map(Number);
-                            sM = sh * 60 + sm; eM = eh * 60 + em;
-                        } else if (slot.sMins !== undefined && slot.eMins !== undefined) {
-                            sM = slot.sMins; eM = slot.eMins;
-                        }
-
-                        if (sM < examEndMin && eM > examStartMin) {
-                            busyRoomsMap[slot.room.toUpperCase()] = {
-                                isBusy: true,
-                                reason: `Busy: Class ${slot.className} Sec ${slot.section} (${slot.subject})`
-                            };
-                        }
+                    const subUpper = (slot.subject || '').toUpperCase();
+                    if (subUpper === 'ASSEMBLY' && slot.room && slot.room !== 'TBD' && slot.room !== 'NONE') {
+                        busyRoomsMap[slot.room.toUpperCase()] = {
+                            isBusy: true,
+                            reason: `Busy: Assembly (${slot.className} Sec ${slot.section})`
+                        };
                     }
                 });
 
                 renderRoomSidebarList();
             } catch (e) {
-                console.error("Error auditing busy rooms:", e);
+                console.error("Error auditing assembly rooms:", e);
             }
         }
 
