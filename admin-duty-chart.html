@@ -653,41 +653,38 @@ async function initExamDateDropdown() {
             localStorage.setItem('minerva_duty_prefs', JSON.stringify({ rooms: selectedRooms, staff: exemptedStaff, configs: roomConfigs }));
         }
 
-    async function renderRoomSelectors() {
-            const prefs = JSON.parse(localStorage.getItem('minerva_duty_prefs')) || { rooms: [], staff: [], configs: {} };
-            const safeConfigs = prefs.configs || {};
-            const hasRoomPrefs = prefs.rooms && prefs.rooms.length > 0;
-            const roomListArea = document.getElementById('room-list-area');
+  async function renderRoomSelectors() {
+        const prefs = JSON.parse(localStorage.getItem('minerva_duty_prefs')) || { rooms: [], staff: [], configs: {} };
+        const safeConfigs = prefs.configs || {};
+        const hasRoomPrefs = prefs.rooms && prefs.rooms.length > 0;
+        const roomListArea = document.getElementById('room-list-area');
 
-            const globalShiftsInput = document.getElementById('exam-num-shifts');
-            const defaultShifts = globalShiftsInput ? globalShiftsInput.value : '2';
+        const globalShiftsInput = document.getElementById('exam-num-shifts');
+        const defaultShifts = globalShiftsInput ? globalShiftsInput.value : '2';
 
-            let activeRooms = roomsData;
+        let activeRooms = roomsData;
+        const eDate = document.getElementById('dutyTargetDate')?.value;
 
-            // If in EXAM mode, strictly filter rooms to only those with assigned students for the target date
-            if (currentMode === 'EXAM') {
-                const eDate = document.getElementById('dutyTargetDate')?.value;
-                if (eDate) {
-                    try {
-                        const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${eDate}`);
-                        const allocSnap = await allocDocRef.get();
-                        if (allocSnap.exists) {
-                            const allocs = allocSnap.data().allocations || {};
-                            const seatedRoomNames = new Set();
-                            Object.keys(allocs).forEach(seatId => {
-                                // Seat IDs are formatted as "RoomName-R#-S#"
-                                const rName = seatId.split('-R')[0];
-                                if (rName) seatedRoomNames.add(rName.toUpperCase());
-                            });
-                            activeRooms = roomsData.filter(r => seatedRoomNames.has(r.name.toUpperCase()));
-                        } else {
-                            activeRooms = []; // No allocations made for this date yet
-                        }
-                    } catch (e) {
-                        console.error("Error filtering rooms by allocation:", e);
-                    }
+        if (currentMode === 'EXAM' && eDate) {
+            await loadSectionTimingsCache(eDate); // Load resolved schedule timings
+            try {
+                const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${eDate}`);
+                const allocSnap = await allocDocRef.get();
+                if (allocSnap.exists) {
+                    const allocs = allocSnap.data().allocations || {};
+                    const seatedRoomNames = new Set();
+                    Object.keys(allocs).forEach(seatId => {
+                        const rName = seatId.split('-R')[0];
+                        if (rName) seatedRoomNames.add(rName.toUpperCase());
+                    });
+                    activeRooms = roomsData.filter(r => seatedRoomNames.has(r.name.toUpperCase()));
+                } else {
+                    activeRooms = [];
                 }
+            } catch (e) {
+                console.error("Error filtering rooms by allocation:", e);
             }
+        }
 
             if (activeRooms.length === 0) {
                 roomListArea.innerHTML = `<div class="text-center text-rose-500 font-bold text-xs uppercase py-4">No rooms with student seating allocations found for this date. Please allocate seats in Seating Plan first.</div>`;
@@ -700,11 +697,33 @@ async function initExamDateDropdown() {
                 let configBtn = '';
                 let configPanel = '';
                 
-                if (currentMode === 'EXAM') {
-                    const conf = safeConfigs[r.name] || {};
+             if (currentMode === 'EXAM') {
+                    let conf = safeConfigs[r.name] || {};
+                    
+                    // AUTO-PRESELECT: If start/end not manually saved yet, resolve from seating plan & timetable
+                    if (eDate && (!conf.start || !conf.end)) {
+                        // We will resolve asynchronously or pre-compute. Let's insert a synchronous check from cache or fallback:
+                        // Since renderRoomSelectors is async, let's await the auto-timing resolver:
+                        const autoTiming = await resolveRoomAutoTiming(r.name, eDate);
+                        if (autoTiming) {
+                            if (!conf.start) conf.start = autoTiming.start;
+                            if (!conf.end) conf.end = autoTiming.end;
+                        } else {
+                            if (!conf.start) conf.start = document.getElementById('dutyGlobalStartTime')?.value || "09:00";
+                            if (!conf.end) conf.end = document.getElementById('dutyGlobalEndTime')?.value || "12:30";
+                        }
+                    }
+
                     const safeId = r.name.replace(/[^a-zA-Z0-9]/g, '');
                     
-                    configBtn = `<button type="button" onclick="event.preventDefault(); document.getElementById('config-panel-${safeId}').classList.toggle('hidden');" class="text-[9px] font-black bg-white text-indigo-600 px-3 py-1.5 rounded border border-indigo-200 hover:bg-indigo-50 shadow-sm ml-auto shrink-0 transition-colors">⚙️ Config</button>`;
+                    // Display a live badge showing the preselected timing on the room card
+                    const timingBadgeText = (conf.start && conf.end) ? `${format12Hour(conf.start)} - ${format12Hour(conf.end)}` : 'Default Schedule';
+
+                    configBtn = `
+                        <div class="flex items-center gap-2 ml-auto shrink-0">
+                            <span class="text-[9px] font-black bg-emerald-100 text-emerald-800 px-2 py-1 rounded shadow-inner">${timingBadgeText}</span>
+                            <button type="button" onclick="event.preventDefault(); document.getElementById('config-panel-${safeId}').classList.toggle('hidden');" class="text-[9px] font-black bg-white text-indigo-600 px-3 py-1.5 rounded border border-indigo-200 hover:bg-indigo-50 shadow-sm transition-colors">⚙️ Config</button>
+                        </div>`;
                     
                     configPanel = `
                     <div class="w-full mt-2 pl-2 sm:pl-8 hidden" id="config-panel-${safeId}">
@@ -980,7 +999,180 @@ async function initExamDateDropdown() {
             alert(`✅ Configuration from ${sourceRoom} has been copied to all rooms.`);
         }
 
-        // --- TIME HELPER FUNCTIONS ---
+      // --- TIME & DYNAMIC TIMING RESOLUTION ENGINE ---
+        let sectionTimingsCache = {};
+
+        async function loadSectionTimingsCache(dateStr) {
+            sectionTimingsCache = {};
+            try {
+                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const dateObj = new Date(dateStr + 'T00:00:00');
+                const dayName = DAYS_OF_WEEK[dateObj.getDay()];
+
+                const historySnap = await getCollection("timetable_history").doc(dateStr).get();
+                let daySlots = [];
+
+                if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
+                    daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
+                } else {
+                    const futureSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+                    let activeMasters = [];
+                    futureSnap.docs.forEach(doc => { if (doc.id <= dateStr) activeMasters.push(doc.data()); });
+                    
+                    if (activeMasters.length > 0) {
+                        activeMasters.sort((a, b) => b.date.localeCompare(a.date));
+                        daySlots = (activeMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                    } else {
+                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                        daySlots = masterSnap.docs.map(d => d.data());
+                    }
+                }
+
+                const [examSnap, bellDoc] = await Promise.all([
+                    getCollection("exam_schedules").where("date", "==", dateStr).get(),
+                    getCollection("configs").doc("bell_schedules").get()
+                ]);
+                const bellRules = bellDoc.exists ? bellDoc.data() : {};
+
+                let explicitExamTimings = {};
+                examSnap.forEach(doc => {
+                    const data = doc.data();
+                    const typeKey = (data.type || 'UT').toLowerCase();
+                    const rules = bellRules[typeKey] || { examStart: '09:00', examEnd: '10:30' };
+                    const startStr = data.examStart || rules.examStart || '09:00';
+                    const endStr = data.examEnd || rules.examEnd || '10:30';
+
+                    const [sh, sm] = startStr.split(':').map(Number);
+                    const [eh, em] = endStr.split(':').map(Number);
+                    const startMin = sh * 60 + sm;
+                    const endMin = eh * 60 + em;
+
+                    const reg = (cName, sName) => {
+                        explicitExamTimings[`${norm(cName)}|${norm(sName)}`] = { startMin, endMin, startStr, endStr };
+                    };
+
+                    if (data.className && data.section) reg(data.className, data.section);
+                    if (data.targets) {
+                        data.targets.forEach(t => t.sections.forEach(s => {
+                            reg(t.className, typeof s === 'object' ? s.section : s);
+                        }));
+                    }
+                });
+
+                let sectionSlotsMap = {};
+                daySlots.forEach(slot => {
+                    if (slot.className && slot.section) {
+                        const key = `${norm(slot.className)}|${norm(slot.section)}`;
+                        if (!sectionSlotsMap[key]) sectionSlotsMap[key] = [];
+                        sectionSlotsMap[key].push(slot);
+                    }
+                });
+
+                Object.keys(sectionSlotsMap).forEach(key => {
+                    if (explicitExamTimings[key]) {
+                        const et = explicitExamTimings[key];
+                        sectionTimingsCache[key] = { startMin: et.startMin, endMin: et.endMin, startStr: et.startStr, endStr: et.endStr };
+                        return;
+                    }
+
+                    const slots = sectionSlotsMap[key];
+                    const examSlot = slots.find(s => ['EXAM', 'UT', 'OT'].includes((s.subject || '').toUpperCase()));
+
+                    if (examSlot) {
+                        let sM = 0, eM = 0;
+                        if (examSlot.start24 && examSlot.end24) {
+                            const [sh, sm] = examSlot.start24.split(':').map(Number);
+                            const [eh, em] = examSlot.end24.split(':').map(Number);
+                            sM = sh * 60 + sm; eM = eh * 60 + em;
+                        } else if (examSlot.sMins !== undefined) {
+                            sM = examSlot.sMins; eM = examSlot.eMins;
+                        }
+                        if (eM > sM) {
+                            sectionTimingsCache[key] = { startMin: sM, endMin: eM, startStr: examSlot.start24 || minsTo24(sM), endStr: examSlot.end24 || minsTo24(eM) };
+                            return;
+                        }
+                    }
+
+                    let minS = 24 * 60, maxE = 0;
+                    slots.forEach(s => {
+                        if (['BREAK', 'LUNCH BREAK'].includes((s.subject || '').toUpperCase())) return;
+                        let sM = 0, eM = 0;
+                        if (s.start24 && s.end24) {
+                            const [sh, sm] = s.start24.split(':').map(Number);
+                            const [eh, em] = s.end24.split(':').map(Number);
+                            sM = sh * 60 + sm; eM = eh * 60 + em;
+                        } else if (s.sMins !== undefined) {
+                            sM = s.sMins; eM = s.eMins;
+                        }
+                        if (sM > 0 && eM > sM) {
+                            if (sM < minS) minS = sM;
+                            if (eM > maxE) maxE = eM;
+                        }
+                    });
+
+                    if (maxE > minS) {
+                        sectionTimingsCache[key] = { startMin: minS, endMin: maxE, startStr: minsTo24(minS), endStr: minsTo24(maxE) };
+                    }
+                });
+            } catch (e) {
+                console.error("Error loading section timings cache:", e);
+            }
+        }
+
+        async function resolveRoomAutoTiming(roomName, dateStr) {
+            if (!dateStr) return null;
+            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            
+            try {
+                const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                const allocSnap = await allocDocRef.get();
+                if (!allocSnap.exists) return null;
+
+                const allocs = allocSnap.data().allocations || {};
+                let seatedSections = new Map();
+
+                Object.keys(allocs).forEach(seatId => {
+                    if (seatId.startsWith(`${roomName}-`)) {
+                        const stu = allocs[seatId];
+                        if (stu && stu.className && stu.section) {
+                            const key = `${norm(stu.className)}|${norm(stu.section)}`;
+                            seatedSections.set(key, { className: stu.className, section: stu.section });
+                        }
+                    }
+                });
+
+                if (seatedSections.size === 0) return null;
+
+                let minStart = 24 * 60, maxEnd = 0;
+                let found = 0;
+
+                seatedSections.forEach((secObj, key) => {
+                    let t = sectionTimingsCache[key];
+                    if (!t) {
+                        const targetSecNorm = norm(secObj.section);
+                        const foundKey = Object.keys(sectionTimingsCache).find(k => k.endsWith(`|${targetSecNorm}`) || targetSecNorm.includes(k.split('|')[1]));
+                        if (foundKey) t = sectionTimingsCache[foundKey];
+                    }
+
+                    if (t) {
+                        found++;
+                        if (t.startMin < minStart) minStart = t.startMin;
+                        if (t.endMin > maxEnd) maxEnd = t.endMin;
+                    }
+                });
+
+                if (found === 0) return null;
+
+                return {
+                    start: minsTo24(minStart),
+                    end: minsTo24(maxEnd)
+                };
+            } catch (e) {
+                console.error("Error resolving auto room timing:", e);
+                return null;
+            }
+        }
+
         function timeToMins(tStr) {
             if(!tStr) return 0;
             try {
@@ -1002,7 +1194,6 @@ async function initExamDateDropdown() {
             const m = Math.round(totalMins % 60); 
             return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
         }
-
         function format12Hour(timeStr) {
             if(!timeStr) return ""; 
             if(timeStr.includes('AM') || timeStr.includes('PM')) return timeStr;
