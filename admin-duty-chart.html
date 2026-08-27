@@ -653,7 +653,7 @@ async function initExamDateDropdown() {
             localStorage.setItem('minerva_duty_prefs', JSON.stringify({ rooms: selectedRooms, staff: exemptedStaff, configs: roomConfigs }));
         }
 
-  async function renderRoomSelectors() {
+async function renderRoomSelectors() {
         const prefs = JSON.parse(localStorage.getItem('minerva_duty_prefs')) || { rooms: [], staff: [], configs: {} };
         const safeConfigs = prefs.configs || {};
         const hasRoomPrefs = prefs.rooms && prefs.rooms.length > 0;
@@ -666,7 +666,7 @@ async function initExamDateDropdown() {
         const eDate = document.getElementById('dutyTargetDate')?.value;
 
         if (currentMode === 'EXAM' && eDate) {
-            await loadSectionTimingsCache(eDate); // Load resolved schedule timings
+            await loadSectionTimingsCache(eDate);
             try {
                 const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${eDate}`);
                 const allocSnap = await allocDocRef.get();
@@ -686,85 +686,83 @@ async function initExamDateDropdown() {
             }
         }
 
-            if (activeRooms.length === 0) {
-                roomListArea.innerHTML = `<div class="text-center text-rose-500 font-bold text-xs uppercase py-4">No rooms with student seating allocations found for this date. Please allocate seats in Seating Plan first.</div>`;
-                return;
-            }
+        if (activeRooms.length === 0) {
+            roomListArea.innerHTML = `<div class="text-center text-rose-500 font-bold text-xs uppercase py-4">No rooms with student seating allocations found for this date. Please allocate seats in Seating Plan first.</div>`;
+            return;
+        }
 
-            roomListArea.innerHTML = activeRooms.map(r => {
-                const isChecked = (!hasRoomPrefs || prefs.rooms.includes(r.name)) ? 'checked' : '';
+        // Use Promise.all to safely handle async mapping for room auto-timings
+        const roomHtmlPromises = activeRooms.map(async (r) => {
+            const isChecked = (!hasRoomPrefs || prefs.rooms.includes(r.name)) ? 'checked' : '';
+            let configBtn = '';
+            let configPanel = '';
+
+            if (currentMode === 'EXAM') {
+                let conf = safeConfigs[r.name] || {};
                 
-                let configBtn = '';
-                let configPanel = '';
-                
-             if (currentMode === 'EXAM') {
-                    let conf = safeConfigs[r.name] || {};
-                    
-                    // AUTO-PRESELECT: If start/end not manually saved yet, resolve from seating plan & timetable
-                    if (eDate && (!conf.start || !conf.end)) {
-                        // We will resolve asynchronously or pre-compute. Let's insert a synchronous check from cache or fallback:
-                        // Since renderRoomSelectors is async, let's await the auto-timing resolver:
-                        const autoTiming = await resolveRoomAutoTiming(r.name, eDate);
-                        if (autoTiming) {
-                            if (!conf.start) conf.start = autoTiming.start;
-                            if (!conf.end) conf.end = autoTiming.end;
-                        } else {
-                            if (!conf.start) conf.start = document.getElementById('dutyGlobalStartTime')?.value || "09:00";
-                            if (!conf.end) conf.end = document.getElementById('dutyGlobalEndTime')?.value || "12:30";
-                        }
+                if (eDate && (!conf.start || !conf.end)) {
+                    const autoTiming = await resolveRoomAutoTiming(r.name, eDate);
+                    if (autoTiming) {
+                        if (!conf.start) conf.start = autoTiming.start;
+                        if (!conf.end) conf.end = autoTiming.end;
+                    } else {
+                        if (!conf.start) conf.start = document.getElementById('dutyGlobalStartTime')?.value || "09:00";
+                        if (!conf.end) conf.end = document.getElementById('dutyGlobalEndTime')?.value || "12:30";
                     }
-
-                    const safeId = r.name.replace(/[^a-zA-Z0-9]/g, '');
-                    
-                    // Display a live badge showing the preselected timing on the room card
-                    const timingBadgeText = (conf.start && conf.end) ? `${format12Hour(conf.start)} - ${format12Hour(conf.end)}` : 'Default Schedule';
-
-                    configBtn = `
-                        <div class="flex items-center gap-2 ml-auto shrink-0">
-                            <span class="text-[9px] font-black bg-emerald-100 text-emerald-800 px-2 py-1 rounded shadow-inner">${timingBadgeText}</span>
-                            <button type="button" onclick="event.preventDefault(); document.getElementById('config-panel-${safeId}').classList.toggle('hidden');" class="text-[9px] font-black bg-white text-indigo-600 px-3 py-1.5 rounded border border-indigo-200 hover:bg-indigo-50 shadow-sm transition-colors">⚙️ Config</button>
-                        </div>`;
-                    
-                    configPanel = `
-                    <div class="w-full mt-2 pl-2 sm:pl-8 hidden" id="config-panel-${safeId}">
-                        <div class="flex flex-col gap-2 bg-indigo-50 p-2.5 rounded-lg border border-indigo-100">
-                            <div class="flex flex-wrap gap-2">
-                                <div class="flex-1 min-w-[80px]">
-                                    <label class="block text-[8px] font-black text-slate-500 uppercase mb-0.5">Start Time (Override)</label>
-                                    <input type="time" class="room-start-input w-full p-1.5 text-xs font-bold rounded border border-indigo-200 outline-none text-slate-700 focus:border-indigo-400" data-room="${r.name}" value="${conf.start || ''}" onchange="saveDutyPrefs()">
-                                </div>
-                                <div class="flex-1 min-w-[80px]">
-                                    <label class="block text-[8px] font-black text-slate-500 uppercase mb-0.5">End Time (Override)</label>
-                                    <input type="time" class="room-end-input w-full p-1.5 text-xs font-bold rounded border border-indigo-200 outline-none text-slate-700 focus:border-indigo-400" data-room="${r.name}" value="${conf.end || ''}" onchange="saveDutyPrefs()">
-                                </div>
-                               <div class="w-[60px]">
-                                    <label class="block text-[8px] font-black text-slate-500 uppercase mb-0.5">Shifts</label>
-                                    <input type="number" min="1" max="5" class="room-shifts-input w-full p-1.5 text-xs font-bold rounded border border-indigo-200 outline-none text-center text-slate-700 focus:border-indigo-400" data-room="${r.name}" value="${conf.shifts || ''}" placeholder="${defaultShifts}" title="Leave blank to use Global setting" onchange="saveDutyPrefs()">
-                                </div>
-                            </div>
-                            <button type="button" onclick="event.preventDefault(); copyConfigToAll('${r.name}')" class="w-full mt-3 py-2 bg-indigo-600 text-white rounded-lg font-black uppercase tracking-widest text-[9px] hover:bg-indigo-700 transition-colors shadow-sm">
-                                📋 Apply This Config to All Rooms
-                            </button>
-                        </div>
-                    </div>`;
                 }
 
-                return `
-                <div class="flex flex-col p-3 bg-slate-50 hover:bg-blue-50/50 rounded-xl border border-slate-100 transition-all mb-3 shadow-sm">
-                    <label class="flex items-start sm:items-center justify-between cursor-pointer w-full gap-2">
-                        <div class="flex items-center gap-3 w-full sm:w-auto">
-                            <input type="checkbox" class="room-cb w-5 h-5 accent-blue-600 shrink-0" value="${r.name}" ${isChecked} onchange="saveDutyPrefs()">
-                            <div class="flex flex-col">
-                                <span class="text-sm font-black text-slate-800 uppercase tracking-tight">${r.name}</span>
-                                <span class="text-[10px] font-bold text-slate-400 mt-0.5">Cap: ${r.capacity || 0}</span>
+                const safeId = r.name.replace(/[^a-zA-Z0-9]/g, '');
+                const timingBadgeText = (conf.start && conf.end) ? `${format12Hour(conf.start)} - ${format12Hour(conf.end)}` : 'Default Schedule';
+
+                configBtn = `
+                    <div class="flex items-center gap-2 ml-auto shrink-0">
+                        <span class="text-[9px] font-black bg-emerald-100 text-emerald-800 px-2 py-1 rounded shadow-inner">${timingBadgeText}</span>
+                        <button type="button" onclick="event.preventDefault(); document.getElementById('config-panel-${safeId}').classList.toggle('hidden');" class="text-[9px] font-black bg-white text-indigo-600 px-3 py-1.5 rounded border border-indigo-200 hover:bg-indigo-50 shadow-sm transition-colors">⚙️ Config</button>
+                    </div>`;
+                
+                configPanel = `
+                <div class="w-full mt-2 pl-2 sm:pl-8 hidden" id="config-panel-${safeId}">
+                    <div class="flex flex-col gap-2 bg-indigo-50 p-2.5 rounded-lg border border-indigo-100">
+                        <div class="flex flex-wrap gap-2">
+                            <div class="flex-1 min-w-[80px]">
+                                <label class="block text-[8px] font-black text-slate-500 uppercase mb-0.5">Start Time (Override)</label>
+                                <input type="time" class="room-start-input w-full p-1.5 text-xs font-bold rounded border border-indigo-200 outline-none text-slate-700 focus:border-indigo-400" data-room="${r.name}" value="${conf.start || ''}" onchange="saveDutyPrefs()">
+                            </div>
+                            <div class="flex-1 min-w-[80px]">
+                                <label class="block text-[8px] font-black text-slate-500 uppercase mb-0.5">End Time (Override)</label>
+                                <input type="time" class="room-end-input w-full p-1.5 text-xs font-bold rounded border border-indigo-200 outline-none text-slate-700 focus:border-indigo-400" data-room="${r.name}" value="${conf.end || ''}" onchange="saveDutyPrefs()">
+                            </div>
+                           <div class="w-[60px]">
+                                <label class="block text-[8px] font-black text-slate-500 uppercase mb-0.5">Shifts</label>
+                                <input type="number" min="1" max="5" class="room-shifts-input w-full p-1.5 text-xs font-bold rounded border border-indigo-200 outline-none text-center text-slate-700 focus:border-indigo-400" data-room="${r.name}" value="${conf.shifts || ''}" placeholder="${defaultShifts}" title="Leave blank to use Global setting" onchange="saveDutyPrefs()">
                             </div>
                         </div>
-                        ${configBtn}
-                    </label>
-                    ${configPanel}
+                        <button type="button" onclick="event.preventDefault(); copyConfigToAll('${r.name}')" class="w-full mt-3 py-2 bg-indigo-600 text-white rounded-lg font-black uppercase tracking-widest text-[9px] hover:bg-indigo-700 transition-colors shadow-sm">
+                            📋 Apply This Config to All Rooms
+                        </button>
+                    </div>
                 </div>`;
-            }).join('');
-        }
+            }
+
+            return `
+            <div class="flex flex-col p-3 bg-slate-50 hover:bg-blue-50/50 rounded-xl border border-slate-100 transition-all mb-3 shadow-sm">
+                <label class="flex items-start sm:items-center justify-between cursor-pointer w-full gap-2">
+                    <div class="flex items-center gap-3 w-full sm:w-auto">
+                        <input type="checkbox" class="room-cb w-5 h-5 accent-blue-600 shrink-0" value="${r.name}" ${isChecked} onchange="saveDutyPrefs()">
+                        <div class="flex flex-col">
+                            <span class="text-sm font-black text-slate-800 uppercase tracking-tight">${r.name}</span>
+                            <span class="text-[10px] font-bold text-slate-400 mt-0.5">Cap: ${r.capacity || 0}</span>
+                        </div>
+                    </div>
+                    ${configBtn}
+                </label>
+                ${configPanel}
+            </div>`;
+        });
+
+        const renderedRooms = await Promise.all(roomHtmlPromises);
+        roomListArea.innerHTML = renderedRooms.join('');
+    }
 
         function renderStaffSelectors() {
             const prefs = JSON.parse(localStorage.getItem('minerva_duty_prefs')) || { rooms: [], staff: [] };
