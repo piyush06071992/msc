@@ -297,7 +297,7 @@
             modal.classList.add('flex');
         }
 
-        function closePrintReportsModal() {
+function closePrintReportsModal() {
             const modal = document.getElementById('print-reports-modal');
             modal.classList.remove('flex');
             modal.classList.add('hidden');
@@ -308,20 +308,17 @@
             document.getElementById('room-filter-wrapper').style.display = type === 'ROOM_VISUAL' ? 'block' : 'none';
         }
 
-        async function executeReportPrint() {
+  async function executeReportPrint() {
             const date = document.getElementById('seating-exam-date').value;
             const type = document.getElementById('report-type-select').value;
             const targetRoom = document.getElementById('report-room-select').value;
             
             closePrintReportsModal();
-            const canvas = document.getElementById('print-canvas-area');
-            canvas.innerHTML = '<div style="text-align:center; padding:50px; font-weight:bold;">Generating Report...</div>';
-
             const prettyDate = new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
             if (type === 'NOTICE_BOARD') {
-                // --- REPORT 1: MASTER NOTICE BOARD LIST (PORTRAIT) ---
-                // Find all classes/sections having exams on this date
+                // --- EXCEL NOTICE BOARD GENERATOR (Multi-Sheet, Double-Column Layout) ---
+                const wb = XLSX.utils.book_new();
                 let activeSections = {};
                 Object.keys(examSectionsMap).forEach(key => {
                     const [cls, sec] = key.split('|');
@@ -329,21 +326,7 @@
                     activeSections[cls].add(sec);
                 });
 
-                let html = `
-                <style>
-                    @page { size: A4 portrait; margin: 12mm; }
-                    body { font-family: 'Plus Jakarta Sans', Arial, sans-serif; color: #0f172a; }
-                    .report-container { width: 100%; max-width: 210mm; margin: 0 auto; }
-                </style>
-                <div class="report-container space-y-6">
-                    <div class="text-center border-b-2 border-slate-900 pb-4 mb-6">
-                        <h2 class="text-2xl font-black uppercase tracking-wider">Minerva Study Circle - Master Notice Board</h2>
-                        <h3 class="text-base font-bold uppercase tracking-widest text-slate-700 mt-1">Seating Allocation List • ${prettyDate}</h3>
-                        <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Center: ${activeCenter}</p>
-                    </div>`;
-
-                // Group allocated students by Class & Section
-                let assignedBySec = {}; // "Class|Sec" -> [{stu, seatId}]
+                let assignedBySec = {};
                 Object.keys(currentAllocations).forEach(seatId => {
                     const stu = currentAllocations[seatId];
                     if (stu && stu.className && stu.section) {
@@ -353,77 +336,83 @@
                     }
                 });
 
+                let hasSheets = false;
+
                 Object.keys(activeSections).sort().forEach(cls => {
                     Array.from(activeSections[cls]).sort().forEach(sec => {
+                        hasSheets = true;
                         const secKey = `${cls}|${sec}`;
                         const assignedList = assignedBySec[secKey] || [];
                         assignedList.sort((a,b) => String(a.stu.rollNo || "").localeCompare(String(b.stu.rollNo || ""), undefined, {numeric:true}));
 
-                        // Find unallotted students in this class & section
                         const placedIds = new Set(assignedList.map(item => item.stu.id));
                         const unallottedList = allApprovedStudents.filter(s => s.className === cls && s.section === sec && !placedIds.has(s.id));
                         unallottedList.sort((a,b) => String(a.rollNo || "").localeCompare(String(b.rollNo || ""), undefined, {numeric:true}));
 
-                        html += `
-                        <div class="print-page-break mb-8 border border-slate-300 rounded-2xl p-4 bg-white">
-                            <div class="flex justify-between items-center bg-slate-900 text-white px-4 py-2.5 rounded-xl mb-4">
-                                <h4 class="font-black text-sm uppercase tracking-wider">Class ${cls} — Section ${sec}</h4>
-                                <span class="text-xs font-bold uppercase tracking-widest">${assignedList.length} Seated • ${unallottedList.length} Unallotted</span>
-                            </div>
+                        let wsData = [
+                            [`MINERVA STUDY CIRCLE - NOTICE BOARD: CLASS ${cls} (SEC ${sec})`],
+                            [`Exam Date: ${prettyDate} | Center: ${activeCenter}`],
+                            []
+                        ];
 
-                            <div class="mb-4">
-                                <h5 class="text-xs font-black uppercase tracking-widest text-slate-600 mb-2">✅ Allocated Students</h5>
-                                ${assignedList.length === 0 ? '<p class="text-xs text-slate-400 italic">No students allocated yet.</p>' : `
-                                <table class="w-full text-left border-collapse text-xs">
-                                    <thead>
-                                        <tr class="bg-slate-100 border-b border-slate-300 font-black uppercase text-[9px]">
-                                            <th class="p-2 w-12 text-center">#</th>
-                                            <th class="p-2 w-28">Roll No</th>
-                                            <th class="p-2">Student Name</th>
-                                            <th class="p-2 text-right">Allocated Seat</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody class="divide-y divide-slate-200">
-                                        ${assignedList.map((item, idx) => `
-                                        <tr>
-                                            <td class="p-2 text-center font-bold text-slate-500">${idx+1}</td>
-                                            <td class="p-2 font-black">${item.stu.rollNo || '—'}</td>
-                                            <td class="p-2 font-black uppercase">${item.stu.name}</td>
-                                            <td class="p-2 text-right font-mono font-black text-indigo-700">${item.seatId}</td>
-                                        </tr>`).join('')}
-                                    </tbody>
-                                </table>`}
-                            </div>
+                        // Header Row with Double Columns
+                        wsData.push([
+                            "S.No", "Roll Number", "Student Name", "Seat Number",
+                            "", // Column separator space
+                            "S.No", "Roll Number", "Student Name", "Seat Number",
+                            "", // Unallotted section header offset
+                            "Unallotted Roll No", "Unallotted Name"
+                        ]);
 
-                            ${unallottedList.length > 0 ? `
-                            <div class="mt-4 pt-3 border-t border-dashed border-rose-300 bg-rose-50/50 p-3 rounded-xl">
-                                <h5 class="text-xs font-black uppercase tracking-widest text-rose-700 mb-2">⚠️ Unallotted Students (${unallottedList.length})</h5>
-                                <div class="flex flex-wrap gap-2">
-                                    ${unallottedList.map(s => `<span class="bg-white border border-rose-300 text-rose-900 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase">${s.name} (#${s.rollNo || '—'})</span>`).join('')}
-                                </div>
-                            </div>` : ''}
-                        </div>`;
+                        const maxRows = Math.max(assignedList.length, unallottedList.length);
+                        for (let i = 0; i < maxRows; i++) {
+                            let r1 = assignedList[i*2] || null;
+                            let r2 = assignedList[i*2 + 1] || null;
+                            let un = unallottedList[i] || null;
+
+                            wsData.push([
+                                r1 ? (i*2 + 1) : "",
+                                r1 ? (r1.stu.rollNo || "—") : "",
+                                r1 ? r1.stu.name : "",
+                                r1 ? r1.seatId : "",
+                                "",
+                                r2 ? (i*2 + 2) : "",
+                                r2 ? (r2.stu.rollNo || "—") : "",
+                                r2 ? r2.name : "",
+                                r2 ? r2.seatId : "",
+                                "",
+                                un ? (un.rollNo || "—") : "",
+                                un ? un.name : ""
+                            ]);
+                        }
+
+                        const ws = XLSX.utils.aoa_to_sheet(wsData);
+                        ws['!cols'] = [
+                            {wch:6}, {wch:14}, {wch:25}, {wch:15}, {wch:3},
+                            {wch:6}, {wch:14}, {wch:25}, {wch:15}, {wch:3},
+                            {wch:14}, {wch:25}
+                        ];
+                        XLSX.utils.book_append_sheet(wb, ws, `Class ${cls}-${sec}`.substring(0, 31));
                     });
                 });
 
-                html += `</div>`;
-                canvas.innerHTML = html;
-                setTimeout(() => { window.print(); canvas.innerHTML = ''; }, 300);
+                if (!hasSheets) return alert("No active sections found to export.");
+                XLSX.writeFile(wb, `NoticeBoard_Seating_${date}.xlsx`);
 
             } else {
-                // --- REPORT 2: ROOM-WISE VISUAL SEATING CHARTS (LANDSCAPE) ---
+                // --- ROOM-WISE VISUAL SEATING CHARTS (SINGLE-PAGE A4 LANDSCAPE PRINT) ---
                 const roomsToPrint = targetRoom === 'ALL' ? roomsDatabase.filter(r => r.rows && r.rows.length > 0) : roomsDatabase.filter(r => r.name === targetRoom);
                 
                 if (roomsToPrint.length === 0) {
-                    canvas.innerHTML = '';
                     return alert("No rooms found to print.");
                 }
 
+                const canvas = document.getElementById('print-canvas-area');
                 let html = `
                 <style>
-                    @page { size: A4 landscape; margin: 10mm; }
-                    body { font-family: 'Plus Jakarta Sans', Arial, sans-serif; color: #0f172a; background: white; }
-                    .print-room-sheet { width: 100%; max-width: 277mm; margin: 0 auto; page-break-after: always; }
+                    @page { size: A4 landscape; margin: 8mm; }
+                    body { font-family: 'Plus Jakarta Sans', Arial, sans-serif; color: #0f172a; background: white; margin: 0; }
+                    .print-room-sheet { width: 100%; height: 195mm; max-height: 195mm; page-break-after: always; display: flex; flex-direction: column; justify-content: space-between; box-sizing: border-box; overflow: hidden; }
                 </style>`;
 
                 roomsToPrint.forEach(room => {
@@ -441,51 +430,51 @@
                             if (assignedStu) {
                                 const secTheme = getSectionColor(assignedStu.className, assignedStu.section);
                                 seatsHtml += `
-                                <div style="border: 2px solid #334155; background: #fff; padding: 6px; border-radius: 8px; text-align: center; width: 90px; height: 80px; display: flex; flex-direction: column; justify-content: center;">
-                                    <div style="font-size: 8px; font-family: monospace; font-weight: bold; color: #64748b;">${seatId}</div>
-                                    <div style="font-size: 10px; font-weight: 900; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 2px 0;">${assignedStu.name}</div>
-                                    <div style="font-size: 8px; font-weight: 900; background: #e2e8f0; padding: 2px; border-radius: 4px;">#${assignedStu.rollNo || '—'} • Sec ${assignedStu.section}</div>
+                                <div style="border: 2px solid #334155; background: #fff; padding: 4px; border-radius: 6px; text-align: center; width: 75px; height: 65px; display: flex; flex-direction: column; justify-content: center;">
+                                    <div style="font-size: 7px; font-family: monospace; font-weight: bold; color: #64748b;">${seatId}</div>
+                                    <div style="font-size: 9px; font-weight: 900; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 1px 0;">${assignedStu.name}</div>
+                                    <div style="font-size: 7px; font-weight: 900; background: #e2e8f0; padding: 1px; border-radius: 3px;">#${assignedStu.rollNo || '—'} • Sec ${assignedStu.section}</div>
                                 </div>`;
                             } else {
                                 seatsHtml += `
-                                <div style="border: 1px dashed #cbd5e1; background: #f8fafc; padding: 6px; border-radius: 8px; text-align: center; width: 90px; height: 80px; display: flex; flex-direction: column; justify-content: center;">
-                                    <div style="font-size: 8px; font-family: monospace; font-weight: bold; color: #94a3b8;">${seatId}</div>
-                                    <div style="font-size: 8px; font-weight: bold; text-transform: uppercase; color: #94a3b8; margin-top: 4px;">Vacant</div>
+                                <div style="border: 1px dashed #cbd5e1; background: #f8fafc; padding: 4px; border-radius: 6px; text-align: center; width: 75px; height: 65px; display: flex; flex-direction: column; justify-content: center;">
+                                    <div style="font-size: 7px; font-family: monospace; font-weight: bold; color: #94a3b8;">${seatId}</div>
+                                    <div style="font-size: 7px; font-weight: bold; text-transform: uppercase; color: #94a3b8; margin-top: 2px;">Vacant</div>
                                 </div>`;
                             }
                         }
 
                         // Prepend so Row 1 is at the bottom (teacher side)
                         rowsHtml = `
-                        <div style="display:flex; flex-direction:column; align-items:center; background:#ffffff; border:2px solid #cbd5e1; border-radius:12px; padding:10px; min-width:120px;">
-                            <div style="font-size:10px; font-weight:900; text-transform:uppercase; background:#fef3c7; color:#78350f; padding:4px 8px; border-radius:6px; margin-bottom:8px; text-align:center; width:100%;">
-                                Row ${rowNum} ${rIdx === 0 ? '<br><span style="font-size:7px; color:#e11d48;">(Door Side)</span>' : ''}
+                        <div style="display:flex; flex-direction:column; align-items:center; background:#ffffff; border:2px solid #cbd5e1; border-radius:10px; padding:6px; min-width:95px;">
+                            <div style="font-size:9px; font-weight:900; text-transform:uppercase; background:#fef3c7; color:#78350f; padding:3px 6px; border-radius:4px; margin-bottom:6px; text-align:center; width:100%;">
+                                Row ${rowNum} ${rIdx === 0 ? '<br><span style="font-size:6px; color:#e11d48;">(Door Side)</span>' : ''}
                             </div>
-                            <div style="display:flex; flex-direction:column-reverse; gap:6px; align-items:center;">
+                            <div style="display:flex; flex-direction:column-reverse; gap:4px; align-items:center;">
                                 ${seatsHtml}
                             </div>
                         </div>` + rowsHtml;
 
                         if (row.hasAisleAfter) {
                             rowsHtml = `
-                            <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; width:30px; opacity:0.7;">
-                                <div style="writing-mode: vertical-rl; transform: rotate(180deg); font-size:8px; font-weight:900; text-transform:uppercase; background:#e0f2fe; color:#0369a1; padding:10px 2px; border-radius:10px; border:1px solid #bae6fd;">Walking Aisle</div>
+                            <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; width:24px; opacity:0.7;">
+                                <div style="writing-mode: vertical-rl; transform: rotate(180deg); font-size:7px; font-weight:900; text-transform:uppercase; background:#e0f2fe; color:#0369a1; padding:8px 2px; border-radius:8px; border:1px solid #bae6fd;">Walking Aisle</div>
                             </div>` + rowsHtml;
                         }
                     });
 
                     html += `
                     <div class="print-room-sheet" style="padding: 10px; box-sizing: border-box;">
-                        <div style="text-align: center; border-bottom: 2px solid #0f172a; padding-bottom: 10px; margin-bottom: 15px;">
-                            <h2 style="font-size: 18pt; font-weight: 900; text-transform: uppercase; margin: 0;">Room Seating Plan: ${room.name}</h2>
-                            <p style="font-size: 10pt; font-weight: bold; color: #475569; text-transform: uppercase; margin: 4px 0 0 0;">Exam Date: ${prettyDate} • Center: ${activeCenter} • Capacity: ${room.capacity || 0} Seats</p>
+                        <div style="text-align: center; border-bottom: 2px solid #0f172a; padding-bottom: 6px; margin-bottom: 8px;">
+                            <h2 style="font-size: 14pt; font-weight: 900; text-transform: uppercase; margin: 0;">Room Seating Plan: ${room.name}</h2>
+                            <p style="font-size: 8pt; font-weight: bold; color: #475569; text-transform: uppercase; margin: 2px 0 0 0;">Exam Date: ${prettyDate} • Center: ${activeCenter} • Capacity: ${room.capacity || 0} Seats</p>
                         </div>
                         
-                        <div style="display: flex; flex-wrap: nowrap; gap: 10px; overflow-x: auto; justify-content: center; background: #f1f5f9; padding: 20px; border-radius: 16px; border: 1px solid #cbd5e1; align-items: flex-end; min-height: 350px;">
+                        <div style="display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto; justify-content: center; background: #f1f5f9; padding: 12px; border-radius: 12px; border: 1px solid #cbd5e1; align-items: flex-end; flex: 1;">
                             ${rowsHtml}
                         </div>
 
-                        <div style="margin-top: 15px; background: #1e1b4b; color: #ffffff; text-align: center; padding: 10px; border-radius: 12px; font-weight: 900; font-size: 10pt; text-transform: uppercase; letter-spacing: 1px; border-top: 3px solid #f59e0b;">
+                        <div style="margin-top: 8px; background: #1e1b4b; color: #ffffff; text-align: center; padding: 8px; border-radius: 10px; font-weight: 900; font-size: 9pt; text-transform: uppercase; letter-spacing: 1px; border-top: 3px solid #f59e0b;">
                             👨‍🏫 Teacher's Desk / Whiteboard (Front of the Class)
                         </div>
                     </div>`;
