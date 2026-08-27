@@ -980,23 +980,53 @@ async function executeReportPrint() {
             }).join('');
         }
 
-      // --- DYNAMIC TIMING RESOLUTION ENGINE ---
+// --- DYNAMIC TIMING RESOLUTION ENGINE ---
+        function minsTo24(totalMins) {
+            const h = Math.floor(totalMins / 60) % 24;
+            const m = Math.round(totalMins % 60);
+            return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+        }
+
         async function loadSectionTimingsCache(dateStr) {
             sectionTimingsCache = {};
             try {
                 const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                
+                // 1. Fetch timetable slots for this specific date (following timetable resolution rules)
+                const dateObj = new Date(dateStr + 'T00:00:00');
+                const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
+
+                const historySnap = await getCollection("timetable_history").doc(dateStr).get();
+                let daySlots = [];
+
+                if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
+                    daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
+                } else {
+                    const futureSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+                    let activeMasters = [];
+                    futureSnap.docs.forEach(doc => { if (doc.id <= dateStr) activeMasters.push(doc.data()); });
+                    
+                    if (activeMasters.length > 0) {
+                        activeMasters.sort((a, b) => b.date.localeCompare(a.date));
+                        daySlots = (activeMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                    } else {
+                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                        daySlots = masterSnap.docs.map(d => d.data());
+                    }
+                }
+
+                // 2. Also check exam_schedules and bell_schedules for explicit exam windows
                 const [examSnap, bellDoc] = await Promise.all([
                     getCollection("exam_schedules").where("date", "==", dateStr).get(),
                     getCollection("configs").doc("bell_schedules").get()
                 ]);
-
                 const bellRules = bellDoc.exists ? bellDoc.data() : {};
 
+                let explicitExamTimings = {};
                 examSnap.forEach(doc => {
                     const data = doc.data();
                     const typeKey = (data.type || 'UT').toLowerCase();
                     const rules = bellRules[typeKey] || { examStart: '09:00', examEnd: '10:30' };
-
                     const startStr = data.examStart || rules.examStart || '09:00';
                     const endStr = data.examEnd || rules.examEnd || '10:30';
 
@@ -1004,23 +1034,94 @@ async function executeReportPrint() {
                     const [eh, em] = endStr.split(':').map(Number);
                     const startMin = sh * 60 + sm;
                     const endMin = eh * 60 + em;
-                    const duration = Math.max(0, endMin - startMin);
 
-                    const registerTiming = (cName, sName) => {
-                        const key = `${norm(cName)}|${norm(sName)}`;
-                        sectionTimingsCache[key] = { startMin, endMin, startStr, endStr, duration };
+                    const reg = (cName, sName) => {
+                        explicitExamTimings[`${norm(cName)}|${norm(sName)}`] = { startMin, endMin, startStr, endStr };
                     };
 
-                    if (data.className && data.section) {
-                        registerTiming(data.className, data.section);
-                    }
+                    if (data.className && data.section) reg(data.className, data.section);
                     if (data.targets) {
-                        data.targets.forEach(t => {
-                            t.sections.forEach(s => {
-                                const secName = typeof s === 'object' ? s.section : s;
-                                registerTiming(t.className, secName);
-                            });
-                        });
+                        data.targets.forEach(t => t.sections.forEach(s => {
+                            reg(t.className, typeof s === 'object' ? s.section : s);
+                        }));
+                    }
+                });
+
+                // Group daySlots by section
+                let sectionSlotsMap = {};
+                daySlots.forEach(slot => {
+                    if (slot.className && slot.section) {
+                        const key = `${norm(slot.className)}|${norm(slot.section)}`;
+                        if (!sectionSlotsMap[key]) sectionSlotsMap[key] = [];
+                        sectionSlotsMap[key].push(slot);
+                    }
+                });
+
+                // For each section, resolve its active timing
+                Object.keys(sectionSlotsMap).forEach(key => {
+                    if (explicitExamTimings[key]) {
+                        const et = explicitExamTimings[key];
+                        sectionTimingsCache[key] = {
+                            startMin: et.startMin,
+                            endMin: et.endMin,
+                            startStr: et.startStr,
+                            endStr: et.endStr,
+                            duration: Math.max(0, et.endMin - et.startMin)
+                        };
+                        return;
+                    }
+
+                    const slots = sectionSlotsMap[key];
+                    // Look for an explicit EXAM, UT, or OT slot
+                    const examSlot = slots.find(s => ['EXAM', 'UT', 'OT'].includes((s.subject || '').toUpperCase()));
+
+                    if (examSlot) {
+                        let sM = 0, eM = 0;
+                        if (examSlot.start24 && examSlot.end24) {
+                            const [sh, sm] = examSlot.start24.split(':').map(Number);
+                            const [eh, em] = examSlot.end24.split(':').map(Number);
+                            sM = sh * 60 + sm; eM = eh * 60 + em;
+                        } else if (examSlot.sMins !== undefined) {
+                            sM = examSlot.sMins; eM = examSlot.eMins;
+                        }
+                        if (eM > sM) {
+                            sectionTimingsCache[key] = {
+                                startMin: sM,
+                                endMin: eM,
+                                startStr: examSlot.start24 || minsTo24(sM),
+                                endStr: examSlot.end24 || minsTo24(eM),
+                                duration: eM - sM
+                            };
+                            return;
+                        }
+                    }
+
+                    // Fallback: take the earliest start and latest end of non-break slots for that section on that date
+                    let minS = 24 * 60, maxE = 0;
+                    slots.forEach(s => {
+                        if (['BREAK', 'LUNCH BREAK'].includes((s.subject || '').toUpperCase())) return;
+                        let sM = 0, eM = 0;
+                        if (s.start24 && s.end24) {
+                            const [sh, sm] = s.start24.split(':').map(Number);
+                            const [eh, em] = s.end24.split(':').map(Number);
+                            sM = sh * 60 + sm; eM = eh * 60 + em;
+                        } else if (s.sMins !== undefined) {
+                            sM = s.sMins; eM = s.eMins;
+                        }
+                        if (sM > 0 && eM > sM) {
+                            if (sM < minS) minS = sM;
+                            if (eM > maxE) maxE = eM;
+                        }
+                    });
+
+                    if (maxE > minS) {
+                        sectionTimingsCache[key] = {
+                            startMin: minS,
+                            endMin: maxE,
+                            startStr: minsTo24(minS),
+                            endStr: minsTo24(maxE),
+                            duration: maxE - minS
+                        };
                     }
                 });
             } catch (e) {
