@@ -100,9 +100,9 @@
                     <div id="exam-controls" class="hidden bg-indigo-50 p-5 sm:p-6 rounded-[2rem] shadow-sm border border-indigo-200 h-fit">
                         <h3 class="font-black text-indigo-800 uppercase text-xs tracking-widest mb-4">Exam Parameters</h3>
                         <div class="space-y-4">
-                           <div>
+                          <div>
                                 <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Target Date</label>
-                                <input type="date" id="dutyTargetDate" class="w-full p-3 bg-white border border-indigo-200 rounded-xl text-sm font-black text-indigo-800 outline-none focus:border-indigo-500 cursor-pointer shadow-sm">
+                                <input type="date" id="dutyTargetDate" onchange="renderRoomSelectors()" class="w-full p-3 bg-white border border-indigo-200 rounded-xl text-sm font-black text-indigo-800 outline-none focus:border-indigo-500 cursor-pointer shadow-sm">
                             </div>
                            <div class="flex gap-3">
                                 <div class="flex-1">
@@ -445,14 +445,35 @@
             window.isReadOnly = !window.hasDutyRights;
             await preloadData();
 
-            if (viewDoc) {
+         if (viewDoc) {
                 document.getElementById('module-selection').classList.add('hidden');
                 document.getElementById('duty-configuration-view').classList.remove('hidden');
                 
                 if (window.isReadOnly) applyReadonlyUI();
                 await loadSpecificChartForViewer(viewDoc);
             }
+            await initExamDateDropdown();
         };
+
+        async function initExamDateDropdown() {
+            try {
+                const snap = await getCollection("exam_schedules").get();
+                let examDatesSet = new Set();
+                snap.forEach(doc => {
+                    const d = doc.data().date;
+                    if (d) examDatesSet.add(d);
+                });
+                const dates = Array.from(examDatesSet).sort().reverse();
+                const dateInp = document.getElementById('dutyTargetDate');
+                if (dateInp && dates.length > 0) {
+                    dateInp.value = dates[0];
+                    dateInp.min = dates[dates.length - 1];
+                    dateInp.max = dates[0];
+                }
+            } catch(e) {
+                console.error("Error setting exam date bounds:", e);
+            }
+        }
 
         function applyReadonlyUI() {
             const leftPanel = document.querySelector('.xl\\:col-span-1');
@@ -611,7 +632,7 @@
             localStorage.setItem('minerva_duty_prefs', JSON.stringify({ rooms: selectedRooms, staff: exemptedStaff, configs: roomConfigs }));
         }
 
-        function renderRoomSelectors() {
+    async function renderRoomSelectors() {
             const prefs = JSON.parse(localStorage.getItem('minerva_duty_prefs')) || { rooms: [], staff: [], configs: {} };
             const safeConfigs = prefs.configs || {};
             const hasRoomPrefs = prefs.rooms && prefs.rooms.length > 0;
@@ -620,7 +641,39 @@
             const globalShiftsInput = document.getElementById('exam-num-shifts');
             const defaultShifts = globalShiftsInput ? globalShiftsInput.value : '2';
 
-            roomListArea.innerHTML = roomsData.map(r => {
+            let activeRooms = roomsData;
+
+            // If in EXAM mode, strictly filter rooms to only those with assigned students for the target date
+            if (currentMode === 'EXAM') {
+                const eDate = document.getElementById('dutyTargetDate')?.value;
+                if (eDate) {
+                    try {
+                        const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${eDate}`);
+                        const allocSnap = await allocDocRef.get();
+                        if (allocSnap.exists) {
+                            const allocs = allocSnap.data().allocations || {};
+                            const seatedRoomNames = new Set();
+                            Object.keys(allocs).forEach(seatId => {
+                                // Seat IDs are formatted as "RoomName-R#-S#"
+                                const rName = seatId.split('-R')[0];
+                                if (rName) seatedRoomNames.add(rName.toUpperCase());
+                            });
+                            activeRooms = roomsData.filter(r => seatedRoomNames.has(r.name.toUpperCase()));
+                        } else {
+                            activeRooms = []; // No allocations made for this date yet
+                        }
+                    } catch (e) {
+                        console.error("Error filtering rooms by allocation:", e);
+                    }
+                }
+            }
+
+            if (activeRooms.length === 0) {
+                roomListArea.innerHTML = `<div class="text-center text-rose-500 font-bold text-xs uppercase py-4">No rooms with student seating allocations found for this date. Please allocate seats in Seating Plan first.</div>`;
+                return;
+            }
+
+            roomListArea.innerHTML = activeRooms.map(r => {
                 const isChecked = (!hasRoomPrefs || prefs.rooms.includes(r.name)) ? 'checked' : '';
                 
                 let configBtn = '';
