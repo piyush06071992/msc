@@ -102,7 +102,7 @@
                         <div class="space-y-4">
                           <div>
                                <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Target Date</label>
-                                <select id="dutyTargetDate" onchange="renderRoomSelectors()" class="w-full p-3 bg-white border border-indigo-200 rounded-xl text-sm font-black text-indigo-800 outline-none focus:border-indigo-500 cursor-pointer shadow-sm uppercase">
+                          <select id="dutyTargetDate" onchange="renderRoomSelectors(); renderStaffSelectors();" class="w-full p-3 bg-white border border-indigo-200 rounded-xl text-sm font-black text-indigo-800 outline-none focus:border-indigo-500 cursor-pointer shadow-sm uppercase">
                                     <option value="">-- Loading Exam Dates --</option>
                                 </select>
                             </div>
@@ -548,16 +548,20 @@ async function initExamDateDropdown() {
             } catch(e) { console.error(e); }
         }
 
+      let leavesData = [];
+
         async function preloadData() {
             try {
-                const [staffSnap, ttSnap, holSnap, roomSnap] = await Promise.all([
+                const [staffSnap, ttSnap, holSnap, roomSnap, leaveSnap] = await Promise.all([
                     getCollection("staff_applications").where("status", "==", "approved").get(),
                     getCollection("timetable").get(),
                     getCollection("school_holidays").get(),
-                    getCollection("infrastructure_rooms").get()
+                    getCollection("infrastructure_rooms").get(),
+                    getCollection("leave_requests").where("status", "==", "APPROVED").get()
                 ]);
 
                 holidaysData = holSnap.docs.map(d => d.data());
+                leavesData = leaveSnap.docs.map(d => d.data());
                 roomsData = roomSnap.docs.map(d => ({id: d.id, ...d.data()})).sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric: true}));
                 
                 staffData = staffSnap.docs.map(doc => {
@@ -764,9 +768,22 @@ async function renderRoomSelectors() {
         roomListArea.innerHTML = renderedRooms.join('');
     }
 
+    function getStaffLeaveStatus(email, dateStr) {
+            if (!dateStr) return null;
+            const targetLeave = leavesData.find(l => {
+                const matchesEmail = (l.teacherEmail || "").trim().toLowerCase() === (email || "").trim().toLowerCase();
+                if (!matchesEmail) return false;
+                const start = l.startDate;
+                const end = l.endDate || l.startDate;
+                return dateStr >= start && dateStr <= end;
+            });
+            return targetLeave ? targetLeave.type : null;
+        }
+
         function renderStaffSelectors() {
             const prefs = JSON.parse(localStorage.getItem('minerva_duty_prefs')) || { rooms: [], staff: [] };
             const depts = getUniqueDepartments();
+            const targetDate = document.getElementById('dutyTargetDate')?.value;
             
             document.getElementById('staff-list').innerHTML = depts.map(d => {
                 const members = staffData.filter(s => s.rawDept.includes(d)).sort((a,b) => a.name.localeCompare(b.name));
@@ -787,10 +804,16 @@ async function renderRoomSelectors() {
                     <div class="p-3 space-y-1 bg-white border-t border-slate-50">
                         ${members.map(s => {
                             const isChecked = (prefs.staff && prefs.staff.includes(s.email)) ? 'checked' : '';
+                            const leaveType = getStaffLeaveStatus(s.email, targetDate);
+                            const leaveBadge = leaveType ? `<span class="text-[9px] bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded font-black ml-2 uppercase">🌴 ${leaveType} Leave</span>` : '';
+                            
                             return `
-                            <label class="flex items-center gap-3 p-2.5 hover:bg-rose-50 rounded-lg cursor-pointer transition-colors">
-                                <input type="checkbox" class="staff-cb dept-${deptId}" value="${s.email}" ${isChecked} onchange="checkMasterCb('${deptId}')">
-                                <span class="text-xs font-semibold text-slate-700">${s.name}</span>
+                            <label class="flex items-center justify-between p-2.5 hover:bg-rose-50 rounded-lg cursor-pointer transition-colors">
+                                <div class="flex items-center gap-3">
+                                    <input type="checkbox" class="staff-cb dept-${deptId}" value="${s.email}" ${isChecked} onchange="checkMasterCb('${deptId}')">
+                                    <span class="text-xs font-semibold text-slate-700">${s.name}</span>
+                                </div>
+                                ${leaveBadge}
                             </label>`;
                         }).join('')}
                     </div>
@@ -1686,7 +1709,10 @@ async function renderRoomSelectors() {
 
             const roomWing = getWingFromText(currentEditParams.roomName);
 
+       const targetExamDate = document.getElementById('dutyTargetDate')?.value;
+
             staffInDept.forEach(s => {
+                const leaveType = getStaffLeaveStatus(s.email, targetExamDate);
                 const sTt = scheduleToCheck.filter(t => t.teacherName === s.name || t.teacher === s.name);
                 
                 let classConflictDetails = "";
@@ -1694,11 +1720,7 @@ async function renderRoomSelectors() {
                     if(!cls.timeRange && (!cls.start24 || !cls.end24)) return false;
                     const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
                     const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
-                    if (bStart < clsE && bEnd > clsS) {
-                        classConflictDetails = `${cls.className} ${cls.section || ''}`.trim();
-                        return true;
-                    }
-                    return false;
+                    return (bStart < clsE && bEnd > clsS);
                 });
 
                 let alreadyOnDuty = false;
@@ -1707,7 +1729,7 @@ async function renderRoomSelectors() {
                     Object.keys(generatedRoster[rKey].columns).forEach(colKey => {
                         const colData = generatedRoster[rKey].columns[colKey];
                         if (colData.status === 'ASSIGNED' && colData.staff && colData.staff.email === s.email) {
-                            if (!(rKey === currentEditParams.roomName && colData.timing === data.timing)) {
+                            if (!(rKey === roomName && colData.timing === data.timing)) {
                                 alreadyOnDuty = true;
                                 dutyConflictDetails = `${rKey} (${colKey})`;
                             }
@@ -1716,7 +1738,8 @@ async function renderRoomSelectors() {
                 });
 
                 let reason = "";
-                if (isBusyInClass) reason = ` | ❌ Class: ${classConflictDetails}`;
+                if (leaveType) reason = ` | 🌴 ON LEAVE (${leaveType})`;
+                else if (isBusyInClass) reason = ` | ❌ Class: ${classConflictDetails}`;
                 else if (alreadyOnDuty) reason = ` | ⚠️ Duty: ${dutyConflictDetails}`;
 
                 const loadMins = getTeacherLoadFromSchedule(scheduleToCheck, s.name).mins;
