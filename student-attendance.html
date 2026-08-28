@@ -1766,12 +1766,12 @@ function updateAuditSectionFilter() {
             const tabLedgerBtn = document.getElementById('tab-ledger');
 
             // Default to hidden
-            if (saveBar) saveBar.style.display = 'none'; 
+   if (saveBar) saveBar.style.display = 'none'; 
             if (mobileBtns) mobileBtns.style.display = 'none';
             if (ttsBtn) ttsBtn.style.display = 'none'; 
             if (bulkP) bulkP.style.display = 'none'; 
             if (bulkL) bulkL.style.display = 'none';
-            if (corrBtn) corrBtn.classList.add('hidden');
+            if (corrBtn) corrBtn.classList.remove('hidden'); // Ensure Correction tool is available in Exam Rooms
             if (augBtn) augBtn.classList.add('hidden');
 
   if (activeStudent) {
@@ -2244,20 +2244,43 @@ async function loadStudentPersonalView() {
             } catch(e) { console.error(e); }
         }
 
-  function openCorrectionModal() {
+ async function openCorrectionModal() {
             const select = document.getElementById('corr-student-select');
             const dateStr = document.getElementById('daily-date-picker').value || todayISO;
-            
-            // Use the robust fetcher that identically matches the Roll Call screen
-            const myStudents = getActiveStudentsForDate(currentReg.c, currentReg.s, dateStr);
-            
-            if (myStudents.length === 0) {
-                select.innerHTML = `<option value="">-- No students available --</option>`;
-            } else {
-                select.innerHTML = myStudents.map(stu => `<option value="${stu.id}">#${stu.rollNo || 'N/A'} - ${stu.name}</option>`).join('');
-            }
-            
+            select.innerHTML = `<option value="">Loading students...</option>`;
             document.getElementById('correction-modal').style.display = 'flex';
+
+            let optionsHtml = "";
+            if (currentReg.isExamRoom) {
+                try {
+                    const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                    const allocSnap = await allocDocRef.get();
+                    let seatedStudents = [];
+                    if (allocSnap.exists) {
+                        const allocs = allocSnap.data().allocations || {};
+                        Object.keys(allocs).forEach(seatId => {
+                            if (seatId.startsWith(`${currentReg.s}-`)) {
+                                const stu = allocs[seatId];
+                                if (stu) seatedStudents.push(stu);
+                            }
+                        });
+                    }
+                    if (seatedStudents.length === 0) {
+                        optionsHtml = `<option value="">-- No students allocated --</option>`;
+                    } else {
+                        seatedStudents.sort((a,b) => String(a.name).localeCompare(String(b.name)));
+                        optionsHtml = seatedStudents.map(stu => `<option value="${stu.id}">#${stu.rollNo || 'N/A'} - ${stu.name} (${stu.className}-${stu.section})</option>`).join('');
+                    }
+                } catch(e) { console.error(e); optionsHtml = `<option value="">Error loading students</option>`; }
+            } else {
+                const myStudents = getActiveStudentsForDate(currentReg.c, currentReg.s, dateStr);
+                if (myStudents.length === 0) {
+                    optionsHtml = `<option value="">-- No students available --</option>`;
+                } else {
+                    optionsHtml = myStudents.map(stu => `<option value="${stu.id}">#${stu.rollNo || 'N/A'} - ${stu.name}</option>`).join('');
+                }
+            }
+            select.innerHTML = optionsHtml;
         }
 
        async function submitCorrection() {
@@ -2295,11 +2318,38 @@ async function loadStudentPersonalView() {
                     }
                 }
             }
-            // ----------------------------------------------
+          // ----------------------------------------------
 
             const [y, m] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
-            const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthKey}`;
+            
+            let targetClass = currentReg.c;
+            let targetSection = currentReg.s;
+            let targetSubject = currentReg.sub;
+
+            if (currentReg.isExamRoom) {
+                // Auto-trace the student's actual class and section
+                const stu = studentsData.find(s => s.id === stuId);
+                if (!stu) return alert("Student data not found for correction.");
+                targetClass = stu.className;
+                targetSection = stu.section;
+                
+                // Find their specific Incharge ledger to apply the correction
+                let foundSub = null;
+                if (window.instituteStructures && timetableData) {
+                    window.instituteStructures.forEach(st => {
+                        if (normMatch(st.className) === normMatch(targetClass) && normMatch(st.sectionName || st.section) === normMatch(targetSection)) {
+                            (st.subjects || []).forEach(sub => {
+                                if (isRegisterSubjectIncharge(targetClass, targetSection, sub)) foundSub = sub;
+                            });
+                        }
+                    });
+                }
+                if (!foundSub) return alert("Cannot determine the student's incharge ledger to correct.");
+                targetSubject = foundSub;
+            }
+
+            const docId = `att_${activeCenter}_${normDoc(targetClass)}_${normDoc(targetSection)}_${normDoc(targetSubject)}_${monthKey}`;
             const docRef = getCollection("attendance_records").doc(docId);
 
             try {
