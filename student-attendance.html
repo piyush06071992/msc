@@ -567,7 +567,7 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        let activeCenter = "GHUMARWIN";
+ let activeCenter = "GHUMARWIN";
         let activeStaff = null;
         let activeStudent = null;
         let holidaysData = [];
@@ -580,6 +580,7 @@
         let todayISO = "";
         let absentWhatsAppList = [];
         let remedialDataMap = {}; 
+        let teacherExamRoomDuty = null;
         
         window.approvedEditUnlocked = false;
         window.activeEditTokenId = null;
@@ -988,10 +989,28 @@ function switchMainTab(tab) {
                     html += `</div></details>`;
                 });
                 container.innerHTML = html;
-            } else {
-     let regMap = new Map();
+       } else {
+                let regMap = new Map();
                 let myRegMap = new Map();
                 
+                // Check if teacher has an exam room duty assigned today
+                try {
+                    const examRosterDoc = await getCollection("duty_rosters").doc(`exam_duty_${todayISO}`).get();
+                    if (examRosterDoc.exists) {
+                        const rosterData = examRosterDoc.data().rosterData || {};
+                        let assignedRoom = null;
+                        Object.keys(rosterData).forEach(roomName => {
+                            const cols = rosterData[roomName].columns || {};
+                            Object.values(cols).forEach(col => {
+                                if (col.status === 'ASSIGNED' && col.staff && normMatch(col.staff.name) === mySafeName) {
+                                    assignedRoom = roomName;
+                                }
+                            });
+                        });
+                        window.teacherExamRoomDuty = assignedRoom;
+                    }
+                } catch(e) { console.error("Error checking exam duty roster:", e); }
+
                 timetableData.forEach(t => {
                     let subjectName = t.subject || t.title || "";
                     let key = `${normMatch(t.className)}|${normMatch(t.section || t.sectionName)}|${normMatch(subjectName)}`;
@@ -1072,14 +1091,36 @@ function switchMainTab(tab) {
                 `;
             }
 
-            const activeList = window.myRegistersCache; // Always show their own registers initially
+       const activeList = window.myRegistersCache; // Always show their own registers initially
 
-            if (!activeList || activeList.length === 0) {
+            if (!activeList || activeList.length === 0 && !window.teacherExamRoomDuty) {
                 container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest border-2 border-dashed border-slate-200 rounded-3xl bg-white">No Assigned Registers Found</div>`; 
                 return;
             }
 
-    let html = `<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">`;
+            let html = `<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">`;
+
+            if (window.teacherExamRoomDuty) {
+                const roomName = window.teacherExamRoomDuty;
+                html += `
+                <div onclick="openExamRoomRegister('${roomName}')" class="cursor-pointer group relative transition-transform hover:-translate-y-2 hover:rotate-1 duration-300">
+                    <div class="absolute -top-3 -right-3 bg-amber-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">Exam Duty</div>
+                    <div class="relative w-full aspect-[3/4] rounded-r-2xl rounded-l-md shadow-[4px_4px_15px_rgba(0,0,0,0.1)] overflow-hidden flex">
+                        <div class="w-6 h-full bg-amber-800 book-spine shrink-0 z-10 relative"></div>
+                        <div class="flex-1 h-full bg-amber-600 p-4 flex flex-col justify-between relative">
+                            <div class="absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/20 to-transparent"></div>
+                            <div class="relative z-10">
+                                <div class="text-[10px] font-black text-amber-200 uppercase tracking-widest mb-1 border-b border-white/20 pb-1 inline-block">Invigilation</div>
+                                <h3 class="text-xl font-black text-white uppercase tracking-tighter leading-none break-words">Room</h3>
+                                <p class="text-sm font-bold text-white/80 uppercase mt-1">${roomName}</p>
+                            </div>
+                            <div class="relative z-10 bg-white/15 backdrop-blur-sm border border-white/20 p-2 rounded-lg text-center mt-4">
+                                <span class="text-[10px] font-black text-white uppercase tracking-widest line-clamp-2">Mixed Roster Attendance</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>`;
+            }
                 const colors = [ { spine: 'bg-blue-800', cover: 'bg-blue-600', text: 'text-blue-200' }, { spine: 'bg-emerald-800', cover: 'bg-emerald-600', text: 'text-emerald-200' }, { spine: 'bg-rose-800', cover: 'bg-rose-600', text: 'text-rose-200' }, { spine: 'bg-amber-700', cover: 'bg-amber-500', text: 'text-amber-100' }, { spine: 'bg-purple-800', cover: 'bg-purple-600', text: 'text-purple-200' } ];
 
                 activeList.sort((a,b) => String(a.c).localeCompare(String(b.c))).forEach((reg, i) => {
@@ -1553,6 +1594,107 @@ function updateAuditSectionFilter() {
             if(tab === 'daily') stopTTS();
             if(tab === 'ledger') loadLedger();
             if(tab === 'personal') loadStudentPersonalView();
+        }
+        async function openExamRoomRegister(roomName) {
+            currentReg = { c: 'EXAM_ROOM', s: roomName, sub: 'Exam Invigilation', canEdit: true, isExamRoom: true };
+            document.getElementById('reg-title').innerText = `Exam Room | ${roomName}`;
+            document.getElementById('reg-subtitle').innerText = `Mixed Seating Attendance`;
+            document.getElementById('register-modal').style.display = 'flex';
+            document.getElementById('daily-date-picker').value = todayISO; 
+
+            const saveBar = document.getElementById('save-bar-container');
+            const mobileBtns = document.getElementById('mobile-bulk-btns');
+            if (saveBar) saveBar.style.display = 'block'; 
+            if (mobileBtns) mobileBtns.style.display = 'grid';
+
+            switchTab('daily');
+            await loadExamRoomAttendance(roomName, todayISO);
+        }
+
+        async function loadExamRoomAttendance(roomName, dateStr) {
+            stopTTS();
+            const listContainer = document.getElementById('daily-students-list');
+            listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
+
+            try {
+                const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                const allocSnap = await allocDocRef.get();
+                
+                let seatedStudents = [];
+                if (allocSnap.exists) {
+                    const allocs = allocSnap.data().allocations || {};
+                    Object.keys(allocs).forEach(seatId => {
+                        if (seatId.startsWith(`${roomName}-`)) {
+                            const stu = allocs[seatId];
+                            if (stu) seatedStudents.push({ seatId, ...stu });
+                        }
+                    });
+                }
+
+                seatedStudents.sort((a,b) => String(a.seatId).localeCompare(String(b.seatId)));
+
+                if (seatedStudents.length === 0) {
+                    listContainer.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs border-2 border-dashed border-slate-300 rounded-2xl">No students allocated to this room for ${dateStr}.</div>`;
+                    return;
+                }
+
+                const [y, m, d] = dateStr.split('-');
+                const monthKey = `${y}_${m}`;
+                const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).get();
+                
+                let sectionAttendanceMap = {};
+                querySnap.forEach(doc => {
+                    const data = doc.data();
+                    if (data.records && data.records[dateStr]) {
+                        const key = `${normMatch(data.className)}|${normMatch(data.section)}|${normMatch(data.subject)}`;
+                        sectionAttendanceMap[key] = data.records[dateStr];
+                    }
+                });
+                currentMonthDoc = { [dateStr]: {} };
+                
+                let html = "";
+                seatedStudents.forEach((stu, index) => {
+                    let status = "";
+                    for (let k of Object.keys(sectionAttendanceMap)) {
+                        if (k.startsWith(`${normMatch(stu.className)}|${normMatch(stu.section)}|`) && sectionAttendanceMap[k][stu.id]) {
+                            status = sectionAttendanceMap[k][stu.id];
+                            currentMonthDoc[dateStr][stu.id] = status;
+                            break;
+                        }
+                    }
+                    let effectiveVal = status === 'A' ? 'L' : status;
+
+                    let attControls = `
+                        <input type="radio" name="att_${stu.id}" id="P_${stu.id}" value="P" class="att-radio" ${effectiveVal==='P' ? 'checked' : ''} onchange="updateDailyStats()">
+                        <label for="P_${stu.id}" class="att-label left text-slate-500 hover:bg-slate-50 select-none">P</label>
+                        
+                        <input type="radio" name="att_${stu.id}" id="L_${stu.id}" value="L" class="att-radio" ${effectiveVal==='L' ? 'checked' : ''} onchange="updateDailyStats()">
+                        <label for="L_${stu.id}" class="att-label right text-slate-500 hover:bg-slate-50 select-none" style="border-radius: 0 8px 8px 0; border-left: none;">L</label>
+                    `;
+
+                    html += `
+                    <div id="row_${stu.id}" class="student-row bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center transition-all duration-300">
+                        <div class="flex items-center gap-2 sm:gap-3">
+                            <span class="bg-amber-100 text-amber-800 font-mono text-[9px] sm:text-[10px] font-black px-2 py-1 rounded border border-amber-200">${stu.seatId}</span>
+                            <span class="bg-purple-100 text-purple-700 font-mono text-[9px] sm:text-[10px] font-black px-2 py-1 rounded border border-purple-200 uppercase">${stu.className}-${stu.section}</span>
+                            <span class="bg-slate-100 text-slate-500 font-mono text-[10px] sm:text-xs font-black px-2 py-1 rounded border border-slate-200">#${stu.rollNo || 'N/A'}</span>
+                            <div>
+                                <h4 class="student-name font-black text-slate-800 text-xs sm:text-sm uppercase tracking-tight" data-name="${stu.name}">${stu.name}</h4>
+                            </div>
+                        </div>
+                        <div class="flex shrink-0 pointer-events-auto">
+                            ${attControls}
+                        </div>
+                    </div>
+                    `;
+                });
+
+                listContainer.innerHTML = html;
+                updateDailyStats();
+            } catch(e) {
+                console.error(e);
+                listContainer.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase">Error loading room attendance.</div>`;
+            }
         }
       async function openRegister(c, s, sub, canEdit) {
             if (activeStudent) canEdit = false;
@@ -2338,6 +2480,121 @@ async function saveDailyAttendance() {
             if(!currentReg.canEdit || activeStudent || isAdmin) return;
             const dateStr = document.getElementById('daily-date-picker').value;
             const btn = document.getElementById('save-daily-btn');
+            const [y, m, d] = dateStr.split('-');
+            const monthKey = `${y}_${m}`;
+
+            // --- EXAM ROOM ATTENDANCE DISTRIBUTION TO INCHARGE REGISTERS ---
+            if (currentReg.isExamRoom) {
+                const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                const allocSnap = await allocDocRef.get();
+                let roomStudentsMap = {};
+                if (allocSnap.exists) {
+                    const allocs = allocSnap.data().allocations || {};
+                    Object.keys(allocs).forEach(seatId => {
+                        if (seatId.startsWith(`${currentReg.s}-`)) {
+                            const stu = allocs[seatId];
+                            if (stu && stu.id) roomStudentsMap[stu.id] = stu;
+                        }
+                    });
+                }
+
+                const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.email) : "");
+                let teacherInchargeRegisters = [];
+                if (window.instituteStructures && timetableData) {
+                    window.instituteStructures.forEach(st => {
+                        (st.subjects || []).forEach(sub => {
+                            if (isRegisterSubjectIncharge(st.className, st.sectionName, sub)) {
+                                const slotMatch = timetableData.find(t => 
+                                    normMatch(t.className) === normMatch(st.className) && 
+                                    normMatch(t.section || t.sectionName) === normMatch(st.sectionName) && 
+                                    normMatch(t.subject || t.title) === normMatch(sub)
+                                );
+                                if (slotMatch) {
+                                    const tName = normMatch(slotMatch.teacherName || slotMatch.teacher || "");
+                                    const matchSt = window.instituteStructures.find(struct => normMatch(struct.className) === normMatch(st.className) && normMatch(struct.sectionName || struct.section) === normMatch(st.sectionName));
+                                    const inchargeName = normMatch(matchSt ? (matchSt.secInchargeName || matchSt.classInchargeName || "") : "");
+                                    if (tName === mySafeName || tName === inchargeName) {
+                                        teacherInchargeRegisters.push({
+                                            className: st.className,
+                                            section: st.sectionName,
+                                            subject: sub
+                                        });
+                                    }
+                                }
+                            }
+                        });
+                    });
+                }
+
+                let sectionUpdates = {};
+                absentWhatsAppList = [];
+
+                Object.keys(roomStudentsMap).forEach(stuId => {
+                    const checked = document.querySelector(`input[name="att_${stuId}"]:checked`);
+                    if (checked) {
+                        const stu = roomStudentsMap[stuId];
+                        const status = checked.value === 'A' ? 'L' : checked.value;
+                        
+                        if (status === 'L' || status === 'A') {
+                            absentWhatsAppList.push({ name: stu.name, roll: stu.rollNo, id: stu.id, status: 'L', section: stu.section });
+                        }
+
+                        const matchingReg = teacherInchargeRegisters.find(r => 
+                            normMatch(r.className) === normMatch(stu.className) && 
+                            normMatch(r.section) === normMatch(stu.section)
+                        );
+
+                        if (matchingReg) {
+                            const docId = `att_${activeCenter}_${normDoc(matchingReg.className)}_${normDoc(matchingReg.section)}_${normDoc(matchingReg.subject)}_${monthKey}`;
+                            if (!sectionUpdates[docId]) {
+                                sectionUpdates[docId] = {
+                                    className: matchingReg.className,
+                                    section: matchingReg.section,
+                                    subject: matchingReg.subject,
+                                    records: {}
+                                };
+                            }
+                            sectionUpdates[docId].records[stuId] = status;
+                        }
+                    }
+                });
+
+                const origText = btn.innerHTML; btn.innerHTML = "⏳ Distributing to Incharge Registers..."; btn.disabled = true;
+
+                try {
+                    const batch = db.batch();
+                    for (const [docId, regData] of Object.entries(sectionUpdates)) {
+                        const docRef = getCollection("attendance_records").doc(docId);
+                        const docSnap = await docRef.get();
+                        let docData = docSnap.exists ? docSnap.data() : {
+                            className: regData.className,
+                            section: regData.section,
+                            subject: regData.subject,
+                            monthKey: monthKey,
+                            records: {}
+                        };
+
+                        if (!docData.records) docData.records = {};
+                        docData.records[dateStr] = { ...(docData.records[dateStr] || {}), ...regData.records };
+                        docData.lastUpdated = Date.now();
+
+                        batch.set(docRef, docData);
+                    }
+
+                    await batch.commit();
+                    btn.innerHTML = "✅ Distributed Successfully!";
+                    setTimeout(() => {
+                        btn.innerHTML = origText; btn.disabled = false;
+                        closeRegister();
+                    }, 1200);
+                    return;
+                } catch(e) {
+                    console.error(e);
+                    alert("Failed to distribute exam room attendance.");
+                    btn.innerHTML = origText; btn.disabled = false;
+                    return;
+                }
+            }
 
             const isPastDateSave = dateStr < todayISO;
             if (isPastDateSave && window.approvedEditUnlocked !== true) {
