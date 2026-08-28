@@ -2379,7 +2379,7 @@ function shareWholeClassWhatsApp() {
                     .where("className", "==", className)
                     .get();
 
-                let sectionRecordsMap = {}; // section -> { studentId -> status }
+              let sectionRecordsMap = {}; // section -> { studentId -> status }
                 snap.forEach(doc => {
                     const data = doc.data();
                     const sec = data.section;
@@ -2389,17 +2389,66 @@ function shareWholeClassWhatsApp() {
                     }
                 });
 
-                // Validate that every section has at least one subject's attendance marked
-                let missingSections = [];
-                Array.from(classSections).forEach(sec => {
-                    if (!sectionRecordsMap[sec] || Object.keys(sectionRecordsMap[sec]).length === 0) {
-                        missingSections.push(sec);
-                    }
-                });
+                // --- EXAM DAY vs NORMAL DAY VALIDATION ---
+                let isExamDayForClass = false;
+                let missingRooms = new Set();
+                
+                try {
+                    const allocDocRef = getCollection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                    const allocSnap = await allocDocRef.get();
+                    
+                    if (allocSnap.exists) {
+                        const allocs = allocSnap.data().allocations || {};
+                        let classRoomsMap = {}; // roomName -> [studentIds]
+                        
+                        Object.keys(allocs).forEach(seatId => {
+                            const stu = allocs[seatId];
+                            if (stu && normMatch(stu.className) === normMatch(className)) {
+                                isExamDayForClass = true;
+                                // Safely extract the room name by removing the "-R#...-S#..." suffix
+                                const roomName = seatId.replace(/-R\d+-S\d+$/, ''); 
+                                if (!classRoomsMap[roomName]) classRoomsMap[roomName] = [];
+                                classRoomsMap[roomName].push(stu);
+                            }
+                        });
 
-                if (missingSections.length > 0) {
-                    return alert(`🚨 Missing Attendance Alert:\n\nCannot share report. No attendance has been logged for Section(s): ${missingSections.join(', ')} on ${prettyDate}. Please ensure at least one subject register is marked for every section.`);
+                        if (isExamDayForClass) {
+                            Object.keys(classRoomsMap).forEach(room => {
+                                const roomStus = classRoomsMap[room];
+                                // Since invigilators must mark ALL students before saving,
+                                // if the first student in this room is unmarked, the room is pending.
+                                const testStu = roomStus[0];
+                                const hasRecord = sectionRecordsMap[testStu.section] && sectionRecordsMap[testStu.section][testStu.id];
+                                
+                                if (!hasRecord) {
+                                    missingRooms.add(room);
+                                }
+                            });
+                        }
+                    }
+                } catch(e) {
+                    console.error("Error checking exam allocations for WhatsApp share:", e);
                 }
+
+                if (isExamDayForClass) {
+                    if (missingRooms.size > 0) {
+                        const roomsList = Array.from(missingRooms).join(', ');
+                        return alert(`🚨 Missing Exam Room Attendance:\n\nCannot share report yet.\nThe following invigilation rooms holding Class ${className} students have not submitted attendance for ${prettyDate}:\n\n• ${roomsList}\n\nPlease ask the duty teachers of these rooms to submit their roll call.`);
+                    }
+                } else {
+                    // Normal Day Validation
+                    let missingSections = [];
+                    Array.from(classSections).forEach(sec => {
+                        if (!sectionRecordsMap[sec] || Object.keys(sectionRecordsMap[sec]).length === 0) {
+                            missingSections.push(sec);
+                        }
+                    });
+
+                    if (missingSections.length > 0) {
+                        return alert(`🚨 Missing Attendance Alert:\n\nCannot share report. No attendance has been logged for Section(s): ${missingSections.join(', ')} on ${prettyDate}. Please ensure at least one subject register is marked for every section.`);
+                    }
+                }
+                // --- END VALIDATION ---
 
                 // Compile Class-Wide Totals
                 let totalStudents = 0;
