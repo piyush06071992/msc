@@ -232,14 +232,14 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        let activeStaff = null, leaveType = null;
-        let timetableData = [], dutyData = [], staffData = [], historyData = [];
+       let activeStaff = null, leaveType = null;
+        let timetableData = [], dutyData = [], staffData = [], historyData = [], holidaysData = [];
         let selectedAdjustments = {};
         let assignedExtraDuties = []; 
 
         let myTransactions = [];
         let myLeaveRecords = [];
-        let allLeaves = []; 
+        let allLeaves = [];
 
         window.onload = async () => {
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
@@ -508,20 +508,22 @@
             renderAssignedExtraDuties();
         }
 
-      async function loadDatabases() {
+async function loadDatabases() {
             const center = activeStaff.center || "GHUMARWIN";
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
-            const [tt, staff, hist, rosters, leavesSnap] = await Promise.all([
+            const [tt, staff, hist, rosters, leavesSnap, holSnap] = await Promise.all([
                 db.collection(prefix + "timetable").get(),
                 db.collection("staff_applications").where("status", "==", "approved").get(),
                 db.collection(prefix + "timetable_history").get(),
                 db.collection(prefix + "duty_rosters").get(),
-                db.collection(prefix + "leave_requests").get()
+                db.collection(prefix + "leave_requests").get(),
+                db.collection("school_holidays").get()
             ]);
             timetableData = tt.docs.map(d => d.data());
             historyData = hist.docs.map(d => d.data());
             dutyData = rosters.docs.map(d => ({ id: d.id, ...d.data() }));
             allLeaves = leavesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+            holidaysData = holSnap.docs.map(d => d.data());
 
             staffData = staff.docs.map(d => {
                 const docData = d.data();
@@ -697,7 +699,7 @@
             const feed = document.getElementById('clash-feed');
             feed.innerHTML = '<div class="flex justify-center p-10"><div class="loader border-t-indigo-500"></div></div>';
 
-            let allDates = [];
+   let allDates = [];
             if(leaveType === 'FULL') {
                 let currDate = new Date(dateVal + "T00:00:00");
                 let endObj = new Date((document.getElementById('l-end-date').value || dateVal) + "T00:00:00");
@@ -710,7 +712,25 @@
                 }
             } else { allDates.push(dateVal); }
 
+            // --- CHECK HOLIDAYS OR HALF-DAYS DURING LEAVE RANGE ---
+            let holidayNotices = [];
+            allDates.forEach(tDate => {
+                const hol = holidaysData.find(h => h.date === tDate || (h.startDate <= tDate && h.endDate >= tDate));
+                if (hol) {
+                    holidayNotices.push(`📅 ${tDate}: ${hol.title || hol.type || 'School Holiday / Event'}`);
+                }
+            });
+
             let analysisHtml = "";
+            if (holidayNotices.length > 0) {
+                analysisHtml += `
+                    <div class="bg-amber-50 border border-amber-200 p-4 rounded-2xl mb-4 text-xs font-bold text-amber-800 uppercase tracking-widest shadow-sm">
+                        <p class="font-black mb-1">⚠️ Calendar Notice During Leave Range:</p>
+                        <ul class="list-disc pl-5 space-y-1">${holidayNotices.map(n => `<li>${n}</li>`).join('')}</ul>
+                    </div>
+                `;
+            }
+
             let totalUncovered = 0;
 
             for (let tDate of allDates) {
@@ -749,10 +769,11 @@
                     }
                 });
 
-                let userConflicts = [];
+     let userConflicts = [];
                 const meInDb = staffData.find(s => s.email.toLowerCase() === myEmail);
                 const myRealName = meInDb ? norm(meInDb.name) : norm(activeStaff.name || "");
 
+                // 1. Check Classes & Substitutions
                 virtualSchedule.forEach(slot => {
                     const slotT = norm(slot.teacherName || slot.teacher || "");
                     const slotE = (slot.teacherEmail || "").toLowerCase();
@@ -771,6 +792,55 @@
                     }
                 });
 
+                // 2. Check Assigned Exam & Lunch Duties
+                dutyData.forEach(roster => {
+                    if (roster.rosterData) {
+                        Object.keys(roster.rosterData).forEach(roomName => {
+                            const roomObj = roster.rosterData[roomName];
+                            Object.keys(roomObj.columns || {}).forEach(colKey => {
+                                const shift = roomObj.columns[colKey];
+                                if (shift && shift.status === 'ASSIGNED' && shift.staff) {
+                                    const sEmail = (shift.staff.email || "").trim().toLowerCase();
+                                    const sName = norm(shift.staff.name || "");
+                                    if (sEmail === myEmail || sName === myName || sName === myRealName) {
+                                        let dutyDate = "";
+                                        if (roster.type === 'EXAM' && roster.id.startsWith('exam_duty_')) {
+                                            dutyDate = roster.id.replace('exam_duty_', '');
+                                        } else if (roster.type === 'LUNCH' && roster.id.startsWith('lunch_duty_')) {
+                                            const monStr = roster.id.replace('lunch_duty_', '');
+                                            const monDate = new Date(monStr + "T00:00:00");
+                                            const dayOffsets = { 'Monday': 0, 'Tuesday': 1, 'Wednesday': 2, 'Thursday': 3, 'Friday': 4, 'Saturday': 5 };
+                                            if (dayOffsets[colKey] !== undefined) {
+                                                monDate.setDate(monDate.getDate() + dayOffsets[colKey]);
+                                                dutyDate = monDate.toISOString().split('T')[0];
+                                            }
+                                        }
+
+                                        if (dutyDate === tDate) {
+                                            let startMins = shift.rawStart !== undefined ? shift.rawStart : 720;
+                                            let endMins = shift.rawEnd !== undefined ? shift.rawEnd : 750;
+                                            if (roster.type === 'LUNCH') {
+                                                startMins = 720; endMins = 750;
+                                            }
+                                            
+                                            if (leaveStart < endMins && leaveEnd > startMins) {
+                                                userConflicts.push({
+                                                    id: `duty_${tDate}_${startMins}_${roomName.replace(/[^a-zA-Z0-9]/g, '')}`,
+                                                    type: 'DUTY',
+                                                    title: `${roster.type === 'EXAM' ? 'Exam Duty' : 'Lunch Duty'} (${roomName})`,
+                                                    sub: `Room: ${roomName} | Shift: ${colKey}`,
+                                                    start: startMins,
+                                                    end: endMins,
+                                                    date: tDate
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        });
+                    }
+                });
                 userConflicts = userConflicts.filter((v, i, a) => a.findIndex(t => (t.start === v.start && t.end === v.end && t.sub === v.sub && t.title === v.title)) === i);
 
                 if (userConflicts.length > 0) {
