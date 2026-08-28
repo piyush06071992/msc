@@ -656,9 +656,14 @@ async function init() {
         // Sends unauthenticated users back to the main hub
         if (!activeStaff && !isAdmin && !activeStudent) return window.location.replace('index.html');
 
+        // Initialize todayISO first so it's available globally before any data fetching
         const today = new Date();
         const offset = today.getTimezoneOffset() * 60000;
         todayISO = new Date(today - offset).toISOString().split('T')[0];
+
+        // 🛑 TEMPORARY TESTING HACK: Force system to think today is Aug 31
+        todayISO = "2026-08-31"; 
+        // ----------------------------------------------------------------
         
        let safeName = "Admin";
         if (activeStudent) {
@@ -989,27 +994,46 @@ function switchMainTab(tab) {
                     html += `</div></details>`;
                 });
                 container.innerHTML = html;
-       } else {
+     } else {
                 let regMap = new Map();
                 let myRegMap = new Map();
                 
-                // Check if teacher has an exam room duty assigned today
+                let myExamDuties = [];
                 try {
-                    const examRosterDoc = await getCollection("duty_rosters").doc(`exam_duty_${todayISO}`).get();
-                    if (examRosterDoc.exists) {
-                        const rosterData = examRosterDoc.data().rosterData || {};
-                        let assignedRoom = null;
-                        Object.keys(rosterData).forEach(roomName => {
-                            const cols = rosterData[roomName].columns || {};
-                            Object.values(cols).forEach(col => {
-                                if (col.status === 'ASSIGNED' && col.staff && normMatch(col.staff.name) === mySafeName) {
-                                    assignedRoom = roomName;
-                                }
+                    const rostersSnap = await getCollection("duty_rosters").get();
+                    rostersSnap.forEach(doc => {
+                        if (doc.id.startsWith("exam_duty_")) {
+                            const dateStr = doc.id.replace("exam_duty_", "");
+                            const rosterData = doc.data().rosterData || {};
+                            Object.keys(rosterData).forEach(roomName => {
+                                const cols = rosterData[roomName].columns || {};
+                                Object.values(cols).forEach(col => {
+                                    if (col.status === 'ASSIGNED' && col.staff && normMatch(col.staff.name) === mySafeName) {
+                                        myExamDuties.push({ date: dateStr, room: roomName });
+                                    }
+                                });
                             });
+                        }
+                    });
+                } catch(e) { console.error("Error checking exam duties:", e); }
+
+                let toggleArea = document.getElementById('view-toggle-area');
+                if (toggleArea) {
+                    if (myExamDuties.length > 0) {
+                        let options = `<option value="">🎓 View Exam Duty...</option>`;
+                        myExamDuties.sort((a,b) => a.date.localeCompare(b.date)).forEach(duty => {
+                            const prettyDate = new Date(duty.date).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'});
+                            options += `<option value="${duty.date}|${duty.room}">${prettyDate} - ${duty.room}</option>`;
                         });
-                        window.teacherExamRoomDuty = assignedRoom;
+                        toggleArea.innerHTML = `
+                            <select onchange="if(this.value){ const [d, r] = this.value.split('|'); openExamRoomRegister(r, d); this.value=''; }" class="bg-amber-100 text-amber-800 hover:bg-amber-200 border border-amber-300 px-4 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest shadow-sm outline-none cursor-pointer transition-colors">
+                                ${options}
+                            </select>
+                        `;
+                    } else {
+                        toggleArea.innerHTML = "";
                     }
-                } catch(e) { console.error("Error checking exam duty roster:", e); }
+                }
 
                 timetableData.forEach(t => {
                     let subjectName = t.subject || t.title || "";
@@ -1087,37 +1111,16 @@ function switchMainTab(tab) {
                 `;
             }
 
-       const activeList = window.myRegistersCache; // Always show their own registers initially
+  const activeList = window.myRegistersCache; // Always show their own registers initially
 
-            if (!activeList || activeList.length === 0 && !window.teacherExamRoomDuty) {
+            if (!activeList || activeList.length === 0) {
                 container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest border-2 border-dashed border-slate-200 rounded-3xl bg-white">No Assigned Registers Found</div>`; 
                 return;
             }
 
             let html = `<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">`;
 
-            if (window.teacherExamRoomDuty) {
-                const roomName = window.teacherExamRoomDuty;
-                html += `
-                <div onclick="openExamRoomRegister('${roomName}')" class="cursor-pointer group relative transition-transform hover:-translate-y-2 hover:rotate-1 duration-300">
-                    <div class="absolute -top-3 -right-3 bg-amber-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">Exam Duty</div>
-                    <div class="relative w-full aspect-[3/4] rounded-r-2xl rounded-l-md shadow-[4px_4px_15px_rgba(0,0,0,0.1)] overflow-hidden flex">
-                        <div class="w-6 h-full bg-amber-800 book-spine shrink-0 z-10 relative"></div>
-                        <div class="flex-1 h-full bg-amber-600 p-4 flex flex-col justify-between relative">
-                            <div class="absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/20 to-transparent"></div>
-                            <div class="relative z-10">
-                                <div class="text-[10px] font-black text-amber-200 uppercase tracking-widest mb-1 border-b border-white/20 pb-1 inline-block">Invigilation</div>
-                                <h3 class="text-xl font-black text-white uppercase tracking-tighter leading-none break-words">Room</h3>
-                                <p class="text-sm font-bold text-white/80 uppercase mt-1">${roomName}</p>
-                            </div>
-                            <div class="relative z-10 bg-white/15 backdrop-blur-sm border border-white/20 p-2 rounded-lg text-center mt-4">
-                                <span class="text-[10px] font-black text-white uppercase tracking-widest line-clamp-2">Mixed Roster Attendance</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>`;
-            }
-                const colors = [ { spine: 'bg-blue-800', cover: 'bg-blue-600', text: 'text-blue-200' }, { spine: 'bg-emerald-800', cover: 'bg-emerald-600', text: 'text-emerald-200' }, { spine: 'bg-rose-800', cover: 'bg-rose-600', text: 'text-rose-200' }, { spine: 'bg-amber-700', cover: 'bg-amber-500', text: 'text-amber-100' }, { spine: 'bg-purple-800', cover: 'bg-purple-600', text: 'text-purple-200' } ];
+            const colors = [ { spine: 'bg-blue-800', cover: 'bg-blue-600', text: 'text-blue-200' }, { spine: 'bg-emerald-800', cover: 'bg-emerald-600', text: 'text-emerald-200' }, { spine: 'bg-rose-800', cover: 'bg-rose-600', text: 'text-rose-200' }, { spine: 'bg-amber-700', cover: 'bg-amber-500', text: 'text-amber-100' }, { spine: 'bg-purple-800', cover: 'bg-purple-600', text: 'text-purple-200' } ];
 
                 activeList.sort((a,b) => String(a.c).localeCompare(String(b.c))).forEach((reg, i) => {
                     const c = colors[i % colors.length];
@@ -1591,12 +1594,13 @@ function updateAuditSectionFilter() {
             if(tab === 'ledger') loadLedger();
             if(tab === 'personal') loadStudentPersonalView();
         }
-        async function openExamRoomRegister(roomName) {
+    async function openExamRoomRegister(roomName, dateStr = null) {
+            const targetDate = dateStr || todayISO;
             currentReg = { c: 'EXAM_ROOM', s: roomName, sub: 'Exam Invigilation', canEdit: true, isExamRoom: true };
             document.getElementById('reg-title').innerText = `Exam Room | ${roomName}`;
             document.getElementById('reg-subtitle').innerText = `Mixed Seating Attendance`;
             document.getElementById('register-modal').style.display = 'flex';
-            document.getElementById('daily-date-picker').value = todayISO; 
+            document.getElementById('daily-date-picker').value = targetDate; 
 
             const saveBar = document.getElementById('save-bar-container');
             const mobileBtns = document.getElementById('mobile-bulk-btns');
@@ -1604,7 +1608,7 @@ function updateAuditSectionFilter() {
             if (mobileBtns) mobileBtns.style.display = 'grid';
 
             switchTab('daily');
-            await loadExamRoomAttendance(roomName, todayISO);
+            await loadExamRoomAttendance(roomName, targetDate);
         }
 
         async function loadExamRoomAttendance(roomName, dateStr) {
@@ -2006,9 +2010,14 @@ async function loadStudentPersonalView() {
                     </div>`;
             }
         }
-        async function loadDailyAttendance() {
+     async function loadDailyAttendance() {
             stopTTS();
             const dateStr = document.getElementById('daily-date-picker').value;
+            
+            if (currentReg && currentReg.isExamRoom) {
+                return loadExamRoomAttendance(currentReg.s, dateStr);
+            }
+
             const [y, m, d] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
             
