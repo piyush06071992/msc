@@ -745,7 +745,7 @@
             }
         }
 
-      async function loadSeatingAllocations(date) {
+  async function loadSeatingAllocations(date) {
             try {
                 const docRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${date}`);
                 const docSnap = await docRef.get();
@@ -755,8 +755,8 @@
                     currentAllocations = {};
                 }
                 
-                // Populate class/section filters using fetched data
-                populateGlobalFilters();
+                populateSidebarFilters();
+                renderRoomSidebarList();
 
                 if (activeRoomId) selectRoom(activeRoomId, false);
             } catch (e) {
@@ -932,8 +932,9 @@
             });
         }
 
-   function renderRoomSidebarList() {
+function renderRoomSidebarList() {
             const listArea = document.getElementById('sidebar-rooms-list');
+            if(!listArea) return;
             const search = (document.getElementById('room-search').value || "").trim().toUpperCase();
             
             const fClassSelect = document.getElementById('sidebar-class-filter');
@@ -950,7 +951,7 @@
                     const cls = String(stu.className).toUpperCase();
                     const sec = String(stu.section || "").toUpperCase();
                     
-                    if (fClass && cls === fClass) {
+                    if (!fClass || cls === fClass) {
                         if (!fSec || sec === fSec) {
                             roomOccupants[roomName].totalMatched++;
                         }
@@ -968,7 +969,8 @@
                 return true;
             });
             
-            document.getElementById('room-count-badge').innerText = `${filteredRooms.length} Rooms`;
+            const countBadge = document.getElementById('room-count-badge');
+            if (countBadge) countBadge.innerText = `${filteredRooms.length} Rooms`;
             
             let availableCap = 0;
             roomsDatabase.forEach(r => {
@@ -2317,51 +2319,29 @@
             secSelect.disabled = false;
         }
 
-        function executeGlobalSearch() {
-            const query = (document.getElementById('global-student-search').value || "").trim().toUpperCase();
-            const fClass = document.getElementById('filter-class-select').value;
-            const fSec = document.getElementById('filter-sec-select').value;
+      // --- PURE STUDENT SEARCH ENGINE (TOP BAR) ---
+        function executeGlobalSearch(query) {
+            const q = (query || "").trim().toUpperCase();
             const resDiv = document.getElementById('global-search-results');
+            if (!resDiv) return;
             
-            // Hide dropdown if nothing is being searched or filtered
-            if (query.length < 2 && !fClass && !fSec) { 
+            if (q.length < 2) { 
                 resDiv.classList.add('hidden'); 
                 return; 
             }
 
             let results = [];
             Object.entries(currentAllocations).forEach(([seatId, stu]) => {
-                if (stu) {
-                    let match = true;
-                    
-                    // Apply Checkbox Filters
-                    if (fClass && String(stu.className).toUpperCase() !== fClass.toUpperCase()) match = false;
-                    if (fSec && String(stu.section).toUpperCase() !== fSec.toUpperCase()) match = false;
-                    
-                    // Apply Text Search (if typed)
-                    if (query.length >= 2) {
-                        const searchTarget = `${stu.name} ${stu.rollNo}`.toUpperCase();
-                        if (!searchTarget.includes(query)) match = false;
-                    }
-
-                    if (match) {
-                        results.push({ seatId, stu });
-                    }
+                if (stu && (String(stu.rollNo || "").toUpperCase().includes(q) || String(stu.name || "").toUpperCase().includes(q))) {
+                    results.push({ seatId, stu });
                 }
             });
 
-            // Sort results neatly by Room Name and Seat Number
-            results.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
-            
             if (results.length === 0) {
-                resDiv.innerHTML = '<div class="p-6 text-sm font-black text-slate-400 text-center uppercase tracking-widest">No allocated students found matching criteria.</div>';
+                resDiv.innerHTML = '<div class="p-6 text-sm font-black text-slate-400 text-center uppercase tracking-widest">No student found.</div>';
             } else {
-                resDiv.innerHTML = `
-                    <div class="bg-amber-100 text-amber-800 text-[10px] font-black px-4 py-2 uppercase tracking-widest sticky top-0 z-10 shadow-sm border-b border-amber-200">
-                        Showing ${results.length} Allocated Students
-                    </div>
-                ` + results.map(r => `
-                    <div class="p-4 hover:bg-amber-50 cursor-pointer flex justify-between items-center transition-colors" onclick="jumpToSeat('${r.seatId}')">
+                resDiv.innerHTML = results.map(r => `
+                    <div class="p-4 hover:bg-amber-50 cursor-pointer flex justify-between items-center transition-colors border-b border-slate-100" onclick="jumpToSeat('${r.seatId}')">
                         <div>
                             <div class="text-sm font-black text-slate-800 uppercase tracking-tight">${r.stu.name}</div>
                             <div class="text-[11px] font-bold text-slate-500 uppercase mt-1">Roll: #${r.stu.rollNo || 'N/A'} • Class ${r.stu.className} • Sec ${r.stu.section}</div>
@@ -2371,6 +2351,55 @@
                 `).join('');
             }
             resDiv.classList.remove('hidden');
+        }
+
+        // --- SIDEBAR CLASS & SECTION LOCATOR FILTERS ---
+        function populateSidebarFilters() {
+            const classSelect = document.getElementById('sidebar-class-filter');
+            if(!classSelect) return;
+            
+            let validClasses = new Set();
+            Object.values(currentAllocations).forEach(stu => {
+                if (stu && stu.className) validClasses.add(stu.className.toUpperCase());
+            });
+            Object.keys(examSectionsMap).forEach(key => {
+                const [cls] = key.split('|');
+                validClasses.add(cls.toUpperCase());
+            });
+
+            classSelect.innerHTML = '<option value="">ALL CLASSES</option>' + Array.from(validClasses).sort().map(c => `<option value="${c}">${c}</option>`).join('');
+            
+            const secSelect = document.getElementById('sidebar-sec-filter');
+            if(secSelect) {
+                secSelect.innerHTML = '<option value="">ALL SEC</option>';
+                secSelect.disabled = true;
+            }
+        }
+
+        function updateSidebarSecFilter() {
+            const cls = document.getElementById('sidebar-class-filter').value;
+            const secSelect = document.getElementById('sidebar-sec-filter');
+            if(!secSelect) return;
+            
+            secSelect.innerHTML = '<option value="">ALL SEC</option>';
+            if (!cls) {
+                secSelect.disabled = true;
+                renderRoomSidebarList();
+                return;
+            }
+
+            let validSecs = new Set();
+            Object.keys(examSectionsMap).forEach(key => {
+                const [c, s] = key.split('|');
+                if (c.toUpperCase() === cls.toUpperCase()) validSecs.add(s.toUpperCase());
+            });
+            Object.values(currentAllocations).forEach(stu => {
+                if(stu && String(stu.className).toUpperCase() === cls.toUpperCase() && stu.section) validSecs.add(String(stu.section).toUpperCase());
+            });
+
+            secSelect.innerHTML += Array.from(validSecs).sort().map(s => `<option value="${s}">Sec ${s}</option>`).join('');
+            secSelect.disabled = false;
+            renderRoomSidebarList();
         }
 
         function jumpToSeat(seatId) {
