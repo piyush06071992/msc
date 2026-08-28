@@ -1307,10 +1307,15 @@ for (let sIdx = 0; sIdx < row.seats; sIdx++) {
                             <span class="text-[11px] font-black text-amber-900 bg-amber-100 px-3 py-1.5 rounded-md uppercase tracking-widest border border-amber-200 w-full text-center leading-tight">
                                 Row ${rowNum} ${rIdx === 0 ? '<br><span class="text-[8px] text-rose-600 block mt-0.5">(Door Side)</span>' : ''}
                             </span>
-                            <span class="text-[9px] font-bold text-slate-500 uppercase tracking-widest">${filledCount}/${row.seats} Filled</span>
-                            <button onclick="openRowAssignmentModal('${room.name}', ${rIdx}, ${row.seats})" class="${isRowFull ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-indigo-600 hover:bg-indigo-500'} text-white px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest shadow-md transition-all active:scale-95 w-full flex items-center justify-center gap-1.5">
-                                ${isRowFull ? '✅ Edit' : '➕ Assign'}
-                            </button>
+                          <span class="text-[9px] font-bold text-slate-500 uppercase tracking-widest">${filledCount}/${row.seats} Filled</span>
+                            <div class="flex gap-1 w-full">
+                                <button onclick="openRowAssignmentModal('${room.name}', ${rIdx}, ${row.seats})" class="${isRowFull ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-indigo-600 hover:bg-indigo-500'} text-white px-2 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest shadow-md transition-all active:scale-95 flex-1 flex items-center justify-center">
+                                    ${isRowFull ? '✅ Edit' : '➕ Assign'}
+                                </button>
+                                <button onclick="swapRowWithPrompt('${room.name}', ${rIdx}, ${rows.length})" class="bg-amber-600 hover:bg-amber-500 text-white px-2 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest shadow-md transition-all active:scale-95" title="Swap Row">
+                                    ⇄ Swap
+                                </button>
+                            </div>
                         </div>
                     </div>`;
 
@@ -1991,7 +1996,7 @@ for (let sIdx = 0; sIdx < row.seats; sIdx++) {
                     timestamp: Date.now()
                 }, { merge: true });
 
-                alert("✅ Auto-Generate Seating Plan Completed Successfully!");
+        alert("✅ Auto-Generate Seating Plan Completed Successfully!");
                 closeAutoGenerateModal();
                 if (activeRoomId) selectRoom(activeRoomId, false);
                 else if (targetRooms.length > 0) selectRoom(targetRooms[0].id, true);
@@ -1999,6 +2004,68 @@ for (let sIdx = 0; sIdx < row.seats; sIdx++) {
             } catch (e) {
                 console.error(e);
                 alert("Error saving auto-generated plan: " + e.message);
+            }
+        }
+
+        // --- ROW INTERCHANGE / SWAP ENGINE ---
+        async function swapRowWithPrompt(roomName, rIdx, totalRows) {
+            const date = document.getElementById('seating-exam-date').value;
+            if (!date) return alert("Please select an exam date first.");
+
+            const rowNum1 = rIdx + 1;
+            const targetInput = prompt(`Enter row number (1 to ${totalRows}) to swap with Row ${rowNum1}:`);
+            if (!targetInput) return;
+
+            const targetRowNum = parseInt(targetInput.trim(), 10);
+            if (isNaN(targetRowNum) || targetRowNum < 1 || targetRowNum > totalRows) {
+                return alert(`Invalid row number. Please enter a number between 1 and ${totalRows}.`);
+            }
+
+            const targetRIdx = targetRowNum - 1;
+            if (targetRIdx === rIdx) {
+                return alert("Cannot swap a row with itself.");
+            }
+
+            const roomObj = roomsDatabase.find(r => r.name === roomName);
+            if (!roomObj || !roomObj.rows) return;
+
+            const row1 = roomObj.rows[rIdx];
+            const row2 = roomObj.rows[targetRIdx];
+            const maxSeats = Math.max(row1.seats, row2.seats);
+
+            // Perform seat-by-seat swap across the two rows (column-aligned)
+            let tempAllocations = { ...currentAllocations };
+            for (let sIdx = 0; sIdx < maxSeats; sIdx++) {
+                const seatNum = String(sIdx + 1).padStart(2, '0');
+                const seatId1 = `${roomName}-R${rowNum1}-S${seatNum}`;
+                const seatId2 = `${roomName}-R${targetRowNum}-S${seatNum}`;
+
+                const stu1 = tempAllocations[seatId1];
+                const stu2 = tempAllocations[seatId2];
+
+                if (stu1) tempAllocations[seatId2] = stu1; else delete tempAllocations[seatId2];
+                if (stu2) tempAllocations[seatId1] = stu2; else delete tempAllocations[seatId1];
+            }
+
+            // Re-evaluate anti-cheat risks for this room
+            evaluateCheatRisks(tempAllocations, roomObj);
+            currentAllocations = tempAllocations;
+
+            try {
+                const allocDocId = `${activeCenter}_${date}`;
+                await db.collection("exam_seating_allocations").doc(allocDocId).set({
+                    date: date,
+                    center: activeCenter,
+                    allocations: currentAllocations,
+                    totalAssigned: Object.keys(currentAllocations).length,
+                    timestamp: Date.now()
+                }, { merge: true });
+
+                alert(`✅ Successfully swapped Row ${rowNum1} with Row ${targetRowNum}!`);
+                if (activeRoomId) selectRoom(activeRoomId, false);
+            } catch (e) {
+                console.error(e);
+                alert("Error saving row swap: " + e.message);
             }
         }
     </script>
