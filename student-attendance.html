@@ -1648,7 +1648,7 @@ function updateAuditSectionFilter() {
                 const monthKey = `${y}_${m}`;
                 const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).get();
                 
-                let sectionAttendanceMap = {};
+            let sectionAttendanceMap = {};
                 querySnap.forEach(doc => {
                     const data = doc.data();
                     if (data.records && data.records[dateStr]) {
@@ -1658,6 +1658,10 @@ function updateAuditSectionFilter() {
                 });
                 currentMonthDoc = { [dateStr]: {} };
                 
+                const isFutureDate = dateStr > todayISO;
+                let hasAttendanceMarked = false;
+                let markedCount = 0;
+                
                 let html = "";
                 seatedStudents.forEach((stu, index) => {
                     let status = "";
@@ -1665,18 +1669,58 @@ function updateAuditSectionFilter() {
                         if (k.startsWith(`${normMatch(stu.className)}|${normMatch(stu.section)}|`) && sectionAttendanceMap[k][stu.id]) {
                             status = sectionAttendanceMap[k][stu.id];
                             currentMonthDoc[dateStr][stu.id] = status;
+                            if (status) markedCount++;
                             break;
                         }
                     }
+                });
+                
+                hasAttendanceMarked = markedCount > 0;
+                const canModify = !isFutureDate && !hasAttendanceMarked && dateStr === todayISO;
+
+                const btn = document.getElementById('save-daily-btn');
+                if (btn) {
+                    if (isFutureDate) {
+                        btn.innerHTML = "🚫 Future Date Locked";
+                        btn.disabled = true;
+                        btn.classList.add('opacity-50', 'cursor-not-allowed');
+                    } else if (hasAttendanceMarked) {
+                        btn.innerHTML = "🔒 Already Saved";
+                        btn.disabled = true;
+                        btn.classList.add('opacity-50', 'cursor-not-allowed');
+                    } else if (dateStr < todayISO) {
+                        btn.innerHTML = "🔒 Past Date Locked";
+                        btn.disabled = true;
+                        btn.classList.add('opacity-50', 'cursor-not-allowed');
+                    } else {
+                        btn.innerHTML = "💾 Save Attendance";
+                        btn.disabled = false;
+                        btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                    }
+                }
+
+                seatedStudents.forEach((stu, index) => {
+                    let status = currentMonthDoc[dateStr][stu.id] || "";
                     let effectiveVal = status === 'A' ? 'L' : status;
 
-                    let attControls = `
-                        <input type="radio" name="att_${stu.id}" id="P_${stu.id}" value="P" class="att-radio" ${effectiveVal==='P' ? 'checked' : ''} onchange="updateDailyStats()">
-                        <label for="P_${stu.id}" class="att-label left text-slate-500 hover:bg-slate-50 select-none">P</label>
-                        
-                        <input type="radio" name="att_${stu.id}" id="L_${stu.id}" value="L" class="att-radio" ${effectiveVal==='L' ? 'checked' : ''} onchange="updateDailyStats()">
-                        <label for="L_${stu.id}" class="att-label right text-slate-500 hover:bg-slate-50 select-none" style="border-radius: 0 8px 8px 0; border-left: none;">L</label>
-                    `;
+                    let attControls = "";
+                    if (canModify) {
+                        attControls = `
+                            <input type="radio" name="att_${stu.id}" id="P_${stu.id}" value="P" class="att-radio" ${effectiveVal==='P' ? 'checked' : ''} onchange="updateDailyStats()">
+                            <label for="P_${stu.id}" class="att-label left text-slate-500 hover:bg-slate-50 select-none">P</label>
+                            
+                            <input type="radio" name="att_${stu.id}" id="L_${stu.id}" value="L" class="att-radio" ${effectiveVal==='L' ? 'checked' : ''} onchange="updateDailyStats()">
+                            <label for="L_${stu.id}" class="att-label right text-slate-500 hover:bg-slate-50 select-none" style="border-radius: 0 8px 8px 0; border-left: none;">L</label>
+                        `;
+                    } else {
+                        if (effectiveVal) {
+                            let statusColor = effectiveVal === 'P' ? 'text-emerald-700 bg-emerald-50 border-emerald-200' : 'text-amber-700 bg-amber-50 border-amber-200';
+                            let statusText = effectiveVal === 'P' ? 'Present' : 'Leave';
+                            attControls = `<div class="px-4 py-1.5 rounded border text-[10px] font-black uppercase tracking-widest ${statusColor}">${statusText}</div>`;
+                        } else {
+                            attControls = `<div class="px-4 py-1.5 rounded border text-[10px] font-black uppercase tracking-widest text-slate-400 bg-slate-100 border-slate-200 shadow-inner">Unmarked</div>`;
+                        }
+                    }
 
                     html += `
                     <div id="row_${stu.id}" class="student-row bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center transition-all duration-300">
@@ -2067,9 +2111,11 @@ async function loadStudentPersonalView() {
                 window.approvedEditUnlocked = false;
                 window.activeEditTokenId = null;
 
-                // Check past-date lock status
+        // Check past-date lock status
                 const isPastDate = dateStr < todayISO;
+                const isFutureDate = dateStr > todayISO;
                 let editUnlocked = !isPastDate || isAdmin;
+                if (isFutureDate) editUnlocked = false;
 
                 // Check if an approved/pending request exists SPECIFICALLY for this past date
                 if (isPastDate && !isAdmin && activeStaff) {
@@ -2108,8 +2154,15 @@ async function loadStudentPersonalView() {
                     listContainer.innerHTML = `<div class="text-center py-6 text-indigo-700 font-black uppercase tracking-widest text-xs bg-indigo-50 rounded-2xl border border-indigo-200 shadow-sm mb-4">🎯 Remedial Session: "${remedialReason}" <br><span class="text-[10px] font-bold text-slate-600 mt-0.5 block">Attendance marked here is for tracking only and is excluded from ledger percentage calculations.</span></div>`;
                 }
 
-                if(btn) { 
-                    if (hasAttendanceMarked && window.approvedEditUnlocked !== true) {
+              if(btn) { 
+                    if (isFutureDate) {
+                        btn.innerHTML = "🚫 Future Date Locked";
+                        btn.disabled = true;
+                        btn.classList.add('opacity-50', 'cursor-not-allowed');
+                        if (document.getElementById('bulk-present-btn')) document.getElementById('bulk-present-btn').style.display = 'none';
+                        if (document.getElementById('bulk-leave-btn')) document.getElementById('bulk-leave-btn').style.display = 'none';
+                        if (document.getElementById('mobile-bulk-btns')) document.getElementById('mobile-bulk-btns').style.display = 'none';
+                    } else if (hasAttendanceMarked && window.approvedEditUnlocked !== true) {
                         btn.innerHTML = "🔒 Already Saved";
                         btn.disabled = true;
                         btn.classList.add('opacity-50', 'cursor-not-allowed');
@@ -2145,7 +2198,7 @@ async function loadStudentPersonalView() {
                     const val = todaysData[stu.id]; 
                     
                     let attControls = "";
-                    const canModify = currentReg.canEdit && !activeStudent && !isAdmin && editUnlocked && (!hasAttendanceMarked || window.approvedEditUnlocked);
+                  const canModify = currentReg.canEdit && !activeStudent && !isAdmin && editUnlocked && !isFutureDate && (!hasAttendanceMarked || window.approvedEditUnlocked);
                     
            let effectiveVal = val === 'A' ? 'L' : val;
                     if (canModify) {
@@ -2191,10 +2244,19 @@ async function loadStudentPersonalView() {
             } catch(e) { console.error(e); }
         }
 
-       function openCorrectionModal() {
+  function openCorrectionModal() {
             const select = document.getElementById('corr-student-select');
-            const myStudents = studentsData.filter(stu => normMatch(stu.className) === normMatch(currentReg.c) && normMatch(stu.section) === normMatch(currentReg.s)).sort((a,b) => String(a.name).localeCompare(String(b.name)));
-            select.innerHTML = myStudents.map(stu => `<option value="${stu.id}">#${stu.rollNo} - ${stu.name}</option>`).join('');
+            const dateStr = document.getElementById('daily-date-picker').value || todayISO;
+            
+            // Use the robust fetcher that identically matches the Roll Call screen
+            const myStudents = getActiveStudentsForDate(currentReg.c, currentReg.s, dateStr);
+            
+            if (myStudents.length === 0) {
+                select.innerHTML = `<option value="">-- No students available --</option>`;
+            } else {
+                select.innerHTML = myStudents.map(stu => `<option value="${stu.id}">#${stu.rollNo || 'N/A'} - ${stu.name}</option>`).join('');
+            }
+            
             document.getElementById('correction-modal').style.display = 'flex';
         }
 
@@ -2539,9 +2601,13 @@ function shareWholeClassWhatsApp() {
 async function saveDailyAttendance() {
             if(!currentReg.canEdit || activeStudent || isAdmin) return;
             const dateStr = document.getElementById('daily-date-picker').value;
+            
+            if (dateStr > todayISO) {
+                return alert("🚨 Action Blocked: Future dates cannot be marked.");
+            }
+
             const btn = document.getElementById('save-daily-btn');
             const [y, m, d] = dateStr.split('-');
-            const monthKey = `${y}_${m}`;
 
             // --- EXAM ROOM ATTENDANCE DISTRIBUTION TO INCHARGE REGISTERS ---
             if (currentReg.isExamRoom) {
