@@ -3516,45 +3516,52 @@ function updateStudentAuditFilters() {
             }
         }
 
-  async function printLedgerPDF() {
+ async function printLedgerPDF() {
             if (!currentReg) return;
             const monthVal = document.getElementById('ledger-month').value; 
             const [y, m] = monthVal.split('_');
             const daysInMonth = new Date(y, m, 0).getDate();
 
-            let monthRecords = window.currentLedgerRecords || {};
-            if (!monthRecords || Object.keys(monthRecords).length === 0) {
-                const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthVal).get();
-                monthRecords = {};
-                querySnap.forEach(doc => {
-                    const data = doc.data();
-                    if (normMatch(data.subject) === normMatch(currentReg.sub) &&
-                        normMatch(data.className) === normMatch(currentReg.c) &&
-                        normMatch(data.section) === normMatch(currentReg.s)) {
-                        if (data.records) {
-                            Object.keys(data.records).forEach(dKey => {
-                                monthRecords[dKey] = { ...(monthRecords[dKey] || {}), ...data.records[dKey] };
-                            });
-                        }
-                    }
-                });
-            }
+            // Determine if the selected month is fully completed
+            const lastDayOfMonthStr = `${y}-${m}-${String(daysInMonth).padStart(2,'0')}`;
+            const isMonthCompleted = lastDayOfMonthStr < todayISO;
 
-          // Define the official session/term start date (adjust if your school term started on a different date)
-            const TERM_START_DATE = "2026-08-10";
+            // Fetch fresh attendance records directly for the current active register to prevent stale cache bugs
+            const querySnap = await getCollection("attendance_records")
+                .where("monthKey", "==", monthVal)
+                .where("className", "==", currentReg.c)
+                .where("section", "==", currentReg.s)
+                .get();
+
+            let monthRecords = {};
+            querySnap.forEach(doc => {
+                const data = doc.data();
+                if (normMatch(data.subject) === normMatch(currentReg.sub)) {
+                    if (data.records) {
+                        Object.keys(data.records).forEach(dKey => {
+                            monthRecords[dKey] = { ...(monthRecords[dKey] || {}), ...data.records[dKey] };
+                        });
+                    }
+                }
+            });
 
             let unmarkedDates = [];
             for (let d = 1; d <= daysInMonth; d++) {
                 const dateStr = `${y}-${m}-${String(d).padStart(2,'0')}`;
-                if (dateStr > todayISO) continue;
-                if (dateStr < TERM_START_DATE) continue; // Skip dates before the term officially started
+
+                // Rule: Check whole month if completed, or up to previous day if not completed
+                if (isMonthCompleted) {
+                    if (dateStr > lastDayOfMonthStr) continue;
+                } else {
+                    if (dateStr >= todayISO) continue; // Stops before today (up to previous day)
+                }
 
                 const status = checkDateStatus(dateStr);
                 const hasAttendanceMarked = monthRecords[dateStr] && Object.keys(monthRecords[dateStr]).length > 0;
                 const remKey = `${dateStr}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}`;
                 const isRemedialDay = remedialDataMap[remKey] ? true : false;
 
-                const requiresAttendance = isRemedialDay || (!status.isExcluded && dateStr <= todayISO);
+                const requiresAttendance = isRemedialDay || (!status.isExcluded);
 
                 if (requiresAttendance && !hasAttendanceMarked) {
                     const pretty = new Date(dateStr).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
