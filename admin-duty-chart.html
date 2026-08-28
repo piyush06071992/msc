@@ -385,7 +385,7 @@
         }
         // --------------------------------------
 
-        // --- GLOBAL STATE ---
+     // --- GLOBAL STATE ---
         let currentMode = null; 
         let staffData = [], timetableData = [], holidaysData = [], roomsData = [];
         let generatedRoster = {}; 
@@ -398,6 +398,7 @@
         let lastExamStaffSet = new Set(); 
         let lastExamDateLabel = ""; 
         let customInstructions = []; 
+        let currentAllocations = {};
 
         const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         const DAY_SHORTS = { 'Monday':'MON', 'Tuesday':'TUE', 'Wednesday':'WED', 'Thursday':'THU', 'Friday':'FRI', 'Saturday':'SAT', 'Sunday':'SUN' };
@@ -690,13 +691,14 @@ async function renderRoomSelectors() {
         let activeRooms = roomsData;
         const eDate = document.getElementById('dutyTargetDate')?.value;
 
-        if (currentMode === 'EXAM' && eDate) {
+    if (currentMode === 'EXAM' && eDate) {
             await loadSectionTimingsCache(eDate);
             try {
                 const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${eDate}`);
                 const allocSnap = await allocDocRef.get();
                 if (allocSnap.exists) {
                     const allocs = allocSnap.data().allocations || {};
+                    currentAllocations = allocs;
                     const seatedRoomNames = new Set();
                     Object.keys(allocs).forEach(seatId => {
                         const rName = seatId.split('-R')[0];
@@ -704,10 +706,12 @@ async function renderRoomSelectors() {
                     });
                     activeRooms = roomsData.filter(r => seatedRoomNames.has(r.name.toUpperCase()));
                 } else {
+                    currentAllocations = {};
                     activeRooms = [];
                 }
             } catch (e) {
                 console.error("Error filtering rooms by allocation:", e);
+                currentAllocations = {};
             }
         }
 
@@ -775,8 +779,9 @@ async function renderRoomSelectors() {
             </div>`;
         });
 
-        const renderedRooms = await Promise.all(roomHtmlPromises);
+     const renderedRooms = await Promise.all(roomHtmlPromises);
         roomListArea.innerHTML = renderedRooms.join('');
+        window.renderedActiveRooms = activeRooms.map(r => r.name);
     }
 
     function getStaffLeaveStatus(email, dateStr) {
@@ -1245,20 +1250,15 @@ async function renderRoomSelectors() {
             return { classes: sTt.length, mins };
         }
 
-  // --- ALGORITHM ENGINE (LUNCH & EXAM) ---
+// --- ALGORITHM ENGINE (LUNCH & EXAM) ---
         async function runAllocationAlgorithm() {
-            const targetAllocations = currentAllocations || {};
-            let allocatedRoomNames = new Set();
-            Object.keys(targetAllocations).forEach(key => {
-                const rm = key.split('-R')[0];
-                if (rm) allocatedRoomNames.add(rm.toUpperCase());
-            });
-            const activeAllocatedRooms = roomsDatabase.filter(r => allocatedRoomNames.has(r.name.toUpperCase()) && !busyRoomsMap[cleanRoom(r.name)] && r.rows && r.rows.length > 0);
-            
-            const selectedRooms = activeAllocatedRooms.map(r => r.name);
+            const selectedRooms = window.renderedActiveRooms || [];
             const exemptedStaffEmails = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value);
 
-            if(selectedRooms.length === 0) return alert("No active rooms found from seating allocations. Ensure seating plan is generated first.");
+            if(selectedRooms.length === 0) {
+                if (currentMode === 'EXAM') return alert("No active rooms found from seating allocations. Ensure seating plan is generated first.");
+                else return alert("No available rooms found.");
+            }
 
             // --- NEW: FETCH PREVIOUS EXAM DUTY HISTORY ---
             try {
