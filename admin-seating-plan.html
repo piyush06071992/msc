@@ -1874,7 +1874,7 @@ for (let sIdx = 0; sIdx < row.seats; sIdx++) {
             }
         }
 
-        async function executeAutoGenerate() {
+     async function executeAutoGenerate() {
             const date = document.getElementById('seating-exam-date').value;
             if (!date) return;
 
@@ -1903,61 +1903,75 @@ for (let sIdx = 0; sIdx < row.seats; sIdx++) {
 
             if (!confirm(`Generate seating plan for ${targetStudents.length} students across ${targetRooms.length} rooms? This will overwrite existing allocations for this date.`)) return;
 
-            // --- ALLOCATION ALGORITHM ---
-            // Group students by Section & Paper to easily manage back-to-back placement
-            let studentsPool = [...targetStudents];
-            // Shuffle pool slightly or sort by section/roll for stable distribution
-            studentsPool.sort((a, b) => `${a.className}-${a.section}`.localeCompare(`${b.className}-${b.section}`));
-
-            let newAllocations = {};
-            let roomQueue = targetRooms.map(room => {
-                let seatsList = [];
-                (room.rows || []).forEach((row, rIdx) => {
-                    const rowNum = rIdx + 1;
-                    for (let sIdx = 0; sIdx < row.seats; sIdx++) {
-                        const seatNum = String(sIdx + 1).padStart(2, '0');
-                        seatsList.push({
-                            seatId: `${room.name}-R${rowNum}-S${seatNum}`,
-                            rowIdx: rIdx,
-                            seatIdx: sIdx
-                        });
-                    }
-                });
-                return { roomObj: room, seats: seatsList, pointer: 0 };
+            // --- ROW-BY-ROW SECTION GROUPED ALLOCATION ALGORITHM ---
+            // Group students by section key (className|section)
+            let sectionPools = {};
+            targetStudents.forEach(stu => {
+                const secKey = `${stu.className}|${stu.section}`;
+                if (!sectionPools[secKey]) sectionPools[secKey] = [];
+                sectionPools[secKey].push(stu);
             });
 
+            // Sort students within each section by roll number for clean ordering
+            Object.keys(sectionPools).forEach(k => {
+                sectionPools[k].sort((a, b) => String(a.rollNo || "").localeCompare(String(b.rollNo || ""), undefined, { numeric: true }));
+            });
+
+            let newAllocations = {};
+            let roomQueue = targetRooms.map(room => ({ roomObj: room, rows: room.rows || [] }));
+
             let roomPtr = 0;
-            while (studentsPool.length > 0 && roomQueue.some(q => q.pointer < q.seats.length)) {
-                let currentQ = roomQueue[roomPtr];
-                if (currentQ.pointer >= currentQ.seats.length) {
-                    roomPtr = (roomPtr + 1) % roomQueue.length;
-                    continue;
+            // Helper to get next available section key that has students
+            const getNextSectionKey = (excludeKey = null) => {
+                let keys = Object.keys(sectionPools).filter(k => sectionPools[k].length > 0);
+                if (keys.length === 0) return null;
+                if (excludeKey && keys.length > 1) {
+                    let filtered = keys.filter(k => k !== excludeKey);
+                    if (filtered.length > 0) return filtered[0];
                 }
+                return keys[0];
+            };
 
-                const seatMeta = currentQ.seats[currentQ.pointer];
-                currentQ.pointer++;
+            // Fill rooms row by row
+            let activeRoomIdx = 0;
+            let roomRowPointers = targetRooms.map(() => 0); // tracks current row index per room
+            let roomLastSection = targetRooms.map(() => null); // tracks section used in previous row per room
 
-                // REQUIREMENT 2: Put same section / same paper behind each other (same column index across rows), NOT side-wise.
-                // We check the seat directly in front/behind (same seatIdx in previous row of the same room)
-                let preferredStudentIdx = 0;
-                if (seatMeta.rowIdx > 0) {
-                    const prevRowSeatId = `${currentQ.roomObj.name}-R${seatMeta.rowIdx}-S${String(seatMeta.seatIdx + 1).padStart(2, '0')}`;
-                    const prevStudent = newAllocations[prevRowSeatId];
+            while (Object.values(sectionPools).some(arr => arr.length > 0)) {
+                let roomEntry = targetRooms[activeRoomIdx];
+                let rows = roomEntry.rows || [];
+                let rIdx = roomRowPointers[activeRoomIdx];
+
+                if (rIdx < rows.length) {
+                    const row = rows[rIdx];
+                    const rowNum = rIdx + 1;
                     
-                    if (prevStudent) {
-                        // Try to find a student from a DIFFERENT section/paper for side-wise safety, 
-                        // but if same section students are being placed behind each other, prioritize them!
-                        const sameSecIdx = studentsPool.findIndex(s => s.className === prevStudent.className && s.section === prevStudent.section);
-                        if (sameSecIdx !== -1) {
-                            preferredStudentIdx = sameSecIdx; // Put behind each other!
+                    // Pick a section for this row (non-matching with previous row if possible)
+                    let secKey = getNextSectionKey(roomLastSection[activeRoomIdx]);
+                    if (secKey) {
+                        roomLastSection[activeRoomIdx] = secKey;
+                        
+                        // Fill all seats in this row with students from this section (or switch sections if pool exhausts)
+                        for (let sIdx = 0; sIdx < row.seats; sIdx++) {
+                            if (sectionPools[secKey].length === 0) {
+                                secKey = getNextSectionKey(secKey);
+                                if (!secKey) break;
+                            }
+                            const stu = sectionPools[secKey].shift();
+                            const seatNum = String(sIdx + 1).padStart(2, '0');
+                            const seatId = `${roomEntry.name}-R${rowNum}-S${seatNum}`;
+                            newAllocations[seatId] = stu;
                         }
                     }
+                    roomRowPointers[activeRoomIdx]++;
                 }
 
-                const assignedStu = studentsPool.splice(preferredStudentIdx, 1)[0];
-                newAllocations[seatMeta.seatId] = assignedStu;
+                activeRoomIdx = (activeRoomIdx + 1) % targetRooms.length;
 
-                roomPtr = (roomPtr + 1) % roomQueue.length;
+                // Safety break if all rooms are fully exhausted but students remain
+                if (roomRowPointers.every((r, idx) => r >= (targetRooms[idx].rows || []).length)) {
+                    break;
+                }
             }
 
             // Run anti-cheat risk checks across generated rooms
