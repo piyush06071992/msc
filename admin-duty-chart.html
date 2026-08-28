@@ -1818,7 +1818,7 @@ async function renderRoomSelectors() {
             panel.classList.remove('hidden');
         }
 
-        function saveManualEdit() {
+     function saveManualEdit() {
             const email = document.getElementById('edit-staff').value;
             let staff = null;
             if(email) staff = staffData.find(s => s.email === email);
@@ -1831,20 +1831,26 @@ async function renderRoomSelectors() {
             
             let targetCol = generatedRoster[roomName].columns[colKey];
             
+            // Capture original unedited raw times of this shift before updating
+            const origStart = targetCol.rawStart;
+            const origEnd = targetCol.rawEnd;
+
             // 1. Update the current shift's data
             targetCol.status = staff ? 'ASSIGNED' : 'UNSTAFFED';
             targetCol.staff = staff;
             
             if (sInp && eInp && currentMode === 'EXAM') {
-                targetCol.rawStart = timeToMins(sInp);
-                targetCol.rawEnd = timeToMins(eInp);
+                const newStartMins = timeToMins(sInp);
+                const newEndMins = timeToMins(eInp);
+
+                targetCol.rawStart = newStartMins;
+                targetCol.rawEnd = newEndMins;
                 const durLabel = `${targetCol.rawEnd - targetCol.rawStart}m`;
                 targetCol.timing = `${format12Hour(sInp)} - ${format12Hour(eInp)} (${durLabel})`;
                 
-                // 2. TIMELINE HEALER: Rebuild the room's shift list
-                healRoomTimeline(roomName, true);
+                // 2. TIMELINE HEALER WITH BOUNDARY SPLITTING (For leading/trailing adjustments)
+                healRoomTimelineWithGaps(roomName, origStart, origEnd, newStartMins, newEndMins);
             } else {
-                // If we didn't heal, we still need to render and keep the room open
                 renderGeneratedGrid(roomName);
             }
             
@@ -1924,6 +1930,54 @@ async function renderRoomSelectors() {
                 setTimeout(() => alert("⚠️ Notice: A teacher was repeated because no completely free staff was available for the new slot."), 500);
           }
             renderGeneratedGrid(keepRoomOpen ? roomName : null);
+        }
+        function healRoomTimelineWithGaps(roomName, origStart, origEnd, newStart, newEnd) {
+            let roomShifts = Object.values(generatedRoster[roomName].columns).sort((a,b) => a.rawStart - b.rawStart);
+            
+            const exemptedStaffEmails = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value.trim().toLowerCase());
+            const availablePool = staffData.filter(s => !exemptedStaffEmails.includes(s.email.trim().toLowerCase()));
+            
+            let busyEmails = new Set();
+            Object.keys(generatedRoster).forEach(r => {
+                Object.values(generatedRoster[r].columns).forEach(c => {
+                   if(c.staff && c.staff.email) busyEmails.add(c.staff.email.trim().toLowerCase());
+                });
+            });
+
+            // Check if user created a leading gap (e.g., original started at 09:00, now starts at 09:30)
+            let leadingGapInserted = false;
+            if (newStart > origStart) {
+                const leadShift = fillHealedGap(origStart, newStart, availablePool, busyEmails, roomName);
+                if (!leadShift.staff) {
+                    alert(`⚠️ Warning: Created leading gap (${minsTo24(origStart)} - ${minsTo24(newStart)}), but no free staff available to fill it! Shift left unstaffed.`);
+                }
+                roomShifts.unshift({ ...leadShift, columnKeyName: 'LeadingGap' });
+            }
+
+            // Check if user created a trailing gap (e.g., original ended at 12:30, now ends at 12:00)
+            let trailingGapInserted = false;
+            if (newEnd < origEnd) {
+                const trailShift = fillHealedGap(newEnd, origEnd, availablePool, busyEmails, roomName);
+                if (!trailShift.staff) {
+                    alert(`⚠️ Warning: Created trailing gap (${minsTo24(newEnd)} - ${minsTo24(origEnd)}), but no free staff available to fill it! Shift left unstaffed.`);
+                }
+                roomShifts.push({ ...trailShift, columnKeyName: 'TrailingGap' });
+            }
+
+            // Re-index all room shifts cleanly
+            generatedRoster[roomName].columns = {};
+            let shiftCounter = 1;
+            roomShifts.forEach(sh => {
+                generatedRoster[roomName].columns[`Shift ${shiftCounter++}`] = {
+                    status: sh.status,
+                    staff: sh.staff,
+                    timing: sh.timing,
+                    rawStart: sh.rawStart,
+                    rawEnd: sh.rawEnd
+                };
+            });
+
+            renderGeneratedGrid(roomName);
         }
 
         // Internal helper to find a teacher for a newly created gap
