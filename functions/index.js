@@ -337,6 +337,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 
             const pages = studentPdf.getPages();
             
+        // Apply flanked bottom footer watermark details safely in the bottom margin (y = 16)
             for (let pIdx = 0; pIdx < pages.length; pIdx++) {
                 const page = pages[pIdx];
                 const { width } = page.getSize();
@@ -348,7 +349,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
                 const color = rgb(0.2, 0.2, 0.2);
                 const opacity = 0.7;
 
-                const y = 16; // Lowered closer to the bottom edge to avoid text overlap 
+                const y = 16; // Lowered from 32 to 16 to sit cleanly below the question content
                 const leftX = 36;
                 const rightX = width - font.widthOfTextAtSize(rightText, size) - 36;
 
