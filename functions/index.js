@@ -1,5 +1,5 @@
 const { onSchedule } = require("firebase-functions/v2/scheduler");
-const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
+const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
@@ -272,7 +272,7 @@ async function loadPdfBytes(pdfUrl) {
 }
 
 // =======================================================
-// --- SINGLE ROOM BATCH COMPILATION ENGINE ---
+// --- SINGLE ROOM BATCH COMPILATION ENGINE (WITH DARKER WATERMARK) ---
 // =======================================================
 async function compileSingleRoomPackage(center, date, roomName, allocations) {
     if (!allocations || Object.keys(allocations).length === 0) return false;
@@ -332,7 +332,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 
             const pages = studentPdf.getPages();
             
-            // Apply centered, light letterhead-style watermark ONLY on the FIRST PAGE (Front Page)
+            // Apply centered letterhead watermark with DARKER contrast on the FIRST PAGE
             if (pages.length > 0) {
                 const firstPage = pages[0];
                 const { width, height } = firstPage.getSize();
@@ -342,48 +342,23 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
                 const line3 = `SEAT: ${seatId}   |   SEC: ${student.section}   |   ${assignedSeries}`;
 
                 const size = 13;
-                const color = rgb(0.5, 0.5, 0.5); // Soft neutral gray
-                const opacity = 0.18;             // Light, subtle watermark effect
+                const color = rgb(0.2, 0.2, 0.2); // Darker charcoal grey for high visibility
+                const opacity = 0.35;             // Noticeably darker and clearer
 
-                // Draw centered lines in the upper-middle section of the page
                 const startY = height / 1.75;
                 
                 const w1 = font.widthOfTextAtSize(line1, size);
                 const w2 = font.widthOfTextAtSize(line2, size);
                 const w3 = font.widthOfTextAtSize(line3, size);
 
-                firstPage.drawText(line1, {
-                    x: (width - w1) / 2,
-                    y: startY,
-                    size: size,
-                    font: font,
-                    color: color,
-                    opacity: opacity,
-                });
-
-                firstPage.drawText(line2, {
-                    x: (width - w2) / 2,
-                    y: startY - 20,
-                    size: size,
-                    font: font,
-                    color: color,
-                    opacity: opacity,
-                });
-
-                firstPage.drawText(line3, {
-                    x: (width - w3) / 2,
-                    y: startY - 40,
-                    size: size,
-                    font: font,
-                    color: color,
-                    opacity: opacity,
-                });
+                firstPage.drawText(line1, { x: (width - w1) / 2, y: startY, size, font, color, opacity });
+                firstPage.drawText(line2, { x: (width - w2) / 2, y: startY - 20, size, font, color, opacity });
+                firstPage.drawText(line3, { x: (width - w3) / 2, y: startY - 40, size, font, color, opacity });
             }
 
             const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
             copiedPages.forEach(p => mergedPdf.addPage(p));
 
-            // Ensure booklet section is padded to a multiple of 4 pages
             const currentPagesCount = copiedPages.length;
             const remainder = currentPagesCount % 4;
             if (remainder !== 0) {
