@@ -239,19 +239,36 @@ exports.sendInstantPushAlerts = onDocumentCreated({
 });
 
 // =======================================================
-// --- ROBUST FETCH WITH RETRY FOR LARGE SCALES ---
+// --- ROBUST PDF LOADER (ADMIN SDK + FETCH FALLBACK) ---
 // =======================================================
-async function fetchWithRetry(url, retries = 3, delay = 1500) {
-    for (let i = 0; i < retries; i++) {
+async function loadPdfBytes(pdfUrl) {
+    if (pdfUrl.includes("firebasestorage.googleapis.com")) {
         try {
-            const res = await fetch(url);
-            if (res.ok) return res;
+            const match = pdfUrl.match(/\/o\/(.*?)\?/);
+            if (match && match[1]) {
+                const filePath = decodeURIComponent(match[1]);
+                const [buffer] = await admin.storage().bucket().file(filePath).download();
+                return buffer;
+            }
         } catch (e) {
-            if (i === retries - 1) throw e;
+            console.warn("[PDF Engine] Admin SDK direct download failed, falling back to fetch:", e.message);
         }
-        await new Promise(resolve => setTimeout(resolve, delay));
     }
-    throw new Error(`Failed to fetch after ${retries} retries: ${url}`);
+
+    // Fallback standard fetch with retries
+    for (let i = 0; i < 3; i++) {
+        try {
+            const res = await fetch(pdfUrl);
+            if (res.ok) {
+                const arrayBuf = await res.arrayBuffer();
+                return Buffer.from(arrayBuf);
+            }
+        } catch (e) {
+            if (i === 2) throw e;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+    throw new Error(`Failed to download PDF from URL: ${pdfUrl}`);
 }
 
 // =======================================================
@@ -260,7 +277,6 @@ async function fetchWithRetry(url, retries = 3, delay = 1500) {
 async function processPrintPackages(center, date, allocations) {
     if (!allocations || Object.keys(allocations).length === 0) return;
 
-    // Aggressive normalizer: strips all spaces, hyphens, brackets, and special characters
     const norm = (str) => String(str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 
     let roomBuckets = {};
@@ -312,8 +328,7 @@ async function processPrintPackages(center, date, allocations) {
             }
 
             try {
-                const pdfRes = await fetchWithRetry(pdfUrl);
-                const pdfBytes = await pdfRes.arrayBuffer();
+                const pdfBytes = await loadPdfBytes(pdfUrl);
                 const studentPdf = await PDFDocument.load(pdfBytes);
 
                 const pages = studentPdf.getPages();
