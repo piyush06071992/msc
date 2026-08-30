@@ -337,7 +337,6 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 
             const pages = studentPdf.getPages();
             
-            // Apply flanked bottom footer watermark details safely inside visible page area (y = 32)
             for (let pIdx = 0; pIdx < pages.length; pIdx++) {
                 const page = pages[pIdx];
                 const { width } = page.getSize();
@@ -388,7 +387,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 }
 
 // =======================================================
-// --- SERVER-SIDE PARALLEL CHUNKED COMPILATION ORCHESTRATOR ---
+// --- SERVER-SIDE BLAZING-FAST FULLY PARALLEL ORCHESTRATOR ---
 // =======================================================
 exports.compileAllRoomsServerSide = onRequest({
     region: "asia-south1",
@@ -421,13 +420,12 @@ exports.compileAllRoomsServerSide = onRequest({
             progress: 0,
             totalRooms: roomsDatabase.length,
             completedRooms: 0,
-            rooms: roomsDatabase.map(r => ({ name: r.name, status: "QUEUED", error: null })),
+            rooms: roomsDatabase.map(r => ({ name: r.name, status: "PROCESSING", error: null })),
             updatedAt: admin.firestore.FieldValue.serverTimestamp()
         });
 
-        res.status(200).send({ success: true, message: "Server-side parallel compilation initiated." });
+        res.status(200).send({ success: true, message: "Server-side full parallel compilation initiated." });
 
-        // --- BACKGROUND PARALLEL CHUNKING LOOP ---
         const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
         const allocDoc = await admin.firestore().collection(`${prefix}exam_seating_allocations`).doc(`${center}_${date}`).get();
         
@@ -441,56 +439,43 @@ exports.compileAllRoomsServerSide = onRequest({
 
         const allocations = allocDoc.data().allocations || {};
         let completedRooms = 0;
-        let roomStatuses = roomsDatabase.map(r => ({ name: r.name, status: "QUEUED", error: null }));
+        let roomStatuses = roomsDatabase.map(r => ({ name: r.name, status: "PROCESSING", error: null }));
 
-        // Process rooms in concurrent chunks of 4 for maximum speed without overloading memory
-        const chunkSize = 4;
-        for (let i = 0; i < roomsDatabase.length; i += chunkSize) {
-            const chunk = roomsDatabase.slice(i, i + chunkSize);
-
-            await Promise.all(chunk.map(async (room) => {
-                const roomIndex = roomsDatabase.findIndex(r => r.name === room.name);
-                
-                roomStatuses[roomIndex].status = "PROCESSING";
-                await admin.firestore().collection("exam_compilation_jobs").doc(jobDocId).update({
-                    rooms: roomStatuses,
-                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        // Execute ALL rooms fully in parallel using Promise.all so it completes in under 60-90 seconds total
+        await Promise.all(roomsDatabase.map(async (room, roomIndex) => {
+            try {
+                let roomOccupantsCount = 0;
+                Object.keys(allocations).forEach(seatId => {
+                    if (seatId.toUpperCase().startsWith(`${room.name}-`.toUpperCase())) {
+                        roomOccupantsCount++;
+                    }
                 });
 
-                try {
-                    let roomOccupantsCount = 0;
-                    Object.keys(allocations).forEach(seatId => {
-                        if (seatId.toUpperCase().startsWith(`${room.name}-`.toUpperCase())) {
-                            roomOccupantsCount++;
-                        }
-                    });
-
-                    if (roomOccupantsCount === 0) {
-                        roomStatuses[roomIndex].status = "SUCCESS";
-                        roomStatuses[roomIndex].error = "Skipped (No students allocated)";
-                    } else {
-                        const success = await compileSingleRoomPackage(center, date, room.name, allocations);
-                        roomStatuses[roomIndex].status = "SUCCESS";
-                        if (!success) roomStatuses[roomIndex].error = "Room skipped";
-                    }
-                } catch (roomErr) {
-                    console.error(`Error compiling room ${room.name}:`, roomErr);
-                    roomStatuses[roomIndex].status = "ERROR";
-                    roomStatuses[roomIndex].error = roomErr.message;
+                if (roomOccupantsCount === 0) {
+                    roomStatuses[roomIndex].status = "SUCCESS";
+                    roomStatuses[roomIndex].error = "Skipped (No students allocated)";
+                } else {
+                    const success = await compileSingleRoomPackage(center, date, room.name, allocations);
+                    roomStatuses[roomIndex].status = "SUCCESS";
+                    if (!success) roomStatuses[roomIndex].error = "Room skipped";
                 }
+            } catch (roomErr) {
+                console.error(`Error compiling room ${room.name}:`, roomErr);
+                roomStatuses[roomIndex].status = "ERROR";
+                roomStatuses[roomIndex].error = roomErr.message;
+            }
 
-                completedRooms++;
-            }));
+            completedRooms++;
+        }));
 
-            const percent = Math.round((completedRooms / roomsDatabase.length) * 100);
-            await admin.firestore().collection("exam_compilation_jobs").doc(jobDocId).update({
-                completedRooms: completedRooms,
-                progress: percent,
-                rooms: roomStatuses,
-                status: completedRooms >= roomsDatabase.length ? "COMPLETED" : "PROCESSING",
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
-        }
+        await admin.firestore().collection("exam_compilation_jobs").doc(jobDocId).update({
+            completedRooms: completedRooms,
+            progress: 100,
+            rooms: roomStatuses,
+            status: "COMPLETED",
+            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+
     } catch (serverErr) {
         console.error("Server-side compilation loop error:", serverErr);
         await admin.firestore().collection("exam_compilation_jobs").doc(jobDocId).update({
