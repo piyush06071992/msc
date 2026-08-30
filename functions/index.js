@@ -404,6 +404,7 @@ exports.compileRoomBatch = onRequest({
     timeoutSeconds: 300
 }, async (req, res) => {
     res.set('Access-Control-Allow-Origin', '*');
+    res.set('Access-Control-Allow-Headers', 'Content-Type');
     if (req.method === 'OPTIONS') {
         res.status(204).send('');
         return;
