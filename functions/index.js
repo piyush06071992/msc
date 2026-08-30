@@ -272,9 +272,6 @@ async function loadPdfBytes(pdfUrl) {
 }
 
 // =======================================================
-// --- SINGLE ROOM BATCH COMPILATION ENGINE (WITH DARKER WATERMARK) ---
-// =======================================================
-// =======================================================
 // --- LIVE JOB STATUS TRACKER HELPER ---
 // =======================================================
 async function updateRoomJobStatus(jobDocId, roomName, status, errorMsg = null) {
@@ -375,28 +372,39 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 
             const pages = studentPdf.getPages();
             
-            // Apply centered letterhead watermark with DARKER contrast on the FIRST PAGE
-            if (pages.length > 0) {
-                const firstPage = pages[0];
-                const { width, height } = firstPage.getSize();
+            // Apply flanked bottom footer watermark details on EVERY page of the student booklet
+            for (let pIdx = 0; pIdx < pages.length; pIdx++) {
+                const page = pages[pIdx];
+                const { width } = page.getSize();
                 
-                const line1 = `MINERVA STUDY CIRCLE`;
-                const line2 = `${student.name.toUpperCase()}  (ROLL: #${student.rollNo || "—"})`;
-                const line3 = `SEAT: ${seatId}   |   SEC: ${student.section}   |   ${assignedSeries}`;
+                const leftText = `MINERVA STUDY CIRCLE  |  ${student.name.toUpperCase()}  (ROLL: #${student.rollNo || "—"})`;
+                const rightText = `SEAT: ${seatId}   |   SEC: ${student.section}   |   ${assignedSeries}`;
 
-                const size = 13;
-                const color = rgb(0.2, 0.2, 0.2);
-                const opacity = 0.35;
+                const size = 8.5;
+                const color = rgb(0.2, 0.2, 0.2); // Dark charcoal grey
+                const opacity = 0.6;              // Clear and slightly bright watermark effect
 
-                const startY = height / 1.75;
-                
-                const w1 = font.widthOfTextAtSize(line1, size);
-                const w2 = font.widthOfTextAtSize(line2, size);
-                const w3 = font.widthOfTextAtSize(line3, size);
+                const y = 20; // Bottom footer margin
+                const leftX = 36;
+                const rightX = width - font.widthOfTextAtSize(rightText, size) - 36;
 
-                firstPage.drawText(line1, { x: (width - w1) / 2, y: startY, size, font, color, opacity });
-                firstPage.drawText(line2, { x: (width - w2) / 2, y: startY - 20, size, font, color, opacity });
-                firstPage.drawText(line3, { x: (width - w3) / 2, y: startY - 40, size, font, color, opacity });
+                page.drawText(leftText, {
+                    x: leftX,
+                    y: y,
+                    size: size,
+                    font: font,
+                    color: color,
+                    opacity: opacity,
+                });
+
+                page.drawText(rightText, {
+                    x: rightX,
+                    y: y,
+                    size: size,
+                    font: font,
+                    color: color,
+                    opacity: opacity,
+                });
             }
 
             const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
@@ -436,7 +444,7 @@ exports.compileRoomBatch = onRequest({
     region: "asia-south1",
     memory: "1GiB",
     timeoutSeconds: 300,
-    cors: true // Native Firebase v2 CORS handling
+    cors: true
 }, async (req, res) => {
     const { center, date, roomName } = req.body;
     if (!center || !date || !roomName) {
@@ -458,7 +466,6 @@ exports.compileRoomBatch = onRequest({
 
         const allocations = docRef.data().allocations || {};
 
-        // Gracefully skip and mark success if room has zero students allocated
         let roomOccupantsCount = 0;
         Object.keys(allocations).forEach(seatId => {
             if (seatId.toUpperCase().startsWith(`${roomName}-`.toUpperCase())) {
