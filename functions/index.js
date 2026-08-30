@@ -242,7 +242,8 @@ exports.sendInstantPushAlerts = onDocumentCreated({
 async function processPrintPackages(center, date, allocations) {
     if (!allocations || Object.keys(allocations).length === 0) return;
 
-    const norm = (str) => String(str || "").replace(/\s+/g, " ").trim().toUpperCase();
+    // Aggressive normalizer: strips all spaces, hyphens, brackets, and special characters
+    const norm = (str) => String(str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 
     let roomBuckets = {};
     Object.keys(allocations).forEach(seatId => {
@@ -256,16 +257,15 @@ async function processPrintPackages(center, date, allocations) {
         .where("date", "==", date)
         .get();
 
-    // Map papers by "CLASS|SECTION" -> { SERIES_NAME: url }
+    // Map papers by aggressive key -> { SERIES_NAME: url }
     let papersBySection = {}; 
     qpSnap.forEach(doc => {
         const qp = doc.data();
         if (!qp.className || !qp.section || !qp.url) return;
 
-        const secKey = `${norm(qp.className)}|${norm(qp.section)}`;
+        const secKey = `${norm(qp.className)}${norm(qp.section)}`;
         if (!papersBySection[secKey]) papersBySection[secKey] = {};
         
-        // Normalize series name (fallback to SERIES A if undefined)
         const series = qp.series ? qp.series.toUpperCase() : "SERIES A";
         papersBySection[secKey][series] = qp.url;
     });
@@ -282,13 +282,12 @@ async function processPrintPackages(center, date, allocations) {
             const { seatId, student } = occupants[i];
             if (!student || !student.className || !student.section) continue;
 
-            const secKey = `${norm(student.className)}|${norm(student.section)}`;
+            const secKey = `${norm(student.className)}${norm(student.section)}`;
             const sectionPapers = papersBySection[secKey] || {};
             const roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers) : availableSeries;
             
-            // Assign series deterministically based on seat index
             const assignedSeries = roomSeriesList[i % roomSeriesList.length];
-            const pdfUrl = sectionPapers[assignedSeries] || Object.values(sectionPapers)[0]; // Fallback to any available series for this section
+            const pdfUrl = sectionPapers[assignedSeries] || Object.values(sectionPapers)[0];
 
             if (!pdfUrl) {
                 console.log(`[PDF Engine] Skipping seat ${seatId}: No question paper found for section ${student.className} Sec ${student.section}`);
@@ -325,7 +324,6 @@ async function processPrintPackages(center, date, allocations) {
                 const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
                 copiedPages.forEach(p => mergedPdf.addPage(p));
 
-                // Booklet Padding: Ensure total pages are a multiple of 4
                 const currentPagesCount = copiedPages.length;
                 const remainder = currentPagesCount % 4;
                 if (remainder !== 0) {
