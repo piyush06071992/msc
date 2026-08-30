@@ -1981,20 +1981,20 @@ async function executeAutoGenerate() {
                 return examSectionsMap[key];
             });
 
-            // Parse specific rules mapping
+            // Parse specific rules mapping: sectionKey -> array of preferred room names
             let sectionPrefMap = {};
             let ruleRoomsSet = new Set();
             autogenRules.forEach(r => {
-                if(r.sections.length > 0 && r.rooms.length > 0) {
-                    r.sections.forEach(sec => {
-                        if(!sectionPrefMap[sec]) sectionPrefMap[sec] = [];
-                        sectionPrefMap[sec].push(...r.rooms);
+                if (r.sections && r.sections.length > 0 && r.rooms && r.rooms.length > 0) {
+                    r.sections.forEach(secKey => {
+                        const normSecKey = norm(secKey);
+                        if (!sectionPrefMap[normSecKey]) sectionPrefMap[normSecKey] = [];
+                        sectionPrefMap[normSecKey].push(...r.rooms);
                     });
                     r.rooms.forEach(rm => ruleRoomsSet.add(rm));
                 }
             });
 
-            // Calculate total global seats + rule seats to ensure we have capacity
             let allUsableRooms = new Set([...selectedRoomNames, ...Array.from(ruleRoomsSet)]);
             let totalSeats = 0;
             let targetRooms = Array.from(allUsableRooms).map(name => roomsDatabase.find(r => r.name === name)).filter(Boolean);
@@ -2003,12 +2003,12 @@ async function executeAutoGenerate() {
             });
 
             if (targetStudents.length > totalSeats) {
-                return alert(`🚨 CAPACITY WARNING / AUTO-GEN BLOCKED:\n\nNumber of students (${targetStudents.length}) exceeds the total capacity of involved rooms (${totalSeats} seats).\nPlease add more rooms before generating.`);
+                return alert(`🚨 CAPACITY WARNING / AUTO-GEN BLOCKED:\n\nNumber of students (${targetStudents.length}) exceeds total capacity (${totalSeats} seats). Please add more rooms.`);
             }
 
             if (!confirm(`Generate seating plan for ${targetStudents.length} students? This will overwrite existing allocations for this date.`)) return;
 
-            // Group students by section
+            // Group students by section key (norm(className)|norm(section))
             let sectionPools = {};
             targetStudents.forEach(stu => {
                 const secKey = `${norm(stu.className)}|${norm(stu.section)}`;
@@ -2022,51 +2022,89 @@ async function executeAutoGenerate() {
 
             let newAllocations = {};
 
-            // Flatten all rows across target rooms to implement strict row-by-row interleaving
-            let allTargetRows = [];
-            targetRooms.forEach(room => {
-                (room.rows || []).forEach((row, rIdx) => {
-                    allTargetRows.push({ roomName: room.name, rIdx, row, roomObj: room });
-                });
+            const getRoomsObjs = (names) => names.map(n => roomsDatabase.find(r => r.name === n)).filter(Boolean);
+
+            // Phase 1: Satisfy explicit section-to-room preference rules first
+            Object.keys(sectionPrefMap).forEach(secKey => {
+                let preferredRoomNames = sectionPrefMap[secKey];
+                let prefRooms = getRoomsObjs(preferredRoomNames);
+                let students = sectionPools[secKey] || [];
+
+                for (let room of prefRooms) {
+                    if (students.length === 0) break;
+                    let rows = room.rows || [];
+                    for (let rIdx = 0; rIdx < rows.length && students.length > 0; rIdx++) {
+                        let row = rows[rIdx];
+                        let rowNum = rIdx + 1;
+                        for (let sIdx = 0; sIdx < row.seats && students.length > 0; sIdx++) {
+                            let seatNum = String(sIdx + 1).padStart(2, '0');
+                            let seatId = `${room.name}-R${rowNum}-S${seatNum}`;
+                            if (!newAllocations[seatId]) {
+                                newAllocations[seatId] = students.shift();
+                            }
+                        }
+                    }
+                }
             });
 
-            let lastSectionPerRoom = {};
+            // Phase 2: Allocate remaining students into remaining room capacities (global room pool / fallback)
+            let globalRooms = targetRooms.filter(r => !ruleRoomsSet.has(r.name) || selectedRoomNames.includes(r.name));
+            if (globalRooms.length === 0) globalRooms = targetRooms;
 
-            // Interleaved round-robin row allocator ensuring same section is never in consecutive rows
-            for (let rowMeta of allTargetRows) {
-                const { roomName, rIdx, row, roomObj } = rowMeta;
-                let lastSec = lastSectionPerRoom[roomName];
+            let globalRoomQueue = [...globalRooms];
 
-                let availableSections = Object.keys(sectionPools).filter(k => sectionPools[k].length > 0);
-                if (availableSections.length === 0) break;
+            const getNextAvailableSection = (excludeSec) => {
+                let keys = Object.keys(sectionPools).filter(k => (sectionPools[k] || []).length > 0);
+                if (keys.length === 0) return null;
+                let nonExcluded = keys.filter(k => k !== excludeSec);
+                if (nonExcluded.length > 0) return nonExcluded[0];
+                return keys[0];
+            };
 
-                // Pick a section different from the last section placed in this room if possible
-                let chosenSec = availableSections.find(k => k !== lastSec);
-                if (!chosenSec) {
-                    chosenSec = lastSec;
-                }
+            while (globalRoomQueue.length > 0 && Object.values(sectionPools).some(arr => arr.length > 0)) {
+                let room = globalRoomQueue.shift();
+                let rows = room.rows || [];
+                let lastSec = null;
 
-                lastSectionPerRoom[roomName] = chosenSec;
+                for (let rIdx = 0; rIdx < rows.length; rIdx++) {
+                    let row = rows[rIdx];
+                    let rowNum = rIdx + 1;
+                    let seatsNeeded = row.seats;
 
-                const rowNum = rIdx + 1;
-                for (let sIdx = 0; sIdx < row.seats; sIdx++) {
-                    if (sectionPools[chosenSec].length === 0) {
-                        let remainingSections = Object.keys(sectionPools).filter(k => sectionPools[k].length > 0);
-                        if (remainingSections.length === 0) break;
-                        chosenSec = remainingSections.find(k => k !== lastSec) || remainingSections[0];
-                        lastSectionPerRoom[roomName] = chosenSec;
+                    let totalAvailableStudents = Object.values(sectionPools).reduce((sum, arr) => sum + arr.length, 0);
+                    if (totalAvailableStudents === 0) break;
+
+                    let rowAllocatedCount = 0;
+                    for (let sIdx = 0; sIdx < seatsNeeded; sIdx++) {
+                        let secKey = getNextAvailableSection(lastSec);
+                        if (!secKey || sectionPools[secKey].length === 0) break;
+
+                        let stu = sectionPools[secKey].shift();
+                        lastSec = secKey;
+
+                        let seatNum = String(sIdx + 1).padStart(2, '0');
+                        let seatId = `${room.name}-R${rowNum}-S${seatNum}`;
+                        
+                        let attempts = 0;
+                        while (newAllocations[seatId] && attempts < seatsNeeded) {
+                            sIdx++;
+                            if (sIdx >= seatsNeeded) break;
+                            seatNum = String(sIdx + 1).padStart(2, '0');
+                            seatId = `${room.name}-R${rowNum}-S${seatNum}`;
+                            attempts++;
+                        }
+
+                        if (!newAllocations[seatId]) {
+                            newAllocations[seatId] = stu;
+                            rowAllocatedCount++;
+                        }
                     }
 
-                    if (sectionPools[chosenSec].length > 0) {
-                        const stu = sectionPools[chosenSec].shift();
-                        const seatNum = String(sIdx + 1).padStart(2, '0');
-                        const seatId = `${roomName}-R${rowNum}-S${seatNum}`;
-                        newAllocations[seatId] = stu;
-                    }
+                    if (totalAvailableStudents === 0) break;
                 }
             }
 
-            // Final anti-cheat validation
+            // Final Anti-Cheat & Save
             targetRooms.forEach(room => evaluateCheatRisks(newAllocations, room));
             currentAllocations = newAllocations;
 
@@ -2080,7 +2118,7 @@ async function executeAutoGenerate() {
                     timestamp: Date.now()
                 }, { merge: true });
 
-                alert("✅ Auto-Generate Seating Plan Completed Successfully with Interleaved Rows!");
+                alert("✅ Auto-Generate Seating Plan Completed Successfully with Preference Rules Respected!");
                 closeAutoGenerateModal();
                 if (activeRoomId) selectRoom(activeRoomId, false);
                 else if (targetRooms.length > 0) selectRoom(targetRooms[0].id, true);
