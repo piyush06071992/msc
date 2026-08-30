@@ -1,5 +1,6 @@
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
+const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
 
@@ -271,19 +272,22 @@ async function loadPdfBytes(pdfUrl) {
 }
 
 // =======================================================
-// --- BACKGROUND SEATING PLAN & PDF COMPILATION ENGINE ---
+// --- SINGLE ROOM BATCH COMPILATION ENGINE ---
 // =======================================================
-async function processPrintPackages(center, date, allocations) {
-    if (!allocations || Object.keys(allocations).length === 0) return;
+async function compileSingleRoomPackage(center, date, roomName, allocations) {
+    if (!allocations || Object.keys(allocations).length === 0) return false;
 
     const norm = (str) => String(str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 
-    let roomBuckets = {};
+    let roomOccupants = [];
     Object.keys(allocations).forEach(seatId => {
-        const roomName = seatId.split("-R")[0].toUpperCase();
-        if (!roomBuckets[roomName]) roomBuckets[roomName] = [];
-        roomBuckets[roomName].push({ seatId, student: allocations[seatId] });
+        if (seatId.toUpperCase().startsWith(`${roomName}-`.toUpperCase())) {
+            roomOccupants.push({ seatId, student: allocations[seatId] });
+        }
     });
+
+    if (roomOccupants.length === 0) return false;
+    roomOccupants.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
 
     const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
     const qpSnap = await admin.firestore().collection(`${prefix}question_papers`)
@@ -302,159 +306,130 @@ async function processPrintPackages(center, date, allocations) {
         papersBySection[secKey][series] = qp.url;
     });
 
-    for (const roomName of Object.keys(roomBuckets)) {
-        const occupants = roomBuckets[roomName];
-        occupants.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
+    const mergedPdf = await PDFDocument.create();
+    const font = await mergedPdf.embedFont(StandardFonts.HelveticaBold);
+    const availableSeries = ["SERIES A", "SERIES B", "SERIES C", "SERIES D"];
 
-        const mergedPdf = await PDFDocument.create();
-        const font = await mergedPdf.embedFont(StandardFonts.HelveticaBold);
-        const availableSeries = ["SERIES A", "SERIES B", "SERIES C", "SERIES D"];
+    for (let i = 0; i < roomOccupants.length; i++) {
+        const { seatId, student } = roomOccupants[i];
+        if (!student || !student.className || !student.section) continue;
 
-        for (let i = 0; i < occupants.length; i++) {
-            const { seatId, student } = occupants[i];
-            if (!student || !student.className || !student.section) continue;
+        const secKey = `${norm(student.className)}${norm(student.section)}`;
+        const sectionPapers = papersBySection[secKey] || {};
+        const roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers) : availableSeries;
+        
+        const assignedSeries = roomSeriesList[i % roomSeriesList.length];
+        const pdfUrl = sectionPapers[assignedSeries] || Object.values(sectionPapers)[0];
 
-            const secKey = `${norm(student.className)}${norm(student.section)}`;
-            const sectionPapers = papersBySection[secKey] || {};
-            const roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers) : availableSeries;
-            
-            const assignedSeries = roomSeriesList[i % roomSeriesList.length];
-            const pdfUrl = sectionPapers[assignedSeries] || Object.values(sectionPapers)[0];
-
-            if (!pdfUrl) {
-                console.log(`[PDF Engine] Skipping seat ${seatId}: No question paper found for section ${student.className} Sec ${student.section}`);
-                continue; 
-            }
-
-            try {
-                const pdfBytes = await loadPdfBytes(pdfUrl);
-                const studentPdf = await PDFDocument.load(pdfBytes);
-
-                const pages = studentPdf.getPages();
-                
-                // Apply professional top header banner ONLY on the FIRST PAGE (Front Page) within printing margins
-                if (pages.length > 0) {
-                    const firstPage = pages[0];
-                    const { width, height } = firstPage.getSize();
-                    
-                    const margin = 36;
-                    const boxHeight = 26;
-                    const boxWidth = width - (margin * 2);
-                    const boxX = margin;
-                    const boxY = height - margin - boxHeight;
-
-                    // Clean border banner container
-                    firstPage.drawRectangle({
-                        x: boxX,
-                        y: boxY,
-                        width: boxWidth,
-                        height: boxHeight,
-                        borderColor: rgb(0.1, 0.1, 0.4),
-                        borderWidth: 1,
-                        color: rgb(0.95, 0.96, 1.0),
-                    });
-
-                    const headerText = `${student.name.toUpperCase()}   |   ROLL: #${student.rollNo || "—"}   |   SEAT: ${seatId}   |   SEC: ${student.section}   |   SERIES ${assignedSeries}`;
-
-                    firstPage.drawText(headerText, {
-                        x: boxX + 10,
-                        y: boxY + 8,
-                        size: 9,
-                        font: font,
-                        color: rgb(0.1, 0.1, 0.3),
-                    });
-                }
-
-                const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
-                copiedPages.forEach(p => mergedPdf.addPage(p));
-
-                // Ensure each student's booklet section is padded to a multiple of 4 pages for booklet binding
-                const currentPagesCount = copiedPages.length;
-                const remainder = currentPagesCount % 4;
-                if (remainder !== 0) {
-                    const pagesNeeded = 4 - remainder;
-                    for (let p = 0; p < pagesNeeded; p++) {
-                        mergedPdf.addPage();
-                    }
-                }
-            } catch (err) {
-                console.error(`[PDF Engine] Error processing paper for seat ${seatId}:`, err);
-            }
+        if (!pdfUrl) {
+            console.log(`[PDF Engine] Skipping seat ${seatId}: No question paper found for section ${student.className} Sec ${student.section}`);
+            continue; 
         }
 
-        if (mergedPdf.getPageCount() > 0) {
-            const mergedPdfBytes = await mergedPdf.save();
-            const storagePath = `print_packages/${center}/${date}/${roomName}_print_package.pdf`;
-            const fileRef = admin.storage().bucket().file(storagePath);
+        try {
+            const pdfBytes = await loadPdfBytes(pdfUrl);
+            const studentPdf = await PDFDocument.load(pdfBytes);
+
+            const pages = studentPdf.getPages();
             
-            await fileRef.save(Buffer.from(mergedPdfBytes), {
-                metadata: { contentType: "application/pdf" },
-            });
-            console.log(`[PDF Engine] Compiled print package for Room: ${roomName} (${date})`);
+            // Apply professional top header banner ONLY on the FIRST PAGE (Front Page) within printing margins
+            if (pages.length > 0) {
+                const firstPage = pages[0];
+                const { width, height } = firstPage.getSize();
+                
+                const margin = 36;
+                const boxHeight = 26;
+                const boxWidth = width - (margin * 2);
+                const boxX = margin;
+                const boxY = height - margin - boxHeight;
+
+                firstPage.drawRectangle({
+                    x: boxX,
+                    y: boxY,
+                    width: boxWidth,
+                    height: boxHeight,
+                    borderColor: rgb(0.1, 0.1, 0.4),
+                    borderWidth: 1,
+                    color: rgb(0.95, 0.96, 1.0),
+                });
+
+                const headerText = `${student.name.toUpperCase()}   |   ROLL: #${student.rollNo || "—"}   |   SEAT: ${seatId}   |   SEC: ${student.section}   |   ${assignedSeries}`;
+
+                firstPage.drawText(headerText, {
+                    x: boxX + 10,
+                    y: boxY + 8,
+                    size: 9,
+                    font: font,
+                    color: rgb(0.1, 0.1, 0.3),
+                });
+            }
+
+            const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
+            copiedPages.forEach(p => mergedPdf.addPage(p));
+
+            // Ensure booklet section is padded to a multiple of 4 pages
+            const currentPagesCount = copiedPages.length;
+            const remainder = currentPagesCount % 4;
+            if (remainder !== 0) {
+                const pagesNeeded = 4 - remainder;
+                for (let p = 0; p < pagesNeeded; p++) {
+                    mergedPdf.addPage();
+                }
+            }
+        } catch (err) {
+            console.error(`[PDF Engine] Error processing paper for seat ${seatId}:`, err);
         }
     }
+
+    if (mergedPdf.getPageCount() > 0) {
+        const mergedPdfBytes = await mergedPdf.save();
+        const storagePath = `print_packages/${center}/${date}/${roomName}_print_package.pdf`;
+        const fileRef = admin.storage().bucket().file(storagePath);
+        
+        await fileRef.save(Buffer.from(mergedPdfBytes), {
+            metadata: { contentType: "application/pdf" },
+        });
+        console.log(`[PDF Engine] Successfully compiled room batch: ${roomName} (${date})`);
+        return true;
+    }
+    return false;
 }
 
-// Trigger for Ghumarwin Seating Allocations (2 GiB RAM & 540s timeout for 1200+ students)
-exports.compileGhumarwinPrintPackages = onDocumentWritten({
-    document: "exam_seating_allocations/{docId}",
+// =======================================================
+// --- HTTP ENDPOINT FOR ROOM-BY-ROOM BATCH PROCESSING ---
+// =======================================================
+exports.compileRoomBatch = onRequest({
     region: "asia-south1",
-    memory: "2GiB",
-    timeoutSeconds: 540
-}, async (event) => {
-    const data = event.data.after.exists ? event.data.after.data() : null;
-    if (!data) return null;
-    await processPrintPackages("GHUMARWIN", data.date, data.allocations);
-    return null;
-});
-
-// Trigger for Dharamshala Seating Allocations (2 GiB RAM & 540s timeout)
-exports.compileDharamshalaPrintPackages = onDocumentWritten({
-    document: "dharamshala_exam_seating_allocations/{docId}",
-    region: "asia-south1",
-    memory: "2GiB",
-    timeoutSeconds: 540
-}, async (event) => {
-    const data = event.data.after.exists ? event.data.after.data() : null;
-    if (!data) return null;
-    await processPrintPackages("DHARAMSHALA", data.date, data.allocations);
-    return null;
-});
-
-// Explicit Trigger when Ghumarwin question papers are uploaded
-exports.recompileGhumarwinOnPaperUpload = onDocumentCreated({
-    document: "question_papers/{docId}",
-    region: "asia-south1",
-    memory: "2GiB",
-    timeoutSeconds: 540
-}, async (event) => {
-    const qp = event.data.data();
-    if (!qp || !qp.date) return null;
-
-    const center = "GHUMARWIN";
-    const allocDoc = await admin.firestore().collection("exam_seating_allocations").doc(`${center}_${qp.date}`).get();
-    if (allocDoc.exists) {
-        const allocData = allocDoc.data();
-        await processPrintPackages(center, qp.date, allocData.allocations);
+    memory: "1GiB",
+    timeoutSeconds: 300
+}, async (req, res) => {
+    res.set('Access-Control-Allow-Origin', '*');
+    if (req.method === 'OPTIONS') {
+        res.status(204).send('');
+        return;
     }
-    return null;
-});
 
-// Explicit Trigger when Dharamshala question papers are uploaded
-exports.recompileDharamshalaOnPaperUpload = onDocumentCreated({
-    document: "dharamshala_question_papers/{docId}",
-    region: "asia-south1",
-    memory: "2GiB",
-    timeoutSeconds: 540
-}, async (event) => {
-    const qp = event.data.data();
-    if (!qp || !qp.date) return null;
-
-    const center = "DHARAMSHALA";
-    const allocDoc = await admin.firestore().collection("dharamshala_exam_seating_allocations").doc(`${center}_${qp.date}`).get();
-    if (allocDoc.exists) {
-        const allocData = allocDoc.data();
-        await processPrintPackages(center, qp.date, allocData.allocations);
+    const { center, date, roomName } = req.body;
+    if (!center || !date || !roomName) {
+        res.status(400).send({ error: "Missing required parameters: center, date, roomName" });
+        return;
     }
-    return null;
+
+    try {
+        const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
+        const docRef = await admin.firestore().collection(`${prefix}exam_seating_allocations`).doc(`${center}_${date}`).get();
+        
+        if (!docRef.exists) {
+            res.status(404).send({ error: "Seating allocations not found for this date." });
+            return;
+        }
+
+        const allocations = docRef.data().allocations || {};
+        const success = await compileSingleRoomPackage(center, date, roomName, allocations);
+
+        res.status(200).send({ success, roomName, date });
+    } catch (error) {
+        console.error("Batch compile error:", error);
+        res.status(500).send({ error: error.message });
+    }
 });
