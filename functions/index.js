@@ -239,7 +239,7 @@ exports.sendInstantPushAlerts = onDocumentCreated({
 });
 
 // =======================================================
-// --- ROBUST PDF LOADER (ADMIN SDK + FETCH FALLBACK) ---
+// --- ROBUST FETCH WITH RETRY FOR LARGE SCALES ---
 // =======================================================
 async function loadPdfBytes(pdfUrl) {
     if (pdfUrl.includes("firebasestorage.googleapis.com")) {
@@ -255,7 +255,6 @@ async function loadPdfBytes(pdfUrl) {
         }
     }
 
-    // Fallback standard fetch with retries
     for (let i = 0; i < 3; i++) {
         try {
             const res = await fetch(pdfUrl);
@@ -333,16 +332,17 @@ async function processPrintPackages(center, date, allocations) {
 
                 const pages = studentPdf.getPages();
                 
-                // Apply diagonal background watermark across every page of the student's booklet
-                for (const page of pages) {
-                    const { width, height } = page.getSize();
-                    page.drawText(`${student.name.toUpperCase()}  |  ROLL: #${student.rollNo || "—"}  |  SEAT: ${seatId}  |  SERIES: ${assignedSeries}`, {
+                // Apply brighter watermark ONLY on the FIRST PAGE (Front Page) of the student's booklet
+                if (pages.length > 0) {
+                    const firstPage = pages[0];
+                    const { width, height } = firstPage.getSize();
+                    firstPage.drawText(`${student.name.toUpperCase()}  |  ROLL: #${student.rollNo || "—"}  |  SEAT: ${seatId}  |  SERIES: ${assignedSeries}`, {
                         x: width / 7,
                         y: height / 2.2,
                         size: 16,
                         font: font,
-                        color: rgb(0.6, 0.6, 0.7),
-                        opacity: 0.18,
+                        color: rgb(0.3, 0.3, 0.4), // Darker gray for higher contrast/brightness
+                        opacity: 0.38,             // Less transparent (brighter)
                         rotate: degrees(45),
                     });
                 }
@@ -355,17 +355,7 @@ async function processPrintPackages(center, date, allocations) {
                 if (remainder !== 0) {
                     const pagesNeeded = 4 - remainder;
                     for (let p = 0; p < pagesNeeded; p++) {
-                        const blankPage = mergedPdf.addPage();
-                        const { width, height } = blankPage.getSize();
-                        blankPage.drawText(`${student.name.toUpperCase()}  |  ROLL: #${student.rollNo || "—"}  |  SEAT: ${seatId}  |  SERIES: ${assignedSeries} (BLANK PAGE)`, {
-                            x: width / 7,
-                            y: height / 2.2,
-                            size: 14,
-                            font: font,
-                            color: rgb(0.7, 0.7, 0.8),
-                            opacity: 0.15,
-                            rotate: degrees(45),
-                        });
+                        mergedPdf.addPage();
                     }
                 }
             } catch (err) {
