@@ -1,7 +1,7 @@
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
 const admin = require("firebase-admin");
-const { PDFDocument, rgb, StandardFonts, degrees } = require("pdf-lib");
+const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
 
 if (!admin.apps.length) {
     admin.initializeApp();
@@ -239,7 +239,7 @@ exports.sendInstantPushAlerts = onDocumentCreated({
 });
 
 // =======================================================
-// --- ROBUST FETCH WITH RETRY FOR LARGE SCALES ---
+// --- ROBUST PDF LOADER (ADMIN SDK + FETCH FALLBACK) ---
 // =======================================================
 async function loadPdfBytes(pdfUrl) {
     if (pdfUrl.includes("firebasestorage.googleapis.com")) {
@@ -332,24 +332,43 @@ async function processPrintPackages(center, date, allocations) {
 
                 const pages = studentPdf.getPages();
                 
-                // Apply brighter watermark ONLY on the FIRST PAGE (Front Page) of the student's booklet
+                // Apply professional top header banner ONLY on the FIRST PAGE (Front Page) within printing margins
                 if (pages.length > 0) {
                     const firstPage = pages[0];
                     const { width, height } = firstPage.getSize();
-                    firstPage.drawText(`${student.name.toUpperCase()}  |  ROLL: #${student.rollNo || "—"}  |  SEAT: ${seatId}  |  SERIES: ${assignedSeries}`, {
-                        x: width / 7,
-                        y: height / 2.2,
-                        size: 16,
+                    
+                    const margin = 36;
+                    const boxHeight = 26;
+                    const boxWidth = width - (margin * 2);
+                    const boxX = margin;
+                    const boxY = height - margin - boxHeight;
+
+                    // Clean border banner container
+                    firstPage.drawRectangle({
+                        x: boxX,
+                        y: boxY,
+                        width: boxWidth,
+                        height: boxHeight,
+                        borderColor: rgb(0.1, 0.1, 0.4),
+                        borderWidth: 1,
+                        color: rgb(0.95, 0.96, 1.0),
+                    });
+
+                    const headerText = `${student.name.toUpperCase()}   |   ROLL: #${student.rollNo || "—"}   |   SEAT: ${seatId}   |   SEC: ${student.section}   |   SERIES ${assignedSeries}`;
+
+                    firstPage.drawText(headerText, {
+                        x: boxX + 10,
+                        y: boxY + 8,
+                        size: 9,
                         font: font,
-                        color: rgb(0.3, 0.3, 0.4), // Darker gray for higher contrast/brightness
-                        opacity: 0.38,             // Less transparent (brighter)
-                        rotate: degrees(45),
+                        color: rgb(0.1, 0.1, 0.3),
                     });
                 }
 
                 const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
                 copiedPages.forEach(p => mergedPdf.addPage(p));
 
+                // Ensure each student's booklet section is padded to a multiple of 4 pages for booklet binding
                 const currentPagesCount = copiedPages.length;
                 const remainder = currentPagesCount % 4;
                 if (remainder !== 0) {
