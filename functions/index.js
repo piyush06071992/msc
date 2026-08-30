@@ -348,7 +348,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
                 const color = rgb(0.2, 0.2, 0.2);
                 const opacity = 0.7;
 
-                const y = 32; 
+                const y = 16; // Lowered closer to the bottom edge to avoid text overlap 
                 const leftX = 36;
                 const rightX = width - font.widthOfTextAtSize(rightText, size) - 36;
 
