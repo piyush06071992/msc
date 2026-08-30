@@ -314,6 +314,9 @@ async function updateRoomJobStatus(jobDocId, roomName, status, errorMsg = null) 
 // =======================================================
 // --- SINGLE ROOM BATCH COMPILATION ENGINE ---
 // =======================================================
+// =======================================================
+// --- OPTIMIZED SINGLE ROOM COMPILATION ENGINE ---
+// =======================================================
 async function compileSingleRoomPackage(center, date, roomName, allocations) {
     if (!allocations || Object.keys(allocations).length === 0) return false;
 
@@ -350,6 +353,9 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
     const font = await mergedPdf.embedFont(StandardFonts.HelveticaBold);
     const availableSeries = ["SERIES A", "SERIES B", "SERIES C", "SERIES D"];
 
+    // Question Paper Byte Cache to prevent duplicate downloads
+    let pdfBytesCache = {};
+
     for (let i = 0; i < roomOccupants.length; i++) {
         const { seatId, student } = roomOccupants[i];
         if (!student || !student.className || !student.section) continue;
@@ -367,7 +373,11 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
         }
 
         try {
-            const pdfBytes = await loadPdfBytes(pdfUrl);
+            // Check cache first so we download each URL only once
+            if (!pdfBytesCache[pdfUrl]) {
+                pdfBytesCache[pdfUrl] = await loadPdfBytes(pdfUrl);
+            }
+            const pdfBytes = pdfBytesCache[pdfUrl];
             const studentPdf = await PDFDocument.load(pdfBytes);
 
             const pages = studentPdf.getPages();
@@ -381,30 +391,15 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
                 const rightText = `SEAT: ${seatId}   |   SEC: ${student.section}   |   ${assignedSeries}`;
 
                 const size = 8.5;
-                const color = rgb(0.2, 0.2, 0.2); // Dark charcoal grey
-                const opacity = 0.6;              // Clear and slightly bright watermark effect
+                const color = rgb(0.2, 0.2, 0.2);
+                const opacity = 0.6;
 
-                const y = 20; // Bottom footer margin
+                const y = 20;
                 const leftX = 36;
                 const rightX = width - font.widthOfTextAtSize(rightText, size) - 36;
 
-                page.drawText(leftText, {
-                    x: leftX,
-                    y: y,
-                    size: size,
-                    font: font,
-                    color: color,
-                    opacity: opacity,
-                });
-
-                page.drawText(rightText, {
-                    x: rightX,
-                    y: y,
-                    size: size,
-                    font: font,
-                    color: color,
-                    opacity: opacity,
-                });
+                page.drawText(leftText, { x: leftX, y, size, font, color, opacity });
+                page.drawText(rightText, { x: rightX, y, size, font, color, opacity });
             }
 
             const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
