@@ -3,6 +3,7 @@ const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
+const crypto = require("crypto");
 
 if (!admin.apps.length) {
     admin.initializeApp();
@@ -337,7 +338,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 
             const pages = studentPdf.getPages();
             
-        // Apply flanked bottom footer watermark details safely in the bottom margin (y = 16)
+            // Apply flanked bottom footer watermark details just below the border line (y = 6)
             for (let pIdx = 0; pIdx < pages.length; pIdx++) {
                 const page = pages[pIdx];
                 const { width } = page.getSize();
@@ -349,7 +350,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
                 const color = rgb(0.2, 0.2, 0.2);
                 const opacity = 0.7;
 
-                const y = 16; // Lowered from 32 to 16 to sit cleanly below the question content
+                const y = 6; // Positioned lower, just below the bottom border line in the margin
                 const leftX = 36;
                 const rightX = width - font.widthOfTextAtSize(rightText, size) - 36;
 
@@ -388,12 +389,6 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 }
 
 // =======================================================
-// --- SERVER-SIDE BLAZING-FAST FULLY PARALLEL ORCHESTRATOR ---
-// =======================================================
-// =======================================================
-// --- ON-DEMAND SINGLE ROOM COMPILATION ENDPOINT ---
-// =======================================================
-// =======================================================
 // --- ON-DEMAND SINGLE ROOM COMPILATION ENDPOINT ---
 // =======================================================
 exports.compileSingleRoomOnDemand = onRequest({
@@ -419,7 +414,6 @@ exports.compileSingleRoomOnDemand = onRequest({
 
         const allocations = allocDoc.data().allocations || {};
         
-        // Compile just this one room using our optimized engine with byte caching
         const success = await compileSingleRoomPackage(center, date, roomName, allocations);
         
         if (!success) {
@@ -427,13 +421,11 @@ exports.compileSingleRoomOnDemand = onRequest({
             return;
         }
 
-        // Generate a secure token and save it to file metadata to bypass SignBlob IAM restrictions
         const storagePath = `print_packages/${center}/${date}/${roomName}_print_package.pdf`;
         const fileRef = admin.storage().bucket().file(storagePath);
         
         const downloadToken = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
         
-        // Update file metadata with the token so Firebase recognizes it as public-downloadable
         await fileRef.setMetadata({
             metadata: {
                 firebaseStorageDownloadTokens: downloadToken
