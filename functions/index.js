@@ -389,98 +389,50 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 // =======================================================
 // --- SERVER-SIDE BLAZING-FAST FULLY PARALLEL ORCHESTRATOR ---
 // =======================================================
-exports.compileAllRoomsServerSide = onRequest({
+// =======================================================
+// --- ON-DEMAND SINGLE ROOM COMPILATION ENDPOINT ---
+// =======================================================
+exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
-    memory: "2GiB",
-    timeoutSeconds: 540,
+    memory: "1GiB",
+    timeoutSeconds: 300,
     cors: true
 }, async (req, res) => {
-    const { center, date } = req.body;
-    if (!center || !date) {
-        res.status(400).send({ error: "Missing required parameters: center, date" });
+    const { center, date, roomName } = req.body;
+    if (!center || !date || !roomName) {
+        res.status(400).send({ error: "Missing required parameters: center, date, roomName" });
         return;
     }
 
-    const jobDocId = `${center}_${date}`;
-
     try {
-        const roomsSnap = await admin.firestore().collection("infrastructure_rooms").get();
-        let roomsDatabase = roomsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        roomsDatabase.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base', numeric: true }));
-
-        if (roomsDatabase.length === 0) {
-            res.status(404).send({ error: "No rooms found in database." });
-            return;
-        }
-
-        await admin.firestore().collection("exam_compilation_jobs").doc(jobDocId).set({
-            center: center,
-            date: date,
-            status: "PROCESSING",
-            progress: 0,
-            totalRooms: roomsDatabase.length,
-            completedRooms: 0,
-            rooms: roomsDatabase.map(r => ({ name: r.name, status: "PROCESSING", error: null })),
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
-
-        res.status(200).send({ success: true, message: "Server-side full parallel compilation initiated." });
-
         const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
         const allocDoc = await admin.firestore().collection(`${prefix}exam_seating_allocations`).doc(`${center}_${date}`).get();
         
         if (!allocDoc.exists) {
-            await admin.firestore().collection("exam_compilation_jobs").doc(jobDocId).update({
-                status: "ERROR",
-                updatedAt: admin.firestore.FieldValue.serverTimestamp()
-            });
+            res.status(404).send({ error: "Seating allocations not found for this date." });
             return;
         }
 
         const allocations = allocDoc.data().allocations || {};
-        let completedRooms = 0;
-        let roomStatuses = roomsDatabase.map(r => ({ name: r.name, status: "PROCESSING", error: null }));
+        
+        // Compile just this one room using our optimized engine with byte caching
+        const success = await compileSingleRoomPackage(center, date, roomName, allocations);
+        
+        if (!success) {
+            res.status(400).send({ error: "Room has no students allocated or failed to compile." });
+            return;
+        }
 
-        // Execute ALL rooms fully in parallel using Promise.all so it completes in under 60-90 seconds total
-        await Promise.all(roomsDatabase.map(async (room, roomIndex) => {
-            try {
-                let roomOccupantsCount = 0;
-                Object.keys(allocations).forEach(seatId => {
-                    if (seatId.toUpperCase().startsWith(`${room.name}-`.toUpperCase())) {
-                        roomOccupantsCount++;
-                    }
-                });
-
-                if (roomOccupantsCount === 0) {
-                    roomStatuses[roomIndex].status = "SUCCESS";
-                    roomStatuses[roomIndex].error = "Skipped (No students allocated)";
-                } else {
-                    const success = await compileSingleRoomPackage(center, date, room.name, allocations);
-                    roomStatuses[roomIndex].status = "SUCCESS";
-                    if (!success) roomStatuses[roomIndex].error = "Room skipped";
-                }
-            } catch (roomErr) {
-                console.error(`Error compiling room ${room.name}:`, roomErr);
-                roomStatuses[roomIndex].status = "ERROR";
-                roomStatuses[roomIndex].error = roomErr.message;
-            }
-
-            completedRooms++;
-        }));
-
-        await admin.firestore().collection("exam_compilation_jobs").doc(jobDocId).update({
-            completedRooms: completedRooms,
-            progress: 100,
-            rooms: roomStatuses,
-            status: "COMPLETED",
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        // Generate a secure signed URL valid for 2 hours
+        const storagePath = `print_packages/${center}/${date}/${roomName}_print_package.pdf`;
+        const [url] = await admin.storage().bucket().file(storagePath).getSignedUrl({
+            action: 'read',
+            expires: Date.now() + 1000 * 60 * 120
         });
 
-    } catch (serverErr) {
-        console.error("Server-side compilation loop error:", serverErr);
-        await admin.firestore().collection("exam_compilation_jobs").doc(jobDocId).update({
-            status: "ERROR",
-            updatedAt: admin.firestore.FieldValue.serverTimestamp()
-        });
+        res.status(200).send({ success: true, url });
+    } catch (err) {
+        console.error(`[On-Demand Error] ${roomName}:`, err);
+        res.status(500).send({ error: err.message });
     }
 });
