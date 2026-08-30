@@ -392,6 +392,9 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 // =======================================================
 // --- ON-DEMAND SINGLE ROOM COMPILATION ENDPOINT ---
 // =======================================================
+// =======================================================
+// --- ON-DEMAND SINGLE ROOM COMPILATION ENDPOINT ---
+// =======================================================
 exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
     memory: "1GiB",
@@ -423,12 +426,21 @@ exports.compileSingleRoomOnDemand = onRequest({
             return;
         }
 
-        // Generate a secure signed URL valid for 2 hours
+        // Generate a secure token and save it to file metadata to bypass SignBlob IAM restrictions
         const storagePath = `print_packages/${center}/${date}/${roomName}_print_package.pdf`;
-        const [url] = await admin.storage().bucket().file(storagePath).getSignedUrl({
-            action: 'read',
-            expires: Date.now() + 1000 * 60 * 120
+        const fileRef = admin.storage().bucket().file(storagePath);
+        
+        const downloadToken = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
+        
+        // Update file metadata with the token so Firebase recognizes it as public-downloadable
+        await fileRef.setMetadata({
+            metadata: {
+                firebaseStorageDownloadTokens: downloadToken
+            }
         });
+
+        const bucketName = admin.storage().bucket().name;
+        const url = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(storagePath)}?alt=media&token=${downloadToken}`;
 
         res.status(200).send({ success: true, url });
     } catch (err) {
