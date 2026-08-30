@@ -1969,11 +1969,11 @@ function renderRoomSidebarList() {
             renderAutogenRules(); 
         }
 
-     async function executeAutoGenerate() {
+async function executeAutoGenerate() {
             const date = document.getElementById('seating-exam-date').value;
             if (!date) return;
 
-      const selectedRoomNames = Array.from(document.querySelectorAll('.autogen-room-cb:checked')).map(cb => cb.value);
+            const selectedRoomNames = Array.from(document.querySelectorAll('.autogen-room-cb:checked')).map(cb => cb.value);
             if (selectedRoomNames.length === 0) return alert("Please select at least one global room preference.");
 
             let targetStudents = allApprovedStudents.filter(stu => {
@@ -2021,98 +2021,52 @@ function renderRoomSidebarList() {
             });
 
             let newAllocations = {};
-            // Separate rooms into those specifically targeted by rules, and global rooms
-            let ruleTargetRooms = targetRooms.filter(r => ruleRoomsSet.has(r.name));
-            let globalTargetRooms = targetRooms.filter(r => selectedRoomNames.includes(r.name));
-            
-            // Pointer tracking
-            let roomRowPointers = {};
-            targetRooms.forEach(r => roomRowPointers[r.name] = 0);
-            let roomLastSection = {};
 
-            // Dynamic logic to pick a section for a specific room
-            const getNextSectionKey = (roomName, excludeKey = null) => {
-                let preferredKeys = Object.keys(sectionPools).filter(k => sectionPools[k].length > 0 && sectionPrefMap[k] && sectionPrefMap[k].includes(roomName));
-                let defaultKeys = Object.keys(sectionPools).filter(k => sectionPools[k].length > 0 && (!sectionPrefMap[k] || sectionPrefMap[k].length === 0));
+            // Flatten all rows across target rooms to implement strict row-by-row interleaving
+            let allTargetRows = [];
+            targetRooms.forEach(room => {
+                (room.rows || []).forEach((row, rIdx) => {
+                    allTargetRows.push({ roomName: room.name, rIdx, row, roomObj: room });
+                });
+            });
 
-                let candidateKeys = preferredKeys.length > 0 ? preferredKeys : defaultKeys;
-                if (candidateKeys.length === 0) return null;
-                
-                if (excludeKey && candidateKeys.length > 1) {
-                    let filtered = candidateKeys.filter(k => k !== excludeKey);
-                    if (filtered.length > 0) return filtered[0];
+            let lastSectionPerRoom = {};
+
+            // Interleaved round-robin row allocator ensuring same section is never in consecutive rows
+            for (let rowMeta of allTargetRows) {
+                const { roomName, rIdx, row, roomObj } = rowMeta;
+                let lastSec = lastSectionPerRoom[roomName];
+
+                let availableSections = Object.keys(sectionPools).filter(k => sectionPools[k].length > 0);
+                if (availableSections.length === 0) break;
+
+                // Pick a section different from the last section placed in this room if possible
+                let chosenSec = availableSections.find(k => k !== lastSec);
+                if (!chosenSec) {
+                    chosenSec = lastSec;
                 }
-                return candidateKeys[0];
-            };
 
-            // Phase 1: Fill Rule Rooms explicitly with their preferred sections first
-            let madeProgress = true;
-            let ruleRoomIdx = 0;
-            while (madeProgress && ruleTargetRooms.length > 0) {
-                madeProgress = false;
-                let roomEntry = ruleTargetRooms[ruleRoomIdx];
-                let rows = roomEntry.rows || [];
-                let rIdx = roomRowPointers[roomEntry.name];
+                lastSectionPerRoom[roomName] = chosenSec;
 
-                if (rIdx < rows.length) {
-                    let secKey = getNextSectionKey(roomEntry.name, roomLastSection[roomEntry.name]);
-                    if (secKey && sectionPrefMap[secKey] && sectionPrefMap[secKey].includes(roomEntry.name)) {
-                        roomLastSection[roomEntry.name] = secKey;
-                        madeProgress = true;
-                        
-                        for (let sIdx = 0; sIdx < rows[rIdx].seats; sIdx++) {
-                            if (sectionPools[secKey].length === 0) {
-                                secKey = getNextSectionKey(roomEntry.name, secKey);
-                                if (!secKey || !sectionPrefMap[secKey] || !sectionPrefMap[secKey].includes(roomEntry.name)) break;
-                            }
-                            const stu = sectionPools[secKey].shift();
-                            const seatNum = String(sIdx + 1).padStart(2, '0');
-                            const seatId = `${roomEntry.name}-R${rIdx + 1}-S${seatNum}`;
-                            newAllocations[seatId] = stu;
-                        }
-                        roomRowPointers[roomEntry.name]++;
+                const rowNum = rIdx + 1;
+                for (let sIdx = 0; sIdx < row.seats; sIdx++) {
+                    if (sectionPools[chosenSec].length === 0) {
+                        let remainingSections = Object.keys(sectionPools).filter(k => sectionPools[k].length > 0);
+                        if (remainingSections.length === 0) break;
+                        chosenSec = remainingSections.find(k => k !== lastSec) || remainingSections[0];
+                        lastSectionPerRoom[roomName] = chosenSec;
                     }
-                }
-                ruleRoomIdx = (ruleRoomIdx + 1) % ruleTargetRooms.length;
-                if (roomRowPointers[ruleTargetRooms[ruleRoomIdx].name] >= (ruleTargetRooms[ruleRoomIdx].rows || []).length) {
-                    ruleTargetRooms.splice(ruleRoomIdx, 1);
-                    if(ruleTargetRooms.length > 0) ruleRoomIdx = ruleRoomIdx % ruleTargetRooms.length;
+
+                    if (sectionPools[chosenSec].length > 0) {
+                        const stu = sectionPools[chosenSec].shift();
+                        const seatNum = String(sIdx + 1).padStart(2, '0');
+                        const seatId = `${roomName}-R${rowNum}-S${seatNum}`;
+                        newAllocations[seatId] = stu;
+                    }
                 }
             }
 
-            // Phase 2: Fill remaining students into global rooms
-            let globalRoomIdx = 0;
-            while (Object.values(sectionPools).some(arr => arr.length > 0) && globalTargetRooms.length > 0) {
-                let roomEntry = globalTargetRooms[globalRoomIdx];
-                let rows = roomEntry.rows || [];
-                let rIdx = roomRowPointers[roomEntry.name];
-
-                if (rIdx < rows.length) {
-                    let secKey = getNextSectionKey(roomEntry.name, roomLastSection[roomEntry.name]);
-                    if (secKey) {
-                        roomLastSection[roomEntry.name] = secKey;
-                        for (let sIdx = 0; sIdx < rows[rIdx].seats; sIdx++) {
-                            if (sectionPools[secKey].length === 0) {
-                                secKey = getNextSectionKey(roomEntry.name, secKey);
-                                if (!secKey) break;
-                            }
-                            const stu = sectionPools[secKey].shift();
-                            const seatNum = String(sIdx + 1).padStart(2, '0');
-                            const seatId = `${roomEntry.name}-R${rIdx + 1}-S${seatNum}`;
-                            newAllocations[seatId] = stu;
-                        }
-                        roomRowPointers[roomEntry.name]++;
-                    }
-                }
-
-                globalRoomIdx = (globalRoomIdx + 1) % globalTargetRooms.length;
-                if (roomRowPointers[globalTargetRooms[globalRoomIdx].name] >= (globalTargetRooms[globalRoomIdx].rows || []).length) {
-                    globalTargetRooms.splice(globalRoomIdx, 1);
-                    if(globalTargetRooms.length > 0) globalRoomIdx = globalRoomIdx % globalTargetRooms.length;
-                }
-            }
-
-            // Final anti-cheat
+            // Final anti-cheat validation
             targetRooms.forEach(room => evaluateCheatRisks(newAllocations, room));
             currentAllocations = newAllocations;
 
@@ -2126,7 +2080,7 @@ function renderRoomSidebarList() {
                     timestamp: Date.now()
                 }, { merge: true });
 
-                alert("✅ Auto-Generate Seating Plan Completed Successfully!");
+                alert("✅ Auto-Generate Seating Plan Completed Successfully with Interleaved Rows!");
                 closeAutoGenerateModal();
                 if (activeRoomId) selectRoom(activeRoomId, false);
                 else if (targetRooms.length > 0) selectRoom(targetRooms[0].id, true);
