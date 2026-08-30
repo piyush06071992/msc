@@ -274,6 +274,49 @@ async function loadPdfBytes(pdfUrl) {
 // =======================================================
 // --- SINGLE ROOM BATCH COMPILATION ENGINE (WITH DARKER WATERMARK) ---
 // =======================================================
+// =======================================================
+// --- LIVE JOB STATUS TRACKER HELPER ---
+// =======================================================
+async function updateRoomJobStatus(jobDocId, roomName, status, errorMsg = null) {
+    try {
+        const jobRef = admin.firestore().collection("exam_compilation_jobs").doc(jobDocId);
+        await admin.firestore().runTransaction(async (transaction) => {
+            const jobDoc = await transaction.get(jobRef);
+            if (!jobDoc.exists) return;
+
+            let data = jobDoc.data();
+            let rooms = data.rooms || [];
+            let completedCount = data.completedRooms || 0;
+
+            let targetRoom = rooms.find(r => r.name === roomName);
+            if (targetRoom) {
+                if ((status === "SUCCESS" || status === "ERROR") && 
+                    (targetRoom.status !== "SUCCESS" && targetRoom.status !== "ERROR")) {
+                    completedCount += 1;
+                }
+                targetRoom.status = status;
+                targetRoom.error = errorMsg;
+            }
+
+            let overallStatus = data.status;
+            if (completedCount >= data.totalRooms && data.totalRooms > 0) {
+                overallStatus = "COMPLETED";
+            }
+
+            transaction.update(jobRef, {
+                rooms: rooms,
+                completedRooms: completedCount,
+                status: overallStatus
+            });
+        });
+    } catch (e) {
+        console.error("Failed to update job status:", e);
+    }
+}
+
+// =======================================================
+// --- SINGLE ROOM BATCH COMPILATION ENGINE ---
+// =======================================================
 async function compileSingleRoomPackage(center, date, roomName, allocations) {
     if (!allocations || Object.keys(allocations).length === 0) return false;
 
@@ -342,8 +385,8 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
                 const line3 = `SEAT: ${seatId}   |   SEC: ${student.section}   |   ${assignedSeries}`;
 
                 const size = 13;
-                const color = rgb(0.2, 0.2, 0.2); // Darker charcoal grey for high visibility
-                const opacity = 0.35;             // Noticeably darker and clearer
+                const color = rgb(0.2, 0.2, 0.2);
+                const opacity = 0.35;
 
                 const startY = height / 1.75;
                 
@@ -392,36 +435,55 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 exports.compileRoomBatch = onRequest({
     region: "asia-south1",
     memory: "1GiB",
-    timeoutSeconds: 300
+    timeoutSeconds: 300,
+    cors: true // Native Firebase v2 CORS handling
 }, async (req, res) => {
-    res.set('Access-Control-Allow-Origin', '*');
-    res.set('Access-Control-Allow-Headers', 'Content-Type');
-    if (req.method === 'OPTIONS') {
-        res.status(204).send('');
-        return;
-    }
-
     const { center, date, roomName } = req.body;
     if (!center || !date || !roomName) {
         res.status(400).send({ error: "Missing required parameters: center, date, roomName" });
         return;
     }
 
+    const jobDocId = `${center}_${date}`;
+
     try {
+        await updateRoomJobStatus(jobDocId, roomName, "PROCESSING");
+
         const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
         const docRef = await admin.firestore().collection(`${prefix}exam_seating_allocations`).doc(`${center}_${date}`).get();
         
         if (!docRef.exists) {
-            res.status(404).send({ error: "Seating allocations not found for this date." });
-            return;
+            throw new Error("Seating allocations not found for this date.");
         }
 
         const allocations = docRef.data().allocations || {};
+
+        // Gracefully skip and mark success if room has zero students allocated
+        let roomOccupantsCount = 0;
+        Object.keys(allocations).forEach(seatId => {
+            if (seatId.toUpperCase().startsWith(`${roomName}-`.toUpperCase())) {
+                roomOccupantsCount++;
+            }
+        });
+
+        if (roomOccupantsCount === 0) {
+            await updateRoomJobStatus(jobDocId, roomName, "SUCCESS", "Skipped (No students allocated)");
+            res.status(200).send({ success: true, roomName, date, message: "Skipped - no students" });
+            return;
+        }
+
         const success = await compileSingleRoomPackage(center, date, roomName, allocations);
+
+        if (success) {
+            await updateRoomJobStatus(jobDocId, roomName, "SUCCESS");
+        } else {
+            await updateRoomJobStatus(jobDocId, roomName, "SUCCESS", "Room skipped");
+        }
 
         res.status(200).send({ success, roomName, date });
     } catch (error) {
-        console.error("Batch compile error:", error);
+        console.error(`[Batch Error] ${roomName}:`, error);
+        await updateRoomJobStatus(jobDocId, roomName, "ERROR", error.message);
         res.status(500).send({ error: error.message });
     }
 });
