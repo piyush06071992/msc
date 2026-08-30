@@ -13,7 +13,8 @@ if (!admin.apps.length) {
 exports.sendPreClassReminders = onSchedule({
     schedule: "every 5 minutes",
     timeZone: "Asia/Kolkata",
-    region: "asia-south1"
+    region: "asia-south1",
+    memory: "512MB"
 }, async (event) => {
     const utcDate = new Date();
     const istString = utcDate.toLocaleString("en-US", { timeZone: "Asia/Kolkata" });
@@ -170,7 +171,8 @@ exports.sendPreClassReminders = onSchedule({
 // =======================================================
 exports.sendInstantPushAlerts = onDocumentCreated({
     document: "instant_alerts/{docId}",
-    region: "asia-south1"
+    region: "asia-south1",
+    memory: "256MB"
 }, async (event) => {
     const data = event.data.data();
     const teachers = data.teachers || [];
@@ -257,7 +259,6 @@ async function processPrintPackages(center, date, allocations) {
         .where("date", "==", date)
         .get();
 
-    // Map papers by aggressive key -> { SERIES_NAME: url }
     let papersBySection = {}; 
     qpSnap.forEach(doc => {
         const qp = doc.data();
@@ -350,10 +351,12 @@ async function processPrintPackages(center, date, allocations) {
     }
 }
 
-// Trigger for Ghumarwin Seating Allocations
+// Trigger for Ghumarwin Seating Allocations (1 GiB RAM allocated)
 exports.compileGhumarwinPrintPackages = onDocumentWritten({
     document: "exam_seating_allocations/{docId}",
-    region: "asia-south1"
+    region: "asia-south1",
+    memory: "1GiB",
+    timeoutSeconds: 300
 }, async (event) => {
     const data = event.data.after.exists ? event.data.after.data() : null;
     if (!data) return null;
@@ -361,10 +364,12 @@ exports.compileGhumarwinPrintPackages = onDocumentWritten({
     return null;
 });
 
-// Trigger for Dharamshala Seating Allocations
+// Trigger for Dharamshala Seating Allocations (1 GiB RAM allocated)
 exports.compileDharamshalaPrintPackages = onDocumentWritten({
     document: "dharamshala_exam_seating_allocations/{docId}",
-    region: "asia-south1"
+    region: "asia-south1",
+    memory: "1GiB",
+    timeoutSeconds: 300
 }, async (event) => {
     const data = event.data.after.exists ? event.data.after.data() : null;
     if (!data) return null;
@@ -372,10 +377,12 @@ exports.compileDharamshalaPrintPackages = onDocumentWritten({
     return null;
 });
 
-// Explicit Trigger when Ghumarwin question papers are uploaded
+// Explicit Trigger when Ghumarwin question papers are uploaded (1 GiB RAM allocated)
 exports.recompileGhumarwinOnPaperUpload = onDocumentCreated({
     document: "question_papers/{docId}",
-    region: "asia-south1"
+    region: "asia-south1",
+    memory: "1GiB",
+    timeoutSeconds: 300
 }, async (event) => {
     const qp = event.data.data();
     if (!qp || !qp.date) return null;
@@ -389,10 +396,12 @@ exports.recompileGhumarwinOnPaperUpload = onDocumentCreated({
     return null;
 });
 
-// Explicit Trigger when Dharamshala question papers are uploaded
+// Explicit Trigger when Dharamshala question papers are uploaded (1 GiB RAM allocated)
 exports.recompileDharamshalaOnPaperUpload = onDocumentCreated({
     document: "dharamshala_question_papers/{docId}",
-    region: "asia-south1"
+    region: "asia-south1",
+    memory: "1GiB",
+    timeoutSeconds: 300
 }, async (event) => {
     const qp = event.data.data();
     if (!qp || !qp.date) return null;
