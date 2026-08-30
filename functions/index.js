@@ -332,35 +332,51 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 
             const pages = studentPdf.getPages();
             
-            // Apply professional top header banner ONLY on the FIRST PAGE (Front Page) within printing margins
+            // Apply centered, light letterhead-style watermark ONLY on the FIRST PAGE (Front Page)
             if (pages.length > 0) {
                 const firstPage = pages[0];
                 const { width, height } = firstPage.getSize();
                 
-                const margin = 36;
-                const boxHeight = 26;
-                const boxWidth = width - (margin * 2);
-                const boxX = margin;
-                const boxY = height - margin - boxHeight;
+                const line1 = `MINERVA STUDY CIRCLE`;
+                const line2 = `${student.name.toUpperCase()}  (ROLL: #${student.rollNo || "—"})`;
+                const line3 = `SEAT: ${seatId}   |   SEC: ${student.section}   |   ${assignedSeries}`;
 
-                firstPage.drawRectangle({
-                    x: boxX,
-                    y: boxY,
-                    width: boxWidth,
-                    height: boxHeight,
-                    borderColor: rgb(0.1, 0.1, 0.4),
-                    borderWidth: 1,
-                    color: rgb(0.95, 0.96, 1.0),
+                const size = 13;
+                const color = rgb(0.5, 0.5, 0.5); // Soft neutral gray
+                const opacity = 0.18;             // Light, subtle watermark effect
+
+                // Draw centered lines in the upper-middle section of the page
+                const startY = height / 1.75;
+                
+                const w1 = font.widthOfTextAtSize(line1, size);
+                const w2 = font.widthOfTextAtSize(line2, size);
+                const w3 = font.widthOfTextAtSize(line3, size);
+
+                firstPage.drawText(line1, {
+                    x: (width - w1) / 2,
+                    y: startY,
+                    size: size,
+                    font: font,
+                    color: color,
+                    opacity: opacity,
                 });
 
-                const headerText = `${student.name.toUpperCase()}   |   ROLL: #${student.rollNo || "—"}   |   SEAT: ${seatId}   |   SEC: ${student.section}   |   ${assignedSeries}`;
-
-                firstPage.drawText(headerText, {
-                    x: boxX + 10,
-                    y: boxY + 8,
-                    size: 9,
+                firstPage.drawText(line2, {
+                    x: (width - w2) / 2,
+                    y: startY - 20,
+                    size: size,
                     font: font,
-                    color: rgb(0.1, 0.1, 0.3),
+                    color: color,
+                    opacity: opacity,
+                });
+
+                firstPage.drawText(line3, {
+                    x: (width - w3) / 2,
+                    y: startY - 40,
+                    size: size,
+                    font: font,
+                    color: color,
+                    opacity: opacity,
                 });
             }
 
