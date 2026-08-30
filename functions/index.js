@@ -242,6 +242,9 @@ exports.sendInstantPushAlerts = onDocumentCreated({
 async function processPrintPackages(center, date, allocations) {
     if (!allocations || Object.keys(allocations).length === 0) return;
 
+    // ROBUST NORMALIZER: Removes all invisible spaces to ensure flawless matching
+    const norm = (str) => String(str || "").replace(/\s+/g, " ").trim().toUpperCase();
+
     let roomBuckets = {};
     Object.keys(allocations).forEach(seatId => {
         const roomName = seatId.split("-R")[0].toUpperCase();
@@ -257,9 +260,9 @@ async function processPrintPackages(center, date, allocations) {
     let papersBySection = {}; 
     qpSnap.forEach(doc => {
         const qp = doc.data();
-        const secKey = `${(qp.className || "").toUpperCase()}|${(qp.section || "").toUpperCase()}`;
+        const secKey = `${norm(qp.className)}|${norm(qp.section)}`;
         if (!papersBySection[secKey]) papersBySection[secKey] = {};
-        const series = qp.series || "SERIES A";
+        const series = qp.series ? qp.series.toUpperCase() : "SERIES A";
         papersBySection[secKey][series] = qp.url;
     });
 
@@ -275,7 +278,7 @@ async function processPrintPackages(center, date, allocations) {
             const { seatId, student } = occupants[i];
             if (!student || !student.className || !student.section) continue;
 
-            const secKey = `${student.className.toUpperCase()}|${student.section.toUpperCase()}`;
+            const secKey = `${norm(student.className)}|${norm(student.section)}`;
             const roomSeriesList = papersBySection[secKey] ? Object.keys(papersBySection[secKey]) : availableSeries;
             
             const assignedSeries = roomSeriesList[i % roomSeriesList.length];
