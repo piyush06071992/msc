@@ -1,7 +1,7 @@
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
 const admin = require("firebase-admin");
-const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
+const { PDFDocument, rgb, StandardFonts, degrees } = require("pdf-lib");
 
 if (!admin.apps.length) {
     admin.initializeApp();
@@ -239,6 +239,22 @@ exports.sendInstantPushAlerts = onDocumentCreated({
 });
 
 // =======================================================
+// --- ROBUST FETCH WITH RETRY FOR LARGE SCALES ---
+// =======================================================
+async function fetchWithRetry(url, retries = 3, delay = 1500) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const res = await fetch(url);
+            if (res.ok) return res;
+        } catch (e) {
+            if (i === retries - 1) throw e;
+        }
+        await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    throw new Error(`Failed to fetch after ${retries} retries: ${url}`);
+}
+
+// =======================================================
 // --- BACKGROUND SEATING PLAN & PDF COMPILATION ENGINE ---
 // =======================================================
 async function processPrintPackages(center, date, allocations) {
@@ -296,31 +312,25 @@ async function processPrintPackages(center, date, allocations) {
             }
 
             try {
-                const pdfRes = await fetch(pdfUrl);
+                const pdfRes = await fetchWithRetry(pdfUrl);
                 const pdfBytes = await pdfRes.arrayBuffer();
                 const studentPdf = await PDFDocument.load(pdfBytes);
 
                 const pages = studentPdf.getPages();
-                const firstPage = pages[0];
-                const { width, height } = firstPage.getSize();
-
-                firstPage.drawRectangle({
-                    x: 40,
-                    y: height - 65,
-                    width: width - 80,
-                    height: 45,
-                    borderColor: rgb(0.1, 0.1, 0.4),
-                    borderWidth: 1.5,
-                    color: rgb(0.95, 0.96, 1.0),
-                });
-
-                firstPage.drawText(`NAME: ${student.name.toUpperCase()}  |  ROLL: #${student.rollNo || "—"}  |  SEAT: ${seatId}  |  SERIES: ${assignedSeries}`, {
-                    x: 50,
-                    y: height - 45,
-                    size: 10,
-                    font: font,
-                    color: rgb(0.1, 0.1, 0.3),
-                });
+                
+                // Apply diagonal background watermark across every page of the student's booklet
+                for (const page of pages) {
+                    const { width, height } = page.getSize();
+                    page.drawText(`${student.name.toUpperCase()}  |  ROLL: #${student.rollNo || "—"}  |  SEAT: ${seatId}  |  SERIES: ${assignedSeries}`, {
+                        x: width / 7,
+                        y: height / 2.2,
+                        size: 16,
+                        font: font,
+                        color: rgb(0.6, 0.6, 0.7),
+                        opacity: 0.18,
+                        rotate: degrees(45),
+                    });
+                }
 
                 const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
                 copiedPages.forEach(p => mergedPdf.addPage(p));
@@ -330,7 +340,17 @@ async function processPrintPackages(center, date, allocations) {
                 if (remainder !== 0) {
                     const pagesNeeded = 4 - remainder;
                     for (let p = 0; p < pagesNeeded; p++) {
-                        mergedPdf.addPage([width, height]);
+                        const blankPage = mergedPdf.addPage();
+                        const { width, height } = blankPage.getSize();
+                        blankPage.drawText(`${student.name.toUpperCase()}  |  ROLL: #${student.rollNo || "—"}  |  SEAT: ${seatId}  |  SERIES: ${assignedSeries} (BLANK PAGE)`, {
+                            x: width / 7,
+                            y: height / 2.2,
+                            size: 14,
+                            font: font,
+                            color: rgb(0.7, 0.7, 0.8),
+                            opacity: 0.15,
+                            rotate: degrees(45),
+                        });
                     }
                 }
             } catch (err) {
@@ -351,12 +371,12 @@ async function processPrintPackages(center, date, allocations) {
     }
 }
 
-// Trigger for Ghumarwin Seating Allocations (1 GiB RAM allocated)
+// Trigger for Ghumarwin Seating Allocations (2 GiB RAM & 540s timeout for 1200+ students)
 exports.compileGhumarwinPrintPackages = onDocumentWritten({
     document: "exam_seating_allocations/{docId}",
     region: "asia-south1",
-    memory: "1GiB",
-    timeoutSeconds: 300
+    memory: "2GiB",
+    timeoutSeconds: 540
 }, async (event) => {
     const data = event.data.after.exists ? event.data.after.data() : null;
     if (!data) return null;
@@ -364,12 +384,12 @@ exports.compileGhumarwinPrintPackages = onDocumentWritten({
     return null;
 });
 
-// Trigger for Dharamshala Seating Allocations (1 GiB RAM allocated)
+// Trigger for Dharamshala Seating Allocations (2 GiB RAM & 540s timeout)
 exports.compileDharamshalaPrintPackages = onDocumentWritten({
     document: "dharamshala_exam_seating_allocations/{docId}",
     region: "asia-south1",
-    memory: "1GiB",
-    timeoutSeconds: 300
+    memory: "2GiB",
+    timeoutSeconds: 540
 }, async (event) => {
     const data = event.data.after.exists ? event.data.after.data() : null;
     if (!data) return null;
@@ -377,12 +397,12 @@ exports.compileDharamshalaPrintPackages = onDocumentWritten({
     return null;
 });
 
-// Explicit Trigger when Ghumarwin question papers are uploaded (1 GiB RAM allocated)
+// Explicit Trigger when Ghumarwin question papers are uploaded
 exports.recompileGhumarwinOnPaperUpload = onDocumentCreated({
     document: "question_papers/{docId}",
     region: "asia-south1",
-    memory: "1GiB",
-    timeoutSeconds: 300
+    memory: "2GiB",
+    timeoutSeconds: 540
 }, async (event) => {
     const qp = event.data.data();
     if (!qp || !qp.date) return null;
@@ -396,12 +416,12 @@ exports.recompileGhumarwinOnPaperUpload = onDocumentCreated({
     return null;
 });
 
-// Explicit Trigger when Dharamshala question papers are uploaded (1 GiB RAM allocated)
+// Explicit Trigger when Dharamshala question papers are uploaded
 exports.recompileDharamshalaOnPaperUpload = onDocumentCreated({
     document: "dharamshala_question_papers/{docId}",
     region: "asia-south1",
-    memory: "1GiB",
-    timeoutSeconds: 300
+    memory: "2GiB",
+    timeoutSeconds: 540
 }, async (event) => {
     const qp = event.data.data();
     if (!qp || !qp.date) return null;
