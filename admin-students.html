@@ -64,8 +64,12 @@
                 🔗 Public Form
             </button>
 
-            <button onclick="openAuthModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-3 rounded-xl font-black uppercase tracking-widest text-xs transition-colors shadow-md border border-indigo-500 flex items-center justify-center gap-2 w-full sm:w-auto shrink-0">
+         <button onclick="openAuthModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-3 rounded-xl font-black uppercase tracking-widest text-xs transition-colors shadow-md border border-indigo-500 flex items-center justify-center gap-2 w-full sm:w-auto shrink-0">
                 🔐 Delegations
+            </button>
+
+            <button onclick="openDuplicateAuditModal()" class="bg-rose-600 hover:bg-rose-500 text-white px-5 py-3 rounded-xl font-black uppercase tracking-widest text-xs transition-colors shadow-md border border-rose-500 flex items-center justify-center gap-2 w-full sm:w-auto shrink-0">
+                🔍 Audit Duplicates
             </button>
         </div>
     </header>
@@ -471,7 +475,7 @@
         </div>
     </div>
 
-    <!-- Auth / Delegation Modal -->
+ <!-- Auth / Delegation Modal -->
     <div id="auth-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[200] hidden items-center justify-center p-4">
         <div class="bg-white rounded-[2.5rem] w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div class="p-6 sm:p-8 bg-indigo-50 border-b border-indigo-100 flex justify-between items-center shrink-0">
@@ -504,6 +508,32 @@
             <div class="p-6 sm:p-8 flex-1 overflow-y-auto bg-white custom-scroll">
                 <h4 class="font-black text-slate-800 uppercase tracking-widest text-sm mb-4 border-b pb-2">Authorized Managers</h4>
                 <div id="auth-list-container" class="space-y-3"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- DUPLICATE AUDIT MODAL -->
+    <div id="duplicate-audit-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[250] hidden items-center justify-center p-4">
+        <div class="bg-white rounded-[2.5rem] w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col h-[90vh]">
+            <div class="p-6 bg-gradient-to-r from-rose-600 to-pink-700 text-white flex justify-between items-center shrink-0">
+                <div>
+                    <h3 class="font-black text-xl uppercase tracking-tight">Database Duplicate Audit</h3>
+                    <p class="text-[10px] font-bold text-rose-200 uppercase tracking-widest mt-0.5">Detect & purge duplicate names, roll numbers, or mobile numbers</p>
+                </div>
+                <button onclick="closeDuplicateAuditModal()" class="w-10 h-10 bg-white/10 hover:bg-rose-800 rounded-full font-black text-lg transition-colors flex items-center justify-center">✕</button>
+            </div>
+
+            <div class="p-4 bg-slate-100 border-b border-slate-200 flex gap-3 shrink-0 items-center">
+                <label class="text-xs font-black text-slate-600 uppercase tracking-widest">Audit Mode:</label>
+                <select id="audit-criteria" onchange="runDuplicateAudit()" class="p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-black uppercase outline-none cursor-pointer">
+                    <option value="roll">Duplicate Roll Numbers</option>
+                    <option value="phone">Duplicate Mobile Numbers</option>
+                    <option value="name">Duplicate Names (Same Class & Section)</option>
+                </select>
+            </div>
+
+            <div id="audit-results-container" class="p-6 flex-1 overflow-y-auto custom-scroll space-y-4 bg-slate-50">
+                <!-- Audit cards generate here -->
             </div>
         </div>
     </div>
@@ -2040,7 +2070,106 @@
             const centerName = activeCenter || "Institute";
             XLSX.writeFile(wb, `Student_Directory_${centerName}_${new Date().toISOString().split('T')[0]}.xlsx`);
         }
+// --- DUPLICATE AUDIT ENGINE ---
+        function openDuplicateAuditModal() {
+            document.getElementById('duplicate-audit-modal').classList.replace('hidden', 'flex');
+            runDuplicateAudit();
+        }
 
+        function closeDuplicateAuditModal() {
+            document.getElementById('duplicate-audit-modal').classList.replace('flex', 'hidden');
+        }
+
+        function runDuplicateAudit() {
+            const criteria = document.getElementById('audit-criteria').value;
+            const container = document.getElementById('audit-results-container');
+            
+            // Combine active and pending records for comprehensive auditing
+            const allRecords = [...globalStudentsData, ...globalPendingData];
+            let groups = {};
+
+            allRecords.forEach(s => {
+                let key = "";
+                if (criteria === 'roll') {
+                    if (!s.rollNo) return;
+                    key = String(s.rollNo).trim().toUpperCase();
+                } else if (criteria === 'phone') {
+                    const phone = s.fMobile || s.whatsapp1 || s.mMobile;
+                    if (!phone) return;
+                    key = String(phone).trim();
+                } else if (criteria === 'name') {
+                    if (!s.name) return;
+                    key = `${(s.className||"").trim().toUpperCase()}_${(s.section||"").trim().toUpperCase()}_${String(s.name).trim().toUpperCase()}`;
+                }
+
+                if (!groups[key]) groups[key] = [];
+                groups[key].push(s);
+            });
+
+            // Filter out groups with only 1 entry (no duplicates)
+            let duplicateGroups = Object.entries(groups).filter(([k, records]) => records.length > 1);
+
+            if (duplicateGroups.length === 0) {
+                container.innerHTML = `
+                    <div class="text-center py-20 bg-white rounded-3xl border-2 border-dashed border-slate-200">
+                        <span class="text-4xl mb-2 block">🎉</span>
+                        <p class="text-slate-500 font-black uppercase text-xs tracking-widest">No duplicates found for this criteria!</p>
+                    </div>`;
+                return;
+            }
+
+            let html = "";
+            duplicateGroups.forEach(([key, records]) => {
+                let rowsHtml = records.map(r => `
+                    <tr class="border-b border-slate-100 bg-white hover:bg-slate-50">
+                        <td class="p-3 font-black text-slate-800 uppercase">${r.name}</td>
+                        <td class="p-3 font-mono text-xs">Roll: #${r.rollNo || '—'}</td>
+                        <td class="p-3 text-xs uppercase">${r.className} | Sec ${r.section}</td>
+                        <td class="p-3 font-mono text-xs">${r.fMobile || r.whatsapp1 || '—'}</td>
+                        <td class="p-3 text-center">
+                            <span class="px-2 py-1 rounded text-[9px] font-black uppercase ${r.admissionStatus === 'APPROVED' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">${r.admissionStatus}</span>
+                        </td>
+                        <td class="p-3 text-right">
+                            <button onclick="deleteDuplicateRecord('${r.id}', '${r.name.replace(/'/g, "\\'")}')" class="bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest border border-rose-200 transition-colors shadow-sm">
+                                🗑️ Delete This Copy
+                            </button>
+                        </td>
+                    </tr>
+                `).join('');
+
+                html += `
+                    <div class="bg-white border-2 border-rose-200 rounded-2xl p-4 shadow-sm space-y-3">
+                        <div class="flex justify-between items-center bg-rose-50 px-4 py-2 rounded-xl border border-rose-100">
+                            <span class="text-xs font-black text-rose-900 uppercase tracking-wider">Conflict Key: <span class="font-mono text-rose-600">${key}</span> (${records.length} records found)</span>
+                            <span class="text-[9px] font-bold text-rose-600 uppercase">Review and delete the unwanted duplicate below</span>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-xs">
+                                <thead class="bg-slate-100 text-slate-500 uppercase tracking-widest text-[9px] font-black">
+                                    <tr><th class="p-3">Name</th><th class="p-3">Roll No</th><th class="p-3">Class / Sec</th><th class="p-3">Mobile</th><th class="p-3 text-center">Status</th><th class="p-3 text-right">Action</th></tr>
+                                </thead>
+                                <tbody>${rowsHtml}</tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = html;
+        }
+
+        async function deleteDuplicateRecord(studentId, studentName) {
+            if (!confirm(`Are you sure you want to permanently delete the duplicate record for "${studentName}" from the database?`)) return;
+
+            try {
+                await getCollection("students").doc(studentId).delete();
+                alert("✅ Duplicate record successfully deleted!");
+                runDuplicateAudit(); // Refresh audit results
+            } catch (e) {
+                console.error(e);
+                alert("Error deleting record: " + e.message);
+            }
+        }
         init();
     </script>
 </body>
