@@ -318,6 +318,24 @@
         </div>
     </div>
 
+    <!-- HOD SYLLABUS OVERVIEW MODAL -->
+    <div id="hod-syllabus-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[300] hidden items-center justify-center p-4">
+        <div class="bg-white rounded-[2.5rem] w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+            <div class="p-6 bg-teal-600 border-b border-teal-700 flex justify-between items-center shrink-0">
+                <div>
+                    <h3 class="font-black text-white text-lg uppercase tracking-tight">Department Syllabus Overview</h3>
+                    <p class="text-[10px] font-black text-teal-200 uppercase tracking-widest mt-0.5">All sections for subject: <span id="hod-syll-dept-label"></span></p>
+                </div>
+                <button onclick="closeHODSyllabusModal()" class="bg-teal-700 text-teal-200 hover:bg-rose-500 hover:text-white w-10 h-10 rounded-full font-black text-xl transition-colors flex items-center justify-center">✕</button>
+            </div>
+            <div class="p-6 flex-1 overflow-y-auto custom-scroll bg-slate-50 space-y-4" id="hod-syll-modal-body">
+                <div class="text-center py-10"><span class="loader border-t-teal-600"></span></div>
+            </div>
+            <div class="p-4 bg-white border-t border-slate-200 flex justify-end shrink-0">
+                <button onclick="closeHODSyllabusModal()" class="px-5 py-2.5 bg-slate-100 text-slate-600 rounded-xl font-black text-xs uppercase tracking-widest hover:bg-slate-200 transition-colors">Close</button>
+            </div>
+        </div>
+    </div>
     <script>
       const firebaseConfig = { apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", authDomain: "shop-portal-bbbbb.firebaseapp.com", projectId: "shop-portal-bbbbb", storageBucket: "shop-portal-bbbbb.firebasestorage.app", messagingSenderId: "701377739976", appId: "1:701377739976:web:99998220272090e56e79fd" };
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
@@ -343,14 +361,19 @@
                         isUserHOD = true;
                         hodDepartment = data.hodDept;
                         
-                        const btnContainer = document.getElementById('hod-mapping-btn-container');
-                        if (btnContainer) {
-                            btnContainer.innerHTML = `
+                       const btnContainer = document.getElementById('hod-mapping-btn-container');
+                    if (btnContainer) {
+                        btnContainer.innerHTML = `
+                            <div class="flex items-center gap-2 flex-wrap justify-end">
                                 <button onclick="openExamMappingModal()" class="bg-amber-500 hover:bg-amber-400 text-slate-950 px-4 py-2.5 rounded-xl font-black uppercase tracking-widest text-xs sm:text-sm shadow-md transition-all flex items-center gap-2 border border-amber-400">
                                     <span>⚙️</span> Teacher Exam Mapping (${hodDepartment})
                                 </button>
-                            `;
-                        }
+                                <button onclick="openHODSyllabusModal()" class="bg-teal-600 hover:bg-teal-500 text-white px-4 py-2.5 rounded-xl font-black uppercase tracking-widest text-xs sm:text-sm shadow-md transition-all flex items-center gap-2 border border-teal-500">
+                                    <span>📚</span> ${hodDepartment} Syllabus Overview
+                                </button>
+                            </div>
+                        `;
+                    }
                     }
                 }
                 const staffSnap = await db.collection("staff_applications").where("status", "==", "approved").get();
@@ -3050,6 +3073,106 @@ let secCodes = r.packets.map(p => {
 
             html += `</div>`;
             resultsDiv.innerHTML = html;
+        }
+        function openHODSyllabusModal() {
+            if (!isUserHOD || !hodDepartment) return;
+            document.getElementById('hod-syll-dept-label').innerText = hodDepartment;
+            document.getElementById('hod-syllabus-modal').classList.replace('hidden', 'flex');
+            loadHODSyllabusData();
+        }
+
+        function closeHODSyllabusModal() {
+            document.getElementById('hod-syllabus-modal').classList.replace('flex', 'hidden');
+        }
+
+        async function loadHODSyllabusData() {
+            const body = document.getElementById('hod-syll-modal-body');
+            body.innerHTML = '<div class="text-center py-10"><span class="loader border-t-teal-600"></span></div>';
+            
+            try {
+                const snap = await getCollection("exam_schedules").orderBy("date", "desc").get();
+                if (snap.empty) {
+                    body.innerHTML = '<div class="text-center py-12 text-slate-400 font-bold uppercase text-xs">No exam schedules found.</div>';
+                    return;
+                }
+
+                const norm = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+                const targetDeptNorm = norm(hodDepartment);
+
+                let matchingEntries = [];
+
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    const date = data.date;
+                    const type = data.type || 'EXAM';
+
+                    const processSec = (cName, secName, subs) => {
+                        (Array.isArray(subs) ? subs : [subs]).forEach(sub => {
+                            if (!sub) return;
+                            if (norm(sub).includes(targetDeptNorm) || targetDeptNorm.includes(norm(sub))) {
+                                const syll = (data.syllabi && data.syllabi[sub]) ? data.syllabi[sub] : "";
+                                matchingEntries.push({
+                                    date,
+                                    type,
+                                    className: cName,
+                                    section: secName,
+                                    subject: sub,
+                                    syllabus: syll,
+                                    examId: doc.id
+                                });
+                            }
+                        });
+                    };
+
+                    if (data.targets && data.targets.length > 0) {
+                        data.targets.forEach(t => {
+                            t.sections.forEach(s => {
+                                const secName = typeof s === 'object' ? s.section : s;
+                                const subs = typeof s === 'object' && s.subjects ? s.subjects : (t.subjects || []);
+                                processSec(t.className, secName, subs);
+                            });
+                        });
+                    } else {
+                        processSec(data.className, data.section, data.subjects || []);
+                    }
+                });
+
+                if (matchingEntries.length === 0) {
+                    body.innerHTML = `<div class="text-center py-12 text-slate-400 font-bold uppercase text-xs">No exam entries found matching department "${hodDepartment}".</div>`;
+                    return;
+                }
+
+                matchingEntries.sort((a,b) => b.date.localeCompare(a.date));
+
+                let html = '<div class="space-y-4">';
+                matchingEntries.forEach(item => {
+                    const prettyDate = new Date(item.date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+                    const hasSyll = item.syllabus && item.syllabus.trim() !== "";
+                    
+                    html += `
+                        <div class="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-3">
+                            <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-2 border-b border-slate-100 pb-3">
+                                <div class="flex items-center gap-2 flex-wrap">
+                                    <span class="bg-teal-100 text-teal-800 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest">${prettyDate}</span>
+                                    <span class="bg-indigo-100 text-indigo-800 px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest">${item.type}</span>
+                                    <span class="font-black text-slate-900 uppercase text-sm">Class ${item.className} | Sec ${item.section}</span>
+                                </div>
+                                <span class="text-[10px] font-black uppercase tracking-wider text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-lg border border-indigo-100 w-fit">${item.subject}</span>
+                            </div>
+                            <div>
+                                <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Syllabus Content:</div>
+                                <div class="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 whitespace-pre-wrap leading-relaxed">${hasSyll ? item.syllabus : '<span class="text-rose-500 uppercase">⚠️ Syllabus Pending / Not Added Yet</span>'}</div>
+                            </div>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+                body.innerHTML = html;
+
+            } catch(e) {
+                console.error(e);
+                body.innerHTML = '<div class="text-center py-12 text-rose-500 font-bold uppercase text-xs">Error loading department syllabus overview.</div>';
+            }
         }
     </script>
    
