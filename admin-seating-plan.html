@@ -1012,47 +1012,61 @@ function renderRoomSidebarList() {
             return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
         }
 
-  async function loadSectionTimingsCache(dateStr) {
+async function loadSectionTimingsCache(dateStr) {
     sectionTimingsCache = {};
     try {
-        const examSnap = await getCollection("exam_schedules").where("date", "==", dateStr).get();
-        
-        examSnap.forEach(doc => {
-            const data = doc.data();
-            const startStr = data.examStart || '09:00';
-            const endStr = data.examEnd || '10:30';
+        const dateObj = new Date(dateStr + 'T00:00:00');
+        const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
 
-            const [sh, sm] = startStr.split(':').map(Number);
-            const [eh, em] = endStr.split(':').map(Number);
-            const startMin = sh * 60 + sm;
-            const endMin = eh * 60 + em;
+        // 1. Check for specific date override history first
+        const historySnap = await getCollection("timetable_history").doc(dateStr).get();
+        let daySlots = [];
 
-            const reg = (cName, sName) => {
-                sectionTimingsCache[`${norm(cName)}|${norm(sName)}`] = {
-                    startMin,
-                    endMin,
-                    startStr,
-                    endStr,
-                    duration: Math.max(0, endMin - startMin)
-                };
-            };
+        if (historySnap.exists && historySnap.data().schedule) {
+            daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
+        } else {
+            // 2. Fall back to Live Master schedule if no override exists for this date
+            const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+            daySlots = masterSnap.docs.map(d => d.data());
+        }
 
-            if (data.className && data.section) reg(data.className, data.section);
-            if (Array.isArray(data.sections)) {
-                data.sections.forEach(s => {
-                    const secName = typeof s === 'object' ? (s.section || s.sectionName) : s;
-                    if (data.className && secName) reg(data.className, secName);
-                });
+        let sectionSlotsMap = {};
+        daySlots.forEach(slot => {
+            if (slot.className && slot.section) {
+                const key = `${norm(slot.className)}|${norm(slot.section)}`;
+                if (!sectionSlotsMap[key]) sectionSlotsMap[key] = [];
+                sectionSlotsMap[key].push(slot);
             }
-            if (data.targets) {
-                data.targets.forEach(t => {
-                    const cls = t.className || t.class;
-                    const secs = t.sections || t.sectionNames || [];
-                    secs.forEach(s => {
-                        const secName = typeof s === 'object' ? (s.section || s.sectionName) : s;
-                        if (cls && secName) reg(cls, secName);
-                    });
-                });
+        });
+
+        Object.keys(sectionSlotsMap).forEach(key => {
+            const slots = sectionSlotsMap[key];
+            let minS = 24 * 60, maxE = 0;
+
+            slots.forEach(s => {
+                if (['BREAK', 'LUNCH BREAK', 'ASSEMBLY'].includes((s.subject || '').toUpperCase())) return;
+                let sM = 0, eM = 0;
+                if (s.start24 && s.end24) {
+                    const [sh, sm] = s.start24.split(':').map(Number);
+                    const [eh, em] = s.end24.split(':').map(Number);
+                    sM = sh * 60 + sm; eM = eh * 60 + em;
+                } else if (s.sMins !== undefined) {
+                    sM = s.sMins; eM = s.eMins;
+                }
+                if (sM > 0 && eM > sM) {
+                    if (sM < minS) minS = sM;
+                    if (eM > maxE) maxE = eM;
+                }
+            });
+
+            if (maxE > minS) {
+                sectionTimingsCache[key] = {
+                    startMin: minS,
+                    endMin: maxE,
+                    startStr: minsTo24(minS),
+                    endStr: minsTo24(maxE),
+                    duration: maxE - minS
+                };
             }
         });
     } catch (e) {
