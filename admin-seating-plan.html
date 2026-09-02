@@ -778,106 +778,104 @@
             }
         }
 
-        // --- TIMETABLE CONFLICT AUDITOR FOR ROOMS ---
+  // --- TIMETABLE CONFLICT AUDITOR FOR ROOMS ---
     async function auditBusyRoomsForDate(dateStr) {
-            busyRoomsMap = {};
-            try {
-                const examSnap = await getCollection("exam_schedules").where("date", "==", dateStr).get();
+        busyRoomsMap = {};
+        try {
+            const dateObj = new Date(dateStr + 'T00:00:00');
+            const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
+
+            // 1. Fetch exact timetable slots for this date
+            const historySnap = await getCollection("timetable_history").doc(dateStr).get();
+            let daySlots = [];
+
+            if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
+                daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
+            } else {
+                const futureSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+                let activeMasters = [];
+                futureSnap.docs.forEach(doc => { if (doc.id <= dateStr) activeMasters.push(doc.data()); });
                 
-                let examSections = new Set();
-                let examStartMin = 24 * 60, examEndMin = 0;
+                if (activeMasters.length > 0) {
+                    activeMasters.sort((a, b) => b.date.localeCompare(a.date));
+                    daySlots = (activeMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                } else {
+                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                    daySlots = masterSnap.docs.map(d => d.data());
+                }
+            }
 
-                if (!examSnap.empty) {
-                    const bellDoc = await getCollection("configs").doc("bell_schedules").get();
-                    const bellRules = bellDoc.exists ? bellDoc.data() : {};
+            // 2. Identify Exam Window and Exam Sections directly from Timetable
+            let examSections = new Set();
+            let examStartMin = 24 * 60, examEndMin = 0;
 
-                    examSnap.forEach(doc => {
-                        const data = doc.data();
-                        if (data.className && data.section) examSections.add(`${norm(data.className)}|${norm(data.section)}`);
-                        if (data.targets) {
-                            data.targets.forEach(t => {
-                                t.sections.forEach(s => {
-                                    const secName = typeof s === 'object' ? s.section : s;
-                                    examSections.add(`${norm(t.className)}|${norm(secName)}`);
-                                });
-                            });
-                        }
+            daySlots.forEach(slot => {
+                const subUpper = (slot.subject || '').toUpperCase();
+                
+                // If it's an explicitly defined Exam block, use it to frame our global Exam Window
+                if (['EXAM', 'UT', 'OT'].includes(subUpper)) {
+                    examSections.add(`${norm(slot.className)}|${norm(slot.section)}`);
+                    
+                    let sM = 0, eM = 0;
+                    if (slot.start24 && slot.end24) {
+                        const [sh, sm] = slot.start24.split(':').map(Number);
+                        const [eh, em] = slot.end24.split(':').map(Number);
+                        sM = sh * 60 + sm; eM = eh * 60 + em;
+                    } else if (slot.sMins !== undefined && slot.eMins !== undefined) {
+                        sM = slot.sMins; eM = slot.eMins;
+                    }
 
-                        const typeKey = (data.type || 'UT').toLowerCase();
-                        const rules = bellRules[typeKey] || { examStart: '09:00', examEnd: '10:30' };
-                        
-                        const [sh, sm] = (rules.examStart || '09:00').split(':').map(Number);
-                        const [eh, em] = (rules.examEnd || '10:30').split(':').map(Number);
-                        
-                        const sM = sh * 60 + sm;
-                        const eM = eh * 60 + em;
+                    if (sM > 0 && eM > sM) {
                         if (sM < examStartMin) examStartMin = sM;
                         if (eM > examEndMin) examEndMin = eM;
-                    });
-                }
-
-                if (examEndMin <= examStartMin) {
-                    examStartMin = 9 * 60;
-                    examEndMin = 12 * 60; 
-                }
-
-                const dateObj = new Date(dateStr + 'T00:00:00');
-                const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
-                const historySnap = await getCollection("timetable_history").doc(dateStr).get();
-                let daySlots = [];
-
-                if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
-                    daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
-                } else {
-                    const futureSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
-                    let activeMasters = [];
-                    futureSnap.docs.forEach(doc => { if (doc.id <= dateStr) activeMasters.push(doc.data()); });
-                    
-                    if (activeMasters.length > 0) {
-                        activeMasters.sort((a, b) => b.date.localeCompare(a.date));
-                        daySlots = (activeMasters[0].schedule || []).filter(slot => slot.day === dayName);
-                    } else {
-                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                        daySlots = masterSnap.docs.map(d => d.data());
                     }
                 }
+            });
 
-                daySlots.forEach(slot => {
-                    const roomName = cleanRoom(slot.room);
-                    if (!roomName || roomName === 'TBD' || roomName === 'NONE') return;
-
-                    const subUpper = (slot.subject || '').toUpperCase();
-                    
-                    if (subUpper === 'ASSEMBLY') {
-                        busyRoomsMap[roomName] = { isBusy: true, reason: `Busy: Assembly (${slot.className} Sec ${slot.section})` };
-                        return;
-                    }
-
-                    const slotKey = `${norm(slot.className)}|${norm(slot.section)}`;
-                    const isExamSection = examSections.has(slotKey);
-                    const isSpecialSub = ['BREAK', 'LUNCH BREAK', 'EXAM', 'UT', 'OT'].includes(subUpper);
-
-                    if (!isExamSection && !isSpecialSub) {
-                        let sM = 0, eM = 0;
-                        if (slot.start24 && slot.end24) {
-                            const [sh, sm] = slot.start24.split(':').map(Number);
-                            const [eh, em] = slot.end24.split(':').map(Number);
-                            sM = sh * 60 + sm; eM = eh * 60 + em;
-                        } else if (slot.sMins !== undefined && slot.eMins !== undefined) {
-                            sM = slot.sMins; eM = slot.eMins;
-                        }
-
-                        if (sM < examEndMin && eM > examStartMin) {
-                            busyRoomsMap[roomName] = { isBusy: true, reason: `Busy: Regular Class (${slot.className} Sec ${slot.section} - ${slot.subject})` };
-                        }
-                    }
-                });
-
-                renderRoomSidebarList();
-            } catch (e) {
-                console.error("Error auditing busy rooms:", e);
+            // Fallback if no explicit exams were found but admin is trying to seat students anyway
+            if (examEndMin <= examStartMin) {
+                examStartMin = 9 * 60;
+                examEndMin = 12 * 60; 
             }
+
+            // 3. Mark busy rooms based on timetable overlaps
+            daySlots.forEach(slot => {
+                const roomName = cleanRoom(slot.room);
+                if (!roomName || roomName === 'TBD' || roomName === 'NONE') return;
+
+                const subUpper = (slot.subject || '').toUpperCase();
+                
+                if (subUpper === 'ASSEMBLY') {
+                    busyRoomsMap[roomName] = { isBusy: true, reason: `Busy: Assembly (${slot.className} Sec ${slot.section})` };
+                    return;
+                }
+
+                const slotKey = `${norm(slot.className)}|${norm(slot.section)}`;
+                const isExamSection = examSections.has(slotKey);
+                const isSpecialSub = ['BREAK', 'LUNCH BREAK', 'EXAM', 'UT', 'OT'].includes(subUpper);
+
+                // If a section is having regular class (not exams/breaks) during the global Exam Window, lock the room
+                if (!isExamSection && !isSpecialSub) {
+                    let sM = 0, eM = 0;
+                    if (slot.start24 && slot.end24) {
+                        const [sh, sm] = slot.start24.split(':').map(Number);
+                        const [eh, em] = slot.end24.split(':').map(Number);
+                        sM = sh * 60 + sm; eM = eh * 60 + em;
+                    } else if (slot.sMins !== undefined && slot.eMins !== undefined) {
+                        sM = slot.sMins; eM = slot.eMins;
+                    }
+
+                    if (sM < examEndMin && eM > examStartMin) {
+                        busyRoomsMap[roomName] = { isBusy: true, reason: `Busy: Regular Class (${slot.className} Sec ${slot.section} - ${slot.subject})` };
+                    }
+                }
+            });
+
+            renderRoomSidebarList();
+        } catch (e) {
+            console.error("Error auditing busy rooms:", e);
         }
+    }
 
         function toggleSidebar() {
             const sidebar = document.getElementById('room-sidebar');
@@ -1044,139 +1042,102 @@ function renderRoomSidebarList() {
             return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
         }
 
-     async function loadSectionTimingsCache(dateStr) {
-            sectionTimingsCache = {};
-            try {
-                const dateObj = new Date(dateStr + 'T00:00:00');
-                const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
+  async function loadSectionTimingsCache(dateStr) {
+        sectionTimingsCache = {};
+        try {
+            const dateObj = new Date(dateStr + 'T00:00:00');
+            const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
 
-                const historySnap = await getCollection("timetable_history").doc(dateStr).get();
-                let daySlots = [];
+            const historySnap = await getCollection("timetable_history").doc(dateStr).get();
+            let daySlots = [];
 
-                if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
-                    daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
+            // 1. Fetch the exact timetable slots for this date
+            if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
+                daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
+            } else {
+                const futureSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+                let activeMasters = [];
+                futureSnap.docs.forEach(doc => { if (doc.id <= dateStr) activeMasters.push(doc.data()); });
+                
+                if (activeMasters.length > 0) {
+                    activeMasters.sort((a, b) => b.date.localeCompare(a.date));
+                    daySlots = (activeMasters[0].schedule || []).filter(slot => slot.day === dayName);
                 } else {
-                    const futureSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
-                    let activeMasters = [];
-                    futureSnap.docs.forEach(doc => { if (doc.id <= dateStr) activeMasters.push(doc.data()); });
-                    
-                    if (activeMasters.length > 0) {
-                        activeMasters.sort((a, b) => b.date.localeCompare(a.date));
-                        daySlots = (activeMasters[0].schedule || []).filter(slot => slot.day === dayName);
-                    } else {
-                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                        daySlots = masterSnap.docs.map(d => d.data());
+                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                    daySlots = masterSnap.docs.map(d => d.data());
+                }
+            }
+
+            // 2. Group slots by section
+            let sectionSlotsMap = {};
+            daySlots.forEach(slot => {
+                if (slot.className && slot.section) {
+                    const key = `${norm(slot.className)}|${norm(slot.section)}`;
+                    if (!sectionSlotsMap[key]) sectionSlotsMap[key] = [];
+                    sectionSlotsMap[key].push(slot);
+                }
+            });
+
+            // 3. Scan the timetable blocks for UT, OT, or EXAM
+            Object.keys(sectionSlotsMap).forEach(key => {
+                const slots = sectionSlotsMap[key];
+                
+                // PRIORITY: Look directly at the subjects you manually typed in the Timetable
+                const examSlot = slots.find(s => ['EXAM', 'UT', 'OT'].includes((s.subject || '').toUpperCase()));
+
+                if (examSlot) {
+                    let sM = 0, eM = 0;
+                    if (examSlot.start24 && examSlot.end24) {
+                        const [sh, sm] = examSlot.start24.split(':').map(Number);
+                        const [eh, em] = examSlot.end24.split(':').map(Number);
+                        sM = sh * 60 + sm; eM = eh * 60 + em;
+                    } else if (examSlot.sMins !== undefined) {
+                        sM = examSlot.sMins; eM = examSlot.eMins;
+                    }
+                    if (eM > sM) {
+                        sectionTimingsCache[key] = {
+                            startMin: sM,
+                            endMin: eM,
+                            startStr: examSlot.start24 || minsTo24(sM),
+                            endStr: examSlot.end24 || minsTo24(eM),
+                            duration: eM - sM
+                        };
+                        return; // Lock this timing and skip the fallback!
                     }
                 }
 
-                const [examSnap, bellDoc] = await Promise.all([
-                    getCollection("exam_schedules").where("date", "==", dateStr).get(),
-                    getCollection("configs").doc("bell_schedules").get()
-                ]);
-                const bellRules = bellDoc.exists ? bellDoc.data() : {};
+                // FALLBACK: If no UT/OT is found, span the earliest to latest normal class
+                let minS = 24 * 60, maxE = 0;
+                slots.forEach(s => {
+                    if (['BREAK', 'LUNCH BREAK'].includes((s.subject || '').toUpperCase())) return;
+                    let sM = 0, eM = 0;
+                    if (s.start24 && s.end24) {
+                        const [sh, sm] = s.start24.split(':').map(Number);
+                        const [eh, em] = s.end24.split(':').map(Number);
+                        sM = sh * 60 + sm; eM = eh * 60 + em;
+                    } else if (s.sMins !== undefined) {
+                        sM = s.sMins; eM = s.eMins;
+                    }
+                    if (sM > 0 && eM > sM) {
+                        if (sM < minS) minS = sM;
+                        if (eM > maxE) maxE = eM;
+                    }
+                });
 
-                let explicitExamTimings = {};
-                examSnap.forEach(doc => {
-                    const data = doc.data();
-                    const typeKey = (data.type || 'UT').toLowerCase();
-                    const rules = bellRules[typeKey] || { examStart: '09:00', examEnd: '10:30' };
-                    const startStr = data.examStart || rules.examStart || '09:00';
-                    const endStr = data.examEnd || rules.examEnd || '10:30';
-
-                    const [sh, sm] = startStr.split(':').map(Number);
-                    const [eh, em] = endStr.split(':').map(Number);
-                    const startMin = sh * 60 + sm;
-                    const endMin = eh * 60 + em;
-
-                    const reg = (cName, sName) => {
-                        explicitExamTimings[`${norm(cName)}|${norm(sName)}`] = { startMin, endMin, startStr, endStr };
+                if (maxE > minS) {
+                    sectionTimingsCache[key] = {
+                        startMin: minS,
+                        endMin: maxE,
+                        startStr: minsTo24(minS),
+                        endStr: minsTo24(maxE),
+                        duration: maxE - minS
                     };
-
-                    if (data.className && data.section) reg(data.className, data.section);
-                    if (data.targets) {
-                        data.targets.forEach(t => t.sections.forEach(s => {
-                            reg(t.className, typeof s === 'object' ? s.section : s);
-                        }));
-                    }
-                });
-
-                let sectionSlotsMap = {};
-                daySlots.forEach(slot => {
-                    if (slot.className && slot.section) {
-                        const key = `${norm(slot.className)}|${norm(slot.section)}`;
-                        if (!sectionSlotsMap[key]) sectionSlotsMap[key] = [];
-                        sectionSlotsMap[key].push(slot);
-                    }
-                });
-
-                Object.keys(sectionSlotsMap).forEach(key => {
-                    if (explicitExamTimings[key]) {
-                        const et = explicitExamTimings[key];
-                        sectionTimingsCache[key] = {
-                            startMin: et.startMin,
-                            endMin: et.endMin,
-                            startStr: et.startStr,
-                            endStr: et.endStr,
-                            duration: Math.max(0, et.endMin - et.startMin)
-                        };
-                        return;
-                    }
-
-                    const slots = sectionSlotsMap[key];
-                    const examSlot = slots.find(s => ['EXAM', 'UT', 'OT'].includes((s.subject || '').toUpperCase()));
-
-                    if (examSlot) {
-                        let sM = 0, eM = 0;
-                        if (examSlot.start24 && examSlot.end24) {
-                            const [sh, sm] = examSlot.start24.split(':').map(Number);
-                            const [eh, em] = examSlot.end24.split(':').map(Number);
-                            sM = sh * 60 + sm; eM = eh * 60 + em;
-                        } else if (examSlot.sMins !== undefined) {
-                            sM = examSlot.sMins; eM = examSlot.eMins;
-                        }
-                        if (eM > sM) {
-                            sectionTimingsCache[key] = {
-                                startMin: sM,
-                                endMin: eM,
-                                startStr: examSlot.start24 || minsTo24(sM),
-                                endStr: examSlot.end24 || minsTo24(eM),
-                                duration: eM - sM
-                            };
-                            return;
-                        }
-                    }
-
-                    let minS = 24 * 60, maxE = 0;
-                    slots.forEach(s => {
-                        if (['BREAK', 'LUNCH BREAK'].includes((s.subject || '').toUpperCase())) return;
-                        let sM = 0, eM = 0;
-                        if (s.start24 && s.end24) {
-                            const [sh, sm] = s.start24.split(':').map(Number);
-                            const [eh, em] = s.end24.split(':').map(Number);
-                            sM = sh * 60 + sm; eM = eh * 60 + em;
-                        } else if (s.sMins !== undefined) {
-                            sM = s.sMins; eM = s.eMins;
-                        }
-                        if (sM > 0 && eM > sM) {
-                            if (sM < minS) minS = sM;
-                            if (eM > maxE) maxE = eM;
-                        }
-                    });
-
-                    if (maxE > minS) {
-                        sectionTimingsCache[key] = {
-                            startMin: minS,
-                            endMin: maxE,
-                            startStr: minsTo24(minS),
-                            endStr: minsTo24(maxE),
-                            duration: maxE - minS
-                        };
-                    }
-                });
-            } catch (e) {
-                console.error("Error loading section timings cache:", e);
-            }
+                }
+            });
+        } catch (e) {
+            console.error("Error loading section timings cache:", e);
         }
+    }
 
         function format12Hour(timeStr) {
             if (!timeStr) return "";
