@@ -779,9 +779,16 @@
         }
 
         // --- TIMETABLE CONFLICT AUDITOR FOR ROOMS ---
- async function auditBusyRoomsForDate(dateStr) {
+async function auditBusyRoomsForDate(dateStr) {
     busyRoomsMap = {};
     try {
+        // On a saved override/exam day, rooms are meant for seating allocations and should not be locked out as busy
+        const historySnap = await getCollection("timetable_history").doc(dateStr).get();
+        if (historySnap.exists && (historySnap.data().type === "EXAM_OVERRIDE" || historySnap.data().type === "DAILY_OVERRIDE")) {
+            renderRoomSidebarList();
+            return;
+        }
+
         const examSnap = await getCollection("exam_schedules").where("date", "==", dateStr).get();
         let examStartMin = 24 * 60, examEndMin = 0;
 
@@ -804,10 +811,9 @@
 
         const dateObj = new Date(dateStr + 'T00:00:00');
         const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
-        const historySnap = await getCollection("timetable_history").doc(dateStr).get();
         let daySlots = [];
 
-        if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
+        if (historySnap.exists && historySnap.data().schedule) {
             daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
         } else {
             const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
@@ -1018,14 +1024,12 @@ async function loadSectionTimingsCache(dateStr) {
         const dateObj = new Date(dateStr + 'T00:00:00');
         const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
 
-        // 1. Check for specific date override history first
         const historySnap = await getCollection("timetable_history").doc(dateStr).get();
         let daySlots = [];
 
         if (historySnap.exists && historySnap.data().schedule) {
             daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
         } else {
-            // 2. Fall back to Live Master schedule if no override exists for this date
             const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
             daySlots = masterSnap.docs.map(d => d.data());
         }
@@ -1041,8 +1045,26 @@ async function loadSectionTimingsCache(dateStr) {
 
         Object.keys(sectionSlotsMap).forEach(key => {
             const slots = sectionSlotsMap[key];
-            let minS = 24 * 60, maxE = 0;
+            
+            // Priority: Isolate the explicit EXAM slot created for this specific date override
+            const examSlot = slots.find(s => (s.subject || '').toUpperCase() === 'EXAM');
+            if (examSlot && examSlot.start24 && examSlot.end24) {
+                const [sh, sm] = examSlot.start24.split(':').map(Number);
+                const [eh, em] = examSlot.end24.split(':').map(Number);
+                const sM = sh * 60 + sm;
+                const eM = eh * 60 + em;
+                sectionTimingsCache[key] = {
+                    startMin: sM,
+                    endMin: eM,
+                    startStr: examSlot.start24,
+                    endStr: examSlot.end24,
+                    duration: eM - sM
+                };
+                return;
+            }
 
+            // Fallback to min start and max end of academic slots
+            let minS = 24 * 60, maxE = 0;
             slots.forEach(s => {
                 if (['BREAK', 'LUNCH BREAK', 'ASSEMBLY'].includes((s.subject || '').toUpperCase())) return;
                 let sM = 0, eM = 0;
