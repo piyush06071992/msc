@@ -317,7 +317,7 @@
             document.getElementById('structure-container').innerHTML = '';
             document.getElementById('live-omr-preview').innerHTML = '<div class="text-center text-slate-400 font-bold uppercase text-xs tracking-widest py-20 mt-32 border-2 border-dashed border-slate-300 rounded-3xl mx-8">Fill structure fields to generate OMR</div>';
 
-            try {
+         try {
                 const keyDoc = await db.collection("exam_answer_keys").doc(docId).get();
                 if (keyDoc.exists) {
                     const data = keyDoc.data();
@@ -326,7 +326,24 @@
                     examStructure.forEach(s => addSubjectRow({ subject: s.subject, total: (s.end - s.start + 1), type: s.type }));
                     updateLiveStructure();
                 } else {
-                    currentGroupData.subjects.forEach(() => addSubjectRow({ subject: '', total: '', type: 'MCQ' }));
+                    // Check if an auto-saved template exists for this subject combination
+                    const subKey = (currentGroupData.subjects || []).slice().sort().join('_').toUpperCase();
+                    let loadedAuto = false;
+                    if (subKey) {
+                        try {
+                            const autoDoc = await db.collection("omr_templates").doc("AUTO_" + subKey).get();
+                            if (autoDoc.exists) {
+                                examStructure = autoDoc.data().structure || [];
+                                answerKey = {}; // Explicitly without answer keys
+                                examStructure.forEach(s => addSubjectRow({ subject: s.subject, total: (s.end - s.start + 1), type: s.type }));
+                                updateLiveStructure();
+                                loadedAuto = true;
+                            }
+                        } catch(err) { console.log(err); }
+                    }
+                    if (!loadedAuto) {
+                        currentGroupData.subjects.forEach(() => addSubjectRow({ subject: '', total: '', type: 'MCQ' }));
+                    }
                 }
             } catch(e) { console.error(e); }
 
@@ -522,7 +539,7 @@
             answerKey[qNum] = val.trim();
         }
 
-        async function saveAnswerKey() {
+    async function saveAnswerKey() {
             if (!currentGroupData) return;
             const btn = event.target;
             const orig = btn.innerText;
@@ -537,6 +554,17 @@
                     answers: answerKey,
                     updatedAt: Date.now()
                 });
+
+                // Auto-remember structure for this subject combination
+                const subKey = (currentGroupData.subjects || []).slice().sort().join('_').toUpperCase();
+                if (subKey) {
+                    await db.collection("omr_templates").doc("AUTO_" + subKey).set({
+                        structure: examStructure,
+                        updatedAt: Date.now()
+                    }, { merge: true });
+                    populateTemplates();
+                }
+
                 alert("✅ Answer Key Saved!");
             } catch(e) {
                 alert("Failed to save.");
