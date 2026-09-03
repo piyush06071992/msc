@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minerva | OMR Evaluator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
+        .glass-card { background: rgba(255, 255, 255, 0.95); border: 1px solid rgba(255, 255, 255, 0.5); box-shadow: 0 10px 30px -5px rgba(0,0,0,0.05); }
+        .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .loader { border: 4px solid #f1f5f9; border-top: 4px solid #2563eb; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; display: inline-block; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* Answer Key UI Bubbles */
+        .ans-btn { width: 32px; height: 32px; border-radius: 50%; border: 2px solid #cbd5e1; display: flex; align-items: center; justify-content: center; font-weight: 800; color: #64748b; cursor: pointer; transition: all 0.2s; }
+        .ans-btn.selected { background-color: #2563eb; border-color: #2563eb; color: white; }
+
+        /* ---------------------------------------------------- */
+        /* STRICT A4 OMR PRINT STYLES */
+        /* ---------------------------------------------------- */
+        @media print {
+            @page { size: A4 portrait; margin: 10mm; }
+            body { background: white !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; margin: 0; padding: 0; font-family: Arial, sans-serif !important; }
+            .no-print { display: none !important; }
+            #print-view { display: block !important; width: 100%; height: 100%; }
+            
+            .omr-sheet { border: 2px solid black; padding: 15px; width: 100%; box-sizing: border-box; }
+            .omr-header { text-align: center; border-bottom: 2px solid black; padding-bottom: 10px; margin-bottom: 15px; }
+            .omr-title { font-size: 24pt; font-weight: 900; letter-spacing: 2px; text-transform: uppercase; margin: 0 0 5px 0; }
+            .omr-code { font-size: 14pt; font-family: monospace; font-weight: bold; background: #eee; display: inline-block; padding: 4px 12px; border: 1px solid black; }
+            
+            .omr-info-grid { display: grid; grid-template-columns: 1fr 180px 1fr; gap: 20px; border-bottom: 2px solid black; padding-bottom: 15px; margin-bottom: 15px; }
+            .info-box { border: 1.5px solid black; padding: 10px; height: 100%; box-sizing: border-box; display: flex; flex-col; justify-content: space-between;}
+            .info-label { font-size: 9pt; font-weight: bold; text-transform: uppercase; margin-bottom: 5px; }
+            .info-line { border-bottom: 1px dashed black; padding-top: 20px; margin-bottom: 10px; }
+            
+            .roll-grid { display: flex; gap: 6px; justify-content: center; }
+            .roll-col { display: flex; flex-direction: column; gap: 3px; align-items: center; }
+            .roll-box { width: 18px; height: 18px; border: 1.5px solid black; margin-bottom: 4px; }
+            
+            .omr-bubble { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid black; display: inline-flex; align-items: center; justify-content: center; font-size: 7pt; font-weight: bold; color: black; box-sizing: border-box; }
+            .omr-bubble.key-filled { background-color: #ef4444 !important; border-color: #ef4444 !important; color: white !important; }
+            
+            .omr-num-box { display: inline-block; width: 60px; height: 20px; border: 1.5px solid black; vertical-align: middle; text-align: center; font-weight: bold; font-size: 11pt; color: #ef4444 !important; }
+            
+            .omr-questions { column-count: 3; column-gap: 30px; column-rule: 1px solid #ccc; font-size: 10pt; }
+            .q-row { display: flex; align-items: center; margin-bottom: 6px; page-break-inside: avoid; }
+            .q-num { width: 25px; font-weight: bold; text-align: right; margin-right: 10px; }
+            .q-opts { display: flex; gap: 8px; }
+            
+            .subject-header { font-weight: 900; font-size: 12pt; text-transform: uppercase; border-bottom: 2px solid black; margin: 15px 0 10px 0; column-span: all; text-align: center; background: #f8f8f8; padding: 4px; }
+        }
+    </style>
+</head>
+<body class="min-h-screen">
+
+    <!-- DASHBOARD VIEW -->
+    <div id="dashboard-view" class="no-print">
+        <header class="bg-[#1e1b4b] text-white p-4 sm:px-8 sm:py-5 flex items-center justify-between shadow-xl border-b-4 border-blue-500">
+            <div class="flex items-center gap-4">
+                <button onclick="window.location.href='admin-exam.html'" class="p-3 bg-white/10 hover:bg-white/20 rounded-xl transition-colors shadow-sm">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
+                </button>
+                <div>
+                    <h1 class="text-2xl font-black tracking-widest uppercase leading-none">Evaluator Hub</h1>
+                    <p class="text-xs text-blue-300 font-bold uppercase tracking-widest mt-1">OMR & Answer Key Generator</p>
+                </div>
+            </div>
+        </header>
+
+        <main class="max-w-6xl mx-auto p-4 sm:p-8 mt-4 space-y-6">
+            <div class="glass-card p-6 rounded-[2rem]">
+                <div class="flex flex-col sm:flex-row gap-4 justify-between sm:items-end border-b border-slate-200 pb-6 mb-6">
+                    <div>
+                        <h2 class="text-xl font-black text-slate-900 uppercase">Select Exam Group</h2>
+                        <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Configure OMRs for mapped exams</p>
+                    </div>
+                    <div class="w-full sm:w-64">
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Exam Date</label>
+                        <select id="date-select" onchange="loadExamsForDate()" class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold outline-none cursor-pointer"></select>
+                    </div>
+                </div>
+
+                <div id="exam-list" class="space-y-4">
+                    <div class="text-center py-10"><span class="loader"></span></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- CONFIGURATOR VIEW (Full Screen) -->
+    <div id="configurator-view" class="fixed inset-0 bg-white z-[200] hidden flex-col no-print">
+        <header class="bg-blue-600 text-white p-4 sm:px-8 sm:py-4 flex justify-between items-center shrink-0 shadow-md">
+            <div>
+                <h2 class="text-xl font-black uppercase tracking-tighter">Answer Key Configurator</h2>
+                <p id="config-subtitle" class="text-[10px] font-bold text-blue-200 uppercase tracking-widest mt-0.5">Code: MATH/A/B/0309</p>
+            </div>
+            <div class="flex gap-3">
+                <button onclick="previewOMR(false)" class="bg-blue-800 hover:bg-blue-900 px-4 py-2 rounded-lg text-xs font-black uppercase tracking-widest shadow-sm">📄 Blank OMR</button>
+                <button onclick="previewOMR(true)" class="bg-indigo-500 hover:bg-indigo-400 px-4 py-2 rounded-lg text-xs font-black uppercase tracking-widest shadow-sm border border-indigo-400">✅ Key OMR</button>
+                <button onclick="closeConfigurator()" class="bg-rose-500 hover:bg-rose-400 px-4 py-2 rounded-lg text-xs font-black uppercase tracking-widest shadow-sm">✕ Close</button>
+            </div>
+        </header>
+
+        <div class="flex-1 flex overflow-hidden bg-slate-50">
+            <!-- Left Panel: Structure Definition -->
+            <div class="w-1/3 min-w-[300px] border-r border-slate-200 bg-white p-6 overflow-y-auto custom-scroll flex flex-col">
+                <h3 class="font-black text-slate-800 uppercase text-sm mb-4 border-b pb-2">1. Exam Structure</h3>
+                
+                <div id="structure-container" class="space-y-4 flex-1"></div>
+                
+                <button onclick="addSubjectRow()" class="w-full mt-4 py-3 border-2 border-dashed border-blue-300 text-blue-600 rounded-xl font-black text-xs uppercase hover:bg-blue-50 transition-colors">+ Add Subject Section</button>
+
+                <div class="mt-8 pt-4 border-t border-slate-200">
+                    <button onclick="generateInputGrid()" class="w-full bg-blue-600 text-white py-3.5 rounded-xl font-black uppercase tracking-widest text-sm shadow-md hover:bg-blue-500">2. Generate Input Grid ➔</button>
+                </div>
+            </div>
+
+            <!-- Right Panel: Answer Key Entry -->
+            <div class="flex-1 p-6 overflow-y-auto custom-scroll">
+                <div class="flex justify-between items-end mb-4 border-b border-slate-200 pb-2">
+                    <h3 class="font-black text-slate-800 uppercase text-sm">3. Enter Correct Answers</h3>
+                    <button onclick="saveAnswerKey()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md">💾 Save Key to Database</button>
+                </div>
+                
+                <div id="answer-grid-container" class="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm min-h-[400px]">
+                    <div class="text-center text-slate-400 font-bold uppercase text-xs tracking-widest py-20">Define structure on the left and click Generate</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- PRINT VIEW (Only visible when printing) -->
+    <div id="print-view" class="hidden bg-white">
+        <div class="omr-sheet mx-auto">
+            <div class="omr-header">
+                <h1 class="omr-title">MINERVA STUDY CIRCLE</h1>
+                <div id="print-exam-code" class="omr-code">MATH/A/B/0309</div>
+            </div>
+
+            <div class="omr-info-grid">
+                <div class="info-box">
+                    <div class="info-label">Candidate Name (In Block Letters)</div>
+                    <div style="flex-1; border: 1px solid black; margin-top: 5px;"></div>
+                </div>
+                
+                <div class="info-box" style="align-items: center; padding: 5px;">
+                    <div class="info-label" style="margin-bottom: 2px;">Roll Number</div>
+                    <div class="roll-grid">
+                        <!-- 6 Column Roll Grid -->
+                        <script>
+                            for(let c=0; c<6; c++) {
+                                document.write('<div class="roll-col"><div class="roll-box"></div>');
+                                for(let r=0; r<=9; r++) document.write(`<div class="omr-bubble">${r}</div>`);
+                                document.write('</div>');
+                            }
+                        </script>
+                    </div>
+                </div>
+
+                <div class="info-box">
+                    <div class="info-line">Class:</div>
+                    <div class="info-line">Section:</div>
+                    <div class="info-line">Date:</div>
+                    <div class="info-line">Invigilator Sign:</div>
+                    <div class="info-line" style="margin-bottom: 0;">Student Sign:</div>
+                </div>
+            </div>
+
+            <div id="print-questions-area" class="omr-questions">
+                <!-- Populated by JS -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Firebase Init ---
+        const firebaseConfig = { apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", authDomain: "shop-portal-bbbbb.firebaseapp.com", projectId: "shop-portal-bbbbb" };
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        // --- Global State ---
+        let currentAdminCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
+        let activeGroups = [];
+        let currentGroupData = null;
+        let examStructure = [];
+        let answerKey = {}; // format: { "1": "2", "31": "45.5" }
+
+        window.onload = async () => {
+            const auth = sessionStorage.getItem('minervaAdminAuth');
+            if (auth !== 'true') return window.location.replace('index.html');
+            await populateDates();
+        };
+
+        async function populateDates() {
+            try {
+                const snap = await db.collection("admin_paper_groups").get();
+                let dates = new Set();
+                snap.forEach(d => dates.add(d.data().date));
+                const sorted = Array.from(dates).sort((a,b) => b.localeCompare(a));
+                
+                const sel = document.getElementById('date-select');
+                if (sorted.length === 0) {
+                    sel.innerHTML = '<option value="">No exams found</option>';
+                } else {
+                    sel.innerHTML = sorted.map(d => `<option value="${d}">${new Date(d).toLocaleDateString('en-GB', {day:'numeric',month:'short',year:'numeric'})}</option>`).join('');
+                    loadExamsForDate();
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function loadExamsForDate() {
+            const date = document.getElementById('date-select').value;
+            const container = document.getElementById('exam-list');
+            if (!date) return;
+            container.innerHTML = '<div class="text-center py-10"><span class="loader"></span></div>';
+
+            try {
+                const snap = await db.collection("admin_paper_groups").where("date", "==", date).get();
+                activeGroups = [];
+                snap.forEach(doc => activeGroups.push({ id: doc.id, ...doc.data() }));
+                
+                activeGroups.sort((a,b) => (a.combinedCode||'').localeCompare(b.combinedCode||''));
+
+                if(activeGroups.length === 0) {
+                    container.innerHTML = '<p class="text-center font-bold text-slate-400">No combined paper groups found for this date.</p>';
+                    return;
+                }
+
+                container.innerHTML = activeGroups.map(g => `
+                    <div class="bg-white border-2 ${g.combinedCode ? 'border-blue-200 bg-blue-50/20' : 'border-slate-200'} rounded-2xl p-5 flex flex-col md:flex-row justify-between items-start md:items-center shadow-sm gap-4">
+                        <div>
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="bg-slate-800 text-white font-mono px-2 py-0.5 rounded text-[10px] uppercase tracking-widest">${g.combinedCode || 'NO CODE'}</span>
+                                <span class="bg-slate-200 text-slate-700 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest">${g.mode || 'Offline'}</span>
+                            </div>
+                            <h3 class="font-black text-slate-800 uppercase text-sm">${g.subjects.join(' + ')}</h3>
+                            <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">Class ${g.className} • ${g.sections.length} Sections Attached</p>
+                        </div>
+                        <button onclick="openConfigurator('${g.id}')" class="bg-blue-600 hover:bg-blue-500 text-white px-5 py-2.5 rounded-xl font-black uppercase text-xs tracking-widest shadow-md transition-colors w-full md:w-auto shrink-0">📝 Configure Key</button>
+                    </div>
+                `).join('');
+            } catch(e) {
+                console.error(e);
+                container.innerHTML = '<p class="text-center text-red-500 font-bold">Error loading exams.</p>';
+            }
+        }
+
+        // --- CONFIGURATOR LOGIC ---
+        async function openConfigurator(docId) {
+            currentGroupData = activeGroups.find(g => g.id === docId);
+            document.getElementById('config-subtitle').innerText = `${currentGroupData.combinedCode || 'UNASSIGNED'} • Class ${currentGroupData.className}`;
+            
+            // Reset state
+            examStructure = [];
+            answerKey = {};
+            document.getElementById('structure-container').innerHTML = '';
+            document.getElementById('answer-grid-container').innerHTML = '<div class="text-center text-slate-400 font-bold uppercase text-xs tracking-widest py-20">Define structure on the left and click Generate</div>';
+
+            // Attempt to load existing key
+            try {
+                const keyDoc = await db.collection("exam_answer_keys").doc(docId).get();
+                if (keyDoc.exists) {
+                    const data = keyDoc.data();
+                    examStructure = data.structure || [];
+                    answerKey = data.answers || {};
+                    
+                    examStructure.forEach(s => addSubjectRow(s));
+                    if (examStructure.length > 0) generateInputGrid();
+                } else {
+                    // Pre-fill subjects from group
+                    currentGroupData.subjects.forEach((sub, i) => {
+                        addSubjectRow({ subject: sub, start: i*30 + 1, end: (i+1)*30, type: 'MCQ' });
+                    });
+                }
+            } catch(e) { console.error(e); }
+
+            document.getElementById('dashboard-view').classList.add('hidden');
+            document.getElementById('configurator-view').classList.remove('hidden');
+            document.getElementById('configurator-view').classList.add('flex');
+        }
+
+        function closeConfigurator() {
+            document.getElementById('configurator-view').classList.add('hidden');
+            document.getElementById('configurator-view').classList.remove('flex');
+            document.getElementById('dashboard-view').classList.remove('hidden');
+        }
+
+        function addSubjectRow(data = {subject: '', start: '', end: '', type: 'MCQ'}) {
+            const cont = document.getElementById('structure-container');
+            const id = 'row_' + Date.now() + Math.random().toString(36).substr(2,5);
+            
+            const html = `
+                <div class="bg-slate-50 border border-slate-200 p-4 rounded-xl relative group struct-row" id="${id}">
+                    <button onclick="document.getElementById('${id}').remove()" class="absolute -top-2 -right-2 bg-rose-500 text-white w-6 h-6 rounded-full font-black text-xs hidden group-hover:block z-10">✕</button>
+                    <input type="text" class="struct-sub w-full p-2 mb-2 bg-white border border-slate-300 rounded-lg text-xs font-black uppercase outline-none" placeholder="Subject Name" value="${data.subject}">
+                    <div class="flex gap-2 mb-2">
+                        <input type="number" class="struct-start w-1/2 p-2 bg-white border border-slate-300 rounded-lg text-xs font-bold" placeholder="Start Q" value="${data.start}">
+                        <input type="number" class="struct-end w-1/2 p-2 bg-white border border-slate-300 rounded-lg text-xs font-bold" placeholder="End Q" value="${data.end}">
+                    </div>
+                    <select class="struct-type w-full p-2 bg-white border border-slate-300 rounded-lg text-xs font-bold uppercase cursor-pointer">
+                        <option value="MCQ" ${data.type === 'MCQ' ? 'selected' : ''}>MCQ (1,2,3,4)</option>
+                        <option value="Numeric" ${data.type === 'Numeric' ? 'selected' : ''}>Numeric Input</option>
+                    </select>
+                </div>
+            `;
+            cont.insertAdjacentHTML('beforeend', html);
+        }
+
+        function generateInputGrid() {
+            const rows = document.querySelectorAll('.struct-row');
+            examStructure = [];
+            
+            let isValid = true;
+            rows.forEach(r => {
+                const sub = r.querySelector('.struct-sub').value.trim();
+                const start = parseInt(r.querySelector('.struct-start').value);
+                const end = parseInt(r.querySelector('.struct-end').value);
+                const type = r.querySelector('.struct-type').value;
+
+                if (!sub || isNaN(start) || isNaN(end) || start > end) isValid = false;
+                examStructure.push({ subject: sub, start, end, type });
+            });
+
+            if (!isValid) return alert("Please fill all structure fields correctly.");
+
+            // Generate UI
+            const cont = document.getElementById('answer-grid-container');
+            let html = '<div class="columns-1 md:columns-2 lg:columns-3 gap-8">';
+
+            examStructure.forEach(sec => {
+                html += `<div class="break-inside-avoid mb-6">
+                            <h4 class="font-black text-slate-800 uppercase tracking-widest text-sm border-b-2 border-slate-800 pb-1 mb-3">${sec.subject} <span class="text-[9px] text-slate-400 bg-slate-100 px-2 py-0.5 rounded ml-2">${sec.type}</span></h4>
+                            <div class="space-y-2">`;
+                
+                for (let q = sec.start; q <= sec.end; q++) {
+                    const savedAns = answerKey[q] || "";
+                    if (sec.type === 'MCQ') {
+                        html += `
+                            <div class="flex items-center gap-3">
+                                <span class="w-6 text-right font-black text-slate-500 text-xs">${q}.</span>
+                                <div class="flex gap-2">
+                                    ${[1,2,3,4].map(opt => `<div onclick="setAnswer(${q}, ${opt})" id="q_${q}_opt_${opt}" class="ans-btn ${savedAns == opt ? 'selected' : ''}">${opt}</div>`).join('')}
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        html += `
+                            <div class="flex items-center gap-3">
+                                <span class="w-6 text-right font-black text-slate-500 text-xs">${q}.</span>
+                                <input type="number" oninput="setNumericAnswer(${q}, this.value)" value="${savedAns}" class="w-24 p-1.5 border-2 border-slate-300 rounded-lg text-sm font-black text-center outline-none focus:border-blue-500">
+                            </div>
+                        `;
+                    }
+                }
+                html += `</div></div>`;
+            });
+
+            html += '</div>';
+            cont.innerHTML = html;
+        }
+
+        function setAnswer(qNum, opt) {
+            // Deselect others in row
+            [1,2,3,4].forEach(o => {
+                const btn = document.getElementById(`q_${qNum}_opt_${o}`);
+                if (btn) btn.classList.remove('selected');
+            });
+            // Select new
+            const btn = document.getElementById(`q_${qNum}_opt_${opt}`);
+            if (btn) btn.classList.add('selected');
+            
+            answerKey[qNum] = String(opt);
+        }
+
+        function setNumericAnswer(qNum, val) {
+            answerKey[qNum] = val.trim();
+        }
+
+        async function saveAnswerKey() {
+            if (!currentGroupData) return;
+            const btn = event.target;
+            const orig = btn.innerText;
+            btn.innerText = "⏳ Saving..."; btn.disabled = true;
+
+            try {
+                await db.collection("exam_answer_keys").doc(currentGroupData.id).set({
+                    groupKey: currentGroupData.groupKey,
+                    combinedCode: currentGroupData.combinedCode,
+                    date: currentGroupData.date,
+                    structure: examStructure,
+                    answers: answerKey,
+                    updatedAt: Date.now()
+                });
+                alert("✅ Answer Key Saved!");
+            } catch(e) {
+                console.error(e);
+                alert("Failed to save.");
+            } finally {
+                btn.innerText = orig; btn.disabled = false;
+            }
+        }
+
+        // --- OMR RENDERER (CSS Multi-Column approach) ---
+        function previewOMR(withAnswers) {
+            if (examStructure.length === 0) return alert("Please generate the grid first.");
+
+            document.getElementById('print-exam-code').innerText = currentGroupData.combinedCode || "UNASSIGNED";
+            
+            const area = document.getElementById('print-questions-area');
+            let html = "";
+
+            examStructure.forEach(sec => {
+                html += `<div class="subject-header">${sec.subject}</div>`;
+                
+                for (let q = sec.start; q <= sec.end; q++) {
+                    const ans = withAnswers ? (answerKey[q] || "") : "";
+                    
+                    if (sec.type === 'MCQ') {
+                        let optsHtml = "";
+                        for(let o=1; o<=4; o++) {
+                            const isKey = (ans == o);
+                            optsHtml += `<div class="omr-bubble ${isKey ? 'key-filled' : ''}">${o}</div>`;
+                        }
+                        html += `
+                            <div class="q-row">
+                                <div class="q-num">${q}.</div>
+                                <div class="q-opts">${optsHtml}</div>
+                            </div>
+                        `;
+                    } else {
+                        html += `
+                            <div class="q-row">
+                                <div class="q-num">${q}.</div>
+                                <div class="omr-num-box">${ans}</div>
+                            </div>
+                        `;
+                    }
+                }
+            });
+
+            area.innerHTML = html;
+            window.print();
+        }
+    </script>
+</body>
+</html>
