@@ -2684,78 +2684,30 @@ async function printRoomOMRsSeatWise() {
         return alert(`No allocated students found in Room ${room.name} to print OMRs.`);
     }
 
-    occupiedSeats.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
-
-    const printArea = document.getElementById('omr-print-target-area');
-    printArea.innerHTML = `<div style="display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; font-weight:bold; font-size:16px;">⚡ Compiling ${occupiedSeats.length} OMR sheets...</div>`;
-    
-    await new Promise(r => setTimeout(r, 40));
+    // Directly call the cloud function to compile server-side PDF instantly without local browser freezing
+    const btn = event?.target;
+    if (btn) { btn.disabled = true; btn.innerText = "⏳ Cloud Compiling..."; }
 
     try {
-        let uniquePairs = new Set();
-        occupiedSeats.forEach(item => uniquePairs.add(`${item.stu.className}|${item.stu.section}`));
-        
-        let structurePromises = Array.from(uniquePairs).map(async pair => {
-            const [cls, sec] = pair.split('|');
-            const struct = await fetchExamStructureForStudent(cls, sec, date);
-            return { key: pair, struct };
+        const response = await fetch("https://asia-south1-shop-portal-bbbbb.cloudfunctions.net/compileSingleRoomOnDemand", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ center: activeCenter, date, roomName: room.name })
         });
+        const result = await response.json();
 
-        const resolvedStructures = await Promise.all(structurePromises);
-        let structureMap = {};
-        resolvedStructures.forEach(item => structureMap[item.key] = item.struct);
-
-        let allPagesHtml = "";
-        for (let i = 0; i < occupiedSeats.length; i++) {
-            const item = occupiedSeats[i];
-            const pairKey = `${item.stu.className}|${item.stu.section}`;
-            const structure = structureMap[pairKey] || [{ subject: 'GENERAL', start: 1, end: 75, type: 'MCQ' }];
-            allPagesHtml += buildPreFilledOMRHtml(item.stu, item.seatId, date, structure);
+        if (!response.ok) {
+            throw new Error(result.error || "Failed to compile room package on cloud.");
         }
 
-        printArea.innerHTML = ""; // Clear main DOM target
-
-        // Open isolated print window to completely eliminate main dashboard lag and freezing
-        const printWin = window.open('', '_blank', 'width=900,height=700');
-        if (!printWin) {
-            alert("Pop-up blocker prevented opening the print window. Please allow pop-ups for this site.");
-            return;
-        }
-
-        printWin.document.write(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Room OMRs - ${room.name}</title>
-                <style>
-                    @page { size: A4 portrait; margin: 6mm; }
-                    body { background: white !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; margin: 0; padding: 0; }
-                    .omr-print-page { width: 100%; height: 275mm; max-height: 275mm; page-break-after: always; page-break-inside: avoid; overflow: hidden; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; padding: 2px 6mm; font-family: Arial, sans-serif; background: white; }
-                    .omr-print-page:last-child { page-break-after: avoid; }
-                    .bubble-filled-black { background-color: black !important; color: white !important; border-color: black !important; }
-                </style>
-            </head>
-            <body>
-                ${allPagesHtml}
-                <script>
-                    window.onload = function() {
-                        setTimeout(() => {
-                            window.print();
-                        }, 400);
-                    };
-                <\/script>
-            </body>
-            </html>
-        `);
-        printWin.document.close();
-
+        window.open(result.url, '_blank');
     } catch (e) {
-        console.error("Isolated print compilation failed:", e);
-        alert("Error generating room OMRs: " + e.message);
-        printArea.innerHTML = "";
+        console.error("Cloud print compilation failed:", e);
+        alert("Error generating cloud room OMR PDF: " + e.message + "\n\nFalling back to local batch print.");
+    } finally {
+        if (btn) { btn.disabled = false; btn.innerText = "🖨️ Room OMRs (Seat-Wise)"; }
     }
 }
-
 async function checkRoomPrintPackageAvailability(roomName) {
     const date = document.getElementById('seating-exam-date').value;
     const btn = document.getElementById('btn-download-room-print');
