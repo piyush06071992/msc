@@ -476,7 +476,6 @@ exports.compileSingleRoomOnDemand = onRequest({
 
             let fullPagesHtml = "";
             const prettyDate = new Date(date + 'T00:00:00').toLocaleDateString('en-GB');
-            const normSec = (str) => (str || "").replace(/\s+/g, " ").trim().toUpperCase();
 
             occupiedSeats.forEach(({ seatId, stu }) => {
                 const pairKey = `${stu.className}|${stu.section}`;
@@ -563,7 +562,13 @@ exports.compileSingleRoomOnDemand = onRequest({
                 `;
             });
 
-            const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+            const executablePath = await chromium.executablePath();
+            const browser = await puppeteer.launch({
+                args: chromium.args,
+                defaultViewport: chromium.defaultViewport,
+                executablePath: executablePath,
+                headless: true,
+            });
             const page = await browser.newPage();
 
             const fullHtml = `
