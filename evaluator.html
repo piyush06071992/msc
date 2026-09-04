@@ -3,11 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Minerva | OMR Evaluator</title>
+    <title>Minerva | OMR Evaluator & Results Hub</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
+    <!-- SheetJS for Excel Template and Report Generation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- PapaParse for CSV reading -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; overflow-x: hidden; }
@@ -22,7 +26,6 @@
         /* ---------------------------------------------------- */
         .omr-sheet { border: 2px solid black; padding: 10px 14px; box-sizing: border-box; display: flex; flex-direction: column; background: white; width: 100%; height: 100%; font-family: Arial, sans-serif; justify-content: space-between; }
         
-        /* Clean Top Header Layout */
         .omr-top-section { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid black; padding-bottom: 8px; margin-bottom: 10px; flex-shrink: 0; color: black; }
         .omr-header-side { font-weight: bold; font-size: 10pt; width: 110px; }
         .omr-header-center { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
@@ -30,22 +33,17 @@
         .omr-title { font-size: 20pt; font-weight: 900; letter-spacing: 1px; text-transform: uppercase; margin: 0 0 3px 0; line-height: 1; color: black; }
         .omr-code { font-size: 10pt; font-family: monospace; font-weight: bold; background: #eee; display: inline-block; padding: 2px 8px; border: 1.5px solid black; }
         
-        /* Info & Roll Parallel Block */
         .omr-details-wrapper { display: flex; gap: 12px; border-bottom: 2px solid black; padding-bottom: 10px; margin-bottom: 10px; flex-shrink: 0; color: black; align-items: stretch; }
-        
-        /* Tighter Rectangular Info Grid */
         .omr-info-grid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; align-content: start; }
         .info-box { border: 1.5px solid black; padding: 5px 7px; display: flex; flex-direction: column; justify-content: flex-start; box-sizing: border-box; background: white; min-height: 38px; }
         .info-label { font-size: 7.5pt; font-weight: bold; text-transform: uppercase; color: #000; line-height: 1; }
         
-        /* Roll Grid */
         .omr-roll-block { border: 1.5px solid black; padding: 6px 10px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; background: white; flex-shrink: 0; }
         .roll-label { font-size: 8pt; font-weight: bold; text-transform: uppercase; margin-bottom: 5px; color: #000; }
         .roll-grid { display: flex; gap: 6px; justify-content: center; }
         .roll-col { display: flex; flex-direction: column; gap: 3px; align-items: center; }
         .roll-box { width: 14px; height: 14px; border: 1.5px solid black; margin-bottom: 2px; }
         
-        /* Subject-Wise Column Grid (Expanded to fill vertical space) */
         .omr-questions-container { display: flex; flex-wrap: nowrap; gap: 12px; width: 100%; flex-grow: 1; justify-content: space-between; align-content: space-between; }
         .omr-q-col { flex: 1; display: flex; flex-direction: column; min-width: 0; justify-content: space-between; }
         
@@ -58,10 +56,8 @@
         .omr-bubble.key-filled { background-color: #ef4444 !important; border-color: #ef4444 !important; color: white !important; }
         
         .omr-num-box { display: inline-block; width: 48px; height: 16px; border: 1px solid black; vertical-align: middle; text-align: center; font-weight: bold; font-size: 9pt; color: #ef4444 !important; outline: none; background: white; }
-        
         .subject-header { font-weight: 900; font-size: 9pt; text-transform: uppercase; border-bottom: 1.5px solid black; margin: 0 0 4px 0; text-align: center; background: #f8f8f8; padding: 3px; color: black; }
 
-        /* Screen Preview Wrapper */
         .preview-wrapper { width: 100%; display: flex; justify-content: center; overflow-x: auto; padding: 15px 0; }
         .live-a4-preview { width: 210mm; height: 297mm; box-shadow: 0 10px 30px rgba(0,0,0,0.15); background: white; flex-shrink: 0; box-sizing: border-box; transform-origin: top center; }
         
@@ -75,31 +71,40 @@
             #print-view { display: flex !important; flex-direction: column; width: 100%; height: 284mm; box-sizing: border-box; overflow: hidden; }
             .print-blank .key-filled { background-color: transparent !important; border-color: black !important; color: black !important; }
             .print-blank .omr-num-box { color: transparent !important; }
+            .print-blank .bonus-tag { display: none !important; }
         }
     </style>
 </head>
 <body class="min-h-screen">
 
-    <!-- DASHBOARD VIEW -->
-    <div id="dashboard-view" class="no-print">
-        <header class="bg-[#1e1b4b] text-white p-4 sm:px-8 sm:py-5 flex items-center justify-between shadow-xl border-b-4 border-blue-500">
-            <div class="flex items-center gap-4">
-                <button onclick="window.location.href='admin-exam.html'" class="p-3 bg-white/10 hover:bg-white/20 rounded-xl transition-colors shadow-sm">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
-                </button>
-                <div>
-                    <h1 class="text-2xl font-black tracking-widest uppercase leading-none">Evaluator Hub</h1>
-                    <p class="text-xs text-blue-300 font-bold uppercase tracking-widest mt-1">OMR & Answer Key Generator</p>
-                </div>
+    <!-- MAIN APP HEADER -->
+    <header class="bg-[#1e1b4b] text-white p-4 sm:px-8 sm:py-4 flex flex-wrap items-center justify-between shadow-xl border-b-4 border-blue-500 no-print gap-4 sticky top-0 z-50">
+        <div class="flex items-center gap-4">
+            <button onclick="handlePortalNavigation()" class="p-3 bg-white/10 hover:bg-white/20 rounded-xl transition-colors shadow-sm">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
+            </button>
+            <div>
+                <h1 class="text-xl sm:text-2xl font-black tracking-widest uppercase leading-none">Evaluator & Results</h1>
+                <p id="user-role-badge" class="text-[10px] sm:text-xs text-blue-300 font-bold uppercase tracking-widest mt-1">Authenticating...</p>
             </div>
-        </header>
+        </div>
+        <!-- NAVIGATION TABS -->
+        <div class="flex bg-white/10 p-1 rounded-xl gap-1">
+            <button onclick="switchViewMode('configurator')" id="tab-btn-configurator" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-black text-xs uppercase tracking-wider transition-all shadow-sm">OMR & Keys</button>
+            <button onclick="switchViewMode('results')" id="tab-btn-results" class="text-blue-200 hover:text-white px-4 py-2 rounded-lg font-black text-xs uppercase tracking-wider transition-all">Results Hub</button>
+        </div>
+    </header>
 
-        <main class="max-w-6xl mx-auto p-4 sm:p-8 mt-4 space-y-6">
+    <!-- ==================================================== -->
+    <!-- SECTION 1: KEY EVALUATOR & CONFIGURATOR WORKSPACE   -->
+    <!-- ==================================================== -->
+    <div id="section-evaluator-workspace" class="no-print">
+        <main class="max-w-6xl mx-auto p-4 sm:p-8 mt-2 space-y-6">
             <div class="glass-card p-6 rounded-[2rem]">
                 <div class="flex flex-col sm:flex-row gap-4 justify-between sm:items-end border-b border-slate-200 pb-6 mb-6">
                     <div>
                         <h2 class="text-xl font-black text-slate-900 uppercase">Select Exam Group</h2>
-                        <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Configure OMRs for mapped exams</p>
+                        <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Configure OMRs and keys for scheduled exams</p>
                     </div>
                     <div class="w-full sm:w-64">
                         <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Exam Date</label>
@@ -113,11 +118,87 @@
         </main>
     </div>
 
-    <!-- CONFIGURATOR VIEW -->
+    <!-- ==================================================== -->
+    <!-- SECTION 2: RESULTS & SCORECARD EXPLORER (ALL STAFF) -->
+    <!-- ==================================================== -->
+    <div id="section-results-hub" class="hidden no-print">
+        <main class="max-w-7xl mx-auto p-4 sm:p-8 mt-2 space-y-6">
+            <div class="glass-card p-6 rounded-[2rem]">
+                <div class="flex flex-col lg:flex-row gap-4 justify-between items-start lg:items-end border-b border-slate-200 pb-6 mb-6">
+                    <div>
+                        <h2 class="text-xl sm:text-2xl font-black text-slate-900 uppercase tracking-tight">Student Performance Hub</h2>
+                        <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Check individual candidate scores or review full section rankings</p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-3 w-full lg:w-auto">
+                        <button onclick="exportResultsToExcel()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-md transition-all flex items-center gap-2">
+                            <span>📊</span> Download Excel
+                        </button>
+                    </div>
+                </div>
+
+                <!-- RESULTS QUERY CONTROLS -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                    <div>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">1. Exam Date</label>
+                        <select id="res-date-select" onchange="onResultDateChange()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer"></select>
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">2. Exam Paper Group</label>
+                        <select id="res-group-select" onchange="onResultGroupChange()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer">
+                            <option value="">-- Select Exam --</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">3. Filter Class / Section</label>
+                        <select id="res-section-select" onchange="filterResultsTable()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer">
+                            <option value="ALL">All Sections</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">4. Search Student</label>
+                        <input type="text" id="res-search-input" onkeyup="filterResultsTable()" placeholder="Roll No or Name..." class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none placeholder:text-slate-400">
+                    </div>
+                </div>
+
+                <!-- AGGREGATE SUMMARY STRIP -->
+                <div id="results-summary-strip" class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+                    <div class="bg-blue-50 border border-blue-200 p-4 rounded-2xl text-center">
+                        <span class="text-[9px] font-black uppercase tracking-widest text-blue-700 block">Total Candidates</span>
+                        <span id="stat-total-students" class="text-2xl font-black text-blue-900 mt-1 block">0</span>
+                    </div>
+                    <div class="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl text-center">
+                        <span class="text-[9px] font-black uppercase tracking-widest text-emerald-700 block">Highest Marks</span>
+                        <span id="stat-top-score" class="text-2xl font-black text-emerald-900 mt-1 block">0</span>
+                    </div>
+                    <div class="bg-purple-50 border border-purple-200 p-4 rounded-2xl text-center">
+                        <span class="text-[9px] font-black uppercase tracking-widest text-purple-700 block">Batch Average</span>
+                        <span id="stat-avg-score" class="text-2xl font-black text-purple-900 mt-1 block">0</span>
+                    </div>
+                    <div class="bg-amber-50 border border-amber-200 p-4 rounded-2xl text-center">
+                        <span class="text-[9px] font-black uppercase tracking-widest text-amber-700 block">Bonus Questions</span>
+                        <span id="stat-bonus-count" class="text-2xl font-black text-amber-900 mt-1 block">0</span>
+                    </div>
+                </div>
+
+                <!-- STUDENT RESULTS TABLE -->
+                <div class="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
+                    <div class="overflow-x-auto custom-scroll" id="results-table-container">
+                        <div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest">
+                            Select an exam date and paper group above to inspect student results.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- ==================================================== -->
+    <!-- CONFIGURATOR MODAL VIEW                             -->
+    <!-- ==================================================== -->
     <div id="configurator-view" class="fixed inset-0 bg-white z-[200] hidden flex-col no-print">
         <header class="bg-blue-600 text-white p-4 sm:px-6 sm:py-3 flex justify-between items-center shrink-0 shadow-md">
             <div>
-                <h2 class="text-lg font-black uppercase tracking-tighter">Answer Key Configurator</h2>
+                <h2 class="text-lg font-black uppercase tracking-tighter">Answer Key & OMR Configurator</h2>
                 <p id="config-subtitle" class="text-[9px] font-bold text-blue-200 uppercase tracking-widest mt-0.5">Code: UNASSIGNED</p>
             </div>
             <div class="flex gap-2">
@@ -129,10 +210,10 @@
 
         <div class="flex-1 flex overflow-hidden bg-slate-200">
             <!-- Left Panel -->
-            <div class="w-1/3 min-w-[320px] max-w-[400px] border-r border-slate-300 bg-white p-5 overflow-y-auto custom-scroll flex flex-col z-10 shadow-xl">
+            <div class="w-1/3 min-w-[320px] max-w-[420px] border-r border-slate-300 bg-white p-5 overflow-y-auto custom-scroll flex flex-col z-10 shadow-xl">
                 
-                <!-- Templates Block (Official presets removed) -->
-                <div class="bg-indigo-50 border border-indigo-100 rounded-xl p-3 mb-5">
+                <!-- Templates Block (Admin Only - Hidden for Coordinators) -->
+                <div id="templates-admin-block" class="bg-indigo-50 border border-indigo-100 rounded-xl p-3 mb-5">
                     <div class="flex justify-between items-center mb-2">
                         <label class="text-[9px] font-black text-indigo-800 uppercase tracking-widest">Draft Templates</label>
                         <div class="flex gap-1">
@@ -149,12 +230,26 @@
                     </div>
                 </div>
 
+                <!-- Pre-Written Excel Download & Upload Action Center (Visible to Coordinators & Admins) -->
+                <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 mb-5 shadow-sm space-y-2">
+                    <span class="text-[9px] font-black text-emerald-900 uppercase tracking-widest block">Coordinator Excel Import / Export</span>
+                    <div class="flex gap-2">
+                        <button onclick="downloadPreWrittenExcelTemplate()" class="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[9px] font-black uppercase tracking-wider transition-colors shadow-sm">
+                            📥 Download Template
+                        </button>
+                        <label class="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-[9px] font-black uppercase tracking-wider text-center cursor-pointer transition-colors shadow-sm">
+                            📤 Upload Key
+                            <input type="file" accept=".xlsx, .xls, .csv" onchange="uploadExcelAnswerKey(event)" class="hidden">
+                        </label>
+                    </div>
+                </div>
+
                 <div class="flex justify-between items-end border-b border-slate-200 pb-2 mb-2">
-                    <h3 class="font-black text-slate-800 uppercase text-xs">1. Exam Structure</h3>
-                    <span class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Drag or reorder blocks</span>
+                    <h3 class="font-black text-slate-800 uppercase text-xs">1. Exam Structure & Marks</h3>
+                    <span class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Reorder blocks</span>
                 </div>
                 
-                <p class="text-[9px] text-slate-500 font-bold mb-3">Use ⬆️ ⬇️ arrows to reorder subject sections.</p>
+                <p class="text-[9px] text-slate-500 font-bold mb-3">Set positive & negative marks per section. Use ⬆️ ⬇️ to reorder.</p>
                 <div id="structure-container" class="space-y-3 flex-1"></div>
             </div>
 
@@ -163,7 +258,7 @@
                 <div class="w-full max-w-[210mm] mx-auto flex justify-between items-end mb-4 bg-white/80 p-3 rounded-xl border border-white/40 shadow-sm sticky top-0 z-20 backdrop-blur-md">
                     <div>
                         <h3 class="font-black text-slate-800 uppercase text-xs">Live OMR & Key Builder</h3>
-                        <p class="text-[9px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">Click bubbles on the sheet to set correct answers</p>
+                        <p class="text-[9px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">Click bubbles to set answers. Click ★ for Bonus (Admin)</p>
                     </div>
                     <button onclick="saveAnswerKey()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-md active:scale-95 transition-all">💾 Save Key to DB</button>
                 </div>
@@ -177,6 +272,48 @@
         </div>
     </div>
 
+    <!-- BONUS RULE CONFIGURATION MODAL (ADMIN ONLY) -->
+    <div id="bonus-rule-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[300] hidden items-center justify-center p-4 no-print">
+        <div class="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden flex flex-col">
+            <div class="p-5 bg-gradient-to-r from-amber-500 to-orange-500 text-white flex justify-between items-center shrink-0">
+                <div>
+                    <h3 class="font-black text-base uppercase tracking-tight flex items-center gap-2">
+                        <span>⭐</span> Configure Bonus Policy
+                    </h3>
+                    <p id="bonus-modal-subtitle" class="text-[10px] font-bold text-amber-100 uppercase tracking-widest mt-0.5">Question #</p>
+                </div>
+                <button onclick="closeBonusModal()" class="bg-white/20 hover:bg-white/30 text-white w-8 h-8 rounded-full font-black text-sm flex items-center justify-center">✕</button>
+            </div>
+            <div class="p-5 space-y-3 bg-slate-50">
+                <p class="text-xs font-bold text-slate-600">Select the evaluation condition for this bonus question:</p>
+                
+                <button onclick="applyBonusRule('ALL')" class="w-full p-3.5 bg-white hover:bg-amber-50 border-2 border-amber-200 hover:border-amber-400 rounded-2xl text-left transition-all group flex flex-col gap-1 shadow-sm">
+                    <div class="flex items-center justify-between">
+                        <span class="font-black text-xs uppercase text-amber-900 flex items-center gap-1.5">
+                            <span>🎁</span> Award to EVERYONE
+                        </span>
+                        <span class="text-[9px] font-black uppercase bg-amber-100 text-amber-800 px-2 py-0.5 rounded">All Students</span>
+                    </div>
+                    <p class="text-[10px] font-bold text-slate-500">Every candidate receives full positive marks, whether attempted or unattempted. Candidates who answered correctly retain standard marks without duplicate addition.</p>
+                </button>
+
+                <button onclick="applyBonusRule('ATTEMPTED')" class="w-full p-3.5 bg-white hover:bg-purple-50 border-2 border-purple-200 hover:border-purple-400 rounded-2xl text-left transition-all group flex flex-col gap-1 shadow-sm">
+                    <div class="flex items-center justify-between">
+                        <span class="font-black text-xs uppercase text-purple-900 flex items-center gap-1.5">
+                            <span>✍️</span> Award to ATTEMPTED ONLY
+                        </span>
+                        <span class="text-[9px] font-black uppercase bg-purple-100 text-purple-800 px-2 py-0.5 rounded">Attempted Only</span>
+                    </div>
+                    <p class="text-[10px] font-bold text-slate-500">Only candidates who attempted this question (including wrong responses) receive positive marks. Unattempted candidates receive 0 marks.</p>
+                </button>
+
+                <button onclick="applyBonusRule('NONE')" class="w-full p-2.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl font-black text-xs uppercase tracking-widest text-center transition-colors">
+                    ✕ Remove Bonus (Standard Evaluation)
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- PRINT VIEW CLONE TARGET -->
     <div id="print-view" class="hidden bg-white"></div>
 
@@ -186,28 +323,81 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
+        // Identity and Role State
+        let isAdmin = false;
+        let activeStaff = null;
+        let activeCenter = "GHUMARWIN";
+
         let activeGroups = [];
         let currentGroupData = null;
         let examStructure = [];
-        let answerKey = {}; 
+        let answerKey = {};
+        let bonusConfig = {}; 
+        let activeBonusQ = null;
+
+        // Results State
+        let currentExamResults = [];
 
         window.onload = async () => {
-            const auth = sessionStorage.getItem('minervaAdminAuth');
-            if (auth !== 'true') return window.location.replace('index.html');
+            const adminAuth = sessionStorage.getItem('minervaAdminAuth');
+            const staffStr = localStorage.getItem('minervaActiveStaff');
+            
+            if (adminAuth === 'true') {
+                isAdmin = true;
+                activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
+                document.getElementById('user-role-badge').innerText = `Admin Authority • ${activeCenter}`;
+                const tBlock = document.getElementById('templates-admin-block');
+                if (tBlock) tBlock.classList.remove('hidden');
+            } else if (staffStr) {
+                activeStaff = JSON.parse(staffStr);
+                activeCenter = activeStaff.center || "GHUMARWIN";
+                document.getElementById('user-role-badge').innerText = `Faculty / Coordinator: ${activeStaff.name || activeStaff.email} • ${activeCenter}`;
+                // Coordinator / Faculty restriction: hide template management
+                const tBlock = document.getElementById('templates-admin-block');
+                if (tBlock) tBlock.classList.add('hidden');
+            } else {
+                return window.location.replace('index.html');
+            }
+
             await populateDates();
-            await populateTemplates();
+            if (isAdmin) await populateTemplates();
         };
+
+        function handlePortalNavigation() {
+            if (isAdmin) window.location.href = 'admin-exam.html';
+            else window.location.href = 'teacher-portal.html';
+        }
+
+        function switchViewMode(mode) {
+            const ws = document.getElementById('section-evaluator-workspace');
+            const rh = document.getElementById('section-results-hub');
+            const btnWs = document.getElementById('tab-btn-configurator');
+            const btnRh = document.getElementById('tab-btn-results');
+
+            if (mode === 'configurator') {
+                ws.classList.remove('hidden');
+                rh.classList.add('hidden');
+                btnWs.className = "bg-blue-600 text-white px-4 py-2 rounded-lg font-black text-xs uppercase tracking-wider transition-all shadow-sm";
+                btnRh.className = "text-blue-200 hover:text-white px-4 py-2 rounded-lg font-black text-xs uppercase tracking-wider transition-all";
+            } else {
+                ws.classList.add('hidden');
+                rh.classList.remove('hidden');
+                btnRh.className = "bg-blue-600 text-white px-4 py-2 rounded-lg font-black text-xs uppercase tracking-wider transition-all shadow-sm";
+                btnWs.className = "text-blue-200 hover:text-white px-4 py-2 rounded-lg font-black text-xs uppercase tracking-wider transition-all";
+                populateResultDates();
+            }
+        }
 
         async function populateDates() {
             try {
                 const snap = await db.collection("admin_paper_groups").get();
                 let dates = new Set();
-                snap.forEach(d => dates.add(d.data().date));
+                snap.forEach(d => { if (d.data().date) dates.add(d.data().date); });
                 const sorted = Array.from(dates).sort((a,b) => b.localeCompare(a));
                 const sel = document.getElementById('date-select');
                 if (sorted.length === 0) sel.innerHTML = '<option value="">No exams found</option>';
                 else {
-                    sel.innerHTML = sorted.map(d => `<option value="${d}">${new Date(d).toLocaleDateString('en-GB', {day:'numeric',month:'short',year:'numeric'})}</option>`).join('');
+                    sel.innerHTML = sorted.map(d => `<option value="${d}">${new Date(d + 'T00:00:00').toLocaleDateString('en-GB', {day:'numeric',month:'short',year:'numeric'})}</option>`).join('');
                     loadExamsForDate();
                 }
             } catch(e) { console.error(e); }
@@ -225,12 +415,23 @@
                 snap.forEach(doc => activeGroups.push({ id: doc.id, ...doc.data() }));
                 activeGroups.sort((a,b) => (a.combinedCode||'').localeCompare(b.combinedCode||''));
 
-                if(activeGroups.length === 0) {
-                    container.innerHTML = '<p class="text-center font-bold text-slate-400">No combined paper groups found for this date.</p>';
+                // Filter for coordinator if not full admin
+                let visibleGroups = activeGroups;
+                if (!isAdmin && activeStaff) {
+                    const myName = (activeStaff.name || "").trim().toLowerCase();
+                    const myEmail = (activeStaff.email || "").trim().toLowerCase();
+                    visibleGroups = activeGroups.filter(g => {
+                        const coord = String(g.coordinatorPerson || "").trim().toLowerCase();
+                        return coord === myName || coord === myEmail;
+                    });
+                }
+
+                if(visibleGroups.length === 0) {
+                    container.innerHTML = `<p class="text-center font-bold text-slate-400 py-10">No exam papers found for this date ${!isAdmin ? 'assigned to you' : ''}.</p>`;
                     return;
                 }
 
-                container.innerHTML = activeGroups.map(g => `
+                container.innerHTML = visibleGroups.map(g => `
                     <div class="bg-white border-2 ${g.combinedCode ? 'border-blue-200 bg-blue-50/20' : 'border-slate-200'} rounded-2xl p-5 flex flex-col md:flex-row justify-between items-start md:items-center shadow-sm gap-4">
                         <div>
                             <div class="flex items-center gap-2 mb-1">
@@ -250,6 +451,7 @@
 
         // --- TEMPLATES LOGIC ---
         async function populateTemplates() {
+            if (!isAdmin) return;
             try {
                 const snap = await db.collection("omr_templates").get();
                 const sel = document.getElementById('template-select');
@@ -301,7 +503,7 @@
                 const doc = await db.collection("omr_templates").doc(name).get();
                 if(doc.exists) {
                     document.getElementById('structure-container').innerHTML = '';
-                   const data = doc.data().structure || [];
+                    const data = doc.data().structure || [];
                     data.forEach(s => addSubjectRow({ 
                         subject: s.subject, 
                         total: (s.end - s.start + 1), 
@@ -315,6 +517,30 @@
             } catch(e) { alert("Error loading: " + e.message); }
         }
 
+        // --- BONUS CONTROLS (ADMIN ONLY) ---
+        function openBonusModal(qNum) {
+            if (!isAdmin) return; // Prevent coordinator access to bonus alteration
+            activeBonusQ = qNum;
+            document.getElementById('bonus-modal-subtitle').innerText = `Question #${qNum} • Policy Rule Selection`;
+            document.getElementById('bonus-rule-modal').classList.replace('hidden', 'flex');
+        }
+
+        function closeBonusModal() {
+            activeBonusQ = null;
+            document.getElementById('bonus-rule-modal').classList.replace('flex', 'hidden');
+        }
+
+        function applyBonusRule(rule) {
+            if (!activeBonusQ) return;
+            if (rule === 'NONE') {
+                delete bonusConfig[activeBonusQ];
+            } else {
+                bonusConfig[activeBonusQ] = rule;
+            }
+            closeBonusModal();
+            renderLiveOMR();
+        }
+
         // --- CONFIGURATOR LOGIC ---
         async function openConfigurator(docId) {
             currentGroupData = activeGroups.find(g => g.id === docId);
@@ -322,15 +548,17 @@
             
             examStructure = [];
             answerKey = {};
+            bonusConfig = {};
             document.getElementById('structure-container').innerHTML = '';
             document.getElementById('live-omr-preview').innerHTML = '<div class="text-center text-slate-400 font-bold uppercase text-xs tracking-widest py-20 mt-32 border-2 border-dashed border-slate-300 rounded-3xl mx-8">Fill structure fields to generate OMR</div>';
 
-       try {
+            try {
                 const keyDoc = await db.collection("exam_answer_keys").doc(docId).get();
                 if (keyDoc.exists) {
                     const data = keyDoc.data();
                     examStructure = data.structure || [];
                     answerKey = data.answers || {};
+                    bonusConfig = data.bonusConfig || {};
                     examStructure.forEach(s => addSubjectRow({ 
                         subject: s.subject, 
                         total: (s.end - s.start + 1), 
@@ -349,6 +577,7 @@
                             if (autoDoc.exists) {
                                 examStructure = autoDoc.data().structure || [];
                                 answerKey = {};
+                                bonusConfig = {};
                                 examStructure.forEach(s => addSubjectRow({ 
                                     subject: s.subject, 
                                     total: (s.end - s.start + 1), 
@@ -369,15 +598,13 @@
             } catch(e) { console.error(e); }
 
             document.getElementById('configurator-view').classList.replace('hidden', 'flex');
-            document.getElementById('dashboard-view').classList.add('hidden');
         }
 
         function closeConfigurator() {
             document.getElementById('configurator-view').classList.replace('flex', 'hidden');
-            document.getElementById('dashboard-view').classList.remove('hidden');
         }
 
-    function replicateMarkingScheme(sourceRowId) {
+        function replicateMarkingScheme(sourceRowId) {
             const row = document.getElementById(sourceRowId);
             if (!row) return;
             const correct = row.querySelector('.struct-correct').value;
@@ -435,7 +662,7 @@
                         <input type="number" class="struct-end w-1/3 p-2 bg-slate-100 border border-slate-200 rounded-lg text-[10px] font-bold text-center outline-none" placeholder="End" readonly>
                     </div>
 
-                    <!-- Marking Scheme Configuration Row -->
+                    <!-- Marking Scheme Configuration -->
                     <div class="bg-slate-50 p-2 rounded-lg border border-slate-200 mb-2">
                         <div class="flex justify-between items-center mb-1.5">
                             <span class="text-[8.5px] font-black uppercase text-slate-500 tracking-wider">Marking Scheme</span>
@@ -487,7 +714,7 @@
             let isValid = true;
             let currentStart = 1;
 
-     rows.forEach(r => {
+            rows.forEach(r => {
                 const sub = r.querySelector('.struct-sub').value.trim();
                 const type = r.querySelector('.struct-type').value;
                 const totalInput = r.querySelector('.struct-total');
@@ -530,7 +757,7 @@
 
         async function renderLiveOMR() {
             let code = currentGroupData ? currentGroupData.combinedCode : "UNASSIGNED";
-            let dateStr = currentGroupData ? new Date(currentGroupData.date).toLocaleDateString('en-GB') : "";
+            let dateStr = currentGroupData ? new Date(currentGroupData.date + 'T00:00:00').toLocaleDateString('en-GB') : "";
             let seriesVal = "";
 
             if (currentGroupData) {
@@ -540,7 +767,6 @@
                 } catch(e) { console.log(e); }
             }
 
-            // Balanced Column Splitting to fully cover vertical A4 space
             let totalQs = examStructure.reduce((sum, sec) => sum + (sec.end - sec.start + 1), 0);
             let numCols = 3;
             if (totalQs > 90) numCols = 4;
@@ -560,15 +786,26 @@
                     
                     chunk.forEach(q => {
                         const ans = answerKey[q] || "";
+                        const bRule = bonusConfig[q] || null;
+                        
+                        let bonusBadge = "";
+                        if (bRule === 'ALL') {
+                            bonusBadge = `<span ${isAdmin ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-amber-500 text-white text-[5.5pt] font-black px-1 py-0.5 rounded cursor-pointer uppercase ml-1 whitespace-nowrap" title="Bonus: Award to All">B:ALL</span>`;
+                        } else if (bRule === 'ATTEMPTED') {
+                            bonusBadge = `<span ${isAdmin ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-purple-600 text-white text-[5.5pt] font-black px-1 py-0.5 rounded cursor-pointer uppercase ml-1 whitespace-nowrap" title="Bonus: Attempted Only">B:ATT</span>`;
+                        } else if (isAdmin) {
+                            bonusBadge = `<span onclick="openBonusModal(${q})" class="bonus-tag no-print text-slate-300 hover:text-amber-500 text-[7.5pt] font-black px-0.5 cursor-pointer ml-1" title="Set Bonus Policy">★</span>`;
+                        }
+
                         if (sec.type === 'MCQ') {
                             let optsHtml = "";
                             for(let o=1; o<=4; o++) {
                                 const isKey = (ans == o);
                                 optsHtml += `<div onclick="setLiveAnswer(${q}, ${o})" id="live_q_${q}_opt_${o}" class="omr-bubble ${isKey ? 'key-filled' : ''}">${o}</div>`;
                             }
-                            columnsHtml += `<div class="q-row"><div class="q-num">${q}.</div><div class="q-opts">${optsHtml}</div></div>`;
+                            columnsHtml += `<div class="q-row"><div class="q-num">${q}.</div><div class="q-opts">${optsHtml}</div>${bonusBadge}</div>`;
                         } else {
-                            columnsHtml += `<div class="q-row"><div class="q-num">${q}.</div><input type="text" oninput="this.value = this.value.replace(/[^0-9.]/g, ''); setLiveNumeric(${q}, this.value)" class="omr-num-box" value="${ans}" /></div>`;
+                            columnsHtml += `<div class="q-row"><div class="q-num">${q}.</div><input type="text" oninput="this.value = this.value.replace(/[^0-9.]/g, ''); setLiveNumeric(${q}, this.value)" class="omr-num-box" value="${ans}" />${bonusBadge}</div>`;
                         }
                     });
                     columnsHtml += `</div>`;
@@ -588,7 +825,6 @@
                     </div>
 
                     <div class="omr-details-wrapper">
-                        <!-- Left Block: Rectangular Details -->
                         <div class="omr-info-grid">
                             <div class="info-box" style="grid-column: span 2; min-height: 34px;">
                                 <div class="info-label">Candidate Name (In Block Letters)</div>
@@ -599,7 +835,6 @@
                             <div class="info-box" style="min-height: 34px;"><div class="info-label">Invigilator Signature</div></div>
                         </div>
                         
-                        <!-- Right Block: Roll Number -->
                         <div class="omr-roll-block">
                             <div class="roll-label">Roll Number</div>
                             <div class="roll-grid">
@@ -633,6 +868,78 @@
             answerKey[qNum] = val.trim();
         }
 
+        // --- PRE-WRITTEN EXCEL TEMPLATE ENGINE ---
+        function downloadPreWrittenExcelTemplate() {
+            if (examStructure.length === 0) return alert("Please configure exam structure first.");
+            
+            let dataRows = [];
+            examStructure.forEach(sec => {
+                for (let q = sec.start; q <= sec.end; q++) {
+                    const existingAns = answerKey[q] || "";
+                    const bonusRule = bonusConfig[q] || "NONE";
+                    dataRows.push({
+                        "Question Number": q,
+                        "Subject": sec.subject,
+                        "Question Type": sec.type,
+                        "Correct Marks": sec.correctMarks,
+                        "Negative Marks": sec.wrongMarks,
+                        "Bonus Status": bonusRule,
+                        "Correct Answer": existingAns
+                    });
+                }
+            });
+
+            const ws = XLSX.utils.json_to_sheet(dataRows);
+            ws['!cols'] = [{wch: 16}, {wch: 18}, {wch: 15}, {wch: 14}, {wch: 14}, {wch: 15}, {wch: 18}];
+            const wb = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(wb, ws, "Answer Key");
+            
+            const fileName = `Answer_Key_Template_${currentGroupData ? currentGroupData.combinedCode : 'Exam'}.xlsx`;
+            XLSX.writeFile(wb, fileName);
+        }
+
+        function uploadExcelAnswerKey(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, {type: 'array'});
+                    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const jsonData = XLSX.utils.sheet_to_json(firstSheet, {defval: ""});
+
+                    let importedCount = 0;
+                    jsonData.forEach(row => {
+                        const qNum = row["Question Number"] || row["QUESTION NUMBER"] || row["Q.No"] || row["QNo"];
+                        const ans = row["Correct Answer"] || row["CORRECT ANSWER"] || row["Answer"] || row["ANSWER"];
+                        const bonus = row["Bonus Status"] || row["BONUS STATUS"] || row["Bonus"];
+
+                        if (qNum) {
+                            const qClean = String(qNum).trim();
+                            if (ans !== undefined && String(ans).trim() !== "") {
+                                answerKey[qClean] = String(ans).trim();
+                                importedCount++;
+                            }
+                            if (bonus && isAdmin) {
+                                const bUpper = String(bonus).trim().toUpperCase();
+                                if (bUpper === 'ALL' || bUpper === 'ATTEMPTED') bonusConfig[qClean] = bUpper;
+                                else if (bUpper === 'NONE' || bUpper === '') delete bonusConfig[qClean];
+                            }
+                        }
+                    });
+
+                    renderLiveOMR();
+                    alert(`✅ Successfully loaded ${importedCount} answers from Excel file! Don't forget to click 'Save Key to DB'.`);
+                } catch(err) {
+                    alert("Error parsing file: " + err.message);
+                }
+                event.target.value = "";
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
         async function saveAnswerKey() {
             if (!currentGroupData) return;
             const btn = event.target;
@@ -640,17 +947,20 @@
             btn.innerText = "⏳ Saving..."; btn.disabled = true;
 
             try {
-                await db.collection("exam_answer_keys").doc(currentGroupData.id).set({
+                const payload = {
                     groupKey: currentGroupData.groupKey,
                     combinedCode: currentGroupData.combinedCode,
                     date: currentGroupData.date,
                     structure: examStructure,
                     answers: answerKey,
+                    bonusConfig: bonusConfig,
                     updatedAt: Date.now()
-                });
+                };
+
+                await db.collection("exam_answer_keys").doc(currentGroupData.id).set(payload, { merge: true });
 
                 const subKey = (currentGroupData.subjects || []).slice().sort().join('_').toUpperCase();
-                if (subKey) {
+                if (subKey && isAdmin) {
                     await db.collection("omr_templates").doc("AUTO_" + subKey).set({
                         structure: examStructure,
                         updatedAt: Date.now()
@@ -658,9 +968,9 @@
                     populateTemplates();
                 }
 
-                alert("✅ Answer Key Saved!");
+                alert("✅ Answer Key Saved Successfully!");
             } catch(e) {
-                alert("Failed to save.");
+                alert("Failed to save: " + e.message);
             } finally {
                 btn.innerText = orig; btn.disabled = false;
             }
@@ -685,6 +995,265 @@
             if (!withAnswers) clone.classList.add('print-blank');
             printContainer.appendChild(clone);
             window.print();
+        }
+
+        // ==========================================================
+        // RESULTS & EVALUATION ENGINE (ALL STAFF ACCESSIBLE)
+        // ==========================================================
+        async function populateResultDates() {
+            const sel = document.getElementById('res-date-select');
+            try {
+                const snap = await db.collection("admin_paper_groups").get();
+                let dates = new Set();
+                snap.forEach(d => { if (d.data().date) dates.add(d.data().date); });
+                const sorted = Array.from(dates).sort((a,b) => b.localeCompare(a));
+                if (sorted.length === 0) sel.innerHTML = '<option value="">No exams</option>';
+                else {
+                    sel.innerHTML = '<option value="">-- Choose Exam Date --</option>' + sorted.map(d => `<option value="${d}">${new Date(d + 'T00:00:00').toLocaleDateString('en-GB', {day:'numeric',month:'short',year:'numeric'})}</option>`).join('');
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function onResultDateChange() {
+            const date = document.getElementById('res-date-select').value;
+            const groupSelect = document.getElementById('res-group-select');
+            groupSelect.innerHTML = '<option value="">Loading papers...</option>';
+
+            if (!date) return;
+            try {
+                const snap = await db.collection("admin_paper_groups").where("date", "==", date).get();
+                let groups = [];
+                snap.forEach(doc => groups.push({ id: doc.id, ...doc.data() }));
+
+                if (groups.length === 0) {
+                    groupSelect.innerHTML = '<option value="">No papers found</option>';
+                    return;
+                }
+
+                groupSelect.innerHTML = '<option value="">-- Select Exam Paper --</option>' + groups.map(g => `
+                    <option value="${g.id}">${g.combinedCode || 'COMBINED'} (${(g.subjects||[]).join(' + ')})</option>
+                `).join('');
+            } catch(e) { console.error(e); }
+        }
+
+        async function onResultGroupChange() {
+            const groupId = document.getElementById('res-group-select').value;
+            const secSelect = document.getElementById('res-section-select');
+            const tableContainer = document.getElementById('results-table-container');
+
+            if (!groupId) {
+                tableContainer.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest">Select an exam paper above to view scorecard.</div>`;
+                return;
+            }
+
+            tableContainer.innerHTML = `<div class="text-center py-20"><span class="loader"></span><p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-2">Computing student scores and evaluating keys...</p></div>`;
+
+            try {
+                // Fetch group data, answer keys, and student database
+                const [groupDoc, keyDoc, stuSnap, dStuSnap] = await Promise.all([
+                    db.collection("admin_paper_groups").doc(groupId).get(),
+                    db.collection("exam_answer_keys").doc(groupId).get(),
+                    db.collection("students").get(),
+                    db.collection("dharamshala_students").get()
+                ]);
+
+                if (!groupDoc.exists) return alert("Exam group not found.");
+                const gData = groupDoc.data();
+                const keyData = keyDoc.exists ? keyDoc.data() : { answers: {}, structure: [], bonusConfig: {} };
+
+                const answers = keyData.answers || {};
+                const structure = keyData.structure || [];
+                const bonuses = keyData.bonusConfig || {};
+
+                // Map sections attached to this group
+                let attachedSecs = new Set();
+                (gData.sectionKeys || []).forEach(sk => {
+                    const parts = sk.split('|');
+                    attachedSecs.add(`${parts[1]}|${parts[2]}`); // Class|Section
+                });
+
+                // Populate section dropdown
+                secSelect.innerHTML = '<option value="ALL">All Sections (Combined)</option>' + Array.from(attachedSecs).sort().map(s => {
+                    const [c, sec] = s.split('|');
+                    return `<option value="${s}">Class ${c} - Sec ${sec}</option>`;
+                }).join('');
+
+                // Pool students
+                let pooledStudents = [];
+                const addCandidate = (doc) => {
+                    const s = doc.data();
+                    if (s.isActive !== false && attachedSecs.has(`${s.className}|${s.section}`)) {
+                        pooledStudents.push({ id: doc.id, ...s });
+                    }
+                };
+                stuSnap.forEach(addCandidate);
+                dStuSnap.forEach(addCandidate);
+
+                // Fetch submitted OMR responses
+                const subSnap = await db.collection("omr_submissions").where("groupId", "==", groupId).get();
+                let submissionsMap = {};
+                subSnap.forEach(doc => {
+                    const d = doc.data();
+                    submissionsMap[String(d.rollNo).trim().toUpperCase()] = d.responses || {};
+                });
+
+                // Evaluate Each Student
+                currentExamResults = pooledStudents.map(stu => {
+                    const roll = String(stu.rollNo || '').trim().toUpperCase();
+                    const studentResponses = submissionsMap[roll] || {}; // Real or empty responses
+                    
+                    let subjectScores = {};
+                    let totalObtained = 0;
+                    let totalMax = 0;
+                    let bonusMarksAwarded = 0;
+
+                    structure.forEach(sec => {
+                        let secScore = 0;
+                        for (let q = sec.start; q <= sec.end; q++) {
+                            const correctAns = answers[q];
+                            const resp = studentResponses[q];
+                            const bonusRule = bonuses[q] || 'NONE';
+
+                            const posMarks = sec.correctMarks !== undefined ? sec.correctMarks : 4;
+                            const negMarks = sec.wrongMarks !== undefined ? sec.wrongMarks : -1;
+                            const unattMarks = sec.unattemptedMarks !== undefined ? sec.unattemptedMarks : 0;
+                            totalMax += posMarks;
+
+                            // Evaluation with Bonus Policy Enforcement
+                            if (bonusRule === 'ALL') {
+                                // Everyone gets full positive marks. If answered correctly, marks awarded once (no double counting)
+                                secScore += posMarks;
+                                if (!resp || resp !== correctAns) bonusMarksAwarded += posMarks;
+                            } else if (bonusRule === 'ATTEMPTED') {
+                                if (resp) {
+                                    secScore += posMarks; // Full marks for attempt
+                                    if (resp !== correctAns) bonusMarksAwarded += posMarks;
+                                } else {
+                                    secScore += unattMarks;
+                                }
+                            } else {
+                                // Standard marking
+                                if (!resp) {
+                                    secScore += unattMarks;
+                                } else if (String(resp) === String(correctAns)) {
+                                    secScore += posMarks;
+                                } else {
+                                    secScore += negMarks;
+                                }
+                            }
+                        }
+                        subjectScores[sec.subject] = (subjectScores[sec.subject] || 0) + secScore;
+                        totalObtained += secScore;
+                    });
+
+                    const percentage = totalMax > 0 ? ((totalObtained / totalMax) * 100).toFixed(1) : 0;
+
+                    return {
+                        id: stu.id,
+                        rollNo: stu.rollNo || '—',
+                        name: stu.name,
+                        className: stu.className,
+                        section: stu.section,
+                        subjectScores: subjectScores,
+                        bonusAwarded: bonusMarksAwarded,
+                        totalScore: totalObtained,
+                        maxMarks: totalMax,
+                        percentage: percentage
+                    };
+                });
+
+                // Sort by score descending (rank order)
+                currentExamResults.sort((a,b) => b.totalScore - a.totalScore || a.name.localeCompare(b.name));
+
+                // Update summary statistics
+                document.getElementById('stat-total-students').innerText = currentExamResults.length;
+                document.getElementById('stat-top-score').innerText = currentExamResults.length > 0 ? currentExamResults[0].totalScore : 0;
+                const avg = currentExamResults.length > 0 ? (currentExamResults.reduce((sum, s) => sum + s.totalScore, 0) / currentExamResults.length).toFixed(1) : 0;
+                document.getElementById('stat-avg-score').innerText = avg;
+                document.getElementById('stat-bonus-count').innerText = Object.keys(bonuses).length;
+
+                renderResultsTable(currentExamResults, structure);
+            } catch(e) {
+                console.error(e);
+                tableContainer.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase text-xs">Error evaluating results: ${e.message}</div>`;
+            }
+        }
+
+        function filterResultsTable() {
+            const secFilter = document.getElementById('res-section-select').value;
+            const searchQ = document.getElementById('res-search-input').value.trim().toLowerCase();
+
+            const filtered = currentExamResults.filter(stu => {
+                let match = true;
+                if (secFilter !== 'ALL') {
+                    const [c, s] = secFilter.split('|');
+                    if (stu.className !== c || stu.section !== s) match = false;
+                }
+                if (searchQ) {
+                    const qStr = `${stu.name} ${stu.rollNo}`.toLowerCase();
+                    if (!qStr.includes(searchQ)) match = false;
+                }
+                return match;
+            });
+
+            renderResultsTable(filtered, examStructure);
+        }
+
+        function renderResultsTable(records, structure) {
+            const container = document.getElementById('results-table-container');
+
+            if (records.length === 0) {
+                container.innerHTML = `<div class="text-center py-16 text-slate-400 font-bold uppercase text-xs tracking-widest">No candidates matching filters.</div>`;
+                return;
+            }
+
+            const subjects = [...new Set((structure || []).map(s => s.subject))];
+
+            let html = `
+                <table class="w-full text-left border-collapse" id="dom-results-table">
+                    <thead class="bg-slate-100 text-slate-700 text-[10px] uppercase font-black border-b border-slate-200">
+                        <tr>
+                            <th class="p-3.5 text-center w-12">Rank</th>
+                            <th class="p-3.5 w-24">Roll No</th>
+                            <th class="p-3.5">Candidate Name</th>
+                            <th class="p-3.5 text-center">Class</th>
+                            ${subjects.map(sub => `<th class="p-3.5 text-center">${sub}</th>`).join('')}
+                            <th class="p-3.5 text-center text-amber-600">Bonus</th>
+                            <th class="p-3.5 text-center font-black text-indigo-900">Total Score</th>
+                            <th class="p-3.5 text-center">%age</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100 text-xs font-bold text-slate-700">
+            `;
+
+            records.forEach((stu, index) => {
+                const rankColor = index === 0 ? 'bg-amber-100 text-amber-800' : (index === 1 ? 'bg-slate-200 text-slate-800' : (index === 2 ? 'bg-orange-100 text-orange-800' : 'text-slate-400'));
+                html += `
+                    <tr class="hover:bg-blue-50/50 transition-colors">
+                        <td class="p-3.5 text-center"><span class="px-2 py-0.5 rounded-full text-[10px] font-black ${rankColor}">#${index + 1}</span></td>
+                        <td class="p-3.5 font-mono font-black text-slate-600">${stu.rollNo}</td>
+                        <td class="p-3.5 uppercase font-black text-slate-900">${stu.name}</td>
+                        <td class="p-3.5 text-center uppercase text-[10px]"><span class="bg-slate-100 px-2 py-0.5 rounded border border-slate-200">${stu.className} - ${stu.section}</span></td>
+                        ${subjects.map(sub => `<td class="p-3.5 text-center font-mono font-black">${stu.subjectScores[sub] !== undefined ? stu.subjectScores[sub] : '—'}</td>`).join('')}
+                        <td class="p-3.5 text-center font-mono font-bold text-amber-600">+${stu.bonusAwarded}</td>
+                        <td class="p-3.5 text-center font-mono font-black text-blue-600 text-sm">${stu.totalScore} <span class="text-[9px] text-slate-400 font-normal">/ ${stu.maxMarks}</span></td>
+                        <td class="p-3.5 text-center font-mono font-black">${stu.percentage}%</td>
+                    </tr>
+                `;
+            });
+
+            html += `</tbody></table>`;
+            container.innerHTML = html;
+        }
+
+        function exportResultsToExcel() {
+            if (currentExamResults.length === 0) return alert("No evaluated results available to download.");
+            const table = document.getElementById('dom-results-table');
+            if (!table) return;
+
+            const wb = XLSX.utils.table_to_book(table, { sheet: "Scorecard" });
+            const code = currentGroupData ? currentGroupData.combinedCode : "Exam";
+            XLSX.writeFile(wb, `Evaluation_Results_${code}_${new Date().toISOString().slice(0,10)}.xlsx`);
         }
     </script>
 </body>
