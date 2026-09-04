@@ -395,7 +395,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 // =======================================================
 exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
-    memory: "1GiB",
+    memory: "2GiB",
     timeoutSeconds: 300,
     cors: true
 }, async (req, res) => {
