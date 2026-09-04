@@ -170,9 +170,6 @@ exports.sendPreClassReminders = onSchedule({
     return null;
 });
 
-// =======================================================
-// --- INSTANT TIMETABLE UPDATE ALERTS ---
-// =======================================================
 exports.sendInstantPushAlerts = onDocumentCreated({
     document: "instant_alerts/{docId}",
     region: "asia-south1",
@@ -242,9 +239,6 @@ exports.sendInstantPushAlerts = onDocumentCreated({
     return null;
 });
 
-// =======================================================
-// --- ROBUST PDF LOADER (ADMIN SDK + FETCH FALLBACK) ---
-// =======================================================
 async function loadPdfBytes(pdfUrl) {
     if (pdfUrl.includes("firebasestorage.googleapis.com")) {
         try {
@@ -255,7 +249,7 @@ async function loadPdfBytes(pdfUrl) {
                 return buffer;
             }
         } catch (e) {
-            console.warn("[PDF Engine] Admin SDK direct download failed, falling back to fetch:", e.message);
+            console.warn("[PDF Engine] Admin SDK direct download failed:", e.message);
         }
     }
 
@@ -274,9 +268,6 @@ async function loadPdfBytes(pdfUrl) {
     throw new Error(`Failed to download PDF from URL: ${pdfUrl}`);
 }
 
-// =======================================================
-// --- OPTIMIZED SINGLE ROOM COMPILATION ENGINE ---
-// =======================================================
 async function compileSingleRoomPackage(center, date, roomName, allocations) {
     if (!allocations || Object.keys(allocations).length === 0) return false;
 
@@ -293,9 +284,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
     roomOccupants.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
 
     const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
-    const qpSnap = await admin.firestore().collection(`${prefix}question_papers`)
-        .where("date", "==", date)
-        .get();
+    const qpSnap = await admin.firestore().collection(`${prefix}question_papers`).where("date", "==", date).get();
 
     let papersBySection = {}; 
     qpSnap.forEach(doc => {
@@ -326,10 +315,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
         const assignedSeries = roomSeriesList[i % roomSeriesList.length];
         const pdfUrl = sectionPapers[assignedSeries] || Object.values(sectionPapers)[0];
 
-        if (!pdfUrl) {
-            console.log(`[PDF Engine] Skipping seat ${seatId}: No question paper found for section ${student.className} Sec ${student.section}`);
-            continue; 
-        }
+        if (!pdfUrl) continue; 
 
         try {
             if (!pdfBytesCache[pdfUrl]) {
@@ -383,15 +369,11 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
         await fileRef.save(Buffer.from(mergedPdfBytes), {
             metadata: { contentType: "application/pdf" },
         });
-        console.log(`[PDF Engine] Successfully compiled room batch: ${roomName} (${date})`);
         return true;
     }
     return false;
 }
 
-// =======================================================
-// --- ON-DEMAND SINGLE ROOM COMPILATION ENDPOINT ---
-// =======================================================
 exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
     memory: "2GiB",
@@ -507,26 +489,26 @@ exports.compileSingleRoomOnDemand = onRequest({
                             if (sec.type === 'MCQ') {
                                 let optsHtml = "";
                                 for (let o = 1; o <= 4; o++) {
-                                    optsHtml += `<div style="width:12px; height:12px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5.5pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
+                                    optsHtml += `<div style="width:11px; height:11px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
                                 }
-                                columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:2px;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
+                                columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:1.5px;"><div style="width:16px; font-weight:bold; font-size:6.5pt; text-align:right; margin-right:2px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
                             } else {
-                                let numericGrid = `<div style="display:flex; gap:1px; margin-left:18px; margin-top:2px;">`;
+                                let numericGrid = `<div style="display:flex; gap:1px; margin-left:18px; margin-top:1px;">`;
                                 for (let col = 0; col < 6; col++) {
-                                    numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
-                                    numericGrid += `<div style="width:10px; height:10px; border:1px solid black; margin-bottom:1px; background:white;"></div>`; // Top write-in box
+                                    numericGrid += `<div style="display:flex; flex-direction:column; gap:0.5px; align-items:center;">`;
+                                    numericGrid += `<div style="width:8px; height:8px; border:1px solid black; margin-bottom:1px; background:white;"></div>`;
                                     for (let r = 0; r <= 9; r++) {
-                                        numericGrid += `<div style="width:10px; height:10px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
+                                        numericGrid += `<div style="width:8px; height:8px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:3.5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
                                     }
                                     numericGrid += `</div>`;
                                 }
                                 numericGrid += `</div>`;
 
                                 columnsHtml += `
-                                    <div style="display:flex; flex-direction:column; margin-bottom:5px; padding-bottom:4px; border-bottom:1px dashed #cbd5e1; break-inside:avoid;">
+                                    <div style="display:flex; flex-direction:column; margin-bottom:3px; padding-bottom:3px; border-bottom:1px dashed #cbd5e1; break-inside:avoid;">
                                         <div style="display:flex; align-items:center;">
-                                            <div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div>
-                                            <div style="width:40px; height:14px; border:1px solid black; background:white;"></div>
+                                            <div style="width:16px; font-weight:bold; font-size:6.5pt; text-align:right; margin-right:2px; color:black;">${q}.</div>
+                                            <div style="width:36px; height:12px; border:1px solid black; background:white;"></div>
                                         </div>
                                         ${numericGrid}
                                     </div>
@@ -539,29 +521,29 @@ exports.compileSingleRoomOnDemand = onRequest({
 
                 fullPagesHtml += `
                     <div class="omr-print-page">
-                        <div style="border:2px solid black; padding:6px 10px; box-sizing:border-box; display:flex; flex-direction:column; background:white; width:100%; height:100%; font-family:Arial, sans-serif; justify-content:space-between;">
+                        <div style="border:2px solid black; padding:4px 8px; box-sizing:border-box; display:flex; flex-direction:column; background:white; width:100%; height:100%; font-family:Arial, sans-serif; justify-content:space-between;">
                             
-                            <!-- HEADER ROW: Date, Branding, and Roll Number Grid -->
-                            <div style="display:flex; justify-content:space-between; align-items:flex-start; border-bottom:2px solid black; padding-bottom:6px; margin-bottom:6px; color:black;">
-                                <div style="font-weight:bold; font-size:8.5pt; width:80px; text-align:left; margin-top:4px;">${prettyDate}</div>
+                            <!-- HEADER ROW: Date, Branding, and Roll Number Grid (Parallel) -->
+                            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px; color:black;">
+                                <div style="font-weight:bold; font-size:8pt; width:70px; text-align:left; margin-top:2px;">${prettyDate}</div>
                                 
                                 <div style="flex:1; display:flex; flex-direction:column; align-items:center; text-align:center;">
-                                    <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="25" jsbarcode-width="1.5" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:2px;"></svg>
-                                    <h1 style="font-size:16pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0 0 2px 0; line-height:1; color:black;">MINERVA STUDY CIRCLE</h1>
-                                    <div style="font-size:8.5pt; font-family:monospace; font-weight:bold; background:#eee; padding:1px 6px; border:1.5px solid black; text-transform:uppercase;">
+                                    <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="20" jsbarcode-width="1.2" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:2px;"></svg>
+                                    <h1 style="font-size:14pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0 0 2px 0; line-height:1; color:black;">MINERVA STUDY CIRCLE</h1>
+                                    <div style="font-size:8pt; font-family:monospace; font-weight:bold; background:#eee; padding:1px 6px; border:1px solid black; text-transform:uppercase;">
                                         ${examName}
                                     </div>
                                 </div>
 
                                 <!-- Pre-filled Roll Number Block -->
-                                <div style="border:1.5px solid black; padding:3px 5px; display:flex; flex-direction:column; align-items:center; background:white; flex-shrink:0;">
-                                    <div style="font-size:6pt; font-weight:bold; text-transform:uppercase; margin-bottom:2px;">Roll Number</div>
-                                    <div style="display:flex; gap:2px; justify-content:center;">
+                                <div style="border:1px solid black; padding:2px 4px; display:flex; flex-direction:column; align-items:center; background:white; flex-shrink:0;">
+                                    <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase; margin-bottom:2px;">Roll Number</div>
+                                    <div style="display:flex; gap:1px; justify-content:center;">
                                         ${rollDigits.map((digit) => `
                                             <div style="display:flex; flex-direction:column; gap:1px; align-items:center;">
-                                                <div style="width:10px; height:10px; border:1px solid black; margin-bottom:1px; font-size:6pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
+                                                <div style="width:8px; height:8px; border:1px solid black; margin-bottom:1px; font-size:5pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
                                                 ${[...Array(10)].map((_, r) => `
-                                                    <div class="${String(r) === String(digit) ? 'bubble-filled-black' : ''}" style="width:9px; height:9px; font-size:4.5pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;">${r}</div>
+                                                    <div class="${String(r) === String(digit) ? 'bubble-filled-black' : ''}" style="width:8px; height:8px; font-size:3.5pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;">${r}</div>
                                                 `).join('')}
                                             </div>
                                         `).join('')}
@@ -569,27 +551,28 @@ exports.compileSingleRoomOnDemand = onRequest({
                                 </div>
                             </div>
 
-                            <!-- CANDIDATE DETAILS ROW (Compact) -->
-                            <div style="display:flex; flex-direction:column; gap:4px; border-bottom:2px solid black; padding-bottom:6px; margin-bottom:6px; color:black;">
-                                <div style="border:1.5px solid black; padding:2px 6px; min-height:20px; display:flex; flex-direction:column; justify-content:center; background:white;">
-                                    <div style="font-size:6pt; font-weight:bold; text-transform:uppercase; color:#000;">Candidate Name</div>
-                                    <div style="font-size:10pt; font-weight:900; text-transform:uppercase; color:black; letter-spacing:0.5px;">${stu.name || ''}</div>
+                            <!-- CANDIDATE DETAILS ROW (Merged Box without gaps) -->
+                            <div style="border:1px solid black; display:flex; flex-direction:column; margin-bottom:6px; color:black; background:white;">
+                                <div style="display:flex; border-bottom:1px solid black;">
+                                    <div style="flex:1; padding:2px 4px; display:flex; flex-direction:column; justify-content:center;">
+                                        <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase; color:#000;">Candidate Name</div>
+                                        <div style="font-size:9pt; font-weight:900; text-transform:uppercase; color:black; line-height:1.2;">${stu.name || ''}</div>
+                                    </div>
                                 </div>
-                                
-                                <div style="display:flex; gap:4px;">
-                                    <div style="flex:1; border:1.5px solid black; padding:2px 6px; background:white; min-height:26px; display:flex; flex-direction:column; justify-content:flex-start;">
-                                        <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Class</div>
-                                        <div style="font-size:8pt; font-weight:bold;">${stu.className || ''}</div>
+                                <div style="display:flex;">
+                                    <div style="flex:1; border-right:1px solid black; padding:2px 4px; min-height:22px; display:flex; flex-direction:column; justify-content:flex-start;">
+                                        <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Class</div>
+                                        <div style="font-size:7.5pt; font-weight:bold;">${stu.className || ''}</div>
                                     </div>
-                                    <div style="flex:1; border:1.5px solid black; padding:2px 6px; background:white; min-height:26px; display:flex; flex-direction:column; justify-content:flex-start;">
-                                        <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Section</div>
-                                        <div style="font-size:8pt; font-weight:bold;">${stu.section || ''}</div>
+                                    <div style="flex:1; border-right:1px solid black; padding:2px 4px; min-height:22px; display:flex; flex-direction:column; justify-content:flex-start;">
+                                        <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Section</div>
+                                        <div style="font-size:7.5pt; font-weight:bold;">${stu.section || ''}</div>
                                     </div>
-                                    <div style="flex:1.5; border:1.5px solid black; padding:2px 6px; background:white; min-height:26px; display:flex; flex-direction:column; justify-content:flex-start;">
-                                        <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Student Sign</div>
+                                    <div style="flex:1.5; border-right:1px solid black; padding:2px 4px; min-height:22px; display:flex; flex-direction:column; justify-content:flex-start;">
+                                        <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Student Sign</div>
                                     </div>
-                                    <div style="flex:1.5; border:1.5px solid black; padding:2px 6px; background:white; min-height:26px; display:flex; flex-direction:column; justify-content:flex-start;">
-                                        <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div>
+                                    <div style="flex:1.5; padding:2px 4px; min-height:22px; display:flex; flex-direction:column; justify-content:flex-start;">
+                                        <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div>
                                     </div>
                                 </div>
                             </div>
@@ -597,8 +580,8 @@ exports.compileSingleRoomOnDemand = onRequest({
                             <div style="display:flex; flex-wrap:nowrap; gap:8px; width:100%; flex-grow:1; justify-content:space-between;">
                                 ${columnsHtml}
                             </div>
-                            <div style="border-top:1.5px solid black; padding-top:3px; margin-top:4px; display:flex; justify-content:center; align-items:center;">
-                                <span style="font-family:monospace; background:black; color:white; padding:2px 12px; border-radius:3px; font-size:9pt; font-weight:900; letter-spacing:1px; text-transform:uppercase;">SEAT NUMBER: ${seatId}</span>
+                            <div style="border-top:1.5px solid black; padding-top:2px; margin-top:2px; display:flex; justify-content:center; align-items:center;">
+                                <span style="font-family:monospace; background:black; color:white; padding:1px 12px; border-radius:3px; font-size:8pt; font-weight:900; letter-spacing:1px; text-transform:uppercase;">SEAT NUMBER: ${seatId}</span>
                             </div>
                         </div>
                     </div>
