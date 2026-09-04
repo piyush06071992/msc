@@ -2672,7 +2672,6 @@ async function printRoomOMRsSeatWise() {
     const room = roomsDatabase.find(r => r.id === activeRoomId);
     if (!date || !room) return alert("Select an exam date and active room first.");
 
-    // Gather occupied seats in this room sorted by Row and Seat
     let occupiedSeats = [];
     Object.keys(currentAllocations).forEach(seatId => {
         if (seatId.startsWith(`${room.name}-`)) {
@@ -2689,16 +2688,54 @@ async function printRoomOMRsSeatWise() {
     occupiedSeats.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
 
     const printArea = document.getElementById('omr-print-target-area');
-    printArea.innerHTML = `<div class="p-8 text-center text-sm font-bold">Compiling ${occupiedSeats.length} Room OMRs...</div>`;
+    printArea.innerHTML = `<div style="display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; font-weight:bold; font-size:16px;">Preparing OMR sheets for print (0 / ${occupiedSeats.length})...</div>`;
+    
+    // Give browser a microsecond to render the loading indicator
+    await new Promise(r => setTimeout(r, 50));
 
-    let allPagesHtml = "";
-    for (const item of occupiedSeats) {
-        const structure = await fetchExamStructureForStudent(item.stu.className, item.stu.section, date);
-        allPagesHtml += buildPreFilledOMRHtml(item.stu, item.seatId, date, structure);
+    try {
+        // Pre-fetch unique class/section structures in parallel to eliminate database lag
+        let uniquePairs = new Set();
+        occupiedSeats.forEach(item => uniquePairs.add(`${item.stu.className}|${item.stu.section}`));
+        
+        let structurePromises = Array.from(uniquePairs).map(async pair => {
+            const [cls, sec] = pair.split('|');
+            const struct = await fetchExamStructureForStudent(cls, sec, date);
+            return { key: pair, struct };
+        });
+
+        const resolvedStructures = await Promise.all(structurePromises);
+        let structureMap = {};
+        resolvedStructures.forEach(item => structureMap[item.key] = item.struct);
+
+        // Build HTML string efficiently in memory
+        let allPagesHtml = "";
+        for (let i = 0; i < occupiedSeats.length; i++) {
+            const item = occupiedSeats[i];
+            const pairKey = `${item.stu.className}|${item.stu.section}`;
+            const structure = structureMap[pairKey] || [{ subject: 'GENERAL', start: 1, end: 75, type: 'MCQ' }];
+            
+            allPagesHtml += buildPreFilledOMRHtml(item.stu, item.seatId, date, structure);
+            
+            // Update loading progress every 10 sheets
+            if (i % 10 === 0 || i === occupiedSeats.length - 1) {
+                printArea.innerHTML = `<div style="display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; font-weight:bold; font-size:16px;">Preparing OMR sheets for print (${i + 1} / ${occupiedSeats.length})...</div>`;
+                await new Promise(r => setTimeout(r, 10));
+            }
+        }
+
+        printArea.innerHTML = allPagesHtml;
+        
+        // Brief delay before triggering window.print() to let browser paint the heavy DOM tree
+        setTimeout(() => {
+            window.print();
+        }, 200);
+
+    } catch (e) {
+        console.error("Fast print compilation failed:", e);
+        alert("Error generating room OMRs: " + e.message);
+        printArea.innerHTML = "";
     }
-
-    printArea.innerHTML = allPagesHtml;
-    window.print();
 }
 
 async function checkRoomPrintPackageAvailability(roomName) {
