@@ -8,8 +8,10 @@
    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
-    <!-- SheetJS for Excel Processing -->
+   <!-- SheetJS for Excel Processing -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- JsBarcode for OMR Barcodes -->
+    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
@@ -2553,7 +2555,28 @@ async function fetchExamStructureForStudent(className, sectionName, dateStr) {
     }
 }
 
-function buildPreFilledOMRHtml(stu, seatId, dateStr, structure) {
+async function fetchExamNameForStudent(className, sectionName, dateStr) {
+    try {
+        const snap = await db.collection("admin_paper_groups").where("date", "==", dateStr).get();
+        let currentExamName = "EXAMINATION OMR SHEET";
+        snap.forEach(doc => {
+            const data = doc.data();
+            const keys = data.sectionKeys || [];
+            const hasSec = keys.some(sk => {
+                const parts = sk.split('|');
+                return parts.length >= 3 && normMatch(parts[1]) === normMatch(className) && normMatch(parts[2]) === normMatch(sectionName);
+            });
+            if (hasSec) {
+                currentExamName = data.combinedCode || "EXAMINATION OMR SHEET";
+            }
+        });
+        return currentExamName;
+    } catch(e) {
+        return "EXAMINATION OMR SHEET";
+    }
+}
+
+function buildPreFilledOMRHtml(stu, seatId, dateStr, structure, examName = "EXAMINATION OMR SHEET") {
     const prettyDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB');
     
     const rawRoll = String(stu.rollNo || '').trim();
@@ -2561,11 +2584,8 @@ function buildPreFilledOMRHtml(stu, seatId, dateStr, structure) {
     const rollDigits = cleanRoll.split('');
 
     let totalQs = structure.reduce((sum, sec) => sum + (sec.end - sec.start + 1), 0);
-    let numCols = 3;
-    if (totalQs > 90) numCols = 4;
-    if (totalQs > 135) numCols = 5;
-    if (totalQs > 165) numCols = 6;
-    const MAX_PER_COL = Math.max(22, Math.ceil(totalQs / numCols));
+    let numCols = totalQs > 135 ? 5 : (totalQs > 90 ? 4 : 3);
+    const MAX_PER_COL = Math.ceil(totalQs / numCols);
 
     let columnsHtml = "";
     structure.forEach(sec => {
@@ -2634,10 +2654,10 @@ function buildPreFilledOMRHtml(stu, seatId, dateStr, structure) {
                     
                     <!-- Center: Barcode & Branding -->
                     <div style="flex:1.2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
-                        <div style="border:1.5px dashed #888; width:120px; height:24px; display:flex; align-items:center; justify-content:center; font-size:7pt; color:#888; font-weight:bold; background:#fafafa; margin-bottom:2px;">BARCODE AREA</div>
+                        <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="25" jsbarcode-width="1.5" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:2px;"></svg>
                         <h1 style="font-size:16pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0 0 2px 0; line-height:1; color:black;">MINERVA STUDY CIRCLE</h1>
                         <div style="font-size:8.5pt; font-family:monospace; font-weight:bold; background:#eee; padding:1px 6px; border:1.5px solid black; text-transform:uppercase;">
-                            EXAMINATION OMR SHEET
+                            ${examName}
                         </div>
                     </div>
 
@@ -2670,6 +2690,7 @@ function buildPreFilledOMRHtml(stu, seatId, dateStr, structure) {
         </div>
     `;
 }
+
 async function printSingleStudentOMR(seatId) {
     const stu = currentAllocations[seatId];
     const date = document.getElementById('seating-exam-date').value;
@@ -2679,7 +2700,10 @@ async function printSingleStudentOMR(seatId) {
     printArea.innerHTML = `<div class="p-8 text-center text-sm font-bold">Compiling Pre-Filled OMR for ${stu.name}...</div>`;
 
     const structure = await fetchExamStructureForStudent(stu.className, stu.section, date);
-    printArea.innerHTML = buildPreFilledOMRHtml(stu, seatId, date, structure);
+    const examName = await fetchExamNameForStudent(stu.className, stu.section, date);
+
+    printArea.innerHTML = buildPreFilledOMRHtml(stu, seatId, date, structure, examName);
+    try { JsBarcode(".barcode-svg").init(); } catch(e) {}
     window.print();
 }
 
