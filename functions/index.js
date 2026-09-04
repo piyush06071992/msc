@@ -437,11 +437,13 @@ exports.compileSingleRoomOnDemand = onRequest({
             occupiedSeats.forEach(item => uniquePairs.add(`${item.stu.className}|${item.stu.section}`));
 
             let structureMap = {};
+            let examNameMap = {}; // Added dynamically fetch exam name
             for (const pair of uniquePairs) {
                 const [className, sectionName] = pair.split('|');
                 const groupSnap = await admin.firestore().collection("admin_paper_groups").where("date", "==", date).get();
                 let targetGroupId = null;
                 let fallbackSubjects = [];
+                let currentExamName = "EXAMINATION OMR SHEET";
 
                 groupSnap.forEach(doc => {
                     const data = doc.data();
@@ -453,8 +455,11 @@ exports.compileSingleRoomOnDemand = onRequest({
                     if (hasSec) {
                         targetGroupId = doc.id;
                         fallbackSubjects = data.subjects || [];
+                        currentExamName = data.combinedCode || "EXAMINATION OMR SHEET";
                     }
                 });
+
+                examNameMap[pair] = currentExamName;
 
                 if (targetGroupId) {
                     const keyDoc = await admin.firestore().collection("exam_answer_keys").doc(targetGroupId).get();
@@ -480,6 +485,7 @@ exports.compileSingleRoomOnDemand = onRequest({
             occupiedSeats.forEach(({ seatId, stu }) => {
                 const pairKey = `${stu.className}|${stu.section}`;
                 const structure = structureMap[pairKey] || [{ subject: 'GENERAL', start: 1, end: 75, type: 'MCQ' }];
+                const examName = examNameMap[pairKey] || "EXAMINATION OMR SHEET";
                 
                 const rawRoll = String(stu.rollNo || '').trim();
                 const cleanRoll = rawRoll.replace(/\D/g, '') || '0000';
@@ -496,7 +502,8 @@ exports.compileSingleRoomOnDemand = onRequest({
 
                     for (let i = 0; i < questions.length; i += MAX_PER_COL) {
                         const chunk = questions.slice(i, i + MAX_PER_COL);
-                        columnsHtml += `<div style="flex:1; display:flex; flex-direction:column; min-width:0;">`;
+                        // Applying flex and space-between to vertically distribute the questions nicely
+                        columnsHtml += `<div style="flex:1; display:flex; flex-direction:column; min-width:0; justify-content:space-between;">`;
                         columnsHtml += `<div style="font-weight:900; font-size:8pt; text-transform:uppercase; border-bottom:1.5px solid black; margin:0 0 2px 0; text-align:center; background:#f8f8f8; padding:2px; color:black;">${sec.subject}</div>`;
                         
                         chunk.forEach(q => {
@@ -505,39 +512,44 @@ exports.compileSingleRoomOnDemand = onRequest({
                                 for (let o = 1; o <= 4; o++) {
                                     optsHtml += `<div style="width:12px; height:12px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
                                 }
-                                columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:1px;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
+                                columnsHtml += `<div style="display:flex; align-items:center;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
                             } else {
-                                columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:1px;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:inline-block; width:40px; height:13px; border:1px solid black;"></div></div>`;
+                                columnsHtml += `<div style="display:flex; align-items:center;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:inline-block; width:40px; height:13px; border:1px solid black;"></div></div>`;
                             }
                         });
                         columnsHtml += `</div>`;
                     }
                 });
 
+                // Implementing new top-layout with barcode SVG and larger signature boxes
                 fullPagesHtml += `
                     <div class="omr-print-page">
                         <div style="border:2px solid black; padding:6px 10px; box-sizing:border-box; display:flex; flex-direction:column; background:white; width:100%; height:100%; font-family:Arial, sans-serif; justify-content:space-between;">
                             <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:2px solid black; padding-bottom:4px; margin-bottom:4px; color:black;">
                                 <div style="font-weight:bold; font-size:8.5pt; width:100px; text-align:left;">${prettyDate}</div>
                                 <div style="flex:1; display:flex; flex-direction:column; align-items:center; text-align:center;">
-                                    <div style="border:1.5px dashed #888; width:120px; height:20px; display:flex; align-items:center; justify-content:center; font-size:7pt; color:#888; font-weight:bold; background:#fafafa; margin-bottom:2px;">BARCODE AREA</div>
+                                    <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="25" jsbarcode-width="1.5" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:2px;"></svg>
                                     <h1 style="font-size:16pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0 0 2px 0; line-height:1; color:black;">MINERVA STUDY CIRCLE</h1>
-                                    <div style="font-size:8.5pt; font-family:monospace; font-weight:bold; background:#eee; padding:1px 6px; border:1.5px solid black; text-transform:uppercase;">EXAMINATION OMR SHEET</div>
+                                    <div style="font-size:8.5pt; font-family:monospace; font-weight:bold; background:#eee; padding:1px 6px; border:1.5px solid black; text-transform:uppercase;">${examName}</div>
                                 </div>
-                                <div style="font-weight:bold; font-size:9pt; width:100px; text-align:right; font-family:monospace; color:#0d9488;">SEC: ${stu.section || ''}</div>
+                                <div style="font-weight:bold; font-size:9pt; width:100px; text-align:right; font-family:monospace; color:#0d9488;"></div>
                             </div>
                             <div style="display:flex; gap:10px; border-bottom:2px solid black; padding-bottom:6px; margin-bottom:6px; color:black; align-items:stretch;">
-                                <div style="flex:1; display:grid; grid-template-columns:1fr 1fr; gap:4px; align-content:start;">
-                                    <div style="grid-column:span 2; border:1.5px solid black; padding:4px 6px; min-height:32px; display:flex; flex-direction:column; justify-content:space-between; background:white;">
+                                <div style="flex:1; display:flex; flex-direction:column; gap:4px; justify-content:space-between;">
+                                    <div style="border:1.5px solid black; padding:4px 6px; min-height:32px; display:flex; flex-direction:column; justify-content:space-between; background:white;">
                                         <div style="font-size:7pt; font-weight:bold; text-transform:uppercase; color:#000;">Candidate Name</div>
                                         <div style="font-size:10.5pt; font-weight:900; text-transform:uppercase; color:black; letter-spacing:0.5px;">${stu.name || ''}</div>
                                     </div>
-                                    <div style="border:1.5px solid black; padding:4px 6px; background:white; min-height:30px;"><div style="font-size:7pt; font-weight:bold; text-transform:uppercase;">Class</div><div style="font-size:9pt; font-weight:bold;">${stu.className || ''}</div></div>
-                                    <div style="border:1.5px solid black; padding:4px 6px; background:white; min-height:30px;"><div style="font-size:7pt; font-weight:bold; text-transform:uppercase;">Section</div><div style="font-size:9pt; font-weight:bold;">${stu.section || ''}</div></div>
-                                    <div style="border:1.5px solid black; padding:4px 6px; min-height:28px; background:white;"><div style="font-size:7pt; font-weight:bold; text-transform:uppercase;">Student Sign</div></div>
-                                    <div style="border:1.5px solid black; padding:4px 6px; min-height:28px; background:white;"><div style="font-size:7pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div></div>
+                                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px;">
+                                        <div style="border:1.5px solid black; padding:4px 6px; background:white; min-height:30px;"><div style="font-size:7pt; font-weight:bold; text-transform:uppercase;">Class</div><div style="font-size:9pt; font-weight:bold;">${stu.className || ''}</div></div>
+                                        <div style="border:1.5px solid black; padding:4px 6px; background:white; min-height:30px;"><div style="font-size:7pt; font-weight:bold; text-transform:uppercase;">Section</div><div style="font-size:9pt; font-weight:bold;">${stu.section || ''}</div></div>
+                                    </div>
+                                    <div style="display:grid; grid-template-columns:1fr 1fr; gap:4px; flex-grow:1;">
+                                        <div style="border:1.5px solid black; padding:4px 6px; background:white; min-height:45px; display:flex; flex-direction:column;"><div style="font-size:7pt; font-weight:bold; text-transform:uppercase;">Student Sign</div></div>
+                                        <div style="border:1.5px solid black; padding:4px 6px; background:white; min-height:45px; display:flex; flex-direction:column;"><div style="font-size:7pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div></div>
+                                    </div>
                                 </div>
-                                <div style="border:1.5px solid black; padding:4px 8px; display:flex; flex-direction:column; align-items:center; background:white;">
+                                <div style="border:1.5px solid black; padding:4px 8px; display:flex; flex-direction:column; align-items:center; background:white; flex-shrink:0;">
                                     <div style="font-size:7.5pt; font-weight:bold; text-transform:uppercase; margin-bottom:3px;">Roll Number</div>
                                     <div style="display:flex; gap:4px; justify-content:center;">
                                         ${rollDigits.map((digit) => `
@@ -571,19 +583,27 @@ exports.compileSingleRoomOnDemand = onRequest({
             });
             const page = await browser.newPage();
 
+            // Injecting JsBarcode library and enforcing transparent text for filled bubbles
             const fullHtml = `
                 <!DOCTYPE html>
                 <html>
                 <head>
+                    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
                     <style>
                         @page { size: A4 portrait; margin: 6mm; }
                         body { background: white !important; margin: 0; padding: 0; font-family: Arial, sans-serif; }
                         .omr-print-page { width: 100%; height: 275mm; max-height: 275mm; page-break-after: always; page-break-inside: avoid; overflow: hidden; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; padding: 2px 6mm; background: white; }
                         .omr-print-page:last-child { page-break-after: avoid; }
-                        .bubble-filled-black { background-color: black !important; color: white !important; border-color: black !important; }
+                        .bubble-filled-black { background-color: black !important; color: transparent !important; border-color: black !important; }
                     </style>
                 </head>
-                <body>${fullPagesHtml}</body>
+                <body>
+                    ${fullPagesHtml}
+                    <script>
+                        // Auto-generate barcodes on render
+                        JsBarcode(".barcode-svg").init();
+                    </script>
+                </body>
                 </html>
             `;
 
