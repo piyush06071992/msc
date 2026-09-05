@@ -796,24 +796,36 @@ async function uploadAndProcessRoomPDF() {
         let mappingResults = {};
         let missingStudents = [];
 
-        // 1. Fetch Target Exam Group & Answer Key Structure for Scanning
-        let targetGroupId = null;
-        let examStructure = [];
+     // 1. Pre-load all Paper Groups and Answer Keys for this Date
         const dateVal = document.getElementById('eval-date-select').value;
         const groupSnap = await db.collection("admin_paper_groups").where("date", "==", dateVal).get();
-        groupSnap.forEach(doc => {
-            const data = doc.data();
-            const matchesCenter = !data.branches || data.branches.length === 0 || data.branches.includes(activeCenter);
-            if (matchesCenter && (data.sectionKeys || []).length > 0) {
-                targetGroupId = doc.id;
-            }
-        });
+        let dateGroups = [];
+        let groupKeysCache = {};
 
-        if (targetGroupId) {
-            const keyDoc = await db.collection("exam_answer_keys").doc(targetGroupId).get();
-            if (keyDoc.exists) {
-                examStructure = keyDoc.data().structure || [];
+        for (const doc of groupSnap.docs) {
+            const gData = { id: doc.id, ...doc.data() };
+            dateGroups.push(gData);
+            const kDoc = await db.collection("exam_answer_keys").doc(doc.id).get();
+            if (kDoc.exists) {
+                groupKeysCache[doc.id] = kDoc.data().structure || [];
             }
+        }
+
+        // Helper to find the exact Group ID for any student by Class & Section
+        function getStudentGroupId(stu) {
+            if (!stu || !stu.className || !stu.section) return dateGroups[0]?.id || null;
+            const cNorm = String(stu.className).trim().toUpperCase();
+            const sNorm = String(stu.section).trim().toUpperCase();
+
+            const matched = dateGroups.find(g => {
+                const matchesCenter = !g.branches || g.branches.length === 0 || g.branches.includes(activeCenter);
+                if (!matchesCenter) return false;
+                return (g.sectionKeys || []).some(sk => {
+                    const parts = sk.split('|');
+                    return parts.length >= 3 && parts[1].trim().toUpperCase() === cNorm && parts[2].trim().toUpperCase() === sNorm;
+                });
+            });
+            return matched ? matched.id : (dateGroups[0]?.id || null);
         }
 
         // Validate allocations first
@@ -848,13 +860,33 @@ async function uploadAndProcessRoomPDF() {
 
             let rollNo = null;
 
-            // 1. AUTO-DETECT: Try to read the barcode from the rendered canvas
+      // 1. AUTO-DETECT BARCODE (With Noise Isolation & Padding)
             try {
-                const result = await codeReader.decodeFromCanvas(canvas);
+                // ZXing fails if there is no "quiet zone" (white space) or if it reads the whole A4 page.
+                // We isolate the top-center barcode area and pad it with pure white to guarantee a read.
+                const cropCanvas = document.createElement('canvas');
+                const cropW = canvas.width * 0.6;   // Take middle 60% of page width
+                const cropH = canvas.height * 0.15; // Take top 15% of page height
+                const cropX = canvas.width * 0.2;   // Start 20% inwards from left
+                const cropY = 0;
+
+                cropCanvas.width = cropW + 200; // Add 100px artificial white padding on all sides
+                cropCanvas.height = cropH + 200;
+                const cropCtx = cropCanvas.getContext('2d');
+                
+                // Create the Quiet Zone
+                cropCtx.fillStyle = 'white';
+                cropCtx.fillRect(0, 0, cropCanvas.width, cropCanvas.height);
+                
+                // Draw ONLY the isolated barcode area into the padded canvas
+                cropCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 100, 100, cropW, cropH);
+
+                // Scan the clean, isolated image
+                const result = await codeReader.decodeFromCanvas(cropCanvas);
                 rollNo = result.text;
                 console.log(`Auto-mapped Page ${pageNum} to Roll No: ${rollNo}`);
             } catch (err) {
-                console.warn(`Barcode unreadable on Page ${pageNum}`);
+                console.warn(`Barcode isolation failed on Page ${pageNum}`, err);
             }
 
             // 2. EXCEPTION FALLBACK: Only prompt if the barcode was smudged/missing
@@ -862,21 +894,27 @@ async function uploadAndProcessRoomPDF() {
                 rollNo = prompt(`⚠️ Barcode unreadable on Page ${pageNum}!\nTo ensure perfect mapping, please manually type the Roll Number printed on this page:`);
             }
             
-       if (!rollNo || rollNo.trim() === "") continue; 
+            if (!rollNo || rollNo.trim() === "") continue; 
             rollNo = rollNo.trim().toUpperCase();
 
-            // 2. RUN LOCAL OMR PIXEL SCANNER
-            btn.innerText = `⏳ Extracting Bubbles for ${rollNo}...`;
-            const extractedAnswers = await extractBubblesFromCanvas(canvas, examStructure);
+          // 2. Resolve the exact Student Record and Group ID
+            const studentEntry = allocatedInRoom.find(s => String(s.rollNo).trim().toUpperCase() === rollNo);
+            const studentGroupId = getStudentGroupId(studentEntry);
+            const studentStructure = groupKeysCache[studentGroupId] || [];
 
-            // 3. SAVE SUBMISSION TO DATABASE (This generates the Result)
-            if (targetGroupId) {
-                await db.collection("omr_submissions").doc(`${targetGroupId}_${rollNo}`).set({
-                    groupId: targetGroupId,
+            // 3. RUN LOCAL OMR PIXEL SCANNER
+            btn.innerText = `⏳ Extracting Bubbles for ${rollNo}...`;
+            const extractedAnswers = await extractBubblesFromCanvas(canvas, studentStructure);
+
+            // 4. SAVE SUBMISSION TO THE EXACT EXAM GROUP
+            if (studentGroupId) {
+                await db.collection("omr_submissions").doc(`${studentGroupId}_${rollNo}`).set({
+                    groupId: studentGroupId,
                     rollNo: rollNo,
                     responses: extractedAnswers,
                     updatedAt: Date.now()
                 }, { merge: true });
+                console.log(`Saved submission for ${rollNo} under Group: ${studentGroupId}`);
             }
 
             btn.innerText = `⏳ Saving Page ${pageNum}...`;
