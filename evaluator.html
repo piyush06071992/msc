@@ -14,9 +14,11 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
     <!-- JsBarcode for OMR Barcodes -->
     <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
-    <!-- PDF.js and PDF-Lib for Client-Side OMR Scanning & Splitting -->
+  <!-- PDF.js and PDF-Lib for Client-Side OMR Scanning & Splitting -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+    <!-- ZXing for Client-Side Auto-Barcode Reading -->
+    <script src="https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; overflow-x: hidden; }
@@ -809,22 +811,43 @@ async function uploadAndProcessRoomPDF() {
         }
 
         // 3. Process each page locally to bypass blind sequencing
+   // Initialize the Barcode Reader
+        const codeReader = new ZXing.BrowserMultiFormatReader();
+
         for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-            btn.innerText = `⏳ Processing Page ${pageNum} of ${numPages}...`;
+            btn.innerText = `⏳ Scanning Barcode on Page ${pageNum} of ${numPages}...`;
             
-            // Render page for visual evaluation (framework laid for auto-barcode reading)
+            // Render page to an internal image canvas
             const page = await pdf.getPage(pageNum);
-            const viewport = page.getViewport({ scale: 1.5 });
+            const viewport = page.getViewport({ scale: 2.0 }); // High resolution for better barcode detection
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
             canvas.width = viewport.width;
             canvas.height = viewport.height;
             await page.render({ canvasContext: ctx, viewport: viewport }).promise;
 
-            // Manual mapping bypasses the backend blind-loop failure
-            let rollNo = prompt(`Page ${pageNum} extracted locally.\nTo ensure perfect alignment, please type the Roll Number printed on this specific page:`);
+            let rollNo = null;
+
+            // 1. AUTO-DETECT: Try to read the barcode from the rendered canvas
+            try {
+                const result = await codeReader.decodeFromCanvas(canvas);
+                rollNo = result.text;
+                console.log(`Auto-mapped Page ${pageNum} to Roll No: ${rollNo}`);
+            } catch (err) {
+                console.warn(`Barcode unreadable on Page ${pageNum}`);
+            }
+
+            // 2. EXCEPTION FALLBACK: Only prompt if the barcode was smudged/missing
+            if (!rollNo || rollNo.trim() === "") {
+                rollNo = prompt(`⚠️ Barcode unreadable on Page ${pageNum}!\nTo ensure perfect mapping, please manually type the Roll Number printed on this page:`);
+            }
+            
             if (!rollNo || rollNo.trim() === "") continue; 
             rollNo = rollNo.trim().toUpperCase();
+
+            btn.innerText = `⏳ Saving Page ${pageNum}...`;
+
+            // Isolate page using PDF-Lib
 
             // Extract the isolated page using PDF-Lib and push to Storage
             const pdfDoc = await PDFLib.PDFDocument.create();
