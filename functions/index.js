@@ -471,47 +471,57 @@ exports.compileSingleRoomOnDemand = onRequest({
                 const cleanRoll = rawRoll.replace(/\D/g, '') || '0000';
                 const rollDigits = cleanRoll.split('');
 
-                // Calculate grid bounds
+                // DYNAMIC SECTION-BASED COLUMN CHUNKING
                 let totalQs = structure.reduce((sum, sec) => sum + (sec.end - sec.start + 1), 0);
-                let numCols = totalQs > 135 ? 5 : (totalQs > 90 ? 4 : 3);
-                const MAX_PER_COL = Math.ceil(totalQs / numCols);
 
                 let columnsHtml = "";
-                
-                // SECTION-BASED RENDER (Prevents numerics from mixing mid-column, guarantees 1-20 / 21-25 splits)
                 structure.forEach(sec => {
                     let questions = [];
                     for (let q = sec.start; q <= sec.end; q++) questions.push(q);
 
+                    // Dynamic column capacity: Allow 40 for huge tests, 25 for normal MCQ, 10 for Numerics to prevent vertical overflow
+                    let MAX_PER_COL = 30; 
+                    if (sec.type === 'MCQ') {
+                        if (totalQs >= 150) {
+                            MAX_PER_COL = 40; 
+                        } else if (totalQs > 90) {
+                            MAX_PER_COL = 30; 
+                        } else {
+                            MAX_PER_COL = 25; 
+                        }
+                    } else {
+                        MAX_PER_COL = 10; 
+                    }
+
                     for (let i = 0; i < questions.length; i += MAX_PER_COL) {
                         const chunk = questions.slice(i, i + MAX_PER_COL);
-                        // Using space-between preserves vertical alignment matching across varied height columns
-                        columnsHtml += `<div style="flex:1; display:flex; flex-direction:column; min-width:0; justify-content:space-between;">`;
                         
-                        // NOTE: Subject headers have been explicitly removed per admin request.
+                        columnsHtml += `<div style="flex:1; display:flex; flex-direction:column; min-width:0; justify-content:flex-start;">`;
+                        
+                        // Subject headers have been explicitly removed to ensure continuous uninterrupted flow
                         
                         chunk.forEach(q => {
                             if (sec.type === 'MCQ') {
                                 let optsHtml = "";
                                 for (let o = 1; o <= 4; o++) {
-                                    optsHtml += `<div style="width:14px; height:14px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:6pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
+                                    optsHtml += `<div style="width:13px; height:13px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5.5pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
                                 }
-                                columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:2px;"><div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
+                                columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:5px;"><div style="width:18px; font-weight:bold; font-size:7.5pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
                             } else {
-                                let numericGrid = `<div style="display:flex; gap:2px;">`;
+                                let numericGrid = `<div style="display:flex; gap:1.5px;">`;
                                 for (let col = 0; col < 6; col++) {
-                                    numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
-                                    numericGrid += `<div style="width:12px; height:12px; border:1px solid black; margin-bottom:2px; background:white;"></div>`; 
+                                    numericGrid += `<div style="display:flex; flex-direction:column; gap:0.5px; align-items:center;">`;
+                                    numericGrid += `<div style="width:9px; height:9px; border:1px solid black; margin-bottom:1px; background:white;"></div>`; 
                                     for (let r = 0; r <= 9; r++) {
-                                        numericGrid += `<div style="width:12px; height:12px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
+                                        numericGrid += `<div style="width:9px; height:9px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4.5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
                                     }
                                     numericGrid += `</div>`;
                                 }
                                 numericGrid += `</div>`;
 
                                 columnsHtml += `
-                                    <div style="display:flex; align-items:flex-start; margin-bottom:3px; break-inside:avoid;">
-                                        <div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; margin-top:14px; color:black;">${q}.</div>
+                                    <div style="display:flex; align-items:flex-start; margin-bottom:8px; break-inside:avoid;">
+                                        <div style="width:18px; font-weight:bold; font-size:7.5pt; text-align:right; margin-right:4px; margin-top:8px; color:black;">${q}.</div>
                                         ${numericGrid}
                                     </div>
                                 `;
@@ -561,7 +571,7 @@ exports.compileSingleRoomOnDemand = onRequest({
                                 <!-- Center: Barcode & Branding -->
                                 <div style="flex:1.2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
                                     <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="30" jsbarcode-width="1.8" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:4px;"></svg>
-                                    <h1 style="font-size:18pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0 0 4px 0; line-height:1; color:black;">MINERVA STUDY CIRCLE</h1>
+                                    <h1 style="font-size:16pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0 0 4px 0; line-height:1; color:black;">MINERVA STUDY CIRCLE</h1>
                                     <div style="font-size:9pt; font-family:monospace; font-weight:bold; background:#eee; padding:2px 8px; border:1.5px solid black; text-transform:uppercase;">
                                         ${examName}
                                     </div>
