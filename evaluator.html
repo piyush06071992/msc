@@ -194,10 +194,16 @@
                         </select>
                     </div>
                 </div>
-                <div class="flex flex-col sm:flex-row gap-3 mb-6 items-center">
+              <div class="flex flex-col sm:flex-row gap-3 mb-6 items-center">
                     <div class="flex-1 w-full bg-slate-50 p-4 rounded-2xl border border-slate-200">
                         <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">6. Search Student</label>
                         <input type="text" id="res-search-input" onkeyup="filterResultsTable()" placeholder="Roll No or Name..." class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none placeholder:text-slate-400">
+                    </div>
+                    <div class="w-full sm:w-64 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">7. Sort By</label>
+                        <select id="res-sort-select" onchange="filterResultsTable()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer">
+                            <option value="total">Total Score (Descending)</option>
+                        </select>
                     </div>
                     <div id="full-exam-view-toggle-container" class="shrink-0 w-full sm:w-auto"></div>
                 </div>
@@ -1733,17 +1739,28 @@ let activeDateGroups = [];
                     toggleContainer.innerHTML = `<span class="bg-indigo-100 text-indigo-800 px-3 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest border border-indigo-200 block text-center">Viewing Full Exam Result (${gData.combinedCode || 'Group'})</span>`;
                 }
 
-                let pooledStudents = [];
-                const addCandidate = (doc) => {
+            let pooledStudents = [];
+                const addCandidate = (doc, defaultCenter) => {
                     const s = doc.data();
                     const cNorm = String(s.className || '').trim().toUpperCase();
                     const sNorm = String(s.section || '').trim().toUpperCase();
                     if (s.isActive !== false && attachedSecs.has(`${cNorm}|${sNorm}`)) {
-                        pooledStudents.push({ id: doc.id, ...s });
+                        pooledStudents.push({ id: doc.id, center: s.center || s.branch || defaultCenter, ...s });
                     }
                 };
-                stuSnap.forEach(addCandidate);
-                dStuSnap.forEach(addCandidate);
+                stuSnap.forEach(doc => addCandidate(doc, "GHUMARWIN"));
+                dStuSnap.forEach(doc => addCandidate(doc, "DHARAMSHALA"));
+
+                // Populate dynamic subject sort options
+                const subjects = [...new Set((structure || []).map(s => s.subject))];
+                const sortSelect = document.getElementById('res-sort-select');
+                if (sortSelect) {
+                    let sortOpts = `<option value="total">Total Score (Descending)</option>`;
+                    subjects.forEach(sub => {
+                        sortOpts += `<option value="sub_${sub}">${sub} Marks (Descending)</option>`;
+                    });
+                    sortSelect.innerHTML = sortOpts;
+                }
 
                 const subSnap = await db.collection("omr_submissions").where("groupId", "==", groupId).get();
                 let submissionsMap = {};
@@ -1828,8 +1845,9 @@ let activeDateGroups = [];
             }
         }
 
-        function filterResultsTable() {
+  function filterResultsTable() {
             const searchQ = document.getElementById('res-search-input').value.trim().toLowerCase();
+            const sortBy = document.getElementById('res-sort-select') ? document.getElementById('res-sort-select').value : 'total';
 
             const filtered = currentExamResults.filter(stu => {
                 let match = true;
@@ -1838,6 +1856,19 @@ let activeDateGroups = [];
                     if (!qStr.includes(searchQ)) match = false;
                 }
                 return match;
+            });
+
+            // Sort records based on selection
+            filtered.sort((a, b) => {
+                if (sortBy === 'total') {
+                    return b.totalScore - a.totalScore || a.name.localeCompare(b.name);
+                } else if (sortBy.startsWith('sub_')) {
+                    const subName = sortBy.replace('sub_', '');
+                    const scoreA = a.subjectScores[subName] !== undefined ? a.subjectScores[subName] : -999;
+                    const scoreB = b.subjectScores[subName] !== undefined ? b.subjectScores[subName] : -999;
+                    return scoreB - scoreA || b.totalScore - a.totalScore || a.name.localeCompare(b.name);
+                }
+                return 0;
             });
 
             renderResultsTable(filtered, examStructure);
@@ -1860,6 +1891,7 @@ let activeDateGroups = [];
                             <th class="p-3.5 text-center w-12">Rank</th>
                             <th class="p-3.5 w-24">Roll No</th>
                             <th class="p-3.5">Candidate Name</th>
+                            <th class="p-3.5 text-center">Center</th>
                             <th class="p-3.5 text-center">Class</th>
                             ${subjects.map(sub => `<th class="p-3.5 text-center">${sub}</th>`).join('')}
                             <th class="p-3.5 text-center text-amber-600">Bonus</th>
@@ -1878,6 +1910,7 @@ let activeDateGroups = [];
                         <td class="p-3.5 text-center"><span class="px-2 py-0.5 rounded-full text-[10px] font-black ${rankColor}">#${index + 1}</span></td>
                         <td class="p-3.5 font-mono font-black text-slate-600">${stu.rollNo}</td>
                         <td class="p-3.5 uppercase font-black text-slate-900">${stu.name}</td>
+                        <td class="p-3.5 text-center uppercase text-[10px]"><span class="bg-amber-100 text-amber-900 px-2 py-0.5 rounded border border-amber-200 font-black">${stu.center || activeCenter}</span></td>
                         <td class="p-3.5 text-center uppercase text-[10px]"><span class="bg-slate-100 px-2 py-0.5 rounded border border-slate-200">${stu.className} - ${stu.section}</span></td>
                         ${subjects.map(sub => `<td class="p-3.5 text-center font-mono font-black">${stu.subjectScores[sub] !== undefined ? stu.subjectScores[sub] : '—'}</td>`).join('')}
                         <td class="p-3.5 text-center font-mono font-bold text-amber-600">+${stu.bonusAwarded}</td>
@@ -1893,7 +1926,6 @@ let activeDateGroups = [];
             html += `</tbody></table>`;
             container.innerHTML = html;
         }
-
      function exportResultsToExcel() {
             if (currentExamResults.length === 0) return alert("No evaluated results available to download.");
             const table = document.getElementById('dom-results-table');
