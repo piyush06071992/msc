@@ -452,9 +452,15 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
         });
     }
 
-    return `
-        <div class="omr-print-page">
-            <div style="border:2px solid black; padding:8px; box-sizing:border-box; display:flex; flex-direction:column; background:white; width:100%; height:100%; font-family:Arial, sans-serif; justify-content:space-between;">
+  return `
+        <div class="omr-print-page" style="position: relative; background: white;">
+            <!-- FIDUCIAL MARKERS FOR COMPUTER VISION (OPENCV) ALIGNMENT -->
+            <div style="position: absolute; top: 15px; left: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
+            <div style="position: absolute; top: 15px; right: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
+            <div style="position: absolute; bottom: 15px; left: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
+            <div style="position: absolute; bottom: 15px; right: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
+
+            <div style="border:2px solid black; padding:8px; margin: 45px; box-sizing:border-box; display:flex; flex-direction:column; background:white; height: calc(100% - 90px); font-family:Arial, sans-serif; justify-content:space-between; position: relative; z-index: 10;">
                 
                 <!-- TOP BLOCK: 3 Columns -> Left: Details, Center: Branding, Right: Roll Number -->
                 <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:4px; margin-bottom:12px; color:black; gap:8px;">
@@ -489,12 +495,14 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
                         </div>
                     </div>
                     
-                    <!-- Center: Barcode & Branding -->
+             <!-- Center: Barcode & Branding -->
                     <div style="flex:1.2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
-                        <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="30" jsbarcode-width="1.8" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:4px;"></svg>
+                        <!-- BARCODE QUIET ZONE -->
+                        <div style="background: white; padding: 10px; margin-bottom: 6px; border: 1px dashed #ccc; display: inline-block;">
+                            <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="40" jsbarcode-width="2" jsbarcode-displayvalue="false" jsbarcode-margin="10" jsbarcode-background="#ffffff"></svg>
+                        </div>
                         <h1 style="font-size:16pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0 0 4px 0; line-height:1; color:black;">MINERVA STUDY CIRCLE</h1>
                         <div style="font-size:9pt; font-family:monospace; font-weight:bold; background:#eee; padding:2px 8px; border:1.5px solid black; text-transform:uppercase;">
-                            ${examName}
                         </div>
                     </div>
 
