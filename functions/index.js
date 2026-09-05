@@ -471,7 +471,7 @@ exports.compileSingleRoomOnDemand = onRequest({
                 const cleanRoll = rawRoll.replace(/\D/g, '') || '0000';
                 const rollDigits = cleanRoll.split('');
 
-                // FLATTEN QUESTIONS: Ignore subject boundaries and render in continuous flow
+             // FLATTEN QUESTIONS: Ignore subject boundaries and render in continuous flow
                 let allQuestions = [];
                 structure.forEach(sec => {
                     for (let q = sec.start; q <= sec.end; q++) {
@@ -480,7 +480,8 @@ exports.compileSingleRoomOnDemand = onRequest({
                 });
 
                 let totalQs = allQuestions.length;
-                let numCols = totalQs > 135 ? 5 : (totalQs > 90 ? 4 : 3);
+                // Shift to 4 columns for anything over 60 questions to easily fit tall numeric grids
+                let numCols = totalQs > 135 ? 5 : (totalQs > 60 ? 4 : 3);
                 const MAX_PER_COL = Math.ceil(totalQs / numCols);
 
                 let columnsHtml = "";
