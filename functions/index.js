@@ -580,14 +580,50 @@ async function autoScanStudentScanPage(singlePdfBytes, structure) {
                     const canvas = document.createElement('canvas');
                     canvas.width = img.width;
                     canvas.height = img.height;
-                    const ctx = canvas.getContext('2d');
+                    const ctx = canvas.getContext('2d', { willReadFrequently: true });
                     ctx.drawImage(img, 0, 0);
 
                     let res = {};
+                    // Calibrated Grid Mapping for standard 1240x1754 OMR sheets
+                    const startX = 200;
+                    const startY = 550;
+                    const rowHeight = 34.5;
+                    const optSpacing = 28;
+                    const bubbleRadius = 10;
+                    const darknessThreshold = 0.35;
+
+                    let currentY = startY;
+
                     struct.forEach(sec => {
-                        for (let q = sec.start; q <= sec.end; q++) {
-                            // Default heuristic scanner behavior: 
-                            // In fully digital scans, option darkness is evaluated across bounding boxes.
+                        if (sec.type === 'MCQ') {
+                            for (let q = sec.start; q <= sec.end; q++) {
+                                let maxDarkness = 0;
+                                let markedOption = null;
+
+                                for (let opt = 1; opt <= 4; opt++) {
+                                    const x = startX + ((opt - 1) * optSpacing);
+                                    try {
+                                        const imgData = ctx.getImageData(x - bubbleRadius, currentY - bubbleRadius, bubbleRadius * 2, bubbleRadius * 2);
+                                        let darkPixels = 0, total = 0;
+                                        for (let i = 0; i < imgData.data.length; i += 4) {
+                                            if ((imgData.data[i] + imgData.data[i+1] + imgData.data[i+2]) / 3 < 130) {
+                                                darkPixels++;
+                                            }
+                                            total++;
+                                        }
+                                        const darkness = darkPixels / total;
+                                        if (darkness > maxDarkness && darkness > darknessThreshold) {
+                                            maxDarkness = darkness;
+                                            markedOption = String(opt);
+                                        }
+                                    } catch(e) {}
+                                }
+
+                                if (markedOption) {
+                                    res[String(q)] = markedOption;
+                                }
+                                currentY += rowHeight;
+                            }
                         }
                     });
                     resolve(res);
@@ -632,26 +668,35 @@ exports.processAndSplitRoomPDF = onRequest({
 
         roomOccupants.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
 
-        // Identify corresponding exam group and answer key structure for auto-scanning
-        let targetGroupId = null;
-        let examStructure = [];
+   // Identify corresponding exam group and answer key structure for auto-scanning based on student sections
         const groupSnap = await admin.firestore().collection("admin_paper_groups").where("date", "==", date).get();
-        groupSnap.forEach(doc => {
-            const data = doc.data();
-            const keys = data.sectionKeys || [];
-            const matchesCenter = !data.branches || data.branches.length === 0 || data.branches.includes(center);
-            if (matchesCenter && keys.length > 0) {
-                targetGroupId = doc.id;
-            }
-        });
+        let dateGroups = [];
+        let groupKeysCache = {};
 
-        if (targetGroupId) {
-            const keyDoc = await admin.firestore().collection("exam_answer_keys").doc(targetGroupId).get();
-            if (keyDoc.exists) {
-                examStructure = keyDoc.data().structure || [];
+        for (const doc of groupSnap.docs) {
+            const gData = { id: doc.id, ...doc.data() };
+            dateGroups.push(gData);
+            const kDoc = await admin.firestore().collection("exam_answer_keys").doc(doc.id).get();
+            if (kDoc.exists) {
+                groupKeysCache[doc.id] = kDoc.data().structure || [];
             }
         }
 
+        function getStudentGroupId(stu) {
+            if (!stu || !stu.className || !stu.section) return dateGroups[0]?.id || null;
+            const cNorm = String(stu.className).trim().toUpperCase();
+            const sNorm = String(stu.section).trim().toUpperCase();
+
+            const matched = dateGroups.find(g => {
+                const matchesCenter = !g.branches || g.branches.length === 0 || g.branches.includes(center);
+                if (!matchesCenter) return false;
+                return (g.sectionKeys || []).some(sk => {
+                    const parts = sk.split('|');
+                    return parts.length >= 3 && parts[1].trim().toUpperCase() === cNorm && parts[2].trim().toUpperCase() === sNorm;
+                });
+            });
+            return matched ? matched.id : (dateGroups[0]?.id || null);
+        }
         const roomPdfBytes = await loadPdfBytes(pdfUrl);
         const masterPdf = await PDFDocument.load(roomPdfBytes);
         const totalPages = masterPdf.getPageCount();
@@ -659,23 +704,26 @@ exports.processAndSplitRoomPDF = onRequest({
         const bucket = admin.storage().bucket();
         let mappingResults = {};
 
-        for (let i = 0; i < roomOccupants.length; i++) {
+   for (let i = 0; i < roomOccupants.length; i++) {
             if (i >= totalPages) break;
             const { seatId, stu } = roomOccupants[i];
             const rollNo = String(stu.rollNo || "").trim().toUpperCase();
             if (!rollNo) continue;
+
+            const studentGroupId = getStudentGroupId(stu);
+            const studentStructure = groupKeysCache[studentGroupId] || [];
 
             const singlePdf = await PDFDocument.create();
             const [copiedPage] = await singlePdf.copyPages(masterPdf, [i]);
             singlePdf.addPage(copiedPage);
             const singlePdfBytes = await singlePdf.save();
 
-            // Run Automated OMR Scanner Extraction
-            const scannedResponses = await autoScanStudentScanPage(singlePdfBytes, examStructure);
+            // Run Automated OMR Scanner Extraction on Server
+            const scannedResponses = await autoScanStudentScanPage(singlePdfBytes, studentStructure);
             
-            if (targetGroupId) {
-                await admin.firestore().collection("omr_submissions").doc(`${targetGroupId}_${rollNo}`).set({
-                    groupId: targetGroupId,
+            if (studentGroupId) {
+                await admin.firestore().collection("omr_submissions").doc(`${studentGroupId}_${rollNo}`).set({
+                    groupId: studentGroupId,
                     rollNo: rollNo,
                     responses: scannedResponses,
                     updatedAt: Date.now()
