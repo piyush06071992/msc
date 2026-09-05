@@ -596,7 +596,7 @@ listenForUnconfiguredExams();
       listenForMissingAttendance();
         // --------------------------------
 
-        async function listenForMissingAttendance() {
+       async function listenForMissingAttendance() {
             // FIX: admin.html uses authStatus to verify identity, not isAdmin
             if (authStatus !== 'true') return;
 
@@ -621,11 +621,15 @@ listenForUnconfiguredExams();
                     }
                 });
 
-                // Fetch Timetable History & Live
-                const histSnap = await db.collection(prefix + "timetable_history").get();
+                // Fetch Timetable History, Live Timetable, and Holidays
+                const [histSnap, ttSnap, holSnap] = await Promise.all([
+                    db.collection(prefix + "timetable_history").get(),
+                    db.collection(prefix + "timetable").get(),
+                    db.collection(prefix + "school_holidays").get()
+                ]);
                 const ttHist = histSnap.docs.map(d => d.data());
-                const ttSnap = await db.collection(prefix + "timetable").get();
                 const ttLive = ttSnap.docs.map(d => d.data());
+                const holidaysData = holSnap.docs.map(d => d.data());
 
                 function getScheduleSnapshot(dateIso) {
                     const exactOverride = ttHist.find(h => h.date === dateIso && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE"));
@@ -686,7 +690,7 @@ listenForUnconfiguredExams();
                 datesToCheck.forEach(dateStr => {
                     const isToday = dateStr === todayIso;
                     const [y, m, d] = dateStr.split('-');
-                    const dateObj = new Date(y, m-1, d);
+                    const dateObj = new Date(parseInt(y), parseInt(m)-1, parseInt(d));
                     
                     if (dateObj.getDay() === 0) return; // Skip Sundays globally
 
@@ -707,6 +711,53 @@ listenForUnconfiguredExams();
                         const [eh, em] = slot.end24.split(':').map(Number);
                         const endMins = eh * 60 + em;
                         if (isToday && (currentMins < endMins + 30)) return;
+
+                        // --- HOLIDAY / HALF-DAY SCANNER LOGIC ---
+                        let isHoliday = false;
+                        if (holidaysData && holidaysData.length > 0) {
+                            for (let h of holidaysData) {
+                                if (h.suspendClasses === false || !h.startDate) continue;
+
+                                const [sy, sm, sd] = h.startDate.split('-');
+                                let hs = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd));
+                                let he = hs;
+                                if (h.endDate) {
+                                    const [ey, em, ed] = h.endDate.split('-');
+                                    he = new Date(parseInt(ey), parseInt(em)-1, parseInt(ed), 23, 59, 59);
+                                } else {
+                                    he = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd), 23, 59, 59);
+                                }
+
+                                if (dateObj >= hs && dateObj <= he) {
+                                    const targetCls = `${norm(slot.className)}|${norm(slot.section)}`;
+                                    const matchesClass = h.targetClasses.some(tc => {
+                                        if (tc === 'ALL') return true;
+                                        const parts = tc.split('|');
+                                        const tcNorm = norm(parts[0]) + (parts[1] ? '|' + norm(parts[1]) : '');
+                                        return tcNorm === targetCls || norm(parts[0]) === norm(slot.className);
+                                    });
+
+                                    if (matchesClass) {
+                                        if (h.isFullDay) {
+                                            isHoliday = true; break;
+                                        } else if (h.startTime && h.endTime) {
+                                            const [sh, sm] = (slot.start24 || "00:00").split(':').map(Number);
+                                            const startMins = sh * 60 + sm;
+                                            const [hsh, hsm] = h.startTime.split(':').map(Number);
+                                            const [heh, hem] = h.endTime.split(':').map(Number);
+                                            const hStartMins = hsh * 60 + hsm;
+                                            const hEndMins = heh * 60 + hem;
+                                            
+                                            if (startMins < hEndMins && endMins > hStartMins) {
+                                                isHoliday = true; break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (isHoliday) return; // Skip holidays and half-days
+                        // --- END HOLIDAY SCANNER LOGIC ---
 
                         // Did they mark it?
                         const attKey = `${dateStr}_${norm(slot.className)}_${norm(slot.section)}_${norm(sub)}`;
