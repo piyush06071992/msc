@@ -194,7 +194,7 @@
                         </select>
                     </div>
                 </div>
-              <div class="flex flex-col sm:flex-row gap-3 mb-6 items-center">
+            <div class="flex flex-col sm:flex-row gap-3 mb-6 items-center">
                     <div class="flex-1 w-full bg-slate-50 p-4 rounded-2xl border border-slate-200">
                         <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">6. Search Student</label>
                         <input type="text" id="res-search-input" onkeyup="filterResultsTable()" placeholder="Roll No or Name..." class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none placeholder:text-slate-400">
@@ -205,9 +205,11 @@
                             <option value="total">Total Score (Descending)</option>
                         </select>
                     </div>
+                    <div class="shrink-0 w-full sm:w-auto flex items-end">
+                        <button onclick="toggleDetailedView()" id="btn-toggle-detailed" class="w-full sm:w-auto bg-purple-600 hover:bg-purple-500 text-white px-5 py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-md transition-all active:scale-95">📊 Detailed Breakdown: OFF</button>
+                    </div>
                     <div id="full-exam-view-toggle-container" class="shrink-0 w-full sm:w-auto"></div>
                 </div>
-
                 <!-- AGGREGATE SUMMARY STRIP -->
                 <div id="results-summary-strip" class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
                     <div class="bg-blue-50 border border-blue-200 p-4 rounded-2xl text-center">
@@ -1581,6 +1583,19 @@ let activeDateGroups = [];
         let activeSelectedGroupId = null;
         let activeFilterSectionKey = null;
         let activeExamStructure = [];
+        let isDetailedViewActive = false;
+
+        function toggleDetailedView() {
+            isDetailedViewActive = !isDetailedViewActive;
+            const btn = document.getElementById('btn-toggle-detailed');
+            if (btn) {
+                btn.innerText = isDetailedViewActive ? "📊 Detailed Breakdown: ON" : "📊 Detailed Breakdown: OFF";
+                btn.className = isDetailedViewActive ? 
+                    "w-full sm:w-auto bg-purple-700 text-white px-5 py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-lg transition-all ring-2 ring-purple-400" : 
+                    "w-full sm:w-auto bg-purple-600 hover:bg-purple-500 text-white px-5 py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-md transition-all active:scale-95";
+            }
+            filterResultsTable();
+        }
 
         async function populateResultDates() {
             const sel = document.getElementById('res-date-select');
@@ -1771,17 +1786,22 @@ let activeDateGroups = [];
                     submissionsMap[String(d.rollNo).trim().toUpperCase()] = d.responses || {};
                 });
 
-                currentExamResults = pooledStudents.map(stu => {
+          currentExamResults = pooledStudents.map(stu => {
                     const roll = String(stu.rollNo || '').trim().toUpperCase();
                     const studentResponses = submissionsMap[roll] || {};
                     
                     let subjectScores = {};
+                    let subjectBreakdown = {};
                     let totalObtained = 0;
                     let totalMax = 0;
                     let bonusMarksAwarded = 0;
 
                     structure.forEach(sec => {
                         let secScore = 0;
+                        let attempted = 0;
+                        let correct = 0;
+                        let incorrect = 0;
+
                         for (let q = sec.start; q <= sec.end; q++) {
                             const correctAns = answers[q];
                             const resp = studentResponses[q];
@@ -1791,6 +1811,15 @@ let activeDateGroups = [];
                             const negMarks = sec.wrongMarks !== undefined ? sec.wrongMarks : -1;
                             const unattMarks = sec.unattemptedMarks !== undefined ? sec.unattemptedMarks : 0;
                             totalMax += posMarks;
+
+                            if (resp !== undefined && resp !== null && String(resp).trim() !== "") {
+                                attempted++;
+                                if (String(resp) === String(correctAns)) {
+                                    correct++;
+                                } else {
+                                    incorrect++;
+                                }
+                            }
 
                             if (bonusRule === 'ALL') {
                                 secScore += posMarks;
@@ -1813,8 +1842,24 @@ let activeDateGroups = [];
                             }
                         }
                         subjectScores[sec.subject] = (subjectScores[sec.subject] || 0) + secScore;
+                        subjectBreakdown[sec.subject] = { attempted, correct, incorrect };
                         totalObtained += secScore;
                     });
+
+                    return {
+                        id: stu.id,
+                        rollNo: stu.rollNo || '—',
+                        name: stu.name,
+                        center: stu.center || activeCenter,
+                        className: stu.className,
+                        section: stu.section,
+                        subjectScores: subjectScores,
+                        subjectBreakdown: subjectBreakdown,
+                        bonusAwarded: bonusMarksAwarded,
+                        totalScore: totalObtained,
+                        maxMarks: totalMax,
+                        percentage: percentage
+                    };
 
                     const percentage = totalMax > 0 ? ((totalObtained / totalMax) * 100).toFixed(1) : 0;
 
@@ -1875,7 +1920,7 @@ function filterResultsTable() {
             renderResultsTable(filtered, activeExamStructure);
         }
 
-        function renderResultsTable(records, structure) {
+     function renderResultsTable(records, structure) {
             const container = document.getElementById('results-table-container');
 
             if (records.length === 0) {
@@ -1921,7 +1966,23 @@ function filterResultsTable() {
                         ${subjects.map(sub => {
                             const isHighlighted = (sortBy === `sub_${sub}`);
                             const tdClass = isHighlighted ? 'bg-amber-50 text-amber-950 font-black ring-1 ring-amber-300' : '';
-                            return `<td class="p-3.5 text-center font-mono font-black ${tdClass}">${stu.subjectScores[sub] !== undefined ? stu.subjectScores[sub] : '—'}</td>`;
+                            const score = stu.subjectScores[sub] !== undefined ? stu.subjectScores[sub] : '—';
+                            
+                            if (isDetailedViewActive && stu.subjectBreakdown && stu.subjectBreakdown[sub]) {
+                                const b = stu.subjectBreakdown[sub];
+                                return `
+                                    <td class="p-3 text-center font-mono ${tdClass}">
+                                        <div class="font-black text-sm text-slate-900">${score}</div>
+                                        <div class="text-[9px] font-bold text-slate-500 uppercase mt-0.5 flex justify-center gap-1.5">
+                                            <span class="text-blue-600" title="Attempted">Att:${b.attempted}</span>
+                                            <span class="text-emerald-600" title="Correct">✓:${b.correct}</span>
+                                            <span class="text-rose-600" title="Incorrect">✗:${b.incorrect}</span>
+                                        </div>
+                                    </td>
+                                `;
+                            }
+
+                            return `<td class="p-3.5 text-center font-mono font-black ${tdClass}">${score}</td>`;
                         }).join('')}
                         <td class="p-3.5 text-center font-mono font-bold text-amber-600">+${stu.bonusAwarded}</td>
                         <td class="p-3.5 text-center font-mono font-black text-blue-600 text-sm ${sortBy === 'total' ? 'bg-indigo-50/80 font-black' : ''}">${stu.totalScore} <span class="text-[9px] text-slate-400 font-normal">/ ${stu.maxMarks}</span></td>
