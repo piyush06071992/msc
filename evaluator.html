@@ -796,6 +796,26 @@ async function uploadAndProcessRoomPDF() {
         let mappingResults = {};
         let missingStudents = [];
 
+        // 1. Fetch Target Exam Group & Answer Key Structure for Scanning
+        let targetGroupId = null;
+        let examStructure = [];
+        const dateVal = document.getElementById('eval-date-select').value;
+        const groupSnap = await db.collection("admin_paper_groups").where("date", "==", dateVal).get();
+        groupSnap.forEach(doc => {
+            const data = doc.data();
+            const matchesCenter = !data.branches || data.branches.length === 0 || data.branches.includes(activeCenter);
+            if (matchesCenter && (data.sectionKeys || []).length > 0) {
+                targetGroupId = doc.id;
+            }
+        });
+
+        if (targetGroupId) {
+            const keyDoc = await db.collection("exam_answer_keys").doc(targetGroupId).get();
+            if (keyDoc.exists) {
+                examStructure = keyDoc.data().structure || [];
+            }
+        }
+
         // Validate allocations first
         let allocatedInRoom = [];
         Object.keys(activeAllocations).forEach(sId => {
@@ -842,14 +862,26 @@ async function uploadAndProcessRoomPDF() {
                 rollNo = prompt(`⚠️ Barcode unreadable on Page ${pageNum}!\nTo ensure perfect mapping, please manually type the Roll Number printed on this page:`);
             }
             
-            if (!rollNo || rollNo.trim() === "") continue; 
+       if (!rollNo || rollNo.trim() === "") continue; 
             rollNo = rollNo.trim().toUpperCase();
+
+            // 2. RUN LOCAL OMR PIXEL SCANNER
+            btn.innerText = `⏳ Extracting Bubbles for ${rollNo}...`;
+            const extractedAnswers = await extractBubblesFromCanvas(canvas, examStructure);
+
+            // 3. SAVE SUBMISSION TO DATABASE (This generates the Result)
+            if (targetGroupId) {
+                await db.collection("omr_submissions").doc(`${targetGroupId}_${rollNo}`).set({
+                    groupId: targetGroupId,
+                    rollNo: rollNo,
+                    responses: extractedAnswers,
+                    updatedAt: Date.now()
+                }, { merge: true });
+            }
 
             btn.innerText = `⏳ Saving Page ${pageNum}...`;
 
             // Isolate page using PDF-Lib
-
-            // Extract the isolated page using PDF-Lib and push to Storage
             const pdfDoc = await PDFLib.PDFDocument.create();
             const srcPdf = await PDFLib.PDFDocument.load(arrayBuffer);
             const [copiedPage] = await pdfDoc.copyPages(srcPdf, [pageNum - 1]);
@@ -898,11 +930,76 @@ async function uploadAndProcessRoomPDF() {
         btn.innerText = orig; btn.disabled = false;
         alert(`✅ Local Scan Complete! ${Object.keys(mappingResults).length} OMR sheets mapped successfully.`);
 
-    } catch(e) {
+  } catch(e) {
         alert("Local scanning failed: " + e.message);
         btn.innerText = orig; 
         btn.disabled = false;
     }
+}
+
+async function extractBubblesFromCanvas(canvas, structure) {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    let responses = {};
+    
+    // -----------------------------------------------------------------------
+    // ⚠️ CRITICAL CALIBRATION REQUIRED:
+    // To make the OMR engine read physical bubbles accurately, you MUST 
+    // adjust these X, Y coordinates to perfectly match your generated OMR PDF.
+    // The current numbers are placeholders to test the database pipeline.
+    // -----------------------------------------------------------------------
+    const startX = 180; // X-coordinate of Q1, Option 1
+    const startY = 450; // Y-coordinate of Q1
+    const rowHeight = 28; // Distance between questions (Y-axis)
+    const optSpacing = 24; // Distance between options 1, 2, 3, 4 (X-axis)
+    const bubbleRadius = 8; // Size of the bubble
+    const darknessThreshold = 0.35; // 35% dark pixels = marked as attempted
+    
+    // Helper to sample pixel darkness inside a bubble coordinate
+    function getDarkness(x, y) {
+        try {
+            const imgData = ctx.getImageData(x - bubbleRadius, y - bubbleRadius, bubbleRadius * 2, bubbleRadius * 2);
+            let darkPixels = 0, total = 0;
+            for (let i = 0; i < imgData.data.length; i += 4) {
+                // Convert RGB to Grayscale. If < 120, it's dark ink.
+                if ((imgData.data[i] + imgData.data[i+1] + imgData.data[i+2]) / 3 < 120) {
+                    darkPixels++;
+                }
+                total++;
+            }
+            return darkPixels / total; // Returns percentage of dark pixels
+        } catch(e) { return 0; }
+    }
+
+    let currentY = startY;
+
+    structure.forEach(sec => {
+        if (sec.type === 'MCQ') {
+            for (let q = sec.start; q <= sec.end; q++) {
+                let maxDarkness = 0;
+                let markedOption = null;
+
+                // Scan options 1, 2, 3, 4
+                for (let opt = 1; opt <= 4; opt++) {
+                    const x = startX + ((opt - 1) * optSpacing);
+                    const darkness = getDarkness(x, currentY);
+
+                    // Determine which bubble is the darkest
+                    if (darkness > maxDarkness && darkness > darknessThreshold) {
+                        maxDarkness = darkness;
+                        markedOption = String(opt);
+                    }
+                }
+
+                if (markedOption) {
+                    responses[String(q)] = markedOption; // Save the read answer
+                }
+                currentY += rowHeight; 
+            }
+        }
+    });
+
+    console.log("Extracted OMR Data:", responses);
+    return responses;
 }
 
         // --- INDIVIDUAL OMR SEARCH ARCHIVE ---
