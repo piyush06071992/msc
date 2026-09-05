@@ -769,9 +769,24 @@ async function uploadAndProcessRoomPDF() {
     btn.innerText = "⏳ Reconciling with Seating Plan..."; btn.disabled = true;
 
     try {
-        const storageRef = storage.ref(`omr_uploads/${activeCenter}/${Date.now()}_${file.name}`);
+       const storageRef = storage.ref(`omr_uploads/${activeCenter}/${Date.now()}_${file.name}`);
         const snapshot = await storageRef.put(file);
         const downloadUrl = await snapshot.ref.getDownloadURL();
+
+        // Automatically split and map the uploaded room PDF student-wise on the backend
+        btn.innerText = "⏳ Splitting Pages & Mapping Students...";
+        const splitRes = await fetch("https://asia-south1-shop-portal-bbbbb.cloudfunctions.net/processAndSplitRoomPDF", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                center: activeCenter,
+                date: document.getElementById('eval-date-select').value,
+                roomName: activeEvalRoom,
+                pdfUrl: downloadUrl
+            })
+        });
+        const splitResult = await splitRes.json();
+        if (!splitRes.ok) console.warn("Auto-split warning:", splitResult.error);
 
         // Cross-reference with actual seating plan allocations for this room
         let allocatedInRoom = [];
@@ -1889,53 +1904,32 @@ let activeDateGroups = [];
             XLSX.writeFile(wb, `Evaluation_Results_${code}_${new Date().toISOString().slice(0,10)}.xlsx`);
         }
 
-      async function viewStudentOMR(rollNo) {
+  async function viewStudentOMR(rollNo) {
             const date = document.getElementById('res-date-select').value;
-            const groupId = document.getElementById('res-group-select').value;
-            if (!date || !groupId) return alert("Select an exam date and paper group first.");
+            if (!date) return alert("Select an exam date first.");
 
             const modal = document.getElementById('cloud-loading-modal') || createLoadingModal();
             modal.classList.replace('hidden', 'flex');
 
             try {
-                // Fetch the seating allocations for this center and date to locate the student
-                const allocDoc = await db.collection("exam_seating_allocations").doc(`${activeCenter}_${date}`).get();
-                if (!allocDoc.exists) throw new Error("No seating plan found for this exam date.");
+                const prefix = activeCenter === "DHARAMSHALA" ? "dharamshala_" : "";
+                const mappingDoc = await db.collection(`${prefix}exam_omr_mappings`).doc(`${activeCenter}_${date}`).get();
                 
-                const allocations = allocDoc.data().allocations || {};
-                let foundSeatId = null;
+                if (!mappingDoc.exists) {
+                    throw new Error("No processed room scans found for this date. Please upload the scanned room PDF in the Evaluation Hub first.");
+                }
+
+                const roomScans = mappingDoc.data().roomScans || {};
                 const targetRoll = String(rollNo).trim().toUpperCase();
+                const scanUrl = roomScans[targetRoll];
 
-                for (const [seatId, stu] of Object.entries(allocations)) {
-                    if (stu && String(stu.rollNo || '').trim().toUpperCase() === targetRoll) {
-                        foundSeatId = seatId;
-                        break;
-                    }
+                if (!scanUrl) {
+                    throw new Error(`No individual scanned OMR found for Roll No #${rollNo}. Verify that the room PDF was uploaded and successfully processed.`);
                 }
 
-                if (!foundSeatId) {
-                    throw new Error(`Student with Roll No #${rollNo} is not allocated to any room in the seating plan for this date.`);
-                }
-
-                const roomName = foundSeatId.split('-R')[0];
-
-                const response = await fetch("https://asia-south1-shop-portal-bbbbb.cloudfunctions.net/compileSingleRoomOnDemand", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ 
-                        center: activeCenter, 
-                        date: date, 
-                        roomName: roomName, 
-                        type: 'omr',
-                        seatId: foundSeatId,
-                        rollNo: rollNo 
-                    })
-                });
-                const result = await response.json();
-                if (!response.ok) throw new Error(result.error || "Failed to generate student OMR.");
-                window.open(result.url, '_blank');
+                window.open(scanUrl, '_blank');
             } catch (e) {
-                alert("Error opening OMR sheet: " + e.message);
+                alert("Error opening stored OMR sheet: " + e.message);
             } finally {
                 modal.classList.replace('flex', 'hidden');
             }
