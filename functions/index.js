@@ -528,6 +528,88 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     `;
 }
 
+// =======================================================
+// --- NEW: PROCESS AND SPLIT ROOM PDF ENDPOINT ---
+// =======================================================
+exports.processAndSplitRoomPDF = onRequest({
+    region: "asia-south1",
+    memory: "2GiB",
+    timeoutSeconds: 300,
+    cors: true
+}, async (req, res) => {
+    const { center, date, roomName, pdfUrl } = req.body;
+    if (!center || !date || !roomName || !pdfUrl) {
+        return res.status(400).send({ error: "Missing required parameters." });
+    }
+
+    try {
+        const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
+        const allocDoc = await admin.firestore().collection(`${prefix}exam_seating_allocations`).doc(`${center}_${date}`).get();
+        
+        if (!allocDoc.exists) {
+            return res.status(404).send({ error: "Seating allocations not found for this date." });
+        }
+
+        const allocations = allocDoc.data().allocations || {};
+        let roomOccupants = [];
+        Object.keys(allocations).forEach(sId => {
+            if (sId.toUpperCase().startsWith(`${roomName.toUpperCase()}-`)) {
+                const stu = allocations[sId];
+                if (stu) roomOccupants.push({ seatId: sId, stu });
+            }
+        });
+
+        roomOccupants.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
+
+        const roomPdfBytes = await loadPdfBytes(pdfUrl);
+        const masterPdf = await PDFDocument.load(roomPdfBytes);
+        const totalPages = masterPdf.getPageCount();
+
+        const bucket = admin.storage().bucket();
+        let mappingResults = {};
+
+        for (let i = 0; i < roomOccupants.length; i++) {
+            if (i >= totalPages) break;
+            const { seatId, stu } = roomOccupants[i];
+            const rollNo = String(stu.rollNo || "").trim().toUpperCase();
+            if (!rollNo) continue;
+
+            const singlePdf = await PDFDocument.create();
+            const [copiedPage] = await singlePdf.copyPages(masterPdf, [i]);
+            singlePdf.addPage(copiedPage);
+            const singlePdfBytes = await singlePdf.save();
+
+            const storagePath = `student_scans/${center}/${date}/${rollNo}.pdf`;
+            const fileRef = bucket.file(storagePath);
+            await fileRef.save(Buffer.from(singlePdfBytes), {
+                metadata: { contentType: "application/pdf" }
+            });
+
+            const downloadToken = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
+            await fileRef.setMetadata({
+                metadata: {
+                    firebaseStorageDownloadTokens: downloadToken
+                }
+            });
+
+            const bucketName = bucket.name;
+            const fileUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(storagePath)}?alt=media&token=${downloadToken}`;
+            
+            mappingResults[rollNo] = fileUrl;
+        }
+
+        await admin.firestore().collection(`${prefix}exam_omr_mappings`).doc(`${center}_${date}`).set({
+            roomScans: mappingResults,
+            updatedAt: Date.now()
+        }, { merge: true });
+
+        res.status(200).send({ success: true, count: Object.keys(mappingResults).length });
+    } catch (err) {
+        console.error("[Room PDF Splitter Error]:", err);
+        res.status(500).send({ error: err.message });
+    }
+});
+
 exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
     memory: "2GiB",
