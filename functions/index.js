@@ -380,7 +380,7 @@ exports.compileSingleRoomOnDemand = onRequest({
     timeoutSeconds: 300,
     cors: true
 }, async (req, res) => {
-    const { center, date, roomName, type } = req.body;
+    const { center, date, roomName, type, seatId } = req.body;
     if (!center || !date || !roomName) {
         res.status(400).send({ error: "Missing required parameters: center, date, roomName" });
         return;
@@ -398,15 +398,16 @@ exports.compileSingleRoomOnDemand = onRequest({
 
             const allocations = allocDoc.data().allocations || {};
             let occupiedSeats = [];
-            Object.keys(allocations).forEach(seatId => {
-                if (seatId.startsWith(`${roomName}-`)) {
-                    const stu = allocations[seatId];
-                    if (stu) occupiedSeats.push({ seatId, stu });
+            Object.keys(allocations).forEach(sId => {
+                // If a specific seatId is passed, ONLY render that single student
+                if (seatId ? (sId === seatId) : sId.startsWith(`${roomName}-`)) {
+                    const stu = allocations[sId];
+                    if (stu) occupiedSeats.push({ seatId: sId, stu });
                 }
             });
 
             if (occupiedSeats.length === 0) {
-                res.status(404).send({ error: `No students allocated in room ${roomName}.` });
+                res.status(404).send({ error: `No students allocated in target scope.` });
                 return;
             }
 
@@ -462,7 +463,7 @@ exports.compileSingleRoomOnDemand = onRequest({
             let fullPagesHtml = "";
             const prettyDate = new Date(date + 'T00:00:00').toLocaleDateString('en-GB');
 
-            occupiedSeats.forEach(({ seatId, stu }) => {
+            occupiedSeats.forEach(({ seatId: sId, stu }) => {
                 const pairKey = `${stu.className}|${stu.section}`;
                 const structure = structureMap[pairKey] || [{ subject: 'GENERAL', start: 1, end: 75, type: 'MCQ' }];
                 const examName = examNameMap[pairKey] || "EXAMINATION OMR SHEET";
@@ -491,22 +492,22 @@ exports.compileSingleRoomOnDemand = onRequest({
                                 for (let o = 1; o <= 4; o++) {
                                     optsHtml += `<div style="width:14px; height:14px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:6pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
                                 }
-                                columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:2px;"><div style="width:16px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
+                                columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:4px;"><div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
                             } else {
-                                let numericGrid = `<div style="display:flex; gap:1.5px;">`;
+                                let numericGrid = `<div style="display:flex; gap:2px;">`;
                                 for (let col = 0; col < 6; col++) {
-                                    numericGrid += `<div style="display:flex; flex-direction:column; gap:0.5px; align-items:center;">`;
-                                    numericGrid += `<div style="width:10px; height:10px; border:1px solid black; margin-bottom:1px; background:white;"></div>`; 
+                                    numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
+                                    numericGrid += `<div style="width:12px; height:12px; border:1px solid black; margin-bottom:2px; background:white;"></div>`; 
                                     for (let r = 0; r <= 9; r++) {
-                                        numericGrid += `<div style="width:10px; height:10px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
+                                        numericGrid += `<div style="width:12px; height:12px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
                                     }
                                     numericGrid += `</div>`;
                                 }
                                 numericGrid += `</div>`;
 
                                 columnsHtml += `
-                                    <div style="display:flex; align-items:flex-start; margin-bottom:3px; break-inside:avoid;">
-                                        <div style="width:16px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; margin-top:10px; color:black;">${q}.</div>
+                                    <div style="display:flex; align-items:flex-start; margin-bottom:6px; break-inside:avoid;">
+                                        <div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; margin-top:14px; color:black;">${q}.</div>
                                         ${numericGrid}
                                     </div>
                                 `;
@@ -518,7 +519,7 @@ exports.compileSingleRoomOnDemand = onRequest({
 
                 fullPagesHtml += `
                     <div class="omr-print-page">
-                        <div style="border:2px solid black; padding:6px 8px; box-sizing:border-box; display:flex; flex-direction:column; background:white; width:100%; height:100%; font-family:Arial, sans-serif; justify-content:space-between;">
+                        <div style="border:2px solid black; padding:8px; box-sizing:border-box; display:flex; flex-direction:column; background:white; width:100%; height:100%; font-family:Arial, sans-serif; justify-content:space-between;">
                             
                             <!-- TOP BLOCK: 3 Columns -> Left: Details, Center: Branding, Right: Roll Number -->
                             <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:4px; margin-bottom:6px; color:black; gap:8px;">
@@ -569,7 +570,7 @@ exports.compileSingleRoomOnDemand = onRequest({
                                 ${columnsHtml}
                             </div>
                             <div style="border-top:1.5px solid black; padding-top:2px; margin-top:2px; display:flex; justify-content:center; align-items:center;">
-                                <span style="font-family:monospace; background:black; color:white; padding:1px 12px; border-radius:3px; font-size:7.5pt; font-weight:900; letter-spacing:1px; text-transform:uppercase;">SEAT NUMBER: ${seatId}</span>
+                                <span style="font-family:monospace; background:black; color:white; padding:1px 12px; border-radius:3px; font-size:7.5pt; font-weight:900; letter-spacing:1px; text-transform:uppercase;">SEAT NUMBER: ${sId}</span>
                             </div>
                         </div>
                     </div>
@@ -611,7 +612,9 @@ exports.compileSingleRoomOnDemand = onRequest({
             const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
             await browser.close();
 
-            const storagePath = `print_packages/${center}/${date}/${roomName}_omr_package.pdf`;
+            const filePrefix = seatId ? seatId : roomName;
+            const storagePath = `print_packages/${center}/${date}/${filePrefix}_omr_package.pdf`;
+            
             const fileRef = admin.storage().bucket().file(storagePath);
             await fileRef.save(Buffer.from(pdfBuffer), {
                 metadata: { contentType: "application/pdf" },
@@ -638,14 +641,21 @@ exports.compileSingleRoomOnDemand = onRequest({
         }
 
         const allocations = allocDoc.data().allocations || {};
-        const success = await compileSingleRoomPackage(center, date, roomName, allocations);
+        
+        let filteredAllocations = allocations;
+        if (seatId && allocations[seatId]) {
+            filteredAllocations = { [seatId]: allocations[seatId] };
+        }
+        
+        const success = await compileSingleRoomPackage(center, date, roomName, filteredAllocations);
         
         if (!success) {
             res.status(400).send({ error: "Room has no students allocated or failed to compile." });
             return;
         }
 
-        const storagePath = `print_packages/${center}/${date}/${roomName}_print_package.pdf`;
+        const filePrefix = seatId ? seatId : roomName;
+        const storagePath = `print_packages/${center}/${date}/${filePrefix}_print_package.pdf`;
         const fileRef = admin.storage().bucket().file(storagePath);
         const downloadToken = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
         
@@ -660,7 +670,7 @@ exports.compileSingleRoomOnDemand = onRequest({
 
         res.status(200).send({ success: true, url });
     } catch (err) {
-        console.error(`[On-Demand Error] ${roomName}:`, err);
+        console.error(`[On-Demand Error] ${roomName || seatId}:`, err);
         res.status(500).send({ error: err.message });
     }
 });
