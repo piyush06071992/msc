@@ -162,29 +162,25 @@
                     </div>
                 </div>
 
-                <!-- RESULTS QUERY CONTROLS -->
-                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+             <!-- RESULTS QUERY CONTROLS -->
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6 bg-slate-50 p-4 rounded-2xl border border-slate-200">
                     <div>
                         <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">1. Exam Date</label>
                         <select id="res-date-select" onchange="onResultDateChange()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer"></select>
                     </div>
                     <div>
-                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">2. Exam Paper Group</label>
-                        <select id="res-group-select" onchange="onResultGroupChange()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer">
-                            <option value="">-- Select Exam --</option>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">2. Select Class & Section</label>
+                        <select id="res-section-select" onchange="onResultSectionChange()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer">
+                            <option value="">-- Choose Class & Section --</option>
                         </select>
                     </div>
                     <div>
-                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">3. Filter Class / Section</label>
-                        <select id="res-section-select" onchange="filterResultsTable()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer">
-                            <option value="ALL">All Sections</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">4. Search Student</label>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">3. Search Student</label>
                         <input type="text" id="res-search-input" onkeyup="filterResultsTable()" placeholder="Roll No or Name..." class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none placeholder:text-slate-400">
                     </div>
                 </div>
+                <!-- Hidden storage for auto-resolved group ID -->
+                <select id="res-group-select" class="hidden"></select>
 
                 <!-- AGGREGATE SUMMARY STRIP -->
                 <div id="results-summary-strip" class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
@@ -1539,42 +1535,80 @@ const html = `
             } catch(e) { console.error(e); }
         }
 
+     let activeDateGroups = [];
+
         async function onResultDateChange() {
             const date = document.getElementById('res-date-select').value;
-            const groupSelect = document.getElementById('res-group-select');
-            groupSelect.innerHTML = '<option value="">Loading papers...</option>';
+            const secSelect = document.getElementById('res-section-select');
+            const tableContainer = document.getElementById('results-table-container');
+            
+            secSelect.innerHTML = '<option value="">Loading sections...</option>';
+            tableContainer.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest">Select a class and section above to inspect student results.</div>`;
 
             if (!date) return;
             try {
                 const snap = await db.collection("admin_paper_groups").where("date", "==", date).get();
-                let groups = [];
-                snap.forEach(doc => groups.push({ id: doc.id, ...doc.data() }));
+                activeDateGroups = [];
+                snap.forEach(doc => activeDateGroups.push({ id: doc.id, ...doc.data() }));
 
-                if (groups.length === 0) {
-                    groupSelect.innerHTML = '<option value="">No papers found</option>';
+                let availableSecs = new Set();
+                activeDateGroups.forEach(g => {
+                    (g.sectionKeys || []).forEach(sk => {
+                        const parts = sk.split('|');
+                        if (parts.length >= 3) {
+                            availableSecs.add(`${parts[1]}|${parts[2]}`); // Class|Section
+                        }
+                    });
+                });
+
+                if (availableSecs.size === 0) {
+                    secSelect.innerHTML = '<option value="">No sections found</option>';
                     return;
                 }
 
-                groupSelect.innerHTML = '<option value="">-- Select Exam Paper --</option>' + groups.map(g => `
-                    <option value="${g.id}">${g.combinedCode || 'COMBINED'} (${(g.subjects||[]).join(' + ')})</option>
-                `).join('');
+                secSelect.innerHTML = '<option value="">-- Choose Class & Section --</option>' + Array.from(availableSecs).sort().map(s => {
+                    const [c, sec] = s.split('|');
+                    return `<option value="${s}">Class ${c} - Sec ${sec}</option>`;
+                }).join('');
             } catch(e) { console.error(e); }
         }
 
-        async function onResultGroupChange() {
-            const groupId = document.getElementById('res-group-select').value;
-            const secSelect = document.getElementById('res-section-select');
+        async function onResultSectionChange() {
+            const secVal = document.getElementById('res-section-select').value;
             const tableContainer = document.getElementById('results-table-container');
 
-            if (!groupId) {
-                tableContainer.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest">Select an exam paper above to view scorecard.</div>`;
+            if (!secVal) {
+                tableContainer.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest">Select a class and section above to inspect student results.</div>`;
                 return;
             }
 
+            // Find matching group for this class & section
+            const matchedGroup = activeDateGroups.find(g => {
+                return (g.sectionKeys || []).some(sk => {
+                    const parts = sk.split('|');
+                    return parts.length >= 3 && `${parts[1]}|${parts[2]}` === secVal;
+                });
+            });
+
+            if (!matchedGroup) {
+                tableContainer.innerHTML = `<div class="text-center py-20 text-rose-400 font-bold uppercase text-xs tracking-widest">No exam paper configuration found for this section.</div>`;
+                return;
+            }
+
+            // Set hidden group select value for compatibility
+            document.getElementById('res-group-select').value = matchedGroup.id;
+            loadResultsForGroupAndSection(matchedGroup.id, secVal);
+        }
+
+        async function onResultGroupChange() {
+            // Maintained for safety if triggered elsewhere
+        }
+
+        async function loadResultsForGroupAndSection(groupId, targetSectionKey) {
+            const tableContainer = document.getElementById('results-table-container');
             tableContainer.innerHTML = `<div class="text-center py-20"><span class="loader"></span><p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-2">Computing student scores and evaluating keys...</p></div>`;
 
             try {
-                // Fetch group data, answer keys, and student database
                 const [groupDoc, keyDoc, stuSnap, dStuSnap] = await Promise.all([
                     db.collection("admin_paper_groups").doc(groupId).get(),
                     db.collection("exam_answer_keys").doc(groupId).get(),
@@ -1590,24 +1624,13 @@ const html = `
                 const structure = keyData.structure || [];
                 const bonuses = keyData.bonusConfig || {};
 
-                // Map sections attached to this group
-                let attachedSecs = new Set();
-                (gData.sectionKeys || []).forEach(sk => {
-                    const parts = sk.split('|');
-                    attachedSecs.add(`${parts[1]}|${parts[2]}`); // Class|Section
-                });
+                const [targetClass, targetSec] = targetSectionKey.split('|');
 
-                // Populate section dropdown
-                secSelect.innerHTML = '<option value="ALL">All Sections (Combined)</option>' + Array.from(attachedSecs).sort().map(s => {
-                    const [c, sec] = s.split('|');
-                    return `<option value="${s}">Class ${c} - Sec ${sec}</option>`;
-                }).join('');
-
-                // Pool students
+                // Pool students matching target section
                 let pooledStudents = [];
                 const addCandidate = (doc) => {
                     const s = doc.data();
-                    if (s.isActive !== false && attachedSecs.has(`${s.className}|${s.section}`)) {
+                    if (s.isActive !== false && String(s.className || '').trim().toUpperCase() === targetClass.trim().toUpperCase() && String(s.section || '').trim().toUpperCase() === targetSec.trim().toUpperCase()) {
                         pooledStudents.push({ id: doc.id, ...s });
                     }
                 };
@@ -1625,7 +1648,7 @@ const html = `
                 // Evaluate Each Student
                 currentExamResults = pooledStudents.map(stu => {
                     const roll = String(stu.rollNo || '').trim().toUpperCase();
-                    const studentResponses = submissionsMap[roll] || {}; // Real or empty responses
+                    const studentResponses = submissionsMap[roll] || {};
                     
                     let subjectScores = {};
                     let totalObtained = 0;
@@ -1644,20 +1667,17 @@ const html = `
                             const unattMarks = sec.unattemptedMarks !== undefined ? sec.unattemptedMarks : 0;
                             totalMax += posMarks;
 
-                            // Evaluation with Bonus Policy Enforcement
                             if (bonusRule === 'ALL') {
-                                // Everyone gets full positive marks. If answered correctly, marks awarded once (no double counting)
                                 secScore += posMarks;
                                 if (!resp || resp !== correctAns) bonusMarksAwarded += posMarks;
                             } else if (bonusRule === 'ATTEMPTED') {
                                 if (resp) {
-                                    secScore += posMarks; // Full marks for attempt
+                                    secScore += posMarks;
                                     if (resp !== correctAns) bonusMarksAwarded += posMarks;
                                 } else {
                                     secScore += unattMarks;
                                 }
                             } else {
-                                // Standard marking
                                 if (!resp) {
                                     secScore += unattMarks;
                                 } else if (String(resp) === String(correctAns)) {
@@ -1687,10 +1707,8 @@ const html = `
                     };
                 });
 
-                // Sort by score descending (rank order)
                 currentExamResults.sort((a,b) => b.totalScore - a.totalScore || a.name.localeCompare(b.name));
 
-                // Update summary statistics
                 document.getElementById('stat-total-students').innerText = currentExamResults.length;
                 document.getElementById('stat-top-score').innerText = currentExamResults.length > 0 ? currentExamResults[0].totalScore : 0;
                 const avg = currentExamResults.length > 0 ? (currentExamResults.reduce((sum, s) => sum + s.totalScore, 0) / currentExamResults.length).toFixed(1) : 0;
@@ -1705,15 +1723,10 @@ const html = `
         }
 
         function filterResultsTable() {
-            const secFilter = document.getElementById('res-section-select').value;
             const searchQ = document.getElementById('res-search-input').value.trim().toLowerCase();
 
             const filtered = currentExamResults.filter(stu => {
                 let match = true;
-                if (secFilter !== 'ALL') {
-                    const [c, s] = secFilter.split('|');
-                    if (stu.className !== c || stu.section !== s) match = false;
-                }
                 if (searchQ) {
                     const qStr = `${stu.name} ${stu.rollNo}`.toLowerCase();
                     if (!qStr.includes(searchQ)) match = false;
