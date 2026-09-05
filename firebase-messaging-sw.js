@@ -18,35 +18,41 @@ messaging.onBackgroundMessage(function(payload) {
     console.log('[firebase-messaging-sw.js] Received background message ', payload);
 
     const notificationTitle = payload.notification.title || "Minerva Alert";
+    
+    // Dynamically capture URL from payload data or FCM options, with a safe fallback
+    const targetUrl = (payload.data && payload.data.url) || 
+                      (payload.fcmOptions && payload.fcmOptions.link) || 
+                      "https://minervaacademy.web.app/teacher-portal.html";
+
     const notificationOptions = {
         body: payload.notification.body,
-        icon: '/logo.png', // Ensure this matches your actual logo file name
+        icon: '/logo.png',
         vibrate: [300, 100, 300, 100, 300, 100, 500],
         requireInteraction: true,
         data: { 
-            url: "https://minervaacademy.web.app/teacher-portal.html" 
+            url: targetUrl 
         }
     };
 
-    // Forces Android to show the banner
     return self.registration.showNotification(notificationTitle, notificationOptions);
 });
 
 // 3. NOTIFICATION CLICK HANDLER
 self.addEventListener('notificationclick', function(event) {
     event.notification.close();
+    const destinationUrl = event.notification.data.url || "https://minervaacademy.web.app/teacher-portal.html";
     event.waitUntil(
-        clients.openWindow(event.notification.data.url)
+        clients.openWindow(destinationUrl)
     );
 });
 
 // =========================================================
-// 4. YOUR PWA OFFLINE LOGIC (Merged from sw.js)
+// 4. PWA OFFLINE LOGIC
 // =========================================================
 
 self.addEventListener('install', (e) => {
   console.log('Service Worker: Installed');
-  self.skipWaiting(); // Forces the new service worker to activate immediately
+  self.skipWaiting();
 });
 
 self.addEventListener('activate', (e) => {
