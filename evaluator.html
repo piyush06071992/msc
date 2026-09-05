@@ -10,10 +10,13 @@
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
     <!-- SheetJS for Excel Template and Report Generation -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-   <!-- PapaParse for CSV reading -->
+  <!-- PapaParse for CSV reading -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
     <!-- JsBarcode for OMR Barcodes -->
     <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+    <!-- PDF.js and PDF-Lib for Client-Side OMR Scanning & Splitting -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; overflow-x: hidden; }
@@ -774,29 +777,24 @@ async function uploadAndProcessRoomPDF() {
 
     const btn = document.getElementById('btn-process-room');
     const orig = btn.innerText;
-    btn.innerText = "⏳ Reconciling with Seating Plan..."; btn.disabled = true;
+    btn.innerText = "⏳ Initializing Local Scanner Engine..."; 
+    btn.disabled = true;
 
     try {
-       const storageRef = storage.ref(`omr_uploads/${activeCenter}/${Date.now()}_${file.name}`);
-        const snapshot = await storageRef.put(file);
-        const downloadUrl = await snapshot.ref.getDownloadURL();
+        // 1. Read the uploaded PDF array buffer locally
+        const arrayBuffer = await file.arrayBuffer();
+        
+        // 2. Initialize PDF.js worker
+        const pdfjsLib = window['pdfjs-dist/build/pdf'];
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+        
+        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const numPages = pdf.numPages;
+        
+        let mappingResults = {};
+        let missingStudents = [];
 
-        // Automatically split and map the uploaded room PDF student-wise on the backend
-        btn.innerText = "⏳ Splitting Pages & Mapping Students...";
-        const splitRes = await fetch("https://asia-south1-shop-portal-bbbbb.cloudfunctions.net/processAndSplitRoomPDF", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                center: activeCenter,
-                date: document.getElementById('eval-date-select').value,
-                roomName: activeEvalRoom,
-                pdfUrl: downloadUrl
-            })
-        });
-        const splitResult = await splitRes.json();
-        if (!splitRes.ok) console.warn("Auto-split warning:", splitResult.error);
-
-        // Cross-reference with actual seating plan allocations for this room
+        // Validate allocations first
         let allocatedInRoom = [];
         Object.keys(activeAllocations).forEach(sId => {
             if (sId.toUpperCase().startsWith(`${activeEvalRoom.toUpperCase()}-`)) {
@@ -806,37 +804,79 @@ async function uploadAndProcessRoomPDF() {
         });
 
         if (allocatedInRoom.length === 0) {
-            btn.innerText = orig;
-            btn.disabled = false;
-            return alert(`⚠️ Seating Plan Error: No students are currently allocated to Room '${activeEvalRoom}' in the master seating plan for this date. Please check your room allocations.`);
+            btn.innerText = orig; btn.disabled = false;
+            return alert(`⚠️ Seating Plan Error: No students are currently allocated to Room '${activeEvalRoom}'.`);
         }
 
-        setTimeout(() => {
-            // Reconciliation check against active room roster
-            let missingStudents = []; 
-
-            const missingContainer = document.getElementById('missing-omr-container');
-            const missingBadge = document.getElementById('missing-omr-badge');
+        // 3. Process each page locally to bypass blind sequencing
+        for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+            btn.innerText = `⏳ Processing Page ${pageNum} of ${numPages}...`;
             
-            missingBadge.innerText = `${missingStudents.length} Missing`;
-            if (missingStudents.length === 0) {
-                missingContainer.innerHTML = `<div class="bg-emerald-50 border border-emerald-200 p-3 rounded-xl text-center text-emerald-800 font-bold text-xs uppercase">✨ All ${allocatedInRoom.length} expected OMRs successfully reconciled against Room ${activeEvalRoom} seating plan!</div>`;
-            } else {
-                missingContainer.innerHTML = missingStudents.map(stu => `
-                    <div class="flex items-center justify-between p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs font-bold text-rose-900">
-                        <span>${stu.name} (Roll: #${stu.rollNo})</span>
-                        <span class="text-[9px] bg-rose-200 text-rose-800 px-2 py-0.5 rounded uppercase">Unaccounted</span>
-                    </div>
-                `).join('');
-            }
+            // Render page for visual evaluation (framework laid for auto-barcode reading)
+            const page = await pdf.getPage(pageNum);
+            const viewport = page.getViewport({ scale: 1.5 });
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = viewport.width;
+            canvas.height = viewport.height;
+            await page.render({ canvasContext: ctx, viewport: viewport }).promise;
 
-            btn.innerText = orig; 
-            btn.disabled = false;
-            alert(`✅ Room ${activeEvalRoom} OMR batch successfully reconciled against seating plan roster!`);
-        }, 1200);
+            // Manual mapping bypasses the backend blind-loop failure
+            let rollNo = prompt(`Page ${pageNum} extracted locally.\nTo ensure perfect alignment, please type the Roll Number printed on this specific page:`);
+            if (!rollNo || rollNo.trim() === "") continue; 
+            rollNo = rollNo.trim().toUpperCase();
+
+            // Extract the isolated page using PDF-Lib and push to Storage
+            const pdfDoc = await PDFLib.PDFDocument.create();
+            const srcPdf = await PDFLib.PDFDocument.load(arrayBuffer);
+            const [copiedPage] = await pdfDoc.copyPages(srcPdf, [pageNum - 1]);
+            pdfDoc.addPage(copiedPage);
+            const singlePdfBytes = await pdfDoc.save();
+
+            const storageRef = storage.ref(`student_scans/${activeCenter}/${document.getElementById('eval-date-select').value}/${rollNo}.pdf`);
+            const snapshot = await storageRef.put(new Blob([singlePdfBytes], { type: "application/pdf" }));
+            const downloadUrl = await snapshot.ref.getDownloadURL();
+            
+            mappingResults[rollNo] = downloadUrl;
+            
+            // Framework Note: Auto-pixel darkness extraction will be piped here in Phase 2
+        }
+
+        // 4. Save Master Mapping to Firestore
+        const dateVal = document.getElementById('eval-date-select').value;
+        const prefix = activeCenter === "DHARAMSHALA" ? "dharamshala_" : "";
+        await db.collection(`${prefix}exam_omr_mappings`).doc(`${activeCenter}_${dateVal}`).set({
+            roomScans: mappingResults,
+            updatedAt: Date.now()
+        }, { merge: true });
+
+        // 5. Generate Exception Report
+        allocatedInRoom.forEach(stu => {
+            if (!mappingResults[String(stu.rollNo).trim().toUpperCase()]) {
+                missingStudents.push(stu);
+            }
+        });
+
+        const missingContainer = document.getElementById('missing-omr-container');
+        const missingBadge = document.getElementById('missing-omr-badge');
+        missingBadge.innerText = `${missingStudents.length} Missing`;
+
+        if (missingStudents.length === 0) {
+            missingContainer.innerHTML = `<div class="bg-emerald-50 border border-emerald-200 p-3 rounded-xl text-center text-emerald-800 font-bold text-xs uppercase">✨ All ${allocatedInRoom.length} expected OMRs successfully scanned and mapped!</div>`;
+        } else {
+            missingContainer.innerHTML = missingStudents.map(stu => `
+                <div class="flex items-center justify-between p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs font-bold text-rose-900">
+                    <span>${stu.name} (Roll: #${stu.rollNo})</span>
+                    <span class="text-[9px] bg-rose-200 text-rose-800 px-2 py-0.5 rounded uppercase">Unaccounted</span>
+                </div>
+            `).join('');
+        }
+
+        btn.innerText = orig; btn.disabled = false;
+        alert(`✅ Local Scan Complete! ${Object.keys(mappingResults).length} OMR sheets mapped successfully.`);
 
     } catch(e) {
-        alert("Processing failed: " + e.message);
+        alert("Local scanning failed: " + e.message);
         btn.innerText = orig; 
         btn.disabled = false;
     }
