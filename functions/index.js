@@ -399,7 +399,6 @@ exports.compileSingleRoomOnDemand = onRequest({
             const allocations = allocDoc.data().allocations || {};
             let occupiedSeats = [];
             Object.keys(allocations).forEach(sId => {
-                // If a specific seatId is passed, ONLY render that single student
                 if (seatId ? (sId === seatId) : sId.startsWith(`${roomName}-`)) {
                     const stu = allocations[sId];
                     if (stu) occupiedSeats.push({ seatId: sId, stu });
@@ -472,93 +471,109 @@ exports.compileSingleRoomOnDemand = onRequest({
                 const cleanRoll = rawRoll.replace(/\D/g, '') || '0000';
                 const rollDigits = cleanRoll.split('');
 
-                let totalQs = structure.reduce((sum, sec) => sum + (sec.end - sec.start + 1), 0);
+                // FLATTEN QUESTIONS: Ignore subject boundaries and render in continuous flow
+                let allQuestions = [];
+                structure.forEach(sec => {
+                    for (let q = sec.start; q <= sec.end; q++) {
+                        allQuestions.push({ q: q, type: sec.type });
+                    }
+                });
+
+                let totalQs = allQuestions.length;
                 let numCols = totalQs > 135 ? 5 : (totalQs > 90 ? 4 : 3);
                 const MAX_PER_COL = Math.ceil(totalQs / numCols);
 
                 let columnsHtml = "";
-                structure.forEach(sec => {
-                    let questions = [];
-                    for (let q = sec.start; q <= sec.end; q++) questions.push(q);
-
-                    for (let i = 0; i < questions.length; i += MAX_PER_COL) {
-                        const chunk = questions.slice(i, i + MAX_PER_COL);
-                        columnsHtml += `<div style="flex:1; display:flex; flex-direction:column; min-width:0; justify-content:space-between;">`;
-                        columnsHtml += `<div style="font-weight:900; font-size:7.5pt; text-transform:uppercase; border-bottom:1.5px solid black; margin:0 0 2px 0; text-align:center; background:#f8f8f8; padding:2px; color:black;">${sec.subject} ${i > 0 ? '(Contd.)' : ''}</div>`;
-                        
-                        chunk.forEach(q => {
-                            if (sec.type === 'MCQ') {
-                                let optsHtml = "";
-                                for (let o = 1; o <= 4; o++) {
-                                    optsHtml += `<div style="width:14px; height:14px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:6pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
-                                }
-                                columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:4px;"><div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
-                            } else {
-                                let numericGrid = `<div style="display:flex; gap:2px;">`;
-                                for (let col = 0; col < 6; col++) {
-                                    numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
-                                    numericGrid += `<div style="width:12px; height:12px; border:1px solid black; margin-bottom:2px; background:white;"></div>`; 
-                                    for (let r = 0; r <= 9; r++) {
-                                        numericGrid += `<div style="width:12px; height:12px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
-                                    }
-                                    numericGrid += `</div>`;
+                for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
+                    const chunk = allQuestions.slice(i, i + MAX_PER_COL);
+                    columnsHtml += `<div style="flex:1; display:flex; flex-direction:column; min-width:0; justify-content:space-between;">`;
+                    
+                    chunk.forEach(item => {
+                        const q = item.q;
+                        if (item.type === 'MCQ') {
+                            let optsHtml = "";
+                            for (let o = 1; o <= 4; o++) {
+                                optsHtml += `<div style="width:14px; height:14px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:6pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
+                            }
+                            columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:4px;"><div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
+                        } else {
+                            let numericGrid = `<div style="display:flex; gap:2px;">`;
+                            for (let col = 0; col < 6; col++) {
+                                numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
+                                numericGrid += `<div style="width:12px; height:12px; border:1px solid black; margin-bottom:2px; background:white;"></div>`; 
+                                for (let r = 0; r <= 9; r++) {
+                                    numericGrid += `<div style="width:12px; height:12px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
                                 }
                                 numericGrid += `</div>`;
-
-                                columnsHtml += `
-                                    <div style="display:flex; align-items:flex-start; margin-bottom:6px; break-inside:avoid;">
-                                        <div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; margin-top:14px; color:black;">${q}.</div>
-                                        ${numericGrid}
-                                    </div>
-                                `;
                             }
-                        });
-                        columnsHtml += `</div>`;
-                    }
-                });
+                            numericGrid += `</div>`;
+
+                            columnsHtml += `
+                                <div style="display:flex; align-items:flex-start; margin-bottom:6px; break-inside:avoid;">
+                                    <div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; margin-top:14px; color:black;">${q}.</div>
+                                    ${numericGrid}
+                                </div>
+                            `;
+                        }
+                    });
+                    columnsHtml += `</div>`;
+                }
 
                 fullPagesHtml += `
                     <div class="omr-print-page">
                         <div style="border:2px solid black; padding:8px; box-sizing:border-box; display:flex; flex-direction:column; background:white; width:100%; height:100%; font-family:Arial, sans-serif; justify-content:space-between;">
                             
                             <!-- TOP BLOCK: 3 Columns -> Left: Details, Center: Branding, Right: Roll Number -->
-                            <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:4px; margin-bottom:6px; color:black; gap:8px;">
+                            <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:4px; margin-bottom:12px; color:black; gap:8px;">
                                 
-                                <!-- Left: Candidate Details (Vertical Stack) -->
-                                <div style="flex:1; display:flex; flex-direction:column; gap:3px; border:1.5px solid black; padding:3px; background:white;">
-                                    <div style="font-weight:bold; font-size:7.5pt; margin-bottom:1px;">${prettyDate}</div>
-                                    <div style="border-bottom:1px solid black; padding-bottom:1px; margin-bottom:1px;">
-                                        <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase; color:#000;">Candidate Name</div>
-                                        <div style="font-size:9pt; font-weight:900; text-transform:uppercase; color:black; line-height:1.1; min-height:12px;">${stu.name || ''}</div>
+                                <!-- Left: Candidate Details (Solid Unified Grid without gaps) -->
+                                <div style="flex:1; display:flex; flex-direction:column; border:1.5px solid black; background:white; box-sizing:border-box;">
+                                    <div style="font-weight:bold; font-size:8pt; padding:3px 4px; border-bottom:1.5px solid black;">${prettyDate}</div>
+                                    
+                                    <div style="padding:2px 4px; border-bottom:1.5px solid black;">
+                                        <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase; color:#000;">Candidate Name</div>
+                                        <div style="font-size:10pt; font-weight:900; text-transform:uppercase; color:black; line-height:1.2; min-height:14px;">${stu.name || ''}</div>
                                     </div>
-                                    <div style="display:flex; gap:3px; border-bottom:1px solid black; padding-bottom:1px; margin-bottom:1px;">
-                                        <div style="flex:1; border-right:1px solid black;"><div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Class</div><div style="font-size:7.5pt; font-weight:bold; min-height:10px;">${stu.className || ''}</div></div>
-                                        <div style="flex:1;"><div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Section</div><div style="font-size:7.5pt; font-weight:bold; min-height:10px;">${stu.section || ''}</div></div>
+                                    
+                                    <div style="display:flex; border-bottom:1.5px solid black;">
+                                        <div style="flex:1; border-right:1.5px solid black; padding:2px 4px;">
+                                            <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Class</div>
+                                            <div style="font-size:8pt; font-weight:bold; min-height:12px;">${stu.className || ''}</div>
+                                        </div>
+                                        <div style="flex:1; padding:2px 4px;">
+                                            <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Section</div>
+                                            <div style="font-size:8pt; font-weight:bold; min-height:12px;">${stu.section || ''}</div>
+                                        </div>
                                     </div>
-                                    <div style="display:flex; gap:3px;">
-                                        <div style="flex:1; border-right:1px solid black; min-height:22px;"><div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Student Sign</div></div>
-                                        <div style="flex:1; min-height:22px;"><div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div></div>
+                                    
+                                    <div style="display:flex; flex:1; min-height:28px;">
+                                        <div style="flex:1; border-right:1.5px solid black; padding:2px 4px; display:flex; flex-direction:column;">
+                                            <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Student Sign</div>
+                                        </div>
+                                        <div style="flex:1; padding:2px 4px; display:flex; flex-direction:column;">
+                                            <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div>
+                                        </div>
                                     </div>
                                 </div>
                                 
                                 <!-- Center: Barcode & Branding -->
                                 <div style="flex:1.2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
-                                    <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="25" jsbarcode-width="1.5" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:2px;"></svg>
-                                    <h1 style="font-size:16pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0 0 2px 0; line-height:1; color:black;">MINERVA STUDY CIRCLE</h1>
-                                    <div style="font-size:8.5pt; font-family:monospace; font-weight:bold; background:#eee; padding:1px 6px; border:1.5px solid black; text-transform:uppercase;">
+                                    <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="30" jsbarcode-width="1.8" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:4px;"></svg>
+                                    <h1 style="font-size:16pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0 0 4px 0; line-height:1; color:black;">MINERVA STUDY CIRCLE</h1>
+                                    <div style="font-size:9pt; font-family:monospace; font-weight:bold; background:#eee; padding:2px 8px; border:1.5px solid black; text-transform:uppercase;">
                                         ${examName}
                                     </div>
                                 </div>
 
-                                <!-- Right: Roll Number Grid -->
-                                <div style="border:1.5px solid black; padding:3px 5px; display:flex; flex-direction:column; align-items:center; background:white; flex-shrink:0;">
-                                    <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase; margin-bottom:2px;">Roll Number</div>
-                                    <div style="display:flex; gap:1.5px; justify-content:center;">
+                                <!-- Right: Roll Number Grid (Unmarked Bubbles) -->
+                                <div style="border:1.5px solid black; padding:4px 6px; display:flex; flex-direction:column; align-items:center; background:white; flex-shrink:0;">
+                                    <div style="font-size:7pt; font-weight:bold; text-transform:uppercase; margin-bottom:4px;">Roll Number</div>
+                                    <div style="display:flex; gap:2px; justify-content:center;">
                                         ${rollDigits.map((digit) => `
-                                            <div style="display:flex; flex-direction:column; gap:1px; align-items:center;">
-                                                <div style="width:10px; height:10px; border:1px solid black; margin-bottom:1px; font-size:5.5pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
+                                            <div style="display:flex; flex-direction:column; gap:1.5px; align-items:center;">
+                                                <div style="width:12px; height:12px; border:1px solid black; margin-bottom:2px; font-size:6pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
                                                 ${[...Array(10)].map((_, r) => `
-                                                    <div class="${String(r) === String(digit) ? 'bubble-filled-black' : ''}" style="width:10px; height:10px; font-size:4.5pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;">${r}</div>
+                                                    <div style="width:12px; height:12px; font-size:5pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;">${r}</div>
                                                 `).join('')}
                                             </div>
                                         `).join('')}
@@ -566,11 +581,14 @@ exports.compileSingleRoomOnDemand = onRequest({
                                 </div>
                             </div>
 
-                            <div style="display:flex; flex-wrap:nowrap; gap:10px; width:100%; flex-grow:1; justify-content:space-between;">
+                            <!-- Questions Container -->
+                            <div style="display:flex; flex-wrap:nowrap; gap:12px; width:100%; flex-grow:1; justify-content:space-between;">
                                 ${columnsHtml}
                             </div>
+
+                            <!-- Seat Number at Footer -->
                             <div style="border-top:1.5px solid black; padding-top:2px; margin-top:2px; display:flex; justify-content:center; align-items:center;">
-                                <span style="font-family:monospace; background:black; color:white; padding:1px 12px; border-radius:3px; font-size:7.5pt; font-weight:900; letter-spacing:1px; text-transform:uppercase;">SEAT NUMBER: ${sId}</span>
+                                <span style="font-family:monospace; background:black; color:white; padding:1px 12px; border-radius:3px; font-size:8pt; font-weight:900; letter-spacing:1px; text-transform:uppercase;">SEAT NUMBER: ${sId}</span>
                             </div>
                         </div>
                     </div>
