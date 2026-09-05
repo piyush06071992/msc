@@ -493,24 +493,24 @@ exports.compileSingleRoomOnDemand = onRequest({
                         if (item.type === 'MCQ') {
                             let optsHtml = "";
                             for (let o = 1; o <= 4; o++) {
-                                optsHtml += `<div style="width:14px; height:14px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:6pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
+                                optsHtml += `<div style="width:13px; height:13px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5.5pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
                             }
-                            columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:4px;"><div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
+                            columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:2px;"><div style="width:16px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
                         } else {
-                            let numericGrid = `<div style="display:flex; gap:2px;">`;
+                            let numericGrid = `<div style="display:flex; gap:1.5px;">`;
                             for (let col = 0; col < 6; col++) {
-                                numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
-                                numericGrid += `<div style="width:12px; height:12px; border:1px solid black; margin-bottom:2px; background:white;"></div>`; 
+                                numericGrid += `<div style="display:flex; flex-direction:column; gap:0.5px; align-items:center;">`;
+                                numericGrid += `<div style="width:9px; height:9px; border:1px solid black; margin-bottom:1px; background:white;"></div>`; 
                                 for (let r = 0; r <= 9; r++) {
-                                    numericGrid += `<div style="width:12px; height:12px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
+                                    numericGrid += `<div style="width:9px; height:9px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
                                 }
                                 numericGrid += `</div>`;
                             }
                             numericGrid += `</div>`;
 
                             columnsHtml += `
-                                <div style="display:flex; align-items:flex-start; margin-bottom:6px; break-inside:avoid;">
-                                    <div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; margin-top:14px; color:black;">${q}.</div>
+                                <div style="display:flex; align-items:flex-start; margin-bottom:3px; break-inside:avoid;">
+                                    <div style="width:16px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; margin-top:8px; color:black;">${q}.</div>
                                     ${numericGrid}
                                 </div>
                             `;
