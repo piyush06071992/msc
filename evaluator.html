@@ -846,12 +846,17 @@ async function uploadAndProcessRoomPDF() {
    // Initialize the Barcode Reader
         const codeReader = new ZXing.BrowserMultiFormatReader();
 
-        for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+      for (let pageNum = 1; pageNum <= numPages; pageNum++) {
             btn.innerText = `⏳ Scanning Barcode on Page ${pageNum} of ${numPages}...`;
             
-            // Render page to an internal image canvas
+            // 1. ABSOLUTE GRID NORMALIZATION
+            // Force every PDF page to render at EXACTLY 1200px wide. 
+            // This guarantees the X and Y bubble coordinates never shift.
             const page = await pdf.getPage(pageNum);
-            const viewport = page.getViewport({ scale: 2.0 }); // High resolution for better barcode detection
+            const baseViewport = page.getViewport({ scale: 1.0 });
+            const scaleFactor = 1200 / baseViewport.width; 
+            const viewport = page.getViewport({ scale: scaleFactor });
+
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
             canvas.width = viewport.width;
@@ -978,32 +983,40 @@ async function extractBubblesFromCanvas(canvas, structure) {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     let responses = {};
     
-    // -----------------------------------------------------------------------
-    // ⚠️ CRITICAL CALIBRATION REQUIRED:
-    // To make the OMR engine read physical bubbles accurately, you MUST 
-    // adjust these X, Y coordinates to perfectly match your generated OMR PDF.
-    // The current numbers are placeholders to test the database pipeline.
-    // -----------------------------------------------------------------------
-    const startX = 180; // X-coordinate of Q1, Option 1
-    const startY = 450; // Y-coordinate of Q1
-    const rowHeight = 28; // Distance between questions (Y-axis)
-    const optSpacing = 24; // Distance between options 1, 2, 3, 4 (X-axis)
-    const bubbleRadius = 8; // Size of the bubble
-    const darknessThreshold = 0.35; // 35% dark pixels = marked as attempted
+    // =======================================================================
+    // VISUAL CALIBRATION ENGINE
+    // Set DEBUG_MODE to true. The system will draw red boxes where it scans
+    // and append the image to the bottom of the page. Adjust startX and startY
+    // until the red boxes perfectly encircle the printed bubbles.
+    // =======================================================================
+    const DEBUG_MODE = true; 
+
+    // Fixed 1200px Grid Coordinates
+    const startX = 200;      // Adjust left/right (X-axis for Q1 Opt 1)
+    const startY = 550;      // Adjust up/down (Y-axis for Q1)
+    const rowHeight = 34.5;  // Vertical distance between Q1 and Q2
+    const optSpacing = 28;   // Horizontal distance between Option 1 and Option 2
+    const bubbleRadius = 10; // Radius of the bounding box to check pixels
+    const darknessThreshold = 0.35; // If >35% pixels are black, it is marked
     
-    // Helper to sample pixel darkness inside a bubble coordinate
     function getDarkness(x, y) {
         try {
             const imgData = ctx.getImageData(x - bubbleRadius, y - bubbleRadius, bubbleRadius * 2, bubbleRadius * 2);
             let darkPixels = 0, total = 0;
             for (let i = 0; i < imgData.data.length; i += 4) {
-                // Convert RGB to Grayscale. If < 120, it's dark ink.
-                if ((imgData.data[i] + imgData.data[i+1] + imgData.data[i+2]) / 3 < 120) {
+                if ((imgData.data[i] + imgData.data[i+1] + imgData.data[i+2]) / 3 < 130) {
                     darkPixels++;
                 }
                 total++;
             }
-            return darkPixels / total; // Returns percentage of dark pixels
+            
+            // Draw visual debug bounding boxes
+            if (DEBUG_MODE) {
+                ctx.strokeStyle = (darkPixels / total) > darknessThreshold ? '#10b981' : '#ef4444'; 
+                ctx.lineWidth = 2;
+                ctx.strokeRect(x - bubbleRadius, y - bubbleRadius, bubbleRadius * 2, bubbleRadius * 2);
+            }
+            return darkPixels / total; 
         } catch(e) { return 0; }
     }
 
@@ -1015,12 +1028,10 @@ async function extractBubblesFromCanvas(canvas, structure) {
                 let maxDarkness = 0;
                 let markedOption = null;
 
-                // Scan options 1, 2, 3, 4
                 for (let opt = 1; opt <= 4; opt++) {
                     const x = startX + ((opt - 1) * optSpacing);
                     const darkness = getDarkness(x, currentY);
 
-                    // Determine which bubble is the darkest
                     if (darkness > maxDarkness && darkness > darknessThreshold) {
                         maxDarkness = darkness;
                         markedOption = String(opt);
@@ -1028,12 +1039,20 @@ async function extractBubblesFromCanvas(canvas, structure) {
                 }
 
                 if (markedOption) {
-                    responses[String(q)] = markedOption; // Save the read answer
+                    responses[String(q)] = markedOption;
                 }
                 currentY += rowHeight; 
             }
         }
     });
+
+    // Mount the canvas to the DOM so you can visually verify the calibration
+    if (DEBUG_MODE) {
+        canvas.style.maxWidth = "100%";
+        canvas.style.border = "4px solid #f59e0b";
+        canvas.style.marginTop = "2rem";
+        document.getElementById('section-eval-hub').appendChild(canvas);
+    }
 
     console.log("Extracted OMR Data:", responses);
     return responses;
