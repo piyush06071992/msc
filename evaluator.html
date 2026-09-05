@@ -865,49 +865,62 @@ async function uploadAndProcessRoomPDF() {
 
             let rollNo = null;
 
-      // 1. AUTO-DETECT BARCODE (With Noise Isolation & Padding)
+   // 1. AUTO-DETECT BARCODE (With Noise Isolation & Padding)
+            const cropCanvas = document.createElement('canvas');
+            const cropW = canvas.width * 0.6;   
+            const cropH = canvas.height * 0.15; 
+            const cropX = canvas.width * 0.2;   
+            const cropY = 0;
+
+            cropCanvas.width = cropW + 200; 
+            cropCanvas.height = cropH + 200;
+            const cropCtx = cropCanvas.getContext('2d');
+            
+            cropCtx.fillStyle = 'white';
+            cropCtx.fillRect(0, 0, cropCanvas.width, cropCanvas.height);
+            cropCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 100, 100, cropW, cropH);
+
+            // --- VISUAL DEBUGGER FOR BARCODE CROP ---
+            cropCanvas.style.border = "5px solid #ef4444";
+            cropCanvas.style.margin = "10px auto";
+            cropCanvas.style.display = "block";
+            cropCanvas.style.maxWidth = "100%";
+            document.getElementById('section-eval-hub').appendChild(cropCanvas);
+            console.log(`%c[DEBUG] Appended Barcode Crop to Screen for Page ${pageNum}`, 'color: cyan; font-weight: bold;');
+
             try {
-                // ZXing fails if there is no "quiet zone" (white space) or if it reads the whole A4 page.
-                // We isolate the top-center barcode area and pad it with pure white to guarantee a read.
-                const cropCanvas = document.createElement('canvas');
-                const cropW = canvas.width * 0.6;   // Take middle 60% of page width
-                const cropH = canvas.height * 0.15; // Take top 15% of page height
-                const cropX = canvas.width * 0.2;   // Start 20% inwards from left
-                const cropY = 0;
-
-                cropCanvas.width = cropW + 200; // Add 100px artificial white padding on all sides
-                cropCanvas.height = cropH + 200;
-                const cropCtx = cropCanvas.getContext('2d');
-                
-                // Create the Quiet Zone
-                cropCtx.fillStyle = 'white';
-                cropCtx.fillRect(0, 0, cropCanvas.width, cropCanvas.height);
-                
-                // Draw ONLY the isolated barcode area into the padded canvas
-                cropCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 100, 100, cropW, cropH);
-
-                // Scan the clean, isolated image
                 const result = await codeReader.decodeFromCanvas(cropCanvas);
                 rollNo = result.text;
-                console.log(`Auto-mapped Page ${pageNum} to Roll No: ${rollNo}`);
+                console.log(`%c[SUCCESS] Auto-mapped Page ${pageNum} to Roll No: ${rollNo}`, 'color: #10b981; font-weight: bold; font-size: 14px;');
             } catch (err) {
-                console.warn(`Barcode isolation failed on Page ${pageNum}`, err);
+                console.warn(`%c[FAILED] Barcode read failed on Page ${pageNum}`, 'color: #ef4444; font-weight: bold;', err);
             }
 
-            // 2. EXCEPTION FALLBACK: Only prompt if the barcode was smudged/missing
+            // 2. EXCEPTION FALLBACK
             if (!rollNo || rollNo.trim() === "") {
-                rollNo = prompt(`⚠️ Barcode unreadable on Page ${pageNum}!\nTo ensure perfect mapping, please manually type the Roll Number printed on this page:`);
+                rollNo = prompt(`⚠️ Barcode unreadable on Page ${pageNum}!\nCheck the red box at the bottom of the screen to see what the scanner saw.\nPlease manually type the Roll Number printed on this page:`);
             }
             
             if (!rollNo || rollNo.trim() === "") continue; 
             rollNo = rollNo.trim().toUpperCase();
 
-          // 2. Resolve the exact Student Record and Group ID
+            // 3. PIPELINE TRACER FOR OMR RESULTS
             const studentEntry = allocatedInRoom.find(s => String(s.rollNo).trim().toUpperCase() === rollNo);
             const studentGroupId = getStudentGroupId(studentEntry);
             const studentStructure = groupKeysCache[studentGroupId] || [];
 
-            // 3. RUN LOCAL OMR PIXEL SCANNER
+            console.log(`%c[PIPELINE TRACE FOR ROLL: ${rollNo}]`, 'color: #f59e0b; font-weight: bold; font-size: 12px;');
+            console.log(`1. Found Student Allocation Entry:`, studentEntry);
+            console.log(`2. Resolved Master Group ID:`, studentGroupId);
+            console.log(`3. Found Exam Structure Sections:`, studentStructure.length);
+            
+            if (studentStructure.length === 0) {
+                console.error(`%c[CRITICAL ERROR] The exam structure is EMPTY. The scanner will read 0 questions. Did you create an Answer Key for Group: ${studentGroupId}?`, 'color: red; font-size: 14px;');
+            } else {
+                console.log(`4. Target Exam Structure:`, studentStructure);
+            }
+
+            // 4. RUN LOCAL OMR PIXEL SCANNER
             btn.innerText = `⏳ Extracting Bubbles for ${rollNo}...`;
             const extractedAnswers = await extractBubblesFromCanvas(canvas, studentStructure);
 
