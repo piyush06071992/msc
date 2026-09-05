@@ -779,214 +779,43 @@ async function uploadAndProcessRoomPDF() {
 
     const btn = document.getElementById('btn-process-room');
     const orig = btn.innerText;
-    btn.innerText = "⏳ Initializing Local Scanner Engine..."; 
+    btn.innerText = "⏳ Uploading Room PDF to Cloud Engine..."; 
     btn.disabled = true;
 
     try {
-        // 1. Read the uploaded PDF array buffer locally
-        const arrayBuffer = await file.arrayBuffer();
-        
-        // 2. Initialize PDF.js worker
-        const pdfjsLib = window['pdfjs-dist/build/pdf'];
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
-        
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-        const numPages = pdf.numPages;
-        
-        let mappingResults = {};
-        let missingStudents = [];
-
-     // 1. Pre-load all Paper Groups and Answer Keys for this Date
         const dateVal = document.getElementById('eval-date-select').value;
-        const groupSnap = await db.collection("admin_paper_groups").where("date", "==", dateVal).get();
-        let dateGroups = [];
-        let groupKeysCache = {};
+        const storagePath = `room_uploads/${activeCenter}/${dateVal}/${activeEvalRoom}_${Date.now()}.pdf`;
+        const fileRef = storage.ref(storagePath);
+        
+        btn.innerText = "⏳ Uploading Scans (Do Not Close Window)...";
+        const snapshot = await fileRef.put(file);
+        const pdfUrl = await snapshot.ref.getDownloadURL();
 
-        for (const doc of groupSnap.docs) {
-            const gData = { id: doc.id, ...doc.data() };
-            dateGroups.push(gData);
-            const kDoc = await db.collection("exam_answer_keys").doc(doc.id).get();
-            if (kDoc.exists) {
-                groupKeysCache[doc.id] = kDoc.data().structure || [];
-            }
-        }
-
-        // Helper to find the exact Group ID for any student by Class & Section
-        function getStudentGroupId(stu) {
-            if (!stu || !stu.className || !stu.section) return dateGroups[0]?.id || null;
-            const cNorm = String(stu.className).trim().toUpperCase();
-            const sNorm = String(stu.section).trim().toUpperCase();
-
-            const matched = dateGroups.find(g => {
-                const matchesCenter = !g.branches || g.branches.length === 0 || g.branches.includes(activeCenter);
-                if (!matchesCenter) return false;
-                return (g.sectionKeys || []).some(sk => {
-                    const parts = sk.split('|');
-                    return parts.length >= 3 && parts[1].trim().toUpperCase() === cNorm && parts[2].trim().toUpperCase() === sNorm;
-                });
-            });
-            return matched ? matched.id : (dateGroups[0]?.id || null);
-        }
-
-        // Validate allocations first
-        let allocatedInRoom = [];
-        Object.keys(activeAllocations).forEach(sId => {
-            if (sId.toUpperCase().startsWith(`${activeEvalRoom.toUpperCase()}-`)) {
-                const stu = activeAllocations[sId];
-                if (stu && !activeLeaveSet.has(stu.id)) allocatedInRoom.push(stu);
-            }
+        btn.innerText = "⚡ Server Processing 100 Pages & Extracting Bubbles...";
+        
+        // Call the Firebase Cloud Function
+        const response = await fetch("https://asia-south1-shop-portal-bbbbb.cloudfunctions.net/processAndSplitRoomPDF", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                center: activeCenter,
+                date: dateVal,
+                roomName: activeEvalRoom,
+                pdfUrl: pdfUrl
+            })
         });
 
-        if (allocatedInRoom.length === 0) {
-            btn.innerText = orig; btn.disabled = false;
-            return alert(`⚠️ Seating Plan Error: No students are currently allocated to Room '${activeEvalRoom}'.`);
-        }
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Server processing failed.");
 
-        // 3. Process each page locally to bypass blind sequencing
-   // Initialize the Barcode Reader
-        const codeReader = new ZXing.BrowserMultiFormatReader();
+        btn.innerText = orig; 
+        btn.disabled = false;
+        alert(`✅ Cloud OMR Engine Complete! Successfully processed and evaluated ${result.count} student sheets instantly.`);
+        closeRoomUploadModal();
+        loadRoomsForDate(); // Refresh UI
 
-      for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-            btn.innerText = `⏳ Scanning Barcode on Page ${pageNum} of ${numPages}...`;
-            
-            // 1. ABSOLUTE GRID NORMALIZATION
-            // Force every PDF page to render at EXACTLY 1200px wide. 
-            // This guarantees the X and Y bubble coordinates never shift.
-            const page = await pdf.getPage(pageNum);
-            const baseViewport = page.getViewport({ scale: 1.0 });
-            const scaleFactor = 1200 / baseViewport.width; 
-            const viewport = page.getViewport({ scale: scaleFactor });
-
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            canvas.width = viewport.width;
-            canvas.height = viewport.height;
-            await page.render({ canvasContext: ctx, viewport: viewport }).promise;
-
-            let rollNo = null;
-
-   // 1. AUTO-DETECT BARCODE (With Noise Isolation & Padding)
-            const cropCanvas = document.createElement('canvas');
-            const cropW = canvas.width * 0.6;   
-            const cropH = canvas.height * 0.15; 
-            const cropX = canvas.width * 0.2;   
-            const cropY = 0;
-
-            cropCanvas.width = cropW + 200; 
-            cropCanvas.height = cropH + 200;
-            const cropCtx = cropCanvas.getContext('2d');
-            
-            cropCtx.fillStyle = 'white';
-            cropCtx.fillRect(0, 0, cropCanvas.width, cropCanvas.height);
-            cropCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 100, 100, cropW, cropH);
-
-            // --- VISUAL DEBUGGER FOR BARCODE CROP ---
-            cropCanvas.style.border = "5px solid #ef4444";
-            cropCanvas.style.margin = "10px auto";
-            cropCanvas.style.display = "block";
-            cropCanvas.style.maxWidth = "100%";
-            document.getElementById('section-eval-hub').appendChild(cropCanvas);
-            console.log(`%c[DEBUG] Appended Barcode Crop to Screen for Page ${pageNum}`, 'color: cyan; font-weight: bold;');
-
-            try {
-                const result = await codeReader.decodeFromCanvas(cropCanvas);
-                rollNo = result.text;
-                console.log(`%c[SUCCESS] Auto-mapped Page ${pageNum} to Roll No: ${rollNo}`, 'color: #10b981; font-weight: bold; font-size: 14px;');
-            } catch (err) {
-                console.warn(`%c[FAILED] Barcode read failed on Page ${pageNum}`, 'color: #ef4444; font-weight: bold;', err);
-            }
-
-            // 2. EXCEPTION FALLBACK
-            if (!rollNo || rollNo.trim() === "") {
-                rollNo = prompt(`⚠️ Barcode unreadable on Page ${pageNum}!\nCheck the red box at the bottom of the screen to see what the scanner saw.\nPlease manually type the Roll Number printed on this page:`);
-            }
-            
-            if (!rollNo || rollNo.trim() === "") continue; 
-            rollNo = rollNo.trim().toUpperCase();
-
-            // 3. PIPELINE TRACER FOR OMR RESULTS
-            const studentEntry = allocatedInRoom.find(s => String(s.rollNo).trim().toUpperCase() === rollNo);
-            const studentGroupId = getStudentGroupId(studentEntry);
-            const studentStructure = groupKeysCache[studentGroupId] || [];
-
-            console.log(`%c[PIPELINE TRACE FOR ROLL: ${rollNo}]`, 'color: #f59e0b; font-weight: bold; font-size: 12px;');
-            console.log(`1. Found Student Allocation Entry:`, studentEntry);
-            console.log(`2. Resolved Master Group ID:`, studentGroupId);
-            console.log(`3. Found Exam Structure Sections:`, studentStructure.length);
-            
-            if (studentStructure.length === 0) {
-                console.error(`%c[CRITICAL ERROR] The exam structure is EMPTY. The scanner will read 0 questions. Did you create an Answer Key for Group: ${studentGroupId}?`, 'color: red; font-size: 14px;');
-            } else {
-                console.log(`4. Target Exam Structure:`, studentStructure);
-            }
-
-            // 4. RUN LOCAL OMR PIXEL SCANNER
-            btn.innerText = `⏳ Extracting Bubbles for ${rollNo}...`;
-            const extractedAnswers = await extractBubblesFromCanvas(canvas, studentStructure);
-
-            // 4. SAVE SUBMISSION TO THE EXACT EXAM GROUP
-            if (studentGroupId) {
-                await db.collection("omr_submissions").doc(`${studentGroupId}_${rollNo}`).set({
-                    groupId: studentGroupId,
-                    rollNo: rollNo,
-                    responses: extractedAnswers,
-                    updatedAt: Date.now()
-                }, { merge: true });
-                console.log(`Saved submission for ${rollNo} under Group: ${studentGroupId}`);
-            }
-
-            btn.innerText = `⏳ Saving Page ${pageNum}...`;
-
-            // Isolate page using PDF-Lib
-            const pdfDoc = await PDFLib.PDFDocument.create();
-            const srcPdf = await PDFLib.PDFDocument.load(arrayBuffer);
-            const [copiedPage] = await pdfDoc.copyPages(srcPdf, [pageNum - 1]);
-            pdfDoc.addPage(copiedPage);
-            const singlePdfBytes = await pdfDoc.save();
-
-            const storageRef = storage.ref(`student_scans/${activeCenter}/${document.getElementById('eval-date-select').value}/${rollNo}.pdf`);
-            const snapshot = await storageRef.put(new Blob([singlePdfBytes], { type: "application/pdf" }));
-            const downloadUrl = await snapshot.ref.getDownloadURL();
-            
-            mappingResults[rollNo] = downloadUrl;
-            
-            // Framework Note: Auto-pixel darkness extraction will be piped here in Phase 2
-        }
-
-      // 4. Save Master Mapping to Firestore
-        const prefix = activeCenter === "DHARAMSHALA" ? "dharamshala_" : "";
-        await db.collection(`${prefix}exam_omr_mappings`).doc(`${activeCenter}_${dateVal}`).set({
-            roomScans: mappingResults,
-            updatedAt: Date.now()
-        }, { merge: true });
-
-        // 5. Generate Exception Report
-        allocatedInRoom.forEach(stu => {
-            if (!mappingResults[String(stu.rollNo).trim().toUpperCase()]) {
-                missingStudents.push(stu);
-            }
-        });
-
-        const missingContainer = document.getElementById('missing-omr-container');
-        const missingBadge = document.getElementById('missing-omr-badge');
-        missingBadge.innerText = `${missingStudents.length} Missing`;
-
-        if (missingStudents.length === 0) {
-            missingContainer.innerHTML = `<div class="bg-emerald-50 border border-emerald-200 p-3 rounded-xl text-center text-emerald-800 font-bold text-xs uppercase">✨ All ${allocatedInRoom.length} expected OMRs successfully scanned and mapped!</div>`;
-        } else {
-            missingContainer.innerHTML = missingStudents.map(stu => `
-                <div class="flex items-center justify-between p-2.5 bg-rose-50 border border-rose-200 rounded-xl text-xs font-bold text-rose-900">
-                    <span>${stu.name} (Roll: #${stu.rollNo})</span>
-                    <span class="text-[9px] bg-rose-200 text-rose-800 px-2 py-0.5 rounded uppercase">Unaccounted</span>
-                </div>
-            `).join('');
-        }
-
-        btn.innerText = orig; btn.disabled = false;
-        alert(`✅ Local Scan Complete! ${Object.keys(mappingResults).length} OMR sheets mapped successfully.`);
-
-  } catch(e) {
-        alert("Local scanning failed: " + e.message);
+    } catch(e) {
+        alert("Cloud processing failed: " + e.message);
         btn.innerText = orig; 
         btn.disabled = false;
     }
