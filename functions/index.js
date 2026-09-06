@@ -240,12 +240,12 @@ exports.sendInstantPushAlerts = onDocumentCreated({
 });
 
 // =======================================================
-// --- LIGHTWEIGHT OMR BATCH EVALUATOR (JSON ONLY) ---
+// --- CLOUD RUN-BACKED OMR BATCH EVALUATOR ---
 // =======================================================
 exports.evaluateRoomOMRBatch = onRequest({
     region: "asia-south1",
-    memory: "1GiB", 
-    timeoutSeconds: 120,
+    memory: "512MB", 
+    timeoutSeconds: 300,
     cors: true
 }, async (req, res) => {
     const { center, date, roomName, payload } = req.body;
@@ -256,31 +256,42 @@ exports.evaluateRoomOMRBatch = onRequest({
 
     try {
         const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
-        const batch = admin.firestore().batch();
-        let firestoreMapUpdate = {}; 
+        const cloudRunUrl = "https://omr-engine-service-701377739976.asia-south1.run.app/evaluate";
         
-        let keysCache = {};
+        let totalEvaluated = 0;
+        let firestoreMapUpdate = {};
+        const batch = admin.firestore().batch();
 
         for (const data of payload) {
-            const { rollNo, groupId, responses, pdfUrl } = data;
-            if (!rollNo || !groupId) continue;
+            const { rollNo, groupId, pdfUrl } = data;
+            if (!rollNo || !groupId || !pdfUrl) continue;
 
-            if (!keysCache[groupId]) {
-                const keyDoc = await admin.firestore().collection("exam_answer_keys").doc(groupId).get();
-                keysCache[groupId] = keyDoc.exists ? keyDoc.data() : { answers: {}, structure: [], bonusConfig: {} };
+            // Forward the scan URL to your Cloud Run Python OpenCV engine
+            const response = await fetch(cloudRunUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ pdfUrl, examId: groupId })
+            });
+
+            const resultData = await response.json();
+            if (!resultData.success) {
+                console.error(`[Cloud Run OMR] Failed for roll ${rollNo}:`, resultData.error);
+                continue;
             }
+
+            // OMRChecker returns evaluated responses array or dictionary
+            const evaluatedResponses = resultData.results || {};
 
             const submissionRef = admin.firestore().collection("omr_submissions").doc(`${groupId}_${rollNo}`);
             batch.set(submissionRef, {
                 groupId: groupId,
                 rollNo: rollNo,
-                responses: responses || {},
+                responses: evaluatedResponses,
                 updatedAt: Date.now()
             }, { merge: true });
 
-            if (pdfUrl) {
-                firestoreMapUpdate[`roomScans.${rollNo}`] = pdfUrl;
-            }
+            firestoreMapUpdate[`roomScans.${rollNo}`] = pdfUrl;
+            totalEvaluated++;
         }
 
         await batch.commit();
@@ -291,9 +302,9 @@ exports.evaluateRoomOMRBatch = onRequest({
             await mappingRef.update(firestoreMapUpdate);
         }
 
-        res.status(200).send({ success: true, evaluatedCount: payload.length });
+        res.status(200).send({ success: true, evaluatedCount: totalEvaluated });
     } catch (err) {
-        console.error("[JSON OMR Evaluator Error]:", err);
+        console.error("[Cloud Run OMR Batch Error]:", err);
         res.status(500).send({ error: err.message });
     }
 });
