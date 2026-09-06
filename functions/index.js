@@ -279,7 +279,6 @@ exports.evaluateRoomOMRBatch = onRequest({
             }, { merge: true });
 
             if (pdfUrl) {
-                // Prepare dot-notation map to safely append links
                 firestoreMapUpdate[`roomScans.${rollNo}`] = pdfUrl;
             }
         }
@@ -288,8 +287,6 @@ exports.evaluateRoomOMRBatch = onRequest({
 
         if (Object.keys(firestoreMapUpdate).length > 0) {
             const mappingRef = admin.firestore().collection(`${prefix}exam_omr_mappings`).doc(`${center}_${date}`);
-            
-            // Fix: First ensure the document exists, then safely apply the nested map updates
             await mappingRef.set({ updatedAt: Date.now() }, { merge: true });
             await mappingRef.update(firestoreMapUpdate);
         }
