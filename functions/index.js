@@ -479,7 +479,6 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
 }
 
 // Helper to render individual section columns cleanly with non-overlapping numeric blocks
-// Helper to render individual section columns cleanly with non-overlapping numeric blocks
 function renderOMRColumn(chunk) {
     let colHtml = `<div style="flex: 1; display:flex; flex-direction:column; gap: 0; max-width: 120px;">`;
     
@@ -513,20 +512,20 @@ function renderOMRColumn(chunk) {
             }
             digitBoxes += `</div>`;
 
-            // 4 Sub-columns of 0-9 bubbles beneath the boxes (compacted size & spacing)
+            // 4 Sub-columns of 0-9 bubbles beneath the boxes (compacted vertical spacing)
             let numericGrid = `<div style="display:flex; gap:2.5px;">`;
             for (let col = 0; col < 4; col++) {
-                numericGrid += `<div style="display:flex; flex-direction:column; gap:1.5px; align-items:center;">`;
+                numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
                 for (let r = 0; r <= 9; r++) {
-                    numericGrid += `<div style="width:9px; height:9px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:3.5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
+                    numericGrid += `<div style="width:9px; height:8.5px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:3.5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
                 }
                 numericGrid += `</div>`;
             }
             numericGrid += `</div>`;
 
-            // Strict 136px height allocated per numeric question to eliminate any overlap with write-boxes or bottom border
+            // Strict 142px height allocated per numeric question so row 9 stays neatly above the dashed line
             colHtml += `
-                <div style="height: 136px; box-sizing: border-box; display:flex; flex-direction:column; justify-content:flex-start; padding-top:3px; border-bottom:1px dashed #cbd5e1;">
+                <div style="height: 142px; box-sizing: border-box; display:flex; flex-direction:column; justify-content:flex-start; padding-top:3px; border-bottom:1px dashed #cbd5e1;">
                     <div style="display:flex; align-items:center; margin-bottom:3px;">
                         <div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div>
                         ${digitBoxes}
