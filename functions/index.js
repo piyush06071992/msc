@@ -584,48 +584,71 @@ async function autoScanStudentScanPage(singlePdfBytes, structure) {
                     ctx.drawImage(img, 0, 0);
 
                     let res = {};
-                    // Calibrated Grid Mapping for standard 1240x1754 OMR sheets
-                    const startX = 200;
-                    const startY = 550;
-                    const rowHeight = 34.5;
-                    const optSpacing = 28;
-                    const bubbleRadius = 10;
-                    const darknessThreshold = 0.35;
 
-                    let currentY = startY;
-
+                    // Replicate the exact multi-column chunking logic from HTML generator
+                    let allQuestions = [];
                     struct.forEach(sec => {
-                        if (sec.type === 'MCQ') {
-                            for (let q = sec.start; q <= sec.end; q++) {
-                                let maxDarkness = 0;
-                                let markedOption = null;
-
-                                for (let opt = 1; opt <= 4; opt++) {
-                                    const x = startX + ((opt - 1) * optSpacing);
-                                    try {
-                                        const imgData = ctx.getImageData(x - bubbleRadius, currentY - bubbleRadius, bubbleRadius * 2, bubbleRadius * 2);
-                                        let darkPixels = 0, total = 0;
-                                        for (let i = 0; i < imgData.data.length; i += 4) {
-                                            if ((imgData.data[i] + imgData.data[i+1] + imgData.data[i+2]) / 3 < 130) {
-                                                darkPixels++;
-                                            }
-                                            total++;
-                                        }
-                                        const darkness = darkPixels / total;
-                                        if (darkness > maxDarkness && darkness > darknessThreshold) {
-                                            maxDarkness = darkness;
-                                            markedOption = String(opt);
-                                        }
-                                    } catch(e) {}
-                                }
-
-                                if (markedOption) {
-                                    res[String(q)] = markedOption;
-                                }
-                                currentY += rowHeight;
-                            }
+                        for (let q = sec.start; q <= sec.end; q++) {
+                            allQuestions.push({ q: q, type: sec.type });
                         }
                     });
+
+                    let totalQs = allQuestions.length;
+                    let numCols = totalQs > 135 ? 5 : (totalQs > 60 ? 4 : 3);
+                    const MAX_PER_COL = Math.ceil(totalQs / numCols);
+
+                    let colChunks = [];
+                    for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
+                        colChunks.push(allQuestions.slice(i, i + MAX_PER_COL));
+                    }
+
+                    // Layout coordinates matching the 1240x1754 canvas layout
+                    const margin_left = 115;
+                    const available_width = 1010;
+                    const colWidth = available_width / colChunks.length;
+                    
+                    const startY = 355.0;
+                    const rowStep = 29.2;
+                    const optSpacing = 18.0;
+                    const bubbleRadius = 6.0;
+                    const darknessThreshold = 0.40;
+
+                    colChunks.forEach((chunk, colIdx) => {
+                        let col_x = margin_left + (colIdx * colWidth);
+                        let current_y = startY;
+
+                        chunk.forEach(item => {
+                            let q = item.q;
+                            let maxDarkness = 0;
+                            let markedOption = null;
+
+                            for (let opt = 1; opt <= 4; opt++) {
+                                // Option positions relative to column start
+                                const x = col_x + 35 + ((opt - 1) * optSpacing);
+                                try {
+                                    const imgData = ctx.getImageData(x - bubbleRadius, current_y - bubbleRadius, bubbleRadius * 2, bubbleRadius * 2);
+                                    let darkPixels = 0, total = 0;
+                                    for (let i = 0; i < imgData.data.length; i += 4) {
+                                        if ((imgData.data[i] + imgData.data[i+1] + imgData.data[i+2]) / 3 < 140) {
+                                            darkPixels++;
+                                        }
+                                        total++;
+                                    }
+                                    const darkness = darkPixels / total;
+                                    if (darkness > maxDarkness && darkness > darknessThreshold) {
+                                        maxDarkness = darkness;
+                                        markedOption = String(opt);
+                                    }
+                                } catch(e) {}
+                            }
+
+                            if (markedOption) {
+                                res[String(q)] = markedOption;
+                            }
+                            current_y += rowStep;
+                        });
+                    });
+
                     resolve(res);
                 };
             });
@@ -637,7 +660,6 @@ async function autoScanStudentScanPage(singlePdfBytes, structure) {
     }
     return responses;
 }
-
 exports.processAndSplitRoomPDF = onRequest({
     region: "asia-south1",
     memory: "2GiB",
