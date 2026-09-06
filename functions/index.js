@@ -401,7 +401,6 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     else if (totalQs === 120) { numCols = 4; MAX_PER_COL = 30; } 
     else if (totalQs === 75) { numCols = 3; MAX_PER_COL = 25; } 
     else {
-        // Fallback for custom exams
         numCols = Math.ceil(totalQs / 30);
         MAX_PER_COL = Math.ceil(totalQs / numCols);
     }
@@ -409,54 +408,52 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
         const chunk = allQuestions.slice(i, i + MAX_PER_COL);
         
-        // Fluid width up to 125px to fit 6 columns without horizontal A4 overflow
+        // Locked column width to prevent horizontal overflow
         columnsHtml += `<div style="flex: 1; display:flex; flex-direction:column; gap: 0; max-width: 125px;">`;
         
         chunk.forEach((item) => {
             const q = item.q;
             
-            // SERVER SAFE CHECKS: Only read variables if they exist (Frontend vs Backend execution)
             const ans = (typeof answerKey !== 'undefined' && answerKey) ? (answerKey[q] || "") : "";
             const bRule = (typeof bonusConfig !== 'undefined' && bonusConfig) ? (bonusConfig[q] || null) : null;
             const adminMode = (typeof isAdmin !== 'undefined' && isAdmin);
             
             let bonusBadge = "";
             if (bRule === 'ALL') {
-                bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-amber-500 text-white text-[5.5pt] font-black px-1 py-0.5 rounded cursor-pointer uppercase ml-1 whitespace-nowrap">B:ALL</span>`;
+                bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-amber-500 text-white text-[5pt] font-black px-1 rounded cursor-pointer uppercase ml-0.5">B:ALL</span>`;
             } else if (bRule === 'ATTEMPTED') {
-                bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-purple-600 text-white text-[5.5pt] font-black px-1 py-0.5 rounded cursor-pointer uppercase ml-1 whitespace-nowrap">B:ATT</span>`;
+                bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-purple-600 text-white text-[5pt] font-black px-1 rounded cursor-pointer uppercase ml-0.5">B:ATT</span>`;
             } else if (adminMode) {
-                bonusBadge = `<span onclick="openBonusModal(${q})" class="bonus-tag no-print text-slate-300 hover:text-amber-500 text-[7.5pt] font-black px-0.5 cursor-pointer ml-1">★</span>`;
+                bonusBadge = `<span onclick="openBonusModal(${q})" class="bonus-tag no-print text-slate-300 hover:text-amber-500 text-[7pt] font-black cursor-pointer ml-0.5">★</span>`;
             }
 
             if (item.type === 'MCQ') {
                 let optsHtml = "";
                 for (let o = 1; o <= 4; o++) {
                     const isKey = (ans == o);
-                    // MCQ BUBBLE: Scaled down to 12px
-                    optsHtml += `<div ${typeof setLiveAnswer !== 'undefined' ? `onclick="setLiveAnswer(${q}, ${o})"` : ''} id="live_q_${q}_opt_${o}" class="omr-bubble ${isKey ? 'key-filled' : ''}" style="width:12px; height:12px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5.5pt; font-weight:bold; color:black; background:white; margin:0 1.5px; cursor:pointer;">${o}</div>`;
+                    optsHtml += `<div ${typeof setLiveAnswer !== 'undefined' ? `onclick="setLiveAnswer(${q}, ${o})"` : ''} id="live_q_${q}_opt_${o}" class="omr-bubble ${isKey ? 'key-filled' : ''}" style="width:11px; height:11px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0 1px; cursor:pointer;">${o}</div>`;
                 }
-                // STRICT MCQ ROW: 23px height. Fits 30 rows in ~690px.
-                columnsHtml += `<div style="height: 23px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:20px; font-weight:bold; font-size:7.5pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div>${bonusBadge}</div>`;
+                // Strict 21px row height for MCQs to save vertical space
+                columnsHtml += `<div style="height: 21px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div>${bonusBadge}</div>`;
             } else {
-                let numericGrid = `<div style="display:flex; gap:1.5px;">`;
+                // COMPACT NUMERIC GRID: Reduced row gap to 0.5px so 10 bubbles fit compactly
+                let numericGrid = `<div style="display:flex; gap:1px;">`;
                 for (let col = 0; col < 6; col++) {
-                    // NUMERIC BUBBLE: Scaled down to 9px, removed the top blank box entirely
-                    numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
+                    numericGrid += `<div style="display:flex; flex-direction:column; gap:0.5px; align-items:center;">`;
                     for (let r = 0; r <= 9; r++) {
-                        numericGrid += `<div style="width:9px; height:9px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4.5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
+                        numericGrid += `<div style="width:8px; height:8px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
                     }
                     numericGrid += `</div>`;
                 }
                 numericGrid += `</div>`;
 
-                // STRICT NUMERIC ROW: 95px height. Fits 20 MCQs + 5 Numerics in ~935px.
+                // STRICT COMPACT NUMERIC ROW: Exactly 80px height (down from 95px) to prevent bottom overflow
                 columnsHtml += `
-                    <div style="height: 95px; box-sizing: border-box; display:flex; align-items:flex-start; margin-top:2px; border-bottom:1px dashed #cbd5e1;">
-                        <div style="width:20px; font-weight:bold; font-size:7.5pt; text-align:right; margin-right:4px; margin-top:6px; color:black;">${q}.</div>
+                    <div style="height: 80px; box-sizing: border-box; display:flex; align-items:flex-start; margin-top:1px; border-bottom:1px dashed #cbd5e1;">
+                        <div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; margin-top:4px; color:black;">${q}.</div>
                         <div style="display:flex; flex-direction:column;">
-                            <div class="no-print" style="display:flex; align-items:center; margin-bottom:2px;">
-                                <input type="text" maxlength="6" ${typeof setLiveNumeric !== 'undefined' ? `oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)"` : ''} class="omr-num-box" style="width:40px; height:12px; font-size:6pt; padding:0;" placeholder="Ans" value="${ans}" />
+                            <div class="no-print" style="display:flex; align-items:center; margin-bottom:1px;">
+                                <input type="text" maxlength="6" ${typeof setLiveNumeric !== 'undefined' ? `oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)"` : ''} class="omr-num-box" style="width:35px; height:11px; font-size:6pt; padding:0;" placeholder="Ans" value="${ans}" />
                                 ${bonusBadge}
                             </div>
                             ${numericGrid}
@@ -470,65 +467,65 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
 
     return `
         <div class="omr-print-page" style="position: relative; background: white;">
-            <div style="position: absolute; top: 15px; left: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
-            <div style="position: absolute; top: 15px; right: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
-            <div style="position: absolute; bottom: 15px; left: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
-            <div style="position: absolute; bottom: 15px; right: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
+            <div style="position: absolute; top: 12px; left: 12px; width: 22px; height: 22px; background: black; z-index: 100;"></div>
+            <div style="position: absolute; top: 12px; right: 12px; width: 22px; height: 22px; background: black; z-index: 100;"></div>
+            <div style="position: absolute; bottom: 12px; left: 12px; width: 22px; height: 22px; background: black; z-index: 100;"></div>
+            <div style="position: absolute; bottom: 12px; right: 12px; width: 22px; height: 22px; background: black; z-index: 100;"></div>
 
-            <div style="border:2px solid black; padding:8px; margin: 45px; box-sizing:border-box; display:flex; flex-direction:column; background:white; height: calc(100% - 90px); font-family:Arial, sans-serif; position: relative; z-index: 10;">
+            <div style="border:2px solid black; padding:6px; margin: 38px; box-sizing:border-box; display:flex; flex-direction:column; background:white; height: calc(100% - 76px); font-family:Arial, sans-serif; position: relative; z-index: 10;">
                 
                 <!-- TOP HEADER BLOCK -->
-                <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:6px; margin-bottom:12px; color:black; gap:8px;">
+                <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:4px; margin-bottom:8px; color:black; gap:6px;">
                     <div style="flex:1; display:flex; flex-direction:column; border:1.5px solid black; background:white; box-sizing:border-box;">
-                        <div style="font-weight:bold; font-size:8pt; padding:3px 4px; border-bottom:1.5px solid black;">${prettyDate} | ${examName}</div>
-                        <div style="padding:2px 4px; border-bottom:1.5px solid black;">
-                            <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase; color:#000;">Candidate Name</div>
-                            <div style="font-size:10pt; font-weight:900; text-transform:uppercase; color:black; line-height:1.2; min-height:14px;">${stu.name || ''}</div>
+                        <div style="font-weight:bold; font-size:7.5pt; padding:2px 3px; border-bottom:1.5px solid black;">${prettyDate} | ${examName}</div>
+                        <div style="padding:2px 3px; border-bottom:1.5px solid black;">
+                            <div style="font-size:6pt; font-weight:bold; text-transform:uppercase; color:#000;">Candidate Name</div>
+                            <div style="font-size:9pt; font-weight:900; text-transform:uppercase; color:black; line-height:1.1; min-height:12px;">${stu.name || ''}</div>
                         </div>
                         <div style="display:flex; border-bottom:1.5px solid black;">
-                            <div style="flex:1; border-right:1.5px solid black; padding:2px 4px;">
-                                <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Class</div>
-                                <div style="font-size:8pt; font-weight:bold; min-height:12px;">${stu.className || ''}</div>
+                            <div style="flex:1; border-right:1.5px solid black; padding:2px 3px;">
+                                <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Class</div>
+                                <div style="font-size:7.5pt; font-weight:bold; min-height:10px;">${stu.className || ''}</div>
                             </div>
-                            <div style="flex:1; padding:2px 4px;">
-                                <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Section</div>
-                                <div style="font-size:8pt; font-weight:bold; min-height:12px;">${stu.section || ''}</div>
+                            <div style="flex:1; padding:2px 3px;">
+                                <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Section</div>
+                                <div style="font-size:7.5pt; font-weight:bold; min-height:10px;">${stu.section || ''}</div>
                             </div>
                         </div>
-                        <div style="display:flex; flex:1; min-height:24px;">
-                            <div style="flex:1; border-right:1.5px solid black; padding:2px 4px; display:flex; flex-direction:column;">
-                                <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Student Sign</div>
+                        <div style="display:flex; flex:1; min-height:20px;">
+                            <div style="flex:1; border-right:1.5px solid black; padding:2px 3px; display:flex; flex-direction:column;">
+                                <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Student Sign</div>
                             </div>
-                            <div style="flex:1; padding:2px 4px; display:flex; flex-direction:column;">
-                                <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div>
+                            <div style="flex:1; padding:2px 3px; display:flex; flex-direction:column;">
+                                <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div>
                             </div>
                         </div>
                     </div>
                     
                     <div style="flex:1.2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
-                        <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="25" jsbarcode-width="1.8" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:4px;"></svg>
-                        <h1 style="font-size:15pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0; color:black;">MINERVA STUDY CIRCLE</h1>
+                        <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="22" jsbarcode-width="1.6" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:2px;"></svg>
+                        <h1 style="font-size:14pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0; color:black;">MINERVA STUDY CIRCLE</h1>
                     </div>
 
-                    <div style="border:1.5px solid black; padding:4px 6px; display:flex; flex-direction:column; align-items:center; background:white; flex-shrink:0;">
-                        <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase; margin-bottom:4px;">Roll Number</div>
-                        <div style="display:flex; gap:1.5px; justify-content:center;">
+                    <div style="border:1.5px solid black; padding:3px 5px; display:flex; flex-direction:column; align-items:center; background:white; flex-shrink:0;">
+                        <div style="font-size:6pt; font-weight:bold; text-transform:uppercase; margin-bottom:3px;">Roll Number</div>
+                        <div style="display:flex; gap:1px; justify-content:center;">
                             ${rollDigits.map((digit) => `
-                                <div style="display:flex; flex-direction:column; gap:1.5px; align-items:center;">
-                                    <div style="width:10px; height:10px; border:1px solid black; margin-bottom:2px; font-size:5pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
-                                    ${[...Array(10)].map((_, r) => `<div style="width:10px; height:10px; font-size:4.5pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;">${r}</div>`).join('')}
+                                <div style="display:flex; flex-direction:column; gap:1px; align-items:center;">
+                                    <div style="width:9px; height:9px; border:1px solid black; margin-bottom:1px; font-size:4.5pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
+                                    ${[...Array(10)].map((_, r) => `<div style="width:9px; height:9px; font-size:4pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;">${r}</div>`).join('')}
                                 </div>
                             `).join('')}
                         </div>
                     </div>
                 </div>
 
-                <div style="display:flex; flex-wrap:nowrap; gap:12px; width:100%; justify-content:space-between;">
+                <div style="display:flex; flex-wrap:nowrap; gap:10px; width:100%; justify-content:space-between;">
                     ${columnsHtml}
                 </div>
 
                 <div style="border-top:1.5px solid black; padding-top:2px; margin-top:auto; display:flex; justify-content:center;">
-                    <span style="font-family:monospace; background:black; color:white; padding:1px 12px; border-radius:3px; font-size:8pt; font-weight:900;">SEAT NUMBER: ${seatId}</span>
+                    <span style="font-family:monospace; background:black; color:white; padding:1px 10px; border-radius:2px; font-size:7.5pt; font-weight:900;">SEAT NUMBER: ${seatId}</span>
                 </div>
             </div>
         </div>
