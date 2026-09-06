@@ -373,7 +373,6 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
     }
     return false;
 }
-
 // Helper Function for Generating Flawless OMR HTML Template
 function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     const prettyDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB');
@@ -382,87 +381,33 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     const rollDigits = cleanRoll.split('');
 
     let columnsHtml = "";
+    const isPureMCQ = !structure.some(sec => sec.type !== 'MCQ');
 
-    // Convert structure into a flat array of questions
-    let allQuestions = [];
-    structure.forEach(sec => {
-        for (let q = sec.start; q <= sec.end; q++) {
-            allQuestions.push({ q: q, type: sec.type });
-        }
-    });
-
-    let totalQs = allQuestions.length;
-    
-    // STRICT STATIC CHUNKING LOGIC
-    let numCols = 3;
-    let MAX_PER_COL = 25; 
-    
-    if (totalQs === 180) { numCols = 6; MAX_PER_COL = 30; } 
-    else if (totalQs === 120) { numCols = 4; MAX_PER_COL = 30; } 
-    else if (totalQs === 75) { numCols = 3; MAX_PER_COL = 25; } 
-    else {
-        numCols = Math.ceil(totalQs / 30);
-        MAX_PER_COL = Math.ceil(totalQs / numCols);
-    }
-
-    for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
-        const chunk = allQuestions.slice(i, i + MAX_PER_COL);
-        
-        // Locked column width to prevent horizontal overflow
-        columnsHtml += `<div style="flex: 1; display:flex; flex-direction:column; gap: 0; max-width: 125px;">`;
-        
-        chunk.forEach((item) => {
-            const q = item.q;
-            
-            const ans = (typeof answerKey !== 'undefined' && answerKey) ? (answerKey[q] || "") : "";
-            const bRule = (typeof bonusConfig !== 'undefined' && bonusConfig) ? (bonusConfig[q] || null) : null;
-            const adminMode = (typeof isAdmin !== 'undefined' && isAdmin);
-            
-            let bonusBadge = "";
-            if (bRule === 'ALL') {
-                bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-amber-500 text-white text-[5pt] font-black px-1 rounded cursor-pointer uppercase ml-0.5">B:ALL</span>`;
-            } else if (bRule === 'ATTEMPTED') {
-                bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-purple-600 text-white text-[5pt] font-black px-1 rounded cursor-pointer uppercase ml-0.5">B:ATT</span>`;
-            } else if (adminMode) {
-                bonusBadge = `<span onclick="openBonusModal(${q})" class="bonus-tag no-print text-slate-300 hover:text-amber-500 text-[7pt] font-black cursor-pointer ml-0.5">★</span>`;
-            }
-
-            if (item.type === 'MCQ') {
-                let optsHtml = "";
-                for (let o = 1; o <= 4; o++) {
-                    const isKey = (ans == o);
-                    optsHtml += `<div ${typeof setLiveAnswer !== 'undefined' ? `onclick="setLiveAnswer(${q}, ${o})"` : ''} id="live_q_${q}_opt_${o}" class="omr-bubble ${isKey ? 'key-filled' : ''}" style="width:11px; height:11px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0 1px; cursor:pointer;">${o}</div>`;
-                }
-                // Strict 21px row height for MCQs to save vertical space
-                columnsHtml += `<div style="height: 21px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div>${bonusBadge}</div>`;
-            } else {
-                // COMPACT NUMERIC GRID: Reduced row gap to 0.5px so 10 bubbles fit compactly
-                let numericGrid = `<div style="display:flex; gap:1px;">`;
-                for (let col = 0; col < 6; col++) {
-                    numericGrid += `<div style="display:flex; flex-direction:column; gap:0.5px; align-items:center;">`;
-                    for (let r = 0; r <= 9; r++) {
-                        numericGrid += `<div style="width:8px; height:8px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
-                    }
-                    numericGrid += `</div>`;
-                }
-                numericGrid += `</div>`;
-
-                // STRICT COMPACT NUMERIC ROW: Exactly 80px height (down from 95px) to prevent bottom overflow
-                columnsHtml += `
-                    <div style="height: 80px; box-sizing: border-box; display:flex; align-items:flex-start; margin-top:1px; border-bottom:1px dashed #cbd5e1;">
-                        <div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; margin-top:4px; color:black;">${q}.</div>
-                        <div style="display:flex; flex-direction:column;">
-                            <div class="no-print" style="display:flex; align-items:center; margin-bottom:1px;">
-                                <input type="text" maxlength="6" ${typeof setLiveNumeric !== 'undefined' ? `oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)"` : ''} class="omr-num-box" style="width:35px; height:11px; font-size:6pt; padding:0;" placeholder="Ans" value="${ans}" />
-                                ${bonusBadge}
-                            </div>
-                            ${numericGrid}
-                        </div>
-                    </div>
-                `;
+    if (isPureMCQ) {
+        // Pure MCQ exams (e.g., NEET 180 or NDA 120): Chunk continuous questions into columns of 30
+        let allQuestions = [];
+        structure.forEach(sec => {
+            for (let q = sec.start; q <= sec.end; q++) {
+                allQuestions.push({ q: q, type: sec.type });
             }
         });
-        columnsHtml += `</div>`;
+        let totalQs = allQuestions.length;
+        let numCols = totalQs > 135 ? 6 : (totalQs > 90 ? 4 : 3);
+        let MAX_PER_COL = Math.ceil(totalQs / numCols);
+
+        for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
+            const chunk = allQuestions.slice(i, i + MAX_PER_COL);
+            columnsHtml += renderOMRColumn(chunk);
+        }
+    } else {
+        // Mixed Exams (e.g., JEE 75): Each section (MCQ block or Numeric block) becomes its own dedicated column
+        structure.forEach(sec => {
+            let chunk = [];
+            for (let q = sec.start; q <= sec.end; q++) {
+                chunk.push({ q: q, type: sec.type });
+            }
+            columnsHtml += renderOMRColumn(chunk);
+        });
     }
 
     return `
@@ -520,7 +465,8 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
                     </div>
                 </div>
 
-                <div style="display:flex; flex-wrap:nowrap; gap:10px; width:100%; justify-content:space-between;">
+                <!-- DEDICATED SECTION COLUMNS CONTAINER -->
+                <div style="display:flex; flex-wrap:nowrap; gap:8px; width:100%; justify-content:space-between;">
                     ${columnsHtml}
                 </div>
 
@@ -530,6 +476,61 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
             </div>
         </div>
     `;
+}
+
+// Helper to render individual section columns cleanly
+function renderOMRColumn(chunk) {
+    let colHtml = `<div style="flex: 1; display:flex; flex-direction:column; gap: 0; max-width: 120px;">`;
+    
+    chunk.forEach((item) => {
+        const q = item.q;
+        const ans = (typeof answerKey !== 'undefined' && answerKey) ? (answerKey[q] || "") : "";
+        const bRule = (typeof bonusConfig !== 'undefined' && bonusConfig) ? (bonusConfig[q] || null) : null;
+        const adminMode = (typeof isAdmin !== 'undefined' && isAdmin);
+        
+        let bonusBadge = "";
+        if (bRule === 'ALL') {
+            bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-amber-500 text-white text-[5pt] font-black px-1 rounded cursor-pointer uppercase ml-0.5">B:ALL</span>`;
+        } else if (bRule === 'ATTEMPTED') {
+            bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-purple-600 text-white text-[5pt] font-black px-1 rounded cursor-pointer uppercase ml-0.5">B:ATT</span>`;
+        } else if (adminMode) {
+            bonusBadge = `<span onclick="openBonusModal(${q})" class="bonus-tag no-print text-slate-300 hover:text-amber-500 text-[7pt] font-black cursor-pointer ml-0.5">★</span>`;
+        }
+
+        if (item.type === 'MCQ') {
+            let optsHtml = "";
+            for (let o = 1; o <= 4; o++) {
+                const isKey = (ans == o);
+                optsHtml += `<div ${typeof setLiveAnswer !== 'undefined' ? `onclick="setLiveAnswer(${q}, ${o})"` : ''} id="live_q_${q}_opt_${o}" class="omr-bubble ${isKey ? 'key-filled' : ''}" style="width:11px; height:11px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0 1px; cursor:pointer;">${o}</div>`;
+            }
+            colHtml += `<div style="height: 21px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div>${bonusBadge}</div>`;
+        } else {
+            let numericGrid = `<div style="display:flex; gap:1px;">`;
+            for (let col = 0; col < 6; col++) {
+                numericGrid += `<div style="display:flex; flex-direction:column; gap:0.5px; align-items:center;">`;
+                for (let r = 0; r <= 9; r++) {
+                    numericGrid += `<div style="width:8px; height:8px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
+                }
+                numericGrid += `</div>`;
+            }
+            numericGrid += `</div>`;
+
+            colHtml += `
+                <div style="height: 78px; box-sizing: border-box; display:flex; align-items:flex-start; margin-top:1px; border-bottom:1px dashed #cbd5e1;">
+                    <div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; margin-top:4px; color:black;">${q}.</div>
+                    <div style="display:flex; flex-direction:column;">
+                        <div class="no-print" style="display:flex; align-items:center; margin-bottom:1px;">
+                            <input type="text" maxlength="6" ${typeof setLiveNumeric !== 'undefined' ? `oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)"` : ''} class="omr-num-box" style="width:35px; height:11px; font-size:6pt; padding:0;" placeholder="Ans" value="${ans}" />
+                            ${bonusBadge}
+                        </div>
+                        ${numericGrid}
+                    </div>
+                </div>
+            `;
+        }
+    });
+    colHtml += `</div>`;
+    return colHtml;
 }
 
 // =======================================================
