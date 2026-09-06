@@ -606,22 +606,35 @@ exports.compileSingleRoomOnDemand = onRequest({
 
                 examNameMap[pair] = currentExamName;
 
-                if (targetGroupId) {
+            if (targetGroupId) {
                     const keyDoc = await admin.firestore().collection("exam_answer_keys").doc(targetGroupId).get();
                     if (keyDoc.exists && keyDoc.data().structure && keyDoc.data().structure.length > 0) {
                         structureMap[pair] = keyDoc.data().structure;
-                        continue;
                     }
                 }
 
-                let defaultStruct = [];
-                let startQ = 1;
-                const subs = fallbackSubjects.length > 0 ? fallbackSubjects : ['PHYSICS', 'CHEMISTRY', 'MATHEMATICS'];
-                subs.forEach(sub => {
-                    defaultStruct.push({ subject: sub.toUpperCase(), start: startQ, end: startQ + 24, type: 'MCQ' });
-                    startQ += 25;
+                if (!structureMap[pair]) {
+                    let defaultStruct = [];
+                    let startQ = 1;
+                    const subs = fallbackSubjects.length > 0 ? fallbackSubjects : ['PHYSICS', 'CHEMISTRY', 'MATHEMATICS'];
+                    subs.forEach(sub => {
+                        defaultStruct.push({ subject: sub.toUpperCase(), start: startQ, end: startQ + 24, type: 'MCQ' });
+                        startQ += 25;
+                    });
+                    structureMap[pair] = defaultStruct;
+                }
+
+                // Save blueprint to Firestore for desktop OMR reader synchronization
+                const blueprintDocId = `${center}_${date}_${className}_${sectionName}`;
+                await admin.firestore().collection("exam_blueprints").doc(blueprintDocId).set({
+                    center: center,
+                    date: date,
+                    className: className,
+                    section: sectionName,
+                    examName: examNameMap[pair],
+                    structure: structureMap[pair],
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
-                structureMap[pair] = defaultStruct;
             }
 
             let fullPagesHtml = "";
