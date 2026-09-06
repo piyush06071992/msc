@@ -373,6 +373,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
     }
     return false;
 }
+
 // Helper Function for Generating Flawless OMR HTML Template
 function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     const prettyDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB');
@@ -384,7 +385,6 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     const isPureMCQ = !structure.some(sec => sec.type !== 'MCQ');
 
     if (isPureMCQ) {
-        // Pure MCQ exams (e.g., NEET 180 or NDA 120): Chunk continuous questions into columns of 30
         let allQuestions = [];
         structure.forEach(sec => {
             for (let q = sec.start; q <= sec.end; q++) {
@@ -400,7 +400,6 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
             columnsHtml += renderOMRColumn(chunk);
         }
     } else {
-        // Mixed Exams (e.g., JEE 75): Each section (MCQ block or Numeric block) becomes its own dedicated column
         structure.forEach(sec => {
             let chunk = [];
             for (let q = sec.start; q <= sec.end; q++) {
@@ -478,7 +477,6 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     `;
 }
 
-// Helper to render individual section columns cleanly with non-overlapping numeric blocks
 function renderOMRColumn(chunk) {
     let colHtml = `<div style="flex: 1; display:flex; flex-direction:column; gap: 0; max-width: 120px;">`;
     
@@ -505,14 +503,12 @@ function renderOMRColumn(chunk) {
             }
             colHtml += `<div style="height: 21px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div>${bonusBadge}</div>`;
         } else {
-            // 4 Separate small write-boxes for digits
             let digitBoxes = `<div style="display:flex; gap:1.5px;">`;
             for (let b = 0; b < 4; b++) {
                 digitBoxes += `<div style="width:10px; height:12px; border:1px solid black; background:white;"></div>`;
             }
             digitBoxes += `</div>`;
 
-            // 4 Sub-columns of 0-9 bubbles beneath the boxes (compacted vertical spacing)
             let numericGrid = `<div style="display:flex; gap:2.5px;">`;
             for (let col = 0; col < 4; col++) {
                 numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
@@ -523,7 +519,6 @@ function renderOMRColumn(chunk) {
             }
             numericGrid += `</div>`;
 
-            // Strict 142px height allocated per numeric question so row 9 stays neatly above the dashed line
             colHtml += `
                 <div style="height: 142px; box-sizing: border-box; display:flex; flex-direction:column; justify-content:flex-start; padding-top:3px; border-bottom:1px dashed #cbd5e1;">
                     <div style="display:flex; align-items:center; margin-bottom:3px;">
@@ -591,7 +586,6 @@ async function autoScanStudentScanPage(singlePdfBytes, structure) {
 
                     let res = {};
 
-                    // Replicate the exact multi-column chunking logic from HTML generator
                     let allQuestions = [];
                     struct.forEach(sec => {
                         for (let q = sec.start; q <= sec.end; q++) {
@@ -608,7 +602,6 @@ async function autoScanStudentScanPage(singlePdfBytes, structure) {
                         colChunks.push(allQuestions.slice(i, i + MAX_PER_COL));
                     }
 
-                    // Layout coordinates matching the 1240x1754 canvas layout
                     const margin_left = 115;
                     const available_width = 1010;
                     const colWidth = available_width / colChunks.length;
@@ -617,7 +610,6 @@ async function autoScanStudentScanPage(singlePdfBytes, structure) {
                     const rowStep = 29.2;
                     const optSpacing = 18.0;
                     const bubbleRadius = 6.0;
-                    const darknessThreshold = 0.40;
 
                     colChunks.forEach((chunk, colIdx) => {
                         let col_x = margin_left + (colIdx * colWidth);
@@ -625,11 +617,9 @@ async function autoScanStudentScanPage(singlePdfBytes, structure) {
 
                         chunk.forEach(item => {
                             let q = item.q;
-                            let maxDarkness = 0;
-                            let markedOption = null;
+                            let rowDarkness = [];
 
                             for (let opt = 1; opt <= 4; opt++) {
-                                // Option positions relative to column start
                                 const x = col_x + 35 + ((opt - 1) * optSpacing);
                                 try {
                                     const imgData = ctx.getImageData(x - bubbleRadius, current_y - bubbleRadius, bubbleRadius * 2, bubbleRadius * 2);
@@ -640,17 +630,22 @@ async function autoScanStudentScanPage(singlePdfBytes, structure) {
                                         }
                                         total++;
                                     }
-                                    const darkness = darkPixels / total;
-                                    if (darkness > maxDarkness && darkness > darknessThreshold) {
-                                        maxDarkness = darkness;
-                                        markedOption = String(opt);
-                                    }
-                                } catch(e) {}
+                                    rowDarkness.push({ opt: String(opt), darkness: darkPixels / total });
+                                } catch(e) {
+                                    rowDarkness.push({ opt: String(opt), darkness: 0 });
+                                }
                             }
 
-                            if (markedOption) {
-                                res[String(q)] = markedOption;
+                            // Winner-Dominance / Relative Contrast Rule to prevent blank sheets from triggering false positives
+                            let maxObj = rowDarkness.reduce((prev, curr) => (curr.darkness > prev.darkness) ? curr : prev, rowDarkness[0]);
+                            let others = rowDarkness.filter(o => o.opt !== maxObj.opt);
+                            let avgOthers = others.reduce((sum, o) => sum + o.darkness, 0) / (others.length || 1);
+
+                            // Absolute minimum floor for faint pens (0.30) AND must be 35% darker than sibling empty circles
+                            if (maxObj.darkness > 0.30 && maxObj.darkness > (avgOthers * 1.35)) {
+                                res[String(q)] = maxObj.opt;
                             }
+
                             current_y += rowStep;
                         });
                     });
@@ -666,6 +661,7 @@ async function autoScanStudentScanPage(singlePdfBytes, structure) {
     }
     return responses;
 }
+
 exports.processAndSplitRoomPDF = onRequest({
     region: "asia-south1",
     memory: "2GiB",
@@ -696,7 +692,6 @@ exports.processAndSplitRoomPDF = onRequest({
 
         roomOccupants.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
 
-   // Identify corresponding exam group and answer key structure for auto-scanning based on student sections
         const groupSnap = await admin.firestore().collection("admin_paper_groups").where("date", "==", date).get();
         let dateGroups = [];
         let groupKeysCache = {};
@@ -725,6 +720,7 @@ exports.processAndSplitRoomPDF = onRequest({
             });
             return matched ? matched.id : (dateGroups[0]?.id || null);
         }
+
         const roomPdfBytes = await loadPdfBytes(pdfUrl);
         const masterPdf = await PDFDocument.load(roomPdfBytes);
         const totalPages = masterPdf.getPageCount();
@@ -732,7 +728,7 @@ exports.processAndSplitRoomPDF = onRequest({
         const bucket = admin.storage().bucket();
         let mappingResults = {};
 
-   for (let i = 0; i < roomOccupants.length; i++) {
+        for (let i = 0; i < roomOccupants.length; i++) {
             if (i >= totalPages) break;
             const { seatId, stu } = roomOccupants[i];
             const rollNo = String(stu.rollNo || "").trim().toUpperCase();
@@ -746,7 +742,6 @@ exports.processAndSplitRoomPDF = onRequest({
             singlePdf.addPage(copiedPage);
             const singlePdfBytes = await singlePdf.save();
 
-            // Run Automated OMR Scanner Extraction on Server
             const scannedResponses = await autoScanStudentScanPage(singlePdfBytes, studentStructure);
             
             if (studentGroupId) {
