@@ -355,13 +355,13 @@ Supports:
         </div>
     </div>
 
-    <!-- ROOM OMR UPLOAD MODAL -->
+ <!-- ROOM OMR UPLOAD MODAL -->
     <div id="room-upload-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[300] hidden items-center justify-center p-4 no-print">
-        <div class="bg-white rounded-3xl w-full max-w-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+        <div class="bg-white rounded-3xl w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div class="p-5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white flex justify-between items-center shrink-0">
                 <div>
-                    <h3 id="modal-room-title" class="font-black text-base uppercase tracking-tight">Room Evaluation & Upload</h3>
-                    <p id="modal-room-subtitle" class="text-[10px] font-bold text-blue-200 uppercase tracking-widest mt-0.5">Upload Scanned Room PDF</p>
+                    <h3 id="modal-room-title" class="font-black text-base uppercase tracking-tight">Room Evaluation & Live Feed</h3>
+                    <p id="modal-room-subtitle" class="text-[10px] font-bold text-blue-200 uppercase tracking-widest mt-0.5">Upload Scanned Room PDF & Inspect Extracted Answers</p>
                 </div>
                 <button onclick="closeRoomUploadModal()" class="bg-white/20 hover:bg-white/30 text-white w-8 h-8 rounded-full font-black text-sm flex items-center justify-center">✕</button>
             </div>
@@ -386,17 +386,18 @@ Supports:
                     <label class="block text-xs font-black text-slate-800 uppercase tracking-widest">Upload Room Scanned PDF</label>
                     <div class="flex gap-3 items-center">
                         <input type="file" id="room-pdf-file" accept="application/pdf" class="flex-1 p-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold outline-none cursor-pointer">
-                        <button onclick="uploadAndProcessRoomPDF()" id="btn-process-room" class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-md transition-all active:scale-95 whitespace-nowrap">🚀 Process Scans</button>
+                        <button onclick="uploadAndProcessRoomPDF()" id="btn-process-room" class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-md transition-all active:scale-95 whitespace-nowrap">🚀 Scan & Inspect Feed</button>
                     </div>
                 </div>
 
+                <!-- LIVE EXTRACTED ANSWERS FEED -->
                 <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3">
-                    <div class="flex justify-between items-center">
-                        <span class="text-xs font-black text-slate-800 uppercase tracking-widest">Unaccounted / Missing OMRs</span>
-                        <span id="missing-omr-badge" class="bg-rose-100 text-rose-800 px-2 py-0.5 rounded text-[10px] font-black uppercase">0 Missing</span>
+                    <div class="flex justify-between items-center border-b pb-2">
+                        <span class="text-xs font-black text-slate-800 uppercase tracking-widest">Live Extracted Student Answers Feed</span>
+                        <span id="extracted-count-badge" class="bg-indigo-100 text-indigo-800 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase">0 Scanned</span>
                     </div>
-                    <div id="missing-omr-container" class="space-y-2 max-h-48 overflow-y-auto custom-scroll pr-1">
-                        <div class="text-center py-6 text-slate-400 font-bold uppercase text-xs">Upload room PDF above to run reconciliation check.</div>
+                    <div id="live-extracted-feed" class="space-y-2 max-h-60 overflow-y-auto custom-scroll pr-1">
+                        <div class="text-center py-8 text-slate-400 font-bold uppercase text-xs">Upload room PDF above to instantly view scanned roll numbers and marked answers.</div>
                     </div>
                 </div>
             </div>
@@ -741,13 +742,14 @@ Supports:
         // ============================================================================
         // FULLY LOCAL BROWSER-BASED OMR ENGINE
         // ============================================================================
-        async function uploadAndProcessRoomPDF() {
+      async function uploadAndProcessRoomPDF() {
             const fileInput = document.getElementById('room-pdf-file');
             const file = fileInput.files[0];
             if (!file) return alert("Please select a scanned room PDF file.");
 
             const btn = document.getElementById('btn-process-room');
-            const missingContainer = document.getElementById('missing-omr-container');
+            const feedContainer = document.getElementById('live-extracted-feed');
+            const badge = document.getElementById('extracted-count-badge');
             const orig = btn.innerText;
             
             btn.innerText = "⏳ Initializing Local Engine..."; 
@@ -772,7 +774,6 @@ Supports:
                         if (stu && !activeLeaveSet.has(stu.id)) roomOccupants.push({ seatId: sId, stu });
                     }
                 });
-                roomOccupants.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
 
                 let dateGroups = [];
                 let groupKeysCache = {};
@@ -811,29 +812,49 @@ Supports:
                 const totalPages = renderPdf.numPages;
 
                 let extractedPayload = [];
-                missingContainer.innerHTML = ''; 
+                feedContainer.innerHTML = ''; 
 
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                const codeReader = new ZXing.BrowserBarcodeReader();
 
-                for (let i = 0; i < roomOccupants.length; i++) {
-                    if (i >= totalPages) {
-                        missingContainer.innerHTML += `<div class="text-xs font-bold text-rose-600 mb-1">❌ ${roomOccupants[i].stu.rollNo} - Missing Page in PDF</div>`;
-                        continue;
-                    }
-
-                    const student = roomOccupants[i].stu;
-                    const rollNo = String(student.rollNo || "").trim().toUpperCase();
-                    const groupData = getStudentGroupAndStructure(student);
+                for (let p = 1; p <= totalPages; p++) {
+                    btn.innerText = `🔍 Scanning Sheet ${p} of ${totalPages}...`;
                     
-                    btn.innerText = `🔍 Processing Sheet ${i + 1} of ${totalPages}...`;
-                    
-                    const page = await renderPdf.getPage(i + 1);
+                    const page = await renderPdf.getPage(p);
                     const viewport = page.getViewport({ scale: 1240 / page.getViewport({ scale: 1.0 }).width });
                     canvas.width = 1240;
                     canvas.height = viewport.height;
                     await page.render({ canvasContext: ctx, viewport: viewport }).promise;
 
+                    // 1. Detect Roll No via Barcode
+                    let detectedRollNo = null;
+                    try {
+                        const result = await codeReader.decodeFromCanvas(canvas);
+                        detectedRollNo = result.text.trim().toUpperCase();
+                    } catch(e) {}
+
+                    let student = null;
+                    if (detectedRollNo) {
+                        const match = roomOccupants.find(o => String(o.stu.rollNo).trim().toUpperCase() === detectedRollNo);
+                        if (match) student = match.stu;
+                    }
+                    
+                    if (!student) {
+                        const fallbackIndex = p - 1;
+                        if (fallbackIndex < roomOccupants.length) {
+                            student = roomOccupants[fallbackIndex].stu;
+                        } else {
+                            feedContainer.innerHTML += `<div class="bg-amber-50 border border-amber-200 p-2.5 rounded-xl text-xs font-bold text-amber-800">⚠️ Page ${p}: Unidentified sheet (Barcode unreadable).</div>`;
+                            page.cleanup();
+                            continue;
+                        }
+                    }
+
+                    const rollNo = String(student.rollNo || "").trim().toUpperCase();
+                    const groupData = getStudentGroupAndStructure(student);
+
+                    // 2. Extract Bubble Grid Answers
                     let responses = {};
                     let allQuestions = [];
                     groupData.struct.forEach(sec => {
@@ -854,11 +875,10 @@ Supports:
                             for (let opt = 1; opt <= 4; opt++) {
                                 const x = col_x + 35 + ((opt - 1) * 18.0);
                                 try {
-                                    // FIX: Increased search radius to 8.0 to handle physical scan drift
                                     const imgData = ctx.getImageData(x - 8.0, current_y - 8.0, 16, 16);
                                     let darkPixels = 0, total = 0;
-                                    for (let p = 0; p < imgData.data.length; p += 4) {
-                                        if ((imgData.data[p] + imgData.data[p+1] + imgData.data[p+2]) / 3 < 140) darkPixels++;
+                                    for (let px = 0; px < imgData.data.length; px += 4) {
+                                        if ((imgData.data[px] + imgData.data[px+1] + imgData.data[px+2]) / 3 < 140) darkPixels++;
                                         total++;
                                     }
                                     rowDarkness.push({ opt: String(opt), darkness: darkPixels / total });
@@ -869,7 +889,6 @@ Supports:
                             let others = rowDarkness.filter(o => o.opt !== maxObj.opt);
                             let avgOthers = others.reduce((sum, o) => sum + o.darkness, 0) / (others.length || 1);
 
-                            // FIX: Lowered absolute floor to 0.15 to reliably catch faint physical pen marks
                             if (maxObj.darkness > 0.15 && maxObj.darkness > (avgOthers * 1.25)) {
                                 responses[String(q)] = maxObj.opt;
                             }
@@ -877,9 +896,9 @@ Supports:
                         });
                     });
 
-                    btn.innerText = `☁️ Uploading Sheet ${i + 1}...`;
+                    // 3. Split & Upload PDF slice to Storage
                     const singleDoc = await window.PDFLib.PDFDocument.create();
-                    const [copiedPage] = await singleDoc.copyPages(splitPdf, [i]);
+                    const [copiedPage] = await singleDoc.copyPages(splitPdf, [p - 1]);
                     singleDoc.addPage(copiedPage);
                     const pdfBytes = await singleDoc.save();
                     
@@ -895,11 +914,25 @@ Supports:
                         pdfUrl: pdfUrl
                     });
 
+                    // Format answers cleanly for the live UI feed (e.g., Q1 - 4, Q2 - 8)
+                    const ansFormatted = Object.entries(responses)
+                        .map(([q, a]) => `<span class="bg-white px-1.5 py-0.5 rounded border border-slate-200 font-mono">Q${q} - <strong class="text-blue-600">${a}</strong></span>`)
+                        .join(' ') || '<span class="text-slate-400 italic">No bubbles marked</span>';
+
+                    feedContainer.innerHTML += `
+                        <div class="bg-slate-50 border border-slate-200 p-3 rounded-2xl flex flex-col gap-1.5 shadow-xs">
+                            <div class="flex justify-between items-center">
+                                <span class="font-black text-slate-900 text-xs">Roll No: #${rollNo} <span class="text-slate-500 font-bold uppercase text-[10px]">(${student.name})</span></span>
+                                <span class="bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded text-[9px] font-black uppercase">Scanned Successfully</span>
+                            </div>
+                            <div class="flex flex-wrap gap-1 text-[11px]">${ansFormatted}</div>
+                        </div>
+                    `;
+                    badge.innerText = `${extractedPayload.length} Scanned`;
                     page.cleanup(); 
                 }
 
-                btn.innerText = "⚡ Compiling & Saving Grades...";
-                
+                btn.innerText = "⚡ Committing Grades to Database...";
                 const response = await fetch("https://asia-south1-shop-portal-bbbbb.cloudfunctions.net/evaluateRoomOMRBatch", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -916,8 +949,7 @@ Supports:
 
                 btn.innerText = orig; 
                 btn.disabled = false;
-                alert(`✅ Local Scan Complete! Successfully evaluated ${result.evaluatedCount} student sheets locally.`);
-                closeRoomUploadModal();
+                alert(`✅ Scan & Evaluation Complete! Successfully processed ${result.evaluatedCount} sheets.`);
                 loadRoomsForDate(); 
 
             } catch(e) {
