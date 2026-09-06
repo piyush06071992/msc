@@ -375,10 +375,6 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 }
 
 // Helper Function for Generating Flawless OMR HTML Template
-// Helper Function for Generating Flawless OMR HTML Template
-// Helper Function for Generating Flawless OMR HTML Template
-// Helper Function for Generating Flawless OMR HTML Template
-// Helper Function for Generating Flawless OMR HTML Template
 function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     const prettyDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB');
     const rawRoll = String(stu.rollNo || '').trim();
@@ -387,6 +383,7 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
 
     let columnsHtml = "";
 
+    // Convert structure into a flat array of questions
     let allQuestions = [];
     structure.forEach(sec => {
         for (let q = sec.start; q <= sec.end; q++) {
@@ -395,22 +392,30 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     });
 
     let totalQs = allQuestions.length;
+    
+    // STRICT STATIC CHUNKING LOGIC
     let numCols = 3;
-    if (totalQs > 90) numCols = 4;
-    if (totalQs > 135) numCols = 5;
-    if (totalQs > 165) numCols = 6;
-    const MAX_PER_COL = Math.max(22, Math.ceil(totalQs / numCols));
+    let MAX_PER_COL = 25; 
+    
+    if (totalQs === 180) { numCols = 6; MAX_PER_COL = 30; } 
+    else if (totalQs === 120) { numCols = 4; MAX_PER_COL = 30; } 
+    else if (totalQs === 75) { numCols = 3; MAX_PER_COL = 25; } 
+    else {
+        // Fallback for custom exams
+        numCols = Math.ceil(totalQs / 30);
+        MAX_PER_COL = Math.ceil(totalQs / numCols);
+    }
 
     for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
         const chunk = allQuestions.slice(i, i + MAX_PER_COL);
         
-        // Fluid width up to 130px to prevent horizontal A4 overflow
-        columnsHtml += `<div style="flex: 1; display:flex; flex-direction:column; gap: 0; max-width: 130px;">`;
+        // Fluid width up to 125px to fit 6 columns without horizontal A4 overflow
+        columnsHtml += `<div style="flex: 1; display:flex; flex-direction:column; gap: 0; max-width: 125px;">`;
         
         chunk.forEach((item) => {
             const q = item.q;
             
-            // SERVER SAFE CHECKS: Only read variables if they exist (Frontend)
+            // SERVER SAFE CHECKS: Only read variables if they exist (Frontend vs Backend execution)
             const ans = (typeof answerKey !== 'undefined' && answerKey) ? (answerKey[q] || "") : "";
             const bRule = (typeof bonusConfig !== 'undefined' && bonusConfig) ? (bonusConfig[q] || null) : null;
             const adminMode = (typeof isAdmin !== 'undefined' && isAdmin);
@@ -428,27 +433,30 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
                 let optsHtml = "";
                 for (let o = 1; o <= 4; o++) {
                     const isKey = (ans == o);
-                    optsHtml += `<div ${typeof setLiveAnswer !== 'undefined' ? `onclick="setLiveAnswer(${q}, ${o})"` : ''} id="live_q_${q}_opt_${o}" class="omr-bubble ${isKey ? 'key-filled' : ''}" style="width:13px; height:13px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5.5pt; font-weight:bold; color:black; background:white; margin:0 1.5px; cursor:pointer;">${o}</div>`;
+                    // MCQ BUBBLE: Scaled down to 12px
+                    optsHtml += `<div ${typeof setLiveAnswer !== 'undefined' ? `onclick="setLiveAnswer(${q}, ${o})"` : ''} id="live_q_${q}_opt_${o}" class="omr-bubble ${isKey ? 'key-filled' : ''}" style="width:12px; height:12px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5.5pt; font-weight:bold; color:black; background:white; margin:0 1.5px; cursor:pointer;">${o}</div>`;
                 }
-                columnsHtml += `<div style="height: 28px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:20px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div>${bonusBadge}</div>`;
+                // STRICT MCQ ROW: 23px height. Fits 30 rows in ~690px.
+                columnsHtml += `<div style="height: 23px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:20px; font-weight:bold; font-size:7.5pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div>${bonusBadge}</div>`;
             } else {
                 let numericGrid = `<div style="display:flex; gap:1.5px;">`;
                 for (let col = 0; col < 6; col++) {
+                    // NUMERIC BUBBLE: Scaled down to 9px, removed the top blank box entirely
                     numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
-                    numericGrid += `<div style="width:11px; height:11px; border:1px solid black; margin-bottom:2px; background:white;"></div>`; 
                     for (let r = 0; r <= 9; r++) {
-                        numericGrid += `<div style="width:11px; height:11px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4.5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
+                        numericGrid += `<div style="width:9px; height:9px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4.5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
                     }
                     numericGrid += `</div>`;
                 }
                 numericGrid += `</div>`;
 
+                // STRICT NUMERIC ROW: 95px height. Fits 20 MCQs + 5 Numerics in ~935px.
                 columnsHtml += `
-                    <div style="height: 110px; box-sizing: border-box; display:flex; align-items:flex-start; margin-top:4px; border-bottom:1px dashed #cbd5e1;">
-                        <div style="width:20px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; margin-top:12px; color:black;">${q}.</div>
+                    <div style="height: 95px; box-sizing: border-box; display:flex; align-items:flex-start; margin-top:2px; border-bottom:1px dashed #cbd5e1;">
+                        <div style="width:20px; font-weight:bold; font-size:7.5pt; text-align:right; margin-right:4px; margin-top:6px; color:black;">${q}.</div>
                         <div style="display:flex; flex-direction:column;">
                             <div class="no-print" style="display:flex; align-items:center; margin-bottom:2px;">
-                                <input type="text" maxlength="6" ${typeof setLiveNumeric !== 'undefined' ? `oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)"` : ''} class="omr-num-box" style="width:50px; height:14px; font-size:7pt; padding:0;" placeholder="Ans" value="${ans}" />
+                                <input type="text" maxlength="6" ${typeof setLiveNumeric !== 'undefined' ? `oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)"` : ''} class="omr-num-box" style="width:40px; height:12px; font-size:6pt; padding:0;" placeholder="Ans" value="${ans}" />
                                 ${bonusBadge}
                             </div>
                             ${numericGrid}
@@ -469,7 +477,8 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
 
             <div style="border:2px solid black; padding:8px; margin: 45px; box-sizing:border-box; display:flex; flex-direction:column; background:white; height: calc(100% - 90px); font-family:Arial, sans-serif; position: relative; z-index: 10;">
                 
-                <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:6px; margin-bottom:16px; color:black; gap:8px;">
+                <!-- TOP HEADER BLOCK -->
+                <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:6px; margin-bottom:12px; color:black; gap:8px;">
                     <div style="flex:1; display:flex; flex-direction:column; border:1.5px solid black; background:white; box-sizing:border-box;">
                         <div style="font-weight:bold; font-size:8pt; padding:3px 4px; border-bottom:1.5px solid black;">${prettyDate} | ${examName}</div>
                         <div style="padding:2px 4px; border-bottom:1.5px solid black;">
@@ -486,28 +495,28 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
                                 <div style="font-size:8pt; font-weight:bold; min-height:12px;">${stu.section || ''}</div>
                             </div>
                         </div>
-                        <div style="display:flex; flex:1; min-height:28px;">
+                        <div style="display:flex; flex:1; min-height:24px;">
                             <div style="flex:1; border-right:1.5px solid black; padding:2px 4px; display:flex; flex-direction:column;">
-                                <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Student Sign</div>
+                                <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Student Sign</div>
                             </div>
                             <div style="flex:1; padding:2px 4px; display:flex; flex-direction:column;">
-                                <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div>
+                                <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div>
                             </div>
                         </div>
                     </div>
                     
                     <div style="flex:1.2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
-                        <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="30" jsbarcode-width="1.8" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:4px;"></svg>
-                        <h1 style="font-size:16pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0; color:black;">MINERVA STUDY CIRCLE</h1>
+                        <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="25" jsbarcode-width="1.8" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:4px;"></svg>
+                        <h1 style="font-size:15pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0; color:black;">MINERVA STUDY CIRCLE</h1>
                     </div>
 
                     <div style="border:1.5px solid black; padding:4px 6px; display:flex; flex-direction:column; align-items:center; background:white; flex-shrink:0;">
-                        <div style="font-size:7pt; font-weight:bold; text-transform:uppercase; margin-bottom:4px;">Roll Number</div>
-                        <div style="display:flex; gap:2px; justify-content:center;">
+                        <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase; margin-bottom:4px;">Roll Number</div>
+                        <div style="display:flex; gap:1.5px; justify-content:center;">
                             ${rollDigits.map((digit) => `
                                 <div style="display:flex; flex-direction:column; gap:1.5px; align-items:center;">
-                                    <div style="width:11px; height:11px; border:1px solid black; margin-bottom:2px; font-size:6pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
-                                    ${[...Array(10)].map((_, r) => `<div style="width:11px; height:11px; font-size:4.5pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;">${r}</div>`).join('')}
+                                    <div style="width:10px; height:10px; border:1px solid black; margin-bottom:2px; font-size:5pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
+                                    ${[...Array(10)].map((_, r) => `<div style="width:10px; height:10px; font-size:4.5pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;">${r}</div>`).join('')}
                                 </div>
                             `).join('')}
                         </div>
