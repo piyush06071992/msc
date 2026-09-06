@@ -478,7 +478,7 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     `;
 }
 
-// Helper to render individual section columns cleanly
+// Helper to render individual section columns cleanly with non-overlapping numeric blocks
 function renderOMRColumn(chunk) {
     let colHtml = `<div style="flex: 1; display:flex; flex-direction:column; gap: 0; max-width: 120px;">`;
     
@@ -505,24 +505,33 @@ function renderOMRColumn(chunk) {
             }
             colHtml += `<div style="height: 21px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div>${bonusBadge}</div>`;
         } else {
-            let numericGrid = `<div style="display:flex; gap:1px;">`;
-            for (let col = 0; col < 6; col++) {
-                numericGrid += `<div style="display:flex; flex-direction:column; gap:0.5px; align-items:center;">`;
+            // 4 Separate small write-boxes for digits
+            let digitBoxes = `<div style="display:flex; gap:1.5px;">`;
+            for (let b = 0; b < 4; b++) {
+                digitBoxes += `<div style="width:11px; height:13px; border:1px solid black; background:white;"></div>`;
+            }
+            digitBoxes += `</div>`;
+
+            // 4 Sub-columns of 0-9 bubbles beneath the boxes
+            let numericGrid = `<div style="display:flex; gap:3px;">`;
+            for (let col = 0; col < 4; col++) {
+                numericGrid += `<div style="display:flex; flex-direction:column; gap:2px; align-items:center;">`;
                 for (let r = 0; r <= 9; r++) {
-                    numericGrid += `<div style="width:8px; height:8px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
+                    numericGrid += `<div style="width:10px; height:10px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
                 }
                 numericGrid += `</div>`;
             }
             numericGrid += `</div>`;
 
+            // Strict 130px height allocated per numeric question to eliminate any overlap
             colHtml += `
-                <div style="height: 78px; box-sizing: border-box; display:flex; align-items:flex-start; margin-top:1px; border-bottom:1px dashed #cbd5e1;">
-                    <div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; margin-top:4px; color:black;">${q}.</div>
-                    <div style="display:flex; flex-direction:column;">
-                        <div class="no-print" style="display:flex; align-items:center; margin-bottom:1px;">
-                            <input type="text" maxlength="6" ${typeof setLiveNumeric !== 'undefined' ? `oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)"` : ''} class="omr-num-box" style="width:35px; height:11px; font-size:6pt; padding:0;" placeholder="Ans" value="${ans}" />
-                            ${bonusBadge}
-                        </div>
+                <div style="height: 130px; box-sizing: border-box; display:flex; flex-direction:column; justify-content:flex-start; padding-top:4px; border-bottom:1px dashed #cbd5e1;">
+                    <div style="display:flex; align-items:center; margin-bottom:4px;">
+                        <div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div>
+                        ${digitBoxes}
+                        ${adminMode ? `<div class="no-print" style="margin-left:4px;"><input type="text" maxlength="4" ${typeof setLiveNumeric !== 'undefined' ? `oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)"` : ''} class="omr-num-box" style="width:30px; height:11px; font-size:6pt; padding:0;" placeholder="Ans" value="${ans}" />${bonusBadge}</div>` : ''}
+                    </div>
+                    <div style="padding-left:21px;">
                         ${numericGrid}
                     </div>
                 </div>
