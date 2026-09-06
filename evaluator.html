@@ -839,21 +839,53 @@ Supports:
             event.target.value = "";
         }
 
-        function parseOmrCanvasPixels(imgData, width, height) {
+      function parseOmrCanvasPixels(imgData, width, height) {
             const data = imgData.data;
-            const isDark = (xPercent, yPercent) => {
-                let px = Math.floor((xPercent / 100) * width);
-                let py = Math.floor((yPercent / 100) * height);
+
+            // 1. ANCHOR CORNER DETECTION: Scan canvas for the 4 printed black corner boxes
+            // to dynamically determine the exact bounding box of the OMR sheet.
+            let minX = width, maxX = 0, minY = height, maxY = 0;
+            let foundAnchors = 0;
+
+            // Simple block-density scanner for corner anchors
+            const stepX = Math.floor(width / 50);
+            const stepY = Math.floor(height / 50);
+
+            for (let y = 0; y < height; y += stepY) {
+                for (let x = 0; x < width; x += stepX) {
+                    let idx = (y * width + x) * 4;
+                    let brightness = (data[idx] + data[idx+1] + data[idx+2]) / 3;
+                    if (brightness < 50) { // Deep black anchor block
+                        if (x < width * 0.25 && y < height * 0.25) { foundAnchors++; minX = Math.min(minX, x); minY = Math.min(minY, y); }
+                        if (x > width * 0.75 && y < height * 0.25) { foundAnchors++; maxX = Math.max(maxX, x); }
+                        if (x < width * 0.25 && y > height * 0.75) { foundAnchors++; maxY = Math.max(maxY, y); }
+                    }
+                }
+            }
+
+            // Fallback bounding box if anchors are obscured
+            const sheetLeft = minX < width * 0.2 ? minX : width * 0.05;
+            const sheetRight = maxX > width * 0.8 ? maxX : width * 0.95;
+            const sheetTop = minY < height * 0.2 ? minY : height * 0.05;
+            const sheetBottom = maxY > height * 0.8 ? maxY : height * 0.95;
+
+            const sheetWidth = sheetRight - sheetLeft;
+            const sheetHeight = sheetBottom - sheetTop;
+
+            const isDarkByBox = (relX, relY) => {
+                let px = Math.floor(sheetLeft + (relX / 100) * sheetWidth);
+                let py = Math.floor(sheetTop + (relY / 100) * sheetHeight);
+                if (px < 0 || px >= width || py < 0 || py >= height) return false;
                 let idx = (py * width + px) * 4;
-                let r = data[idx], g = data[idx+1], b = data[idx+2];
-                return (r + g + b) / 3 < 120;
+                return (data[idx] + data[idx+1] + data[idx+2]) / 3 < 125;
             };
 
+            // 2. EXTRACT ROLL NUMBER relative to detected layout box
             let rollNoDigits = "";
             for (let col = 0; col < 6; col++) {
                 let foundDigit = "0";
                 for (let r = 0; r <= 9; r++) {
-                    if (isDark(72 + (col * 2.2), 18 + (r * 1.5))) {
+                    if (isDarkByBox(73 + (col * 2.3), 16 + (r * 1.4))) {
                         foundDigit = String(r);
                         break;
                     }
@@ -861,15 +893,16 @@ Supports:
                 rollNoDigits += foundDigit;
             }
 
+            // 3. EXTRACT MCQ RESPONSES relative to detected layout box
             let responses = {};
             for (let q = 1; q <= 75; q++) {
                 let colIdx = Math.floor((q - 1) / 25);
                 let rowInCol = (q - 1) % 25;
-                let baseX = 10 + (colIdx * 28);
-                let baseY = 35 + (rowInCol * 2.4);
+                let baseX = 12 + (colIdx * 27);
+                let baseY = 34 + (rowInCol * 2.3);
 
                 for (let opt = 1; opt <= 4; opt++) {
-                    if (isDark(baseX + (opt * 1.2), baseY)) {
+                    if (isDarkByBox(baseX + (opt * 1.2), baseY)) {
                         responses[String(q)] = String(opt);
                         break;
                     }
