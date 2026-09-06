@@ -375,161 +375,123 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 }
 
 // Helper Function for Generating Flawless OMR HTML Template
+// Helper Function for Generating Flawless OMR HTML Template
 function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     const prettyDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB');
     const rawRoll = String(stu.rollNo || '').trim();
     const cleanRoll = rawRoll.replace(/\D/g, '') || '0000';
     const rollDigits = cleanRoll.split('');
 
-    // DYNAMIC ENGINE: Decide layout mode based on whether there are numeric questions
     const isPureMCQ = !structure.some(sec => sec.type !== 'MCQ');
     let columnsHtml = "";
 
-    if (isPureMCQ) {
-        // --- MODE 1: PURE MCQ (Continuous Flow) ---
-        let allQuestions = [];
-        structure.forEach(sec => {
-            for (let q = sec.start; q <= sec.end; q++) {
-                allQuestions.push({ q: q, type: sec.type });
-            }
-        });
+    // Chunking Logic (Same as before, but rendering with STRICT heights)
+    let allQuestions = [];
+    structure.forEach(sec => {
+        for (let q = sec.start; q <= sec.end; q++) {
+            allQuestions.push({ q: q, type: sec.type, subject: sec.subject });
+        }
+    });
 
-        let totalQs = allQuestions.length;
-        // Shift to 4 columns for >60 questions to leave generous room for A4 margins
-        let numCols = totalQs > 135 ? 5 : (totalQs > 60 ? 4 : 3);
-        const MAX_PER_COL = Math.ceil(totalQs / numCols);
+    let totalQs = allQuestions.length;
+    let numCols = 3;
+    if (totalQs > 90) numCols = 4;
+    if (totalQs > 135) numCols = 5;
+    if (totalQs > 165) numCols = 6;
+    const MAX_PER_COL = Math.max(22, Math.ceil(totalQs / numCols));
 
-        for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
-            const chunk = allQuestions.slice(i, i + MAX_PER_COL);
-            columnsHtml += `<div style="flex:1; display:flex; flex-direction:column; min-width:0; justify-content:space-between;">`;
+    let currentSubject = "";
+
+    for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
+        const chunk = allQuestions.slice(i, i + MAX_PER_COL);
+        
+        // STRICT COLUMN: No flex-grow, strict width
+        columnsHtml += `<div style="width: 170px; display:flex; flex-direction:column; gap: 0;">`;
+        
+        chunk.forEach((item, idx) => {
+            const q = item.q;
             
-            chunk.forEach(item => {
-                const q = item.q;
+            // Add Subject Header if it changes
+            if (item.subject !== currentSubject || idx === 0) {
+                currentSubject = item.subject;
+                columnsHtml += `<div style="height: 24px; box-sizing: border-box; font-weight:900; font-size:8pt; text-transform:uppercase; border-bottom:1.5px solid black; margin:0 0 4px 0; text-align:center; background:#f8f8f8; padding-top:4px; color:black;">${currentSubject} ${idx > 0 ? '(Contd.)' : ''}</div>`;
+            }
+
+            if (item.type === 'MCQ') {
                 let optsHtml = "";
                 for (let o = 1; o <= 4; o++) {
-                    optsHtml += `<div style="width:14px; height:14px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:6pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
+                    optsHtml += `<div style="width:14px; height:14px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:6pt; font-weight:bold; color:black; background:white; margin:0 2px;">${o}</div>`;
                 }
-                columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:4px;"><div style="width:18px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
-            });
-            columnsHtml += `</div>`;
-        }
-    } else {
-        // --- MODE 2: MIXED/NUMERIC (Option A: Section-Based Split) ---
-        structure.forEach(sec => {
-            columnsHtml += `<div style="flex:1; display:flex; flex-direction:column; min-width:0; justify-content:flex-start;">`;
-            
-            let questions = [];
-            for (let q = sec.start; q <= sec.end; q++) questions.push(q);
-
-            questions.forEach(q => {
-                if (sec.type === 'MCQ') {
-                    let optsHtml = "";
-                    for (let o = 1; o <= 4; o++) {
-                        optsHtml += `<div style="width:13px; height:13px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5.5pt; font-weight:bold; color:black; background:white; margin:0 1px;">${o}</div>`;
-                    }
-                    columnsHtml += `<div style="display:flex; align-items:center; margin-bottom:5px;"><div style="width:18px; font-weight:bold; font-size:7.5pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
-                } else {
-                    let numericGrid = `<div style="display:flex; gap:1.5px;">`;
-                    for (let col = 0; col < 6; col++) {
-                        numericGrid += `<div style="display:flex; flex-direction:column; gap:0.5px; align-items:center;">`;
-                        numericGrid += `<div style="width:10px; height:10px; border:1px solid black; margin-bottom:1px; background:white;"></div>`; 
-                        for (let r = 0; r <= 9; r++) {
-                            numericGrid += `<div style="width:10px; height:10px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:4.5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
-                        }
-                        numericGrid += `</div>`;
+                // STRICT MCQ ROW: Exactly 32px height
+                columnsHtml += `<div style="height: 32px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:20px; font-weight:bold; font-size:8pt; text-align:right; margin-right:6px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div></div>`;
+            } else {
+                let numericGrid = `<div style="display:flex; gap:2px;">`;
+                for (let col = 0; col < 6; col++) {
+                    numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
+                    numericGrid += `<div style="width:12px; height:12px; border:1px solid black; margin-bottom:2px; background:white;"></div>`; 
+                    for (let r = 0; r <= 9; r++) {
+                        numericGrid += `<div style="width:12px; height:12px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
                     }
                     numericGrid += `</div>`;
-
-                    columnsHtml += `
-                        <div style="display:flex; align-items:flex-start; margin-bottom:8px; break-inside:avoid;">
-                            <div style="width:18px; font-weight:bold; font-size:7.5pt; text-align:right; margin-right:3px; margin-top:10px; color:black;">${q}.</div>
-                            ${numericGrid}
-                        </div>
-                    `;
                 }
-            });
-            columnsHtml += `</div>`;
+                numericGrid += `</div>`;
+
+                // STRICT NUMERIC ROW: Exactly 125px height
+                columnsHtml += `
+                    <div style="height: 125px; box-sizing: border-box; display:flex; align-items:flex-start; margin-top:4px; border-bottom:1px dashed #cbd5e1;">
+                        <div style="width:20px; font-weight:bold; font-size:8pt; text-align:right; margin-right:6px; margin-top:14px; color:black;">${q}.</div>
+                        ${numericGrid}
+                    </div>
+                `;
+            }
         });
+        columnsHtml += `</div>`;
     }
 
-  return `
+    return `
         <div class="omr-print-page" style="position: relative; background: white;">
-            <!-- FIDUCIAL MARKERS FOR COMPUTER VISION (OPENCV) ALIGNMENT -->
+            <!-- FIDUCIAL MARKERS -->
             <div style="position: absolute; top: 15px; left: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
             <div style="position: absolute; top: 15px; right: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
             <div style="position: absolute; bottom: 15px; left: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
             <div style="position: absolute; bottom: 15px; right: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
 
-            <div style="border:2px solid black; padding:8px; margin: 45px; box-sizing:border-box; display:flex; flex-direction:column; background:white; height: calc(100% - 90px); font-family:Arial, sans-serif; justify-content:space-between; position: relative; z-index: 10;">
+            <div style="border:2px solid black; padding:8px; margin: 45px; box-sizing:border-box; display:flex; flex-direction:column; background:white; height: calc(100% - 90px); font-family:Arial, sans-serif; position: relative; z-index: 10;">
                 
-                <!-- TOP BLOCK: 3 Columns -> Left: Details, Center: Branding, Right: Roll Number -->
-                <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:4px; margin-bottom:12px; color:black; gap:8px;">
-                    
-                    <!-- Left: Candidate Details (Solid Unified Grid without gaps) -->
-                    <div style="flex:1; display:flex; flex-direction:column; border:1.5px solid black; background:white; box-sizing:border-box;">
-                        <div style="font-weight:bold; font-size:8pt; padding:3px 4px; border-bottom:1.5px solid black;">${prettyDate}</div>
-                        
-                        <div style="padding:2px 4px; border-bottom:1.5px solid black;">
-                            <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase; color:#000;">Candidate Name</div>
-                            <div style="font-size:10pt; font-weight:900; text-transform:uppercase; color:black; line-height:1.2; min-height:14px;">${stu.name || ''}</div>
-                        </div>
-                        
-                        <div style="display:flex; border-bottom:1.5px solid black;">
-                            <div style="flex:1; border-right:1.5px solid black; padding:2px 4px;">
-                                <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Class</div>
-                                <div style="font-size:8pt; font-weight:bold; min-height:12px;">${stu.className || ''}</div>
-                            </div>
-                            <div style="flex:1; padding:2px 4px;">
-                                <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Section</div>
-                                <div style="font-size:8pt; font-weight:bold; min-height:12px;">${stu.section || ''}</div>
-                            </div>
-                        </div>
-                        
-                        <div style="display:flex; flex:1; min-height:28px;">
-                            <div style="flex:1; border-right:1.5px solid black; padding:2px 4px; display:flex; flex-direction:column;">
-                                <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Student Sign</div>
-                            </div>
-                            <div style="flex:1; padding:2px 4px; display:flex; flex-direction:column;">
-                                <div style="font-size:6.5pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div>
-                            </div>
-                        </div>
+                <!-- TOP HEADER BLOCK -->
+                <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:6px; margin-bottom:16px; color:black; gap:10px;">
+                    <div style="flex:1; border:1.5px solid black; padding:4px; background:white;">
+                        <div style="font-weight:bold; font-size:8pt; border-bottom:1.5px solid black; padding-bottom:2px; margin-bottom:2px;">${prettyDate} | ${examName}</div>
+                        <div style="font-size:10pt; font-weight:900; text-transform:uppercase;">${stu.name || ''}</div>
+                        <div style="font-size:8pt; font-weight:bold; margin-top:4px;">Class: ${stu.className || ''} | Sec: ${stu.section || ''}</div>
                     </div>
                     
-             <!-- Center: Barcode & Branding -->
                     <div style="flex:1.2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
-                        <!-- BARCODE QUIET ZONE -->
-                        <div style="background: white; padding: 10px; margin-bottom: 6px; border: 1px dashed #ccc; display: inline-block;">
-                            <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="40" jsbarcode-width="2" jsbarcode-displayvalue="false" jsbarcode-margin="10" jsbarcode-background="#ffffff"></svg>
-                        </div>
-                        <h1 style="font-size:16pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0 0 4px 0; line-height:1; color:black;">MINERVA STUDY CIRCLE</h1>
-                        <div style="font-size:9pt; font-family:monospace; font-weight:bold; background:#eee; padding:2px 8px; border:1.5px solid black; text-transform:uppercase;">
-                        </div>
+                        <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="35" jsbarcode-width="2" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:4px;"></svg>
+                        <h1 style="font-size:16pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0; color:black;">MINERVA STUDY CIRCLE</h1>
                     </div>
 
-                    <!-- Right: Roll Number Grid (Unmarked Bubbles) -->
                     <div style="border:1.5px solid black; padding:4px 6px; display:flex; flex-direction:column; align-items:center; background:white; flex-shrink:0;">
                         <div style="font-size:7pt; font-weight:bold; text-transform:uppercase; margin-bottom:4px;">Roll Number</div>
                         <div style="display:flex; gap:2px; justify-content:center;">
                             ${rollDigits.map((digit) => `
                                 <div style="display:flex; flex-direction:column; gap:1.5px; align-items:center;">
-                                    <div style="width:10px; height:10px; border:1px solid black; margin-bottom:2px; font-size:6pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
-                                    ${[...Array(10)].map((_, r) => `
-                                        <div style="width:10px; height:10px; font-size:4.5pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;">${r}</div>
-                                    `).join('')}
+                                    <div style="width:12px; height:12px; border:1px solid black; margin-bottom:2px; font-size:6pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
+                                    ${[...Array(10)].map((_, r) => `<div style="width:12px; height:12px; font-size:5pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;"></div>`).join('')}
                                 </div>
                             `).join('')}
                         </div>
                     </div>
                 </div>
 
-                <!-- Questions Container -->
-                <div style="display:flex; flex-wrap:nowrap; gap:12px; width:100%; flex-grow:1; justify-content:space-between;">
+                <!-- STRICT GEOMETRY QUESTIONS CONTAINER -->
+                <!-- Removed space-between. Used fixed gap to ensure exact X distances -->
+                <div style="display:flex; flex-wrap:nowrap; gap:25px; width:100%; justify-content:center;">
                     ${columnsHtml}
                 </div>
 
-                <!-- Seat Number at Footer -->
-                <div style="border-top:1.5px solid black; padding-top:2px; margin-top:2px; display:flex; justify-content:center; align-items:center;">
-                    <span style="font-family:monospace; background:black; color:white; padding:1px 12px; border-radius:3px; font-size:8pt; font-weight:900; letter-spacing:1px; text-transform:uppercase;">SEAT NUMBER: ${seatId}</span>
+                <div style="border-top:1.5px solid black; padding-top:2px; margin-top:auto; display:flex; justify-content:center;">
+                    <span style="font-family:monospace; background:black; color:white; padding:1px 12px; border-radius:3px; font-size:8pt; font-weight:900;">SEAT NUMBER: ${seatId}</span>
                 </div>
             </div>
         </div>
