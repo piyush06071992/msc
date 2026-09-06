@@ -239,6 +239,69 @@ exports.sendInstantPushAlerts = onDocumentCreated({
     return null;
 });
 
+// =======================================================
+// --- LIGHTWEIGHT OMR BATCH EVALUATOR (JSON ONLY) ---
+// =======================================================
+exports.evaluateRoomOMRBatch = onRequest({
+    region: "asia-south1",
+    memory: "1GiB", 
+    timeoutSeconds: 120,
+    cors: true
+}, async (req, res) => {
+    const { center, date, roomName, payload } = req.body;
+    
+    if (!center || !date || !roomName || !Array.isArray(payload)) {
+        return res.status(400).send({ error: "Missing required parameters or invalid payload format." });
+    }
+
+    try {
+        const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
+        const batch = admin.firestore().batch();
+        let firestoreMapUpdate = {}; 
+        
+        let keysCache = {};
+
+        for (const data of payload) {
+            const { rollNo, groupId, responses, pdfUrl } = data;
+            if (!rollNo || !groupId) continue;
+
+            if (!keysCache[groupId]) {
+                const keyDoc = await admin.firestore().collection("exam_answer_keys").doc(groupId).get();
+                keysCache[groupId] = keyDoc.exists ? keyDoc.data() : { answers: {}, structure: [], bonusConfig: {} };
+            }
+
+            const submissionRef = admin.firestore().collection("omr_submissions").doc(`${groupId}_${rollNo}`);
+            batch.set(submissionRef, {
+                groupId: groupId,
+                rollNo: rollNo,
+                responses: responses || {},
+                updatedAt: Date.now()
+            }, { merge: true });
+
+            if (pdfUrl) {
+                firestoreMapUpdate[`roomScans.${rollNo}`] = pdfUrl;
+            }
+        }
+
+        await batch.commit();
+
+        if (Object.keys(firestoreMapUpdate).length > 0) {
+            await admin.firestore().collection(`${prefix}exam_omr_mappings`).doc(`${center}_${date}`).set(
+                { updatedAt: Date.now(), ...firestoreMapUpdate }, 
+                { merge: true }
+            );
+        }
+
+        res.status(200).send({ success: true, evaluatedCount: payload.length });
+    } catch (err) {
+        console.error("[JSON OMR Evaluator Error]:", err);
+        res.status(500).send({ error: err.message });
+    }
+});
+
+// =======================================================
+// --- PDF & HTML GENERATOR UTILITIES ---
+// =======================================================
 async function loadPdfBytes(pdfUrl) {
     if (pdfUrl.includes("firebasestorage.googleapis.com")) {
         try {
@@ -374,7 +437,6 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
     return false;
 }
 
-// Helper Function for Generating Flawless OMR HTML Template
 function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     const prettyDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB');
     const rawRoll = String(stu.rollNo || '').trim();
@@ -536,253 +598,6 @@ function renderOMRColumn(chunk) {
     colHtml += `</div>`;
     return colHtml;
 }
-
-// =======================================================
-// --- AUTOMATED OMR SCANNER & ROOM PDF SPLITTER ---
-// =======================================================
-async function autoScanStudentScanPage(singlePdfBytes, structure) {
-    let responses = {};
-    try {
-        const executablePath = await chromium.executablePath();
-        const browser = await puppeteer.launch({
-            args: chromium.args,
-            defaultViewport: { width: 1240, height: 1754 },
-            executablePath: executablePath,
-            headless: true,
-        });
-        const page = await browser.newPage();
-        
-        const base64 = Buffer.from(singlePdfBytes).toString('base64');
-        await page.setContent(`
-            <html>
-            <body style="margin:0;background:white;display:flex;justify-content:center;align-items:center;">
-                <embed src="data:application/pdf;base64,${base64}" width="1240" height="1754" type="application/pdf">
-            </body>
-            </html>
-        `, { waitUntil: 'networkidle0' });
-
-        const screenshotBuffer = await page.screenshot({ type: 'png' });
-        await browser.close();
-
-        const browser2 = await puppeteer.launch({
-            args: chromium.args,
-            defaultViewport: { width: 1240, height: 1754 },
-            executablePath: await chromium.executablePath(),
-            headless: true,
-        });
-        const page2 = await browser2.newPage();
-        const screenshotBase64 = screenshotBuffer.toString('base64');
-
-        responses = await page2.evaluate(async (struct, imgData) => {
-            return new Promise((resolve) => {
-                const img = new Image();
-                img.src = 'data:image/png;base64,' + imgData;
-                img.onload = () => {
-                    const canvas = document.createElement('canvas');
-                    canvas.width = img.width;
-                    canvas.height = img.height;
-                    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-                    ctx.drawImage(img, 0, 0);
-
-                    let res = {};
-
-                    let allQuestions = [];
-                    struct.forEach(sec => {
-                        for (let q = sec.start; q <= sec.end; q++) {
-                            allQuestions.push({ q: q, type: sec.type });
-                        }
-                    });
-
-                    let totalQs = allQuestions.length;
-                    let numCols = totalQs > 135 ? 5 : (totalQs > 60 ? 4 : 3);
-                    const MAX_PER_COL = Math.ceil(totalQs / numCols);
-
-                    let colChunks = [];
-                    for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
-                        colChunks.push(allQuestions.slice(i, i + MAX_PER_COL));
-                    }
-
-                    const margin_left = 115;
-                    const available_width = 1010;
-                    const colWidth = available_width / colChunks.length;
-                    
-                    const startY = 355.0;
-                    const rowStep = 29.2;
-                    const optSpacing = 18.0;
-                    const bubbleRadius = 6.0;
-
-                    colChunks.forEach((chunk, colIdx) => {
-                        let col_x = margin_left + (colIdx * colWidth);
-                        let current_y = startY;
-
-                        chunk.forEach(item => {
-                            let q = item.q;
-                            let rowDarkness = [];
-
-                            for (let opt = 1; opt <= 4; opt++) {
-                                const x = col_x + 35 + ((opt - 1) * optSpacing);
-                                try {
-                                    const imgData = ctx.getImageData(x - bubbleRadius, current_y - bubbleRadius, bubbleRadius * 2, bubbleRadius * 2);
-                                    let darkPixels = 0, total = 0;
-                                    for (let i = 0; i < imgData.data.length; i += 4) {
-                                        if ((imgData.data[i] + imgData.data[i+1] + imgData.data[i+2]) / 3 < 140) {
-                                            darkPixels++;
-                                        }
-                                        total++;
-                                    }
-                                    rowDarkness.push({ opt: String(opt), darkness: darkPixels / total });
-                                } catch(e) {
-                                    rowDarkness.push({ opt: String(opt), darkness: 0 });
-                                }
-                            }
-
-                            // Winner-Dominance / Relative Contrast Rule to prevent blank sheets from triggering false positives
-                            let maxObj = rowDarkness.reduce((prev, curr) => (curr.darkness > prev.darkness) ? curr : prev, rowDarkness[0]);
-                            let others = rowDarkness.filter(o => o.opt !== maxObj.opt);
-                            let avgOthers = others.reduce((sum, o) => sum + o.darkness, 0) / (others.length || 1);
-
-                            // Absolute minimum floor for faint pens (0.30) AND must be 35% darker than sibling empty circles
-                            if (maxObj.darkness > 0.30 && maxObj.darkness > (avgOthers * 1.35)) {
-                                res[String(q)] = maxObj.opt;
-                            }
-
-                            current_y += rowStep;
-                        });
-                    });
-
-                    resolve(res);
-                };
-            });
-        }, structure, screenshotBase64);
-
-        await browser2.close();
-    } catch (err) {
-        console.warn("[Automated OMR Scanner Warning]:", err.message);
-    }
-    return responses;
-}
-
-exports.processAndSplitRoomPDF = onRequest({
-    region: "asia-south1",
-    memory: "2GiB",
-    timeoutSeconds: 300,
-    cors: true
-}, async (req, res) => {
-    const { center, date, roomName, pdfUrl } = req.body;
-    if (!center || !date || !roomName || !pdfUrl) {
-        return res.status(400).send({ error: "Missing required parameters." });
-    }
-
-    try {
-        const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
-        const allocDoc = await admin.firestore().collection(`${prefix}exam_seating_allocations`).doc(`${center}_${date}`).get();
-        
-        if (!allocDoc.exists) {
-            return res.status(404).send({ error: "Seating allocations not found for this date." });
-        }
-
-        const allocations = allocDoc.data().allocations || {};
-        let roomOccupants = [];
-        Object.keys(allocations).forEach(sId => {
-            if (sId.toUpperCase().startsWith(`${roomName.toUpperCase()}-`)) {
-                const stu = allocations[sId];
-                if (stu) roomOccupants.push({ seatId: sId, stu });
-            }
-        });
-
-        roomOccupants.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
-
-        const groupSnap = await admin.firestore().collection("admin_paper_groups").where("date", "==", date).get();
-        let dateGroups = [];
-        let groupKeysCache = {};
-
-        for (const doc of groupSnap.docs) {
-            const gData = { id: doc.id, ...doc.data() };
-            dateGroups.push(gData);
-            const kDoc = await admin.firestore().collection("exam_answer_keys").doc(doc.id).get();
-            if (kDoc.exists) {
-                groupKeysCache[doc.id] = kDoc.data().structure || [];
-            }
-        }
-
-        function getStudentGroupId(stu) {
-            if (!stu || !stu.className || !stu.section) return dateGroups[0]?.id || null;
-            const cNorm = String(stu.className).trim().toUpperCase();
-            const sNorm = String(stu.section).trim().toUpperCase();
-
-            const matched = dateGroups.find(g => {
-                const matchesCenter = !g.branches || g.branches.length === 0 || g.branches.includes(center);
-                if (!matchesCenter) return false;
-                return (g.sectionKeys || []).some(sk => {
-                    const parts = sk.split('|');
-                    return parts.length >= 3 && parts[1].trim().toUpperCase() === cNorm && parts[2].trim().toUpperCase() === sNorm;
-                });
-            });
-            return matched ? matched.id : (dateGroups[0]?.id || null);
-        }
-
-        const roomPdfBytes = await loadPdfBytes(pdfUrl);
-        const masterPdf = await PDFDocument.load(roomPdfBytes);
-        const totalPages = masterPdf.getPageCount();
-
-        const bucket = admin.storage().bucket();
-        let mappingResults = {};
-
-        for (let i = 0; i < roomOccupants.length; i++) {
-            if (i >= totalPages) break;
-            const { seatId, stu } = roomOccupants[i];
-            const rollNo = String(stu.rollNo || "").trim().toUpperCase();
-            if (!rollNo) continue;
-
-            const studentGroupId = getStudentGroupId(stu);
-            const studentStructure = groupKeysCache[studentGroupId] || [];
-
-            const singlePdf = await PDFDocument.create();
-            const [copiedPage] = await singlePdf.copyPages(masterPdf, [i]);
-            singlePdf.addPage(copiedPage);
-            const singlePdfBytes = await singlePdf.save();
-
-            const scannedResponses = await autoScanStudentScanPage(singlePdfBytes, studentStructure);
-            
-            if (studentGroupId) {
-                await admin.firestore().collection("omr_submissions").doc(`${studentGroupId}_${rollNo}`).set({
-                    groupId: studentGroupId,
-                    rollNo: rollNo,
-                    responses: scannedResponses,
-                    updatedAt: Date.now()
-                }, { merge: true });
-            }
-
-            const storagePath = `student_scans/${center}/${date}/${rollNo}.pdf`;
-            const fileRef = bucket.file(storagePath);
-            await fileRef.save(Buffer.from(singlePdfBytes), {
-                metadata: { contentType: "application/pdf" }
-            });
-
-            const downloadToken = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
-            await fileRef.setMetadata({
-                metadata: {
-                    firebaseStorageDownloadTokens: downloadToken
-                }
-            });
-
-            const bucketName = bucket.name;
-            const fileUrl = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(storagePath)}?alt=media&token=${downloadToken}`;
-            
-            mappingResults[rollNo] = fileUrl;
-        }
-
-        await admin.firestore().collection(`${prefix}exam_omr_mappings`).doc(`${center}_${date}`).set({
-            roomScans: mappingResults,
-            updatedAt: Date.now()
-        }, { merge: true });
-
-        res.status(200).send({ success: true, count: Object.keys(mappingResults).length });
-    } catch (err) {
-        console.error("[Room PDF Splitter Error]:", err);
-        res.status(500).send({ error: err.message });
-    }
-});
 
 exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
