@@ -378,6 +378,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 // Helper Function for Generating Flawless OMR HTML Template
 // Helper Function for Generating Flawless OMR HTML Template
 // Helper Function for Generating Flawless OMR HTML Template
+// Helper Function for Generating Flawless OMR HTML Template
 function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     const prettyDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB');
     const rawRoll = String(stu.rollNo || '').trim();
@@ -408,15 +409,18 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
         
         chunk.forEach((item) => {
             const q = item.q;
-            const ans = answerKey[q] || "";
-            const bRule = bonusConfig[q] || null;
+            
+            // SERVER SAFE CHECKS: Only read variables if they exist (Frontend)
+            const ans = (typeof answerKey !== 'undefined' && answerKey) ? (answerKey[q] || "") : "";
+            const bRule = (typeof bonusConfig !== 'undefined' && bonusConfig) ? (bonusConfig[q] || null) : null;
+            const adminMode = (typeof isAdmin !== 'undefined' && isAdmin);
             
             let bonusBadge = "";
             if (bRule === 'ALL') {
-                bonusBadge = `<span ${isAdmin ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-amber-500 text-white text-[5.5pt] font-black px-1 py-0.5 rounded cursor-pointer uppercase ml-1 whitespace-nowrap">B:ALL</span>`;
+                bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-amber-500 text-white text-[5.5pt] font-black px-1 py-0.5 rounded cursor-pointer uppercase ml-1 whitespace-nowrap">B:ALL</span>`;
             } else if (bRule === 'ATTEMPTED') {
-                bonusBadge = `<span ${isAdmin ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-purple-600 text-white text-[5.5pt] font-black px-1 py-0.5 rounded cursor-pointer uppercase ml-1 whitespace-nowrap">B:ATT</span>`;
-            } else if (isAdmin) {
+                bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-purple-600 text-white text-[5.5pt] font-black px-1 py-0.5 rounded cursor-pointer uppercase ml-1 whitespace-nowrap">B:ATT</span>`;
+            } else if (adminMode) {
                 bonusBadge = `<span onclick="openBonusModal(${q})" class="bonus-tag no-print text-slate-300 hover:text-amber-500 text-[7.5pt] font-black px-0.5 cursor-pointer ml-1">★</span>`;
             }
 
@@ -424,9 +428,8 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
                 let optsHtml = "";
                 for (let o = 1; o <= 4; o++) {
                     const isKey = (ans == o);
-                    optsHtml += `<div onclick="setLiveAnswer(${q}, ${o})" id="live_q_${q}_opt_${o}" class="omr-bubble ${isKey ? 'key-filled' : ''}" style="width:13px; height:13px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5.5pt; font-weight:bold; color:black; background:white; margin:0 1.5px; cursor:pointer;">${o}</div>`;
+                    optsHtml += `<div ${typeof setLiveAnswer !== 'undefined' ? `onclick="setLiveAnswer(${q}, ${o})"` : ''} id="live_q_${q}_opt_${o}" class="omr-bubble ${isKey ? 'key-filled' : ''}" style="width:13px; height:13px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5.5pt; font-weight:bold; color:black; background:white; margin:0 1.5px; cursor:pointer;">${o}</div>`;
                 }
-                // Locked 28px height prevents vertical bleeding
                 columnsHtml += `<div style="height: 28px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:20px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div>${bonusBadge}</div>`;
             } else {
                 let numericGrid = `<div style="display:flex; gap:1.5px;">`;
@@ -445,7 +448,7 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
                         <div style="width:20px; font-weight:bold; font-size:8pt; text-align:right; margin-right:4px; margin-top:12px; color:black;">${q}.</div>
                         <div style="display:flex; flex-direction:column;">
                             <div class="no-print" style="display:flex; align-items:center; margin-bottom:2px;">
-                                <input type="text" maxlength="6" oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)" class="omr-num-box" style="width:50px; height:14px; font-size:7pt; padding:0;" placeholder="Ans" value="${ans}" />
+                                <input type="text" maxlength="6" ${typeof setLiveNumeric !== 'undefined' ? `oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)"` : ''} class="omr-num-box" style="width:50px; height:14px; font-size:7pt; padding:0;" placeholder="Ans" value="${ans}" />
                                 ${bonusBadge}
                             </div>
                             ${numericGrid}
@@ -459,7 +462,6 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
 
     return `
         <div class="omr-print-page" style="position: relative; background: white;">
-            <!-- FIDUCIAL MARKERS -->
             <div style="position: absolute; top: 15px; left: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
             <div style="position: absolute; top: 15px; right: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
             <div style="position: absolute; bottom: 15px; left: 15px; width: 25px; height: 25px; background: black; z-index: 100;"></div>
@@ -467,7 +469,6 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
 
             <div style="border:2px solid black; padding:8px; margin: 45px; box-sizing:border-box; display:flex; flex-direction:column; background:white; height: calc(100% - 90px); font-family:Arial, sans-serif; position: relative; z-index: 10;">
                 
-                <!-- TOP HEADER BLOCK WITH SIGNATURES -->
                 <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:6px; margin-bottom:16px; color:black; gap:8px;">
                     <div style="flex:1; display:flex; flex-direction:column; border:1.5px solid black; background:white; box-sizing:border-box;">
                         <div style="font-weight:bold; font-size:8pt; padding:3px 4px; border-bottom:1.5px solid black;">${prettyDate} | ${examName}</div>
@@ -513,7 +514,6 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
                     </div>
                 </div>
 
-                <!-- STRICT GEOMETRY QUESTIONS CONTAINER -->
                 <div style="display:flex; flex-wrap:nowrap; gap:12px; width:100%; justify-content:space-between;">
                     ${columnsHtml}
                 </div>
