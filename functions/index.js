@@ -376,20 +376,20 @@ async function compileSingleRoomPackage(center, date, roomName, allocations) {
 
 // Helper Function for Generating Flawless OMR HTML Template
 // Helper Function for Generating Flawless OMR HTML Template
+// Helper Function for Generating Flawless OMR HTML Template
 function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     const prettyDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB');
     const rawRoll = String(stu.rollNo || '').trim();
     const cleanRoll = rawRoll.replace(/\D/g, '') || '0000';
     const rollDigits = cleanRoll.split('');
 
-    const isPureMCQ = !structure.some(sec => sec.type !== 'MCQ');
     let columnsHtml = "";
 
-    // Chunking Logic (Same as before, but rendering with STRICT heights)
+    // Convert structure into a flat array of questions
     let allQuestions = [];
     structure.forEach(sec => {
         for (let q = sec.start; q <= sec.end; q++) {
-            allQuestions.push({ q: q, type: sec.type, subject: sec.subject });
+            allQuestions.push({ q: q, type: sec.type });
         }
     });
 
@@ -400,22 +400,14 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
     if (totalQs > 165) numCols = 6;
     const MAX_PER_COL = Math.max(22, Math.ceil(totalQs / numCols));
 
-    let currentSubject = "";
-
     for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
         const chunk = allQuestions.slice(i, i + MAX_PER_COL);
         
-        // STRICT COLUMN: No flex-grow, strict width
+        // STRICT COLUMN: Fixed width, no flex stretching
         columnsHtml += `<div style="width: 170px; display:flex; flex-direction:column; gap: 0;">`;
         
-        chunk.forEach((item, idx) => {
+        chunk.forEach((item) => {
             const q = item.q;
-            
-            // Add Subject Header if it changes
-            if (item.subject !== currentSubject || idx === 0) {
-                currentSubject = item.subject;
-                columnsHtml += `<div style="height: 24px; box-sizing: border-box; font-weight:900; font-size:8pt; text-transform:uppercase; border-bottom:1.5px solid black; margin:0 0 4px 0; text-align:center; background:#f8f8f8; padding-top:4px; color:black;">${currentSubject} ${idx > 0 ? '(Contd.)' : ''}</div>`;
-            }
 
             if (item.type === 'MCQ') {
                 let optsHtml = "";
@@ -485,7 +477,6 @@ function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
                 </div>
 
                 <!-- STRICT GEOMETRY QUESTIONS CONTAINER -->
-                <!-- Removed space-between. Used fixed gap to ensure exact X distances -->
                 <div style="display:flex; flex-wrap:nowrap; gap:25px; width:100%; justify-content:center;">
                     ${columnsHtml}
                 </div>
