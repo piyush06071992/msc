@@ -310,14 +310,18 @@
                 <input type="hidden" id="paper-upload-date">
                 <input type="hidden" id="paper-upload-class">
                 <input type="hidden" id="paper-upload-sec">
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+   <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div>
                         <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Series / Set (Optional)</label>
                         <input type="text" id="paper-upload-series" placeholder="e.g., Series A" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-700 outline-none focus:border-blue-500 uppercase">
                     </div>
                     <div>
-                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">PDF File</label>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Question Paper *</label>
                         <input type="file" id="paper-upload-file" accept="application/pdf" class="w-full text-xs file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-[10px] file:font-black file:uppercase file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer border border-slate-300 bg-white p-1 rounded-xl h-[42px]">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">OMR PDF (Optional)</label>
+                        <input type="file" id="omr-upload-file" accept="application/pdf" class="w-full text-xs file:mr-2 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-[10px] file:font-black file:uppercase file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer border border-slate-300 bg-white p-1 rounded-xl h-[42px]">
                     </div>
                 </div>
                 <button onclick="uploadQuestionPaper()" id="btn-upload-paper" class="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-black uppercase tracking-widest text-xs shadow-md transition-all active:scale-95 flex justify-center items-center gap-2">
@@ -1177,16 +1181,19 @@
             document.getElementById('paper-upload-modal').classList.replace('flex', 'hidden');
         }
         
-        async function uploadQuestionPaper() {
+ async function uploadQuestionPaper() {
             const date = document.getElementById('paper-upload-date').value;
             const cls = document.getElementById('paper-upload-class').value;
             const sec = document.getElementById('paper-upload-sec').value;
             const series = document.getElementById('paper-upload-series').value.trim().toUpperCase() || "DEFAULT";
-            const fileInput = document.getElementById('paper-upload-file');
-            const file = fileInput.files[0];
             
-            if (!file) return alert("Please select a PDF file to upload.");
-            if (file.type !== "application/pdf") return alert("Only PDF files are allowed.");
+            const qpFile = document.getElementById('paper-upload-file').files[0];
+            const omrFile = document.getElementById('omr-upload-file').files[0];
+            
+            if (!qpFile) return alert("Please select a Question Paper PDF to upload.");
+            if (qpFile.type !== "application/pdf" || (omrFile && omrFile.type !== "application/pdf")) {
+                return alert("Only PDF files are allowed.");
+            }
             
             const btn = document.getElementById('btn-upload-paper');
             const orig = btn.innerHTML;
@@ -1195,15 +1202,26 @@
             
             try {
                 const storageRef = firebase.storage().ref();
-                const safeName = file.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
-                const fileRef = storageRef.child(`question_papers/${activeCenter}/${date}/${cls}/${sec}/FULL_PAPER_${series}_${Date.now()}_${safeName}`);
                 
-                await fileRef.put(file);
-                const url = await fileRef.getDownloadURL();
+                // 1. Upload Question Paper
+                const safeQpName = qpFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
+                const qpRef = storageRef.child(`question_papers/${activeCenter}/${date}/${cls}/${sec}/FULL_PAPER_${series}_${Date.now()}_${safeQpName}`);
+                await qpRef.put(qpFile);
+                const qpUrl = await qpRef.getDownloadURL();
+                
+                // 2. Upload OMR (If Provided)
+                let omrUrl = null, omrStoragePath = null, omrFileName = null;
+                if (omrFile) {
+                    const safeOmrName = omrFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
+                    const omrRef = storageRef.child(`question_papers/${activeCenter}/${date}/${cls}/${sec}/OMR_${series}_${Date.now()}_${safeOmrName}`);
+                    await omrRef.put(omrFile);
+                    omrUrl = await omrRef.getDownloadURL();
+                    omrStoragePath = omrRef.fullPath;
+                    omrFileName = omrFile.name;
+                }
                 
                 const expiresAt = Date.now() + (30 * 24 * 60 * 60 * 1000);
-                
-             const uploaderName = (typeof activeStaff !== 'undefined' && activeStaff) ? (activeStaff.name || activeStaff.email || "Admin") : "Admin";
+                const uploaderName = (typeof activeStaff !== 'undefined' && activeStaff) ? (activeStaff.name || activeStaff.email || "Admin") : "Admin";
 
                 await getCollection("question_papers").add({
                     center: activeCenter,
@@ -1212,16 +1230,20 @@
                     section: sec,
                     subject: "FULL PAPER",
                     series: series,
-                    fileName: file.name,
-                    url: url,
-                    storagePath: fileRef.fullPath,
+                    fileName: qpFile.name,
+                    url: qpUrl,
+                    storagePath: qpRef.fullPath,
+                    omrFileName: omrFileName,
+                    omrUrl: omrUrl,
+                    omrStoragePath: omrStoragePath,
                     uploadedAt: Date.now(),
                     expiresAt: expiresAt,
                     uploadedBy: uploaderName
                 });
                 
-                alert("✅ Paper uploaded successfully! It will be auto-deleted after 30 days.");
-                fileInput.value = "";
+                alert("✅ Uploaded successfully! Files will be auto-deleted after 30 days.");
+                document.getElementById('paper-upload-file').value = "";
+                document.getElementById('omr-upload-file').value = "";
                 document.getElementById('paper-upload-series').value = "Series A";
                 loadUploadedPapers(date, cls, sec);
             } catch (e) {
