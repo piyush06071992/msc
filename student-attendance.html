@@ -1794,10 +1794,10 @@ function updateAuditSectionFilter() {
                 }
 
             seatedStudents.forEach((stu, index) => {
-                    let status = currentMonthDoc[dateStr][stu.id] || "";
+                 let status = currentMonthDoc[dateStr][stu.id] || "";
                     let effectiveVal = status === 'A' ? 'L' : status;
 
-                    const specialLeave = isStudentOnSpecialLeave(stu.id, dateStr, "23:59");
+                    const specialLeave = isStudentOnSpecialLeave(stu.id, dateStr, "23:59", "00:00");
 
                     let attControls = "";
                     if (specialLeave) {
@@ -2303,10 +2303,11 @@ async function loadStudentPersonalView() {
                 const val = todaysData[stu.id]; 
                     
                     const dDate = new Date(dateStr);
-                    const dayName = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dDate.getDay()];
+                   const dayName = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dDate.getDay()];
                     const slotMatch = timetableData.find(t => t.day === dayName && normMatch(t.className) === normMatch(currentReg.c) && normMatch(t.section || t.sectionName) === normMatch(currentReg.s) && normMatch(t.subject || t.title) === normMatch(currentReg.sub));
                     const classEndTimeStr = slotMatch ? slotMatch.end24 : null;
-                    const specialLeave = isStudentOnSpecialLeave(stu.id, dateStr, classEndTimeStr);
+                    const classStartTimeStr = slotMatch ? slotMatch.start24 : null;
+                    const specialLeave = isStudentOnSpecialLeave(stu.id, dateStr, classEndTimeStr, classStartTimeStr);
 
                     let attControls = "";
                   const canModify = currentReg.canEdit && !activeStudent && !isAdmin && editUnlocked && !isFutureDate && (!hasAttendanceMarked || window.approvedEditUnlocked);
@@ -4175,9 +4176,10 @@ async function loadDiscrepancies() {
                         }
                     });
 
-                let subjectsTimelineHtml = orderedSubjects.map(item => {
+               let subjectsTimelineHtml = orderedSubjects.map(item => {
+                        let timeStart = item.time.includes('-') ? item.time.split('-')[0].trim() : null;
                         let timeEnd = item.time.includes('-') ? item.time.split('-')[1].trim() : null;
-                        const splLeave = isStudentOnSpecialLeave(disc.stuId, dateStr, timeEnd);
+                        const splLeave = isStudentOnSpecialLeave(disc.stuId, dateStr, timeEnd, timeStart);
                         
                         let statBadge = "";
                         if (splLeave && item.status === 'L') {
@@ -4542,7 +4544,8 @@ async function printLedgerPDF() {
                             <div class="text-[10px] font-black text-slate-700 uppercase">${leave.authorizerName}</div>
                             <div class="text-[9px] font-bold text-slate-500 uppercase">${leave.authorizerDept}</div>
                         </td>
-                        <td class="p-4 text-right">
+                  <td class="p-4 text-right flex flex-col items-end gap-1.5">
+                            ${(leave.type === 'PARTIAL' && !leave.endTime) ? `<button onclick="endSpecialLeaveNow('${leave.id}')" class="text-[10px] font-black uppercase text-sky-600 hover:text-sky-800 bg-sky-50 px-3 py-1.5 rounded-lg border border-sky-200 shadow-sm">Mark Returned</button>` : ''}
                             <button onclick="cancelSpecialLeave('${leave.id}')" class="text-[10px] font-black uppercase text-rose-500 hover:text-rose-700 bg-rose-50 px-3 py-1.5 rounded-lg border border-rose-200">Cancel</button>
                         </td>
                     </tr>
@@ -4563,24 +4566,51 @@ async function printLedgerPDF() {
             }
         }
 
-        function isStudentOnSpecialLeave(stuId, dateStr, classEndTimeStr) {
+       function isStudentOnSpecialLeave(stuId, dateStr, classEndTimeStr, classStartTimeStr) {
             const leave = specialLeavesData.find(s => s.studentId === stuId && s.date === dateStr && s.status === 'ACTIVE');
             if (!leave) return false;
             if (leave.type === 'FULL') return leave;
             
             // Partial day
-            if (leave.type === 'PARTIAL' && classEndTimeStr) {
+            if (leave.type === 'PARTIAL' && classEndTimeStr && classStartTimeStr) {
                 const [lh, lm] = leave.startTime.split(':').map(Number);
                 const leaveStartMins = lh * 60 + lm;
                 
-                const [ch, cm] = classEndTimeStr.split(':').map(Number);
-                const classEndMins = ch * 60 + cm;
+                const [ceh, cem] = classEndTimeStr.split(':').map(Number);
+                const classEndMins = ceh * 60 + cem;
 
-                if (classEndMins > leaveStartMins) return leave;
+                const [csh, csm] = classStartTimeStr.split(':').map(Number);
+                const classStartMins = csh * 60 + csm;
+
+                let leaveEndMins = Infinity; // Default to end of day if return time is unknown
+                if (leave.endTime) {
+                    const [leh, lem] = leave.endTime.split(':').map(Number);
+                    leaveEndMins = leh * 60 + lem;
+                }
+
+                // The register is ONLY locked if the class time overlaps with the time the student was actually gone.
+                if (classStartMins < leaveEndMins && classEndMins > leaveStartMins) {
+                    return leave;
+                }
             }
             return false;
         }
 
+        async function endSpecialLeaveNow(id) {
+            if (!confirm("Has the student returned? This will set the end time to right now and unlock future classes for teachers.")) return;
+            const now = new Date();
+            const timeStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+            
+            try {
+                await getCollection("special_leaves").doc(id).update({ endTime: timeStr });
+                const leave = specialLeavesData.find(s => s.id === id);
+                if (leave) leave.endTime = timeStr;
+                loadSpecialLeavesView();
+            } catch(e) {
+                console.error(e);
+                alert("Failed to update return time.");
+            }
+        }
         init();
     </script>
 
