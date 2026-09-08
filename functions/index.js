@@ -10,6 +10,12 @@ if (!admin.apps.length) {
 }
 
 // =======================================================
+// --- ROBUST STRING NORMALIZERS ---
+// =======================================================
+const cleanCls = (str) => String(str || "").toUpperCase().replace(/CLASS/g, "").replace(/[^A-Z0-9]/g, "");
+const cleanSec = (str) => String(str || "").split('(')[0].toUpperCase().replace(/SEC|SECTION/g, "").replace(/[^A-Z0-9]/g, "");
+
+// =======================================================
 // --- 10-MINUTE PRE-CLASS REMINDER CRON JOB ---
 // =======================================================
 exports.sendPreClassReminders = onSchedule({
@@ -272,8 +278,6 @@ async function loadPdfBytes(pdfUrl) {
 async function compileSingleRoomPackage(center, date, roomName, allocations, docType = 'qp') {
     if (!allocations || Object.keys(allocations).length === 0) return false;
 
-    const norm = (str) => String(str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-
     let roomOccupants = [];
     Object.keys(allocations).forEach(seatId => {
         if (seatId.toUpperCase().startsWith(`${roomName}-`.toUpperCase())) {
@@ -292,7 +296,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         omrSnap.forEach(doc => {
             const data = doc.data();
             if (data.className && data.section && data.url) {
-                const secKey = `${norm(data.className)}${norm(data.section)}`;
+                const secKey = `${cleanCls(data.className)}|${cleanSec(data.section)}`;
                 permanentOmrs[secKey] = data.url;
             }
         });
@@ -305,7 +309,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const qp = doc.data();
         if (!qp.className || !qp.section) return;
 
-        const secKey = `${norm(qp.className)}${norm(qp.section)}`;
+        const secKey = `${cleanCls(qp.className)}|${cleanSec(qp.section)}`;
         if (!papersBySection[secKey]) papersBySection[secKey] = {};
         
         const series = qp.series ? qp.series.toUpperCase() : "SERIES A";
@@ -334,7 +338,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const { seatId, student } = roomOccupants[i];
         if (!student || !student.className || !student.section) continue;
 
-        const secKey = `${norm(student.className)}${norm(student.section)}`;
+        const secKey = `${cleanCls(student.className)}|${cleanSec(student.section)}`;
         const sectionPapers = papersBySection[secKey] || {};
         const roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers) : availableSeries;
         
@@ -400,7 +404,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
 exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
-    memory: "1GiB", // Memory drastically reduced since headless chrome is removed
+    memory: "1GiB",
     timeoutSeconds: 300,
     cors: true
 }, async (req, res) => {
