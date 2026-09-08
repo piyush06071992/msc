@@ -4,16 +4,12 @@ const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
 const crypto = require("crypto");
+const puppeteer = require("puppeteer-core");
+const chromium = require("@sparticuz/chromium");
 
 if (!admin.apps.length) {
     admin.initializeApp();
 }
-
-// =======================================================
-// --- ROBUST STRING NORMALIZERS ---
-// =======================================================
-const cleanCls = (str) => String(str || "").toUpperCase().replace(/CLASS/g, "").replace(/[^A-Z0-9]/g, "");
-const cleanSec = (str) => String(str || "").split('(')[0].toUpperCase().replace(/SEC|SECTION/g, "").replace(/[^A-Z0-9]/g, "");
 
 // =======================================================
 // --- 10-MINUTE PRE-CLASS REMINDER CRON JOB ---
@@ -275,8 +271,10 @@ async function loadPdfBytes(pdfUrl) {
     throw new Error(`Failed to download PDF from URL: ${pdfUrl}`);
 }
 
-async function compileSingleRoomPackage(center, date, roomName, allocations, docType = 'qp') {
+async function compileSingleRoomPackage(center, date, roomName, allocations) {
     if (!allocations || Object.keys(allocations).length === 0) return false;
+
+    const norm = (str) => String(str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 
     let roomOccupants = [];
     Object.keys(allocations).forEach(seatId => {
@@ -289,44 +287,19 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
     roomOccupants.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
 
     const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
-    
-    let permanentOmrs = {};
-    if (docType === 'omr') {
-        const omrSnap = await admin.firestore().collection(`${prefix}section_omr_templates`).get();
-        omrSnap.forEach(doc => {
-            const data = doc.data();
-            if (data.className && data.section && data.url) {
-                const secKey = `${cleanCls(data.className)}|${cleanSec(data.section)}`;
-                permanentOmrs[secKey] = data.url;
-            }
-        });
-    }
-
     const qpSnap = await admin.firestore().collection(`${prefix}question_papers`).where("date", "==", date).get();
 
     let papersBySection = {}; 
     qpSnap.forEach(doc => {
         const qp = doc.data();
-        if (!qp.className || !qp.section) return;
+        if (!qp.className || !qp.section || !qp.url) return;
 
-        const secKey = `${cleanCls(qp.className)}|${cleanSec(qp.section)}`;
+        const secKey = `${norm(qp.className)}${norm(qp.section)}`;
         if (!papersBySection[secKey]) papersBySection[secKey] = {};
         
         const series = qp.series ? qp.series.toUpperCase() : "SERIES A";
-        papersBySection[secKey][series] = {
-            qp: qp.url,
-            omr: permanentOmrs[secKey] || qp.omrUrl
-        };
+        papersBySection[secKey][series] = qp.url;
     });
-
-    if (docType === 'omr') {
-        Object.keys(permanentOmrs).forEach(secKey => {
-            if (!papersBySection[secKey]) papersBySection[secKey] = {};
-            if (!papersBySection[secKey]["SERIES A"]) {
-                papersBySection[secKey]["SERIES A"] = { omr: permanentOmrs[secKey] };
-            }
-        });
-    }
 
     const mergedPdf = await PDFDocument.create();
     const font = await mergedPdf.embedFont(StandardFonts.HelveticaBold);
@@ -338,14 +311,12 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const { seatId, student } = roomOccupants[i];
         if (!student || !student.className || !student.section) continue;
 
-        const secKey = `${cleanCls(student.className)}|${cleanSec(student.section)}`;
+        const secKey = `${norm(student.className)}${norm(student.section)}`;
         const sectionPapers = papersBySection[secKey] || {};
         const roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers) : availableSeries;
         
         const assignedSeries = roomSeriesList[i % roomSeriesList.length];
-        const paperLinks = sectionPapers[assignedSeries] || Object.values(sectionPapers)[0] || {};
-        
-        const pdfUrl = docType === 'omr' ? paperLinks.omr : paperLinks.qp;
+        const pdfUrl = sectionPapers[assignedSeries] || Object.values(sectionPapers)[0];
 
         if (!pdfUrl) continue; 
 
@@ -360,16 +331,16 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             
             for (let pIdx = 0; pIdx < pages.length; pIdx++) {
                 const page = pages[pIdx];
-                const { width, height } = page.getSize();
+                const { width } = page.getSize();
                 
                 const leftText = `MINERVA STUDY CIRCLE  |  ${student.name.toUpperCase()}  (ROLL: #${student.rollNo || "—"})`;
                 const rightText = `SEAT: ${seatId}    |    SEC: ${student.section}    |    ${assignedSeries}`;
 
                 const size = 8.5;
                 const color = rgb(0.2, 0.2, 0.2);
-                const opacity = 0.8;
+                const opacity = 0.7;
 
-                const y = height - 15;
+                const y = 6;
                 const leftX = 36;
                 const rightX = width - font.widthOfTextAtSize(rightText, size) - 36;
 
@@ -380,14 +351,12 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
             copiedPages.forEach(p => mergedPdf.addPage(p));
 
-            if (docType !== 'omr') {
-                const currentPagesCount = copiedPages.length;
-                const remainder = currentPagesCount % 4;
-                if (remainder !== 0) {
-                    const pagesNeeded = 4 - remainder;
-                    for (let p = 0; p < pagesNeeded; p++) {
-                        mergedPdf.addPage();
-                    }
+            const currentPagesCount = copiedPages.length;
+            const remainder = currentPagesCount % 4;
+            if (remainder !== 0) {
+                const pagesNeeded = 4 - remainder;
+                for (let p = 0; p < pagesNeeded; p++) {
+                    mergedPdf.addPage();
                 }
             }
         } catch (err) {
@@ -397,14 +366,182 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
     if (mergedPdf.getPageCount() > 0) {
         const mergedPdfBytes = await mergedPdf.save();
-        return mergedPdfBytes;
+        const storagePath = `print_packages/${center}/${date}/${roomName}_print_package.pdf`;
+        const fileRef = admin.storage().bucket().file(storagePath);
+        
+        await fileRef.save(Buffer.from(mergedPdfBytes), {
+            metadata: { contentType: "application/pdf" },
+        });
+        return true;
     }
-    return null;
+    return false;
+}
+
+function generateOMRPageHtml(stu, seatId, dateStr, structure, examName) {
+    const prettyDate = new Date(dateStr + 'T00:00:00').toLocaleDateString('en-GB');
+    const rawRoll = String(stu.rollNo || '').trim();
+    const cleanRoll = rawRoll.replace(/\D/g, '') || '0000';
+    const rollDigits = cleanRoll.split('');
+
+    let columnsHtml = "";
+    const isPureMCQ = !structure.some(sec => sec.type !== 'MCQ');
+
+    if (isPureMCQ) {
+        let allQuestions = [];
+        structure.forEach(sec => {
+            for (let q = sec.start; q <= sec.end; q++) {
+                allQuestions.push({ q: q, type: sec.type });
+            }
+        });
+        let totalQs = allQuestions.length;
+        let numCols = totalQs > 135 ? 6 : (totalQs > 90 ? 4 : 3);
+        let MAX_PER_COL = Math.ceil(totalQs / numCols);
+
+        for (let i = 0; i < allQuestions.length; i += MAX_PER_COL) {
+            const chunk = allQuestions.slice(i, i + MAX_PER_COL);
+            columnsHtml += renderOMRColumn(chunk);
+        }
+    } else {
+        structure.forEach(sec => {
+            let chunk = [];
+            for (let q = sec.start; q <= sec.end; q++) {
+                chunk.push({ q: q, type: sec.type });
+            }
+            columnsHtml += renderOMRColumn(chunk);
+        });
+    }
+
+    return `
+        <div class="omr-print-page" style="position: relative; background: white;">
+            <div style="position: absolute; top: 12px; left: 12px; width: 22px; height: 22px; background: black; z-index: 100;"></div>
+            <div style="position: absolute; top: 12px; right: 12px; width: 22px; height: 22px; background: black; z-index: 100;"></div>
+            <div style="position: absolute; bottom: 12px; left: 12px; width: 22px; height: 22px; background: black; z-index: 100;"></div>
+            <div style="position: absolute; bottom: 12px; right: 12px; width: 22px; height: 22px; background: black; z-index: 100;"></div>
+
+            <div style="border:2px solid black; padding:6px; margin: 38px; box-sizing:border-box; display:flex; flex-direction:column; background:white; height: calc(100% - 76px); font-family:Arial, sans-serif; position: relative; z-index: 10;">
+                
+                <!-- TOP HEADER BLOCK -->
+                <div style="display:flex; justify-content:space-between; align-items:stretch; border-bottom:2px solid black; padding-bottom:4px; margin-bottom:8px; color:black; gap:6px;">
+                    <div style="flex:1; display:flex; flex-direction:column; border:1.5px solid black; background:white; box-sizing:border-box;">
+                        <div style="font-weight:bold; font-size:7.5pt; padding:2px 3px; border-bottom:1.5px solid black;">${prettyDate} | ${examName}</div>
+                        <div style="padding:2px 3px; border-bottom:1.5px solid black;">
+                            <div style="font-size:6pt; font-weight:bold; text-transform:uppercase; color:#000;">Candidate Name</div>
+                            <div style="font-size:9pt; font-weight:900; text-transform:uppercase; color:black; line-height:1.1; min-height:12px;">${stu.name || ''}</div>
+                        </div>
+                        <div style="display:flex; border-bottom:1.5px solid black;">
+                            <div style="flex:1; border-right:1.5px solid black; padding:2px 3px;">
+                                <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Class</div>
+                                <div style="font-size:7.5pt; font-weight:bold; min-height:10px;">${stu.className || ''}</div>
+                            </div>
+                            <div style="flex:1; padding:2px 3px;">
+                                <div style="font-size:6pt; font-weight:bold; text-transform:uppercase;">Section</div>
+                                <div style="font-size:7.5pt; font-weight:bold; min-height:10px;">${stu.section || ''}</div>
+                            </div>
+                        </div>
+                        <div style="display:flex; flex:1; min-height:20px;">
+                            <div style="flex:1; border-right:1.5px solid black; padding:2px 3px; display:flex; flex-direction:column;">
+                                <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Student Sign</div>
+                            </div>
+                            <div style="flex:1; padding:2px 3px; display:flex; flex-direction:column;">
+                                <div style="font-size:5.5pt; font-weight:bold; text-transform:uppercase;">Invigilator Sign</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="flex:1.2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;">
+                        <svg class="barcode-svg" jsbarcode-value="${cleanRoll}" jsbarcode-height="22" jsbarcode-width="1.6" jsbarcode-displayvalue="false" jsbarcode-margin="0" style="margin-bottom:2px;"></svg>
+                        <h1 style="font-size:14pt; font-weight:900; letter-spacing:1px; text-transform:uppercase; margin:0; color:black;">MINERVA STUDY CIRCLE</h1>
+                    </div>
+
+                    <div style="border:1.5px solid black; padding:3px 5px; display:flex; flex-direction:column; align-items:center; background:white; flex-shrink:0;">
+                        <div style="font-size:6pt; font-weight:bold; text-transform:uppercase; margin-bottom:3px;">Roll Number</div>
+                        <div style="display:flex; gap:1px; justify-content:center;">
+                            ${rollDigits.map((digit) => `
+                                <div style="display:flex; flex-direction:column; gap:1px; align-items:center;">
+                                    <div style="width:9px; height:9px; border:1px solid black; margin-bottom:1px; font-size:4.5pt; font-weight:900; display:flex; align-items:center; justify-content:center; background:#eee;">${digit}</div>
+                                    ${[...Array(10)].map((_, r) => `<div style="width:9px; height:9px; font-size:4pt; font-weight:bold; border:1px solid black; color:black; display:flex; align-items:center; justify-content:center; border-radius:50%;">${r}</div>`).join('')}
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DEDICATED SECTION COLUMNS CONTAINER -->
+                <div style="display:flex; flex-wrap:nowrap; gap:8px; width:100%; justify-content:space-between;">
+                    ${columnsHtml}
+                </div>
+
+                <div style="border-top:1.5px solid black; padding-top:2px; margin-top:auto; display:flex; justify-content:center;">
+                    <span style="font-family:monospace; background:black; color:white; padding:1px 10px; border-radius:2px; font-size:7.5pt; font-weight:900;">SEAT NUMBER: ${seatId}</span>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function renderOMRColumn(chunk) {
+    let colHtml = `<div style="flex: 1; display:flex; flex-direction:column; gap: 0; max-width: 120px;">`;
+    
+    chunk.forEach((item) => {
+        const q = item.q;
+        const ans = (typeof answerKey !== 'undefined' && answerKey) ? (answerKey[q] || "") : "";
+        const bRule = (typeof bonusConfig !== 'undefined' && bonusConfig) ? (bonusConfig[q] || null) : null;
+        const adminMode = (typeof isAdmin !== 'undefined' && isAdmin);
+        
+        let bonusBadge = "";
+        if (bRule === 'ALL') {
+            bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-amber-500 text-white text-[5pt] font-black px-1 rounded cursor-pointer uppercase ml-0.5">B:ALL</span>`;
+        } else if (bRule === 'ATTEMPTED') {
+            bonusBadge = `<span ${adminMode ? `onclick="openBonusModal(${q})"` : ''} class="bonus-tag bg-purple-600 text-white text-[5pt] font-black px-1 rounded cursor-pointer uppercase ml-0.5">B:ATT</span>`;
+        } else if (adminMode) {
+            bonusBadge = `<span onclick="openBonusModal(${q})" class="bonus-tag no-print text-slate-300 hover:text-amber-500 text-[7pt] font-black cursor-pointer ml-0.5">★</span>`;
+        }
+
+        if (item.type === 'MCQ') {
+            let optsHtml = "";
+            for (let o = 1; o <= 4; o++) {
+                const isKey = (ans == o);
+                optsHtml += `<div ${typeof setLiveAnswer !== 'undefined' ? `onclick="setLiveAnswer(${q}, ${o})"` : ''} id="live_q_${q}_opt_${o}" class="omr-bubble ${isKey ? 'key-filled' : ''}" style="width:11px; height:11px; border-radius:50%; border:1px solid black; display:inline-flex; align-items:center; justify-content:center; font-size:5pt; font-weight:bold; color:black; background:white; margin:0 1px; cursor:pointer;">${o}</div>`;
+            }
+            colHtml += `<div style="height: 21px; box-sizing: border-box; display:flex; align-items:center;"><div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div><div style="display:flex;">${optsHtml}</div>${bonusBadge}</div>`;
+        } else {
+            let digitBoxes = `<div style="display:flex; gap:1.5px;">`;
+            for (let b = 0; b < 4; b++) {
+                digitBoxes += `<div style="width:10px; height:12px; border:1px solid black; background:white;"></div>`;
+            }
+            digitBoxes += `</div>`;
+
+            let numericGrid = `<div style="display:flex; gap:2.5px;">`;
+            for (let col = 0; col < 4; col++) {
+                numericGrid += `<div style="display:flex; flex-direction:column; gap:1px; align-items:center;">`;
+                for (let r = 0; r <= 9; r++) {
+                    numericGrid += `<div style="width:9px; height:8.5px; border-radius:50%; border:1px solid black; display:flex; align-items:center; justify-content:center; font-size:3.5pt; font-weight:bold; color:black; background:white; margin:0;">${r}</div>`;
+                }
+                numericGrid += `</div>`;
+            }
+            numericGrid += `</div>`;
+
+            colHtml += `
+                <div style="height: 142px; box-sizing: border-box; display:flex; flex-direction:column; justify-content:flex-start; padding-top:3px; border-bottom:1px dashed #cbd5e1;">
+                    <div style="display:flex; align-items:center; margin-bottom:3px;">
+                        <div style="width:18px; font-weight:bold; font-size:7pt; text-align:right; margin-right:3px; color:black;">${q}.</div>
+                        ${digitBoxes}
+                        ${adminMode ? `<div class="no-print" style="margin-left:4px;"><input type="text" maxlength="4" ${typeof setLiveNumeric !== 'undefined' ? `oninput="this.value = this.value.replace(/[^0-9]/g, ''); setLiveNumeric(${q}, this.value)"` : ''} class="omr-num-box" style="width:30px; height:11px; font-size:6pt; padding:0;" placeholder="Ans" value="${ans}" />${bonusBadge}</div>` : ''}
+                    </div>
+                    <div style="padding-left:21px; margin-top:2px;">
+                        ${numericGrid}
+                    </div>
+                </div>
+            `;
+        }
+    });
+    colHtml += `</div>`;
+    return colHtml;
 }
 
 exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
-    memory: "1GiB",
+    memory: "2GiB",
     timeoutSeconds: 300,
     cors: true
 }, async (req, res) => {
@@ -416,6 +553,155 @@ exports.compileSingleRoomOnDemand = onRequest({
 
     try {
         const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
+
+        if (type === 'omr') {
+            const allocDoc = await admin.firestore().collection(`${prefix}exam_seating_allocations`).doc(`${center}_${date}`).get();
+            if (!allocDoc.exists) {
+                res.status(404).send({ error: "Seating allocations not found for this date." });
+                return;
+            }
+
+            const allocations = allocDoc.data().allocations || {};
+            let occupiedSeats = [];
+            Object.keys(allocations).forEach(sId => {
+                if (seatId ? (sId === seatId) : sId.startsWith(`${roomName}-`)) {
+                    const stu = allocations[sId];
+                    if (stu) occupiedSeats.push({ seatId: sId, stu });
+                }
+            });
+
+            if (occupiedSeats.length === 0) {
+                res.status(404).send({ error: `No students allocated in target scope.` });
+                return;
+            }
+
+            occupiedSeats.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
+
+            let uniquePairs = new Set();
+            occupiedSeats.forEach(item => uniquePairs.add(`${item.stu.className}|${item.stu.section}`));
+
+            let structureMap = {};
+            let examNameMap = {};
+            
+            for (const pair of uniquePairs) {
+                const [className, sectionName] = pair.split('|');
+                const groupSnap = await admin.firestore().collection("admin_paper_groups").where("date", "==", date).get();
+                let targetGroupId = null;
+                let fallbackSubjects = [];
+                let currentExamName = "EXAMINATION OMR SHEET";
+
+                groupSnap.forEach(doc => {
+                    const data = doc.data();
+                    const keys = data.sectionKeys || [];
+                    const hasSec = keys.some(sk => {
+                        const parts = sk.split('|');
+                        return parts.length >= 3 && parts[1].trim().toUpperCase() === className.trim().toUpperCase() && parts[2].trim().toUpperCase() === sectionName.trim().toUpperCase();
+                    });
+                    if (hasSec) {
+                        targetGroupId = doc.id;
+                        fallbackSubjects = data.subjects || [];
+                        currentExamName = data.combinedCode || "EXAMINATION OMR SHEET";
+                    }
+                });
+
+                examNameMap[pair] = currentExamName;
+
+            if (targetGroupId) {
+                    const keyDoc = await admin.firestore().collection("exam_answer_keys").doc(targetGroupId).get();
+                    if (keyDoc.exists && keyDoc.data().structure && keyDoc.data().structure.length > 0) {
+                        structureMap[pair] = keyDoc.data().structure;
+                    }
+                }
+
+                if (!structureMap[pair]) {
+                    let defaultStruct = [];
+                    let startQ = 1;
+                    const subs = fallbackSubjects.length > 0 ? fallbackSubjects : ['PHYSICS', 'CHEMISTRY', 'MATHEMATICS'];
+                    subs.forEach(sub => {
+                        defaultStruct.push({ subject: sub.toUpperCase(), start: startQ, end: startQ + 24, type: 'MCQ' });
+                        startQ += 25;
+                    });
+                    structureMap[pair] = defaultStruct;
+                }
+
+                // Save blueprint to Firestore for desktop OMR reader synchronization
+                const blueprintDocId = `${center}_${date}_${className}_${sectionName}`;
+                await admin.firestore().collection("exam_blueprints").doc(blueprintDocId).set({
+                    center: center,
+                    date: date,
+                    className: className,
+                    section: sectionName,
+                    examName: examNameMap[pair],
+                    structure: structureMap[pair],
+                    updatedAt: admin.firestore.FieldValue.serverTimestamp()
+                });
+            }
+
+            let fullPagesHtml = "";
+            occupiedSeats.forEach(({ seatId: sId, stu }) => {
+                const pairKey = `${stu.className}|${stu.section}`;
+                const structure = structureMap[pairKey] || [{ subject: 'GENERAL', start: 1, end: 75, type: 'MCQ' }];
+                const examName = examNameMap[pairKey] || "EXAMINATION OMR SHEET";
+                
+                fullPagesHtml += generateOMRPageHtml(stu, sId, date, structure, examName);
+            });
+
+            const executablePath = await chromium.executablePath();
+            const browser = await puppeteer.launch({
+                args: chromium.args,
+                defaultViewport: chromium.defaultViewport,
+                executablePath: executablePath,
+                headless: true,
+            });
+            const page = await browser.newPage();
+
+            const fullHtml = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js"></script>
+                    <style>
+                        @page { size: A4 portrait; margin: 6mm; }
+                        body { background: white !important; margin: 0; padding: 0; font-family: Arial, sans-serif; }
+                        .omr-print-page { width: 100%; height: 275mm; max-height: 275mm; page-break-after: always; page-break-inside: avoid; overflow: hidden; box-sizing: border-box; display: flex; flex-direction: column; justify-content: space-between; padding: 2px 6mm; background: white; }
+                        .omr-print-page:last-child { page-break-after: avoid; }
+                        .bubble-filled-black { background-color: black !important; color: transparent !important; border-color: black !important; }
+                    </style>
+                </head>
+                <body>
+                    ${fullPagesHtml}
+                    <script>
+                        JsBarcode(".barcode-svg").init();
+                    </script>
+                </body>
+                </html>
+            `;
+
+            await page.setContent(fullHtml, { waitUntil: 'networkidle0' });
+            const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
+            await browser.close();
+
+            const filePrefix = seatId ? seatId : roomName;
+            const storagePath = `print_packages/${center}/${date}/${filePrefix}_omr_package.pdf`;
+            
+            const fileRef = admin.storage().bucket().file(storagePath);
+            await fileRef.save(Buffer.from(pdfBuffer), {
+                metadata: { contentType: "application/pdf" },
+            });
+
+            const downloadToken = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
+            await fileRef.setMetadata({
+                metadata: {
+                    firebaseStorageDownloadTokens: downloadToken
+                }
+            });
+
+            const bucketName = admin.storage().bucket().name;
+            const url = `https://firebasestorage.googleapis.com/v0/b/${bucketName}/o/${encodeURIComponent(storagePath)}?alt=media&token=${downloadToken}`;
+
+            res.status(200).send({ success: true, url });
+            return;
+        }
 
         const allocDoc = await admin.firestore().collection(`${prefix}exam_seating_allocations`).doc(`${center}_${date}`).get();
         if (!allocDoc.exists) {
@@ -429,26 +715,19 @@ exports.compileSingleRoomOnDemand = onRequest({
         if (seatId && allocations[seatId]) {
             filteredAllocations = { [seatId]: allocations[seatId] };
         }
-
-        const docType = type === 'omr' ? 'omr' : 'qp';
         
-        const mergedPdfBytes = await compileSingleRoomPackage(center, date, roomName, filteredAllocations, docType);
+        const success = await compileSingleRoomPackage(center, date, roomName, filteredAllocations);
         
-        if (!mergedPdfBytes) {
-            res.status(400).send({ error: `Room has no students allocated, or the requested PDF (${docType.toUpperCase()}) was not uploaded for these sections.` });
+        if (!success) {
+            res.status(400).send({ error: "Room has no students allocated or failed to compile." });
             return;
         }
 
         const filePrefix = seatId ? seatId : roomName;
-        const suffix = docType === 'omr' ? '_omr_package.pdf' : '_print_package.pdf';
-        const storagePath = `print_packages/${center}/${date}/${filePrefix}${suffix}`;
-        
+        const storagePath = `print_packages/${center}/${date}/${filePrefix}_print_package.pdf`;
         const fileRef = admin.storage().bucket().file(storagePath);
-        await fileRef.save(Buffer.from(mergedPdfBytes), {
-            metadata: { contentType: "application/pdf" },
-        });
-
         const downloadToken = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
+        
         await fileRef.setMetadata({
             metadata: {
                 firebaseStorageDownloadTokens: downloadToken
