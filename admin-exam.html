@@ -1260,11 +1260,16 @@ async function uploadQuestionPaper() {
             }
         }
         
-        async function loadUploadedPapers(date, cls, sec) {
+   async function loadUploadedPapers(date, cls, sec) {
             const listDiv = document.getElementById('uploaded-papers-list');
             listDiv.innerHTML = '<div class="text-center py-6"><span class="loader border-t-blue-600"></span></div>';
             
             try {
+                const norm = (str) => (str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+                const masterOmrDocId = `${norm(cls)}_${norm(sec)}`;
+                const masterOmrSnap = await getCollection("section_omr_templates").doc(masterOmrDocId).get();
+                const masterOmr = masterOmrSnap.exists ? masterOmrSnap.data() : null;
+
                 const snap = await getCollection("question_papers")
                     .where("date", "==", date)
                     .where("className", "==", cls)
@@ -1282,23 +1287,47 @@ async function uploadQuestionPaper() {
                 
                 papers.sort((a,b) => a.series.localeCompare(b.series));
                 
+                let masterStatusHtml = masterOmr ? `
+                    <div class="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-4 flex items-center justify-between shadow-sm">
+                        <div class="flex items-center gap-2">
+                            <span class="text-xl">✅</span>
+                            <div>
+                                <h5 class="font-black text-emerald-900 text-xs uppercase">Permanent Master OMR Active</h5>
+                                <p class="text-[9px] font-bold text-emerald-600 uppercase">This section uses a permanent template and won't expire.</p>
+                            </div>
+                        </div>
+                        <button onclick="window.open('${masterOmr.url}', '_blank')" class="bg-white border border-emerald-300 text-emerald-700 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase">View Master</button>
+                    </div>
+                ` : `
+                    <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4 flex items-center gap-2 shadow-sm">
+                        <span class="text-xl">⚠️</span>
+                        <div>
+                            <h5 class="font-black text-amber-900 text-xs uppercase">No Permanent Master OMR Set</h5>
+                            <p class="text-[9px] font-bold text-amber-600 uppercase">Click "💾 Set as Permanent Master" on any uploaded OMR below to lock it in.</p>
+                        </div>
+                    </div>
+                `;
+
                 if (papers.length === 0) {
-                    listDiv.innerHTML = '<div class="text-center py-6 text-slate-400 font-bold uppercase tracking-widest text-[10px]">No papers uploaded yet.</div>';
+                    listDiv.innerHTML = masterStatusHtml + '<div class="text-center py-6 text-slate-400 font-bold uppercase tracking-widest text-[10px]">No papers uploaded for this date yet.</div>';
                     return;
                 }
                 
-                listDiv.innerHTML = papers.map(p => `
+                listDiv.innerHTML = masterStatusHtml + papers.map(p => `
                     <div class="bg-slate-50 border border-slate-200 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between shadow-sm gap-4">
                         <div class="flex items-center gap-4">
                             <span class="text-3xl">📄</span>
                             <div>
-                                <h4 class="font-black text-slate-800 uppercase tracking-tight text-sm">Combined Question Paper <span class="text-blue-600 ml-1">(${p.series})</span></h4>
+                                <h4 class="font-black text-slate-800 uppercase tracking-tight text-sm">Exam Package <span class="text-blue-600 ml-1">(${p.series})</span></h4>
                                 <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">Uploaded by ${p.uploadedBy} • Expires in ${Math.ceil((p.expiresAt - now) / (1000*60*60*24))} Days</p>
                             </div>
                         </div>
-                    <div class="flex items-center gap-2 shrink-0">
+                        <div class="flex items-center gap-2 shrink-0 flex-wrap">
                             ${p.url ? `<button onclick="window.open('${p.url}', '_blank')" class="bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-600 hover:text-white px-3 h-10 rounded-lg flex items-center justify-center transition-colors shadow-sm text-[10px] font-black uppercase" title="View Question Paper">👁️ QP</button>` : ''}
-                            ${p.omrUrl ? `<button onclick="window.open('${p.omrUrl}', '_blank')" class="bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-600 hover:text-white px-3 h-10 rounded-lg flex items-center justify-center transition-colors shadow-sm text-[10px] font-black uppercase" title="View OMR PDF">⭕ OMR</button>` : ''}
+                            ${p.omrUrl ? `
+                                <button onclick="window.open('${p.omrUrl}', '_blank')" class="bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-600 hover:text-white px-3 h-10 rounded-lg flex items-center justify-center transition-colors shadow-sm text-[10px] font-black uppercase" title="View OMR PDF">⭕ OMR</button>
+                                <button onclick="setAsPermanentMaster('${cls}', '${sec}', '${p.omrUrl}', '${p.omrStoragePath || ''}')" class="bg-amber-50 border border-amber-200 text-amber-700 hover:bg-amber-600 hover:text-white px-3 h-10 rounded-lg flex items-center justify-center transition-colors shadow-sm text-[10px] font-black uppercase" title="Save this OMR as the permanent master template">💾 Set as Permanent Master</button>
+                            ` : ''}
                             <button onclick="deleteQuestionPaper('${p.id}', '${p.storagePath || ''}', '${p.omrStoragePath || ''}')" class="bg-white border border-slate-200 text-slate-600 hover:text-rose-600 hover:border-rose-300 w-10 h-10 rounded-lg flex items-center justify-center transition-colors shadow-sm" title="Delete Package">🗑️</button>
                         </div>
                     </div>
@@ -1306,6 +1335,28 @@ async function uploadQuestionPaper() {
             } catch (e) {
                 console.error(e);
                 listDiv.innerHTML = '<div class="text-center py-6 text-rose-500 font-bold uppercase tracking-widest text-[10px]">Error loading papers.</div>';
+            }
+        }
+        
+        async function setAsPermanentMaster(cls, sec, omrUrl, storagePath) {
+            if (!confirm(`Are you sure you want to set this OMR as the permanent master template for Class ${cls} Sec ${sec}? Future seating plan prints will use this template automatically.`)) return;
+            try {
+                const norm = (str) => (str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+                const docId = `${norm(cls)}_${norm(sec)}`;
+                
+                await getCollection("section_omr_templates").doc(docId).set({
+                    className: cls,
+                    section: sec,
+                    url: omrUrl,
+                    storagePath: storagePath,
+                    updatedAt: Date.now()
+                });
+                
+                alert("✅ Successfully set as Permanent Master OMR!");
+                const date = document.getElementById('paper-upload-date').value;
+                loadUploadedPapers(date, cls, sec);
+            } catch (e) {
+                alert("Failed to set permanent master: " + e.message);
             }
         }
         
