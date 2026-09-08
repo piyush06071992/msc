@@ -285,6 +285,19 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
     roomOccupants.sort((a, b) => a.seatId.localeCompare(b.seatId, undefined, { numeric: true }));
 
     const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
+    
+    let permanentOmrs = {};
+    if (docType === 'omr') {
+        const omrSnap = await admin.firestore().collection(`${prefix}section_omr_templates`).get();
+        omrSnap.forEach(doc => {
+            const data = doc.data();
+            if (data.className && data.section && data.url) {
+                const secKey = `${norm(data.className)}${norm(data.section)}`;
+                permanentOmrs[secKey] = data.url;
+            }
+        });
+    }
+
     const qpSnap = await admin.firestore().collection(`${prefix}question_papers`).where("date", "==", date).get();
 
     let papersBySection = {}; 
@@ -298,9 +311,18 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const series = qp.series ? qp.series.toUpperCase() : "SERIES A";
         papersBySection[secKey][series] = {
             qp: qp.url,
-            omr: qp.omrUrl
+            omr: permanentOmrs[secKey] || qp.omrUrl
         };
     });
+
+    if (docType === 'omr') {
+        Object.keys(permanentOmrs).forEach(secKey => {
+            if (!papersBySection[secKey]) papersBySection[secKey] = {};
+            if (!papersBySection[secKey]["SERIES A"]) {
+                papersBySection[secKey]["SERIES A"] = { omr: permanentOmrs[secKey] };
+            }
+        });
+    }
 
     const mergedPdf = await PDFDocument.create();
     const font = await mergedPdf.embedFont(StandardFonts.HelveticaBold);
@@ -343,7 +365,6 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 const color = rgb(0.2, 0.2, 0.2);
                 const opacity = 0.8;
 
-                // Stamp placed at the TOP to prevent interference with OMR timing tracks
                 const y = height - 15;
                 const leftX = 36;
                 const rightX = width - font.widthOfTextAtSize(rightText, size) - 36;
@@ -355,7 +376,6 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
             copiedPages.forEach(p => mergedPdf.addPage(p));
 
-            // Optional padding for Question Papers to force multiple of 4 pages
             if (docType !== 'omr') {
                 const currentPagesCount = copiedPages.length;
                 const remainder = currentPagesCount % 4;
