@@ -232,13 +232,12 @@
                             <option value="">-- Choose Class --</option>
                         </select>
                     </div>
-                    <div>
-                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Select Section</label>
-                        <select id="modal-sec-select" onchange="onModalSectionChange()" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-black uppercase outline-none focus:border-amber-500 shadow-sm cursor-pointer" disabled>
-                            <option value="">-- Choose Section --</option>
-                        </select>
+                   <div>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Select Sections (Check Multiple to Interleave)</label>
+                        <div id="modal-sec-checkboxes" class="p-3 bg-white border border-slate-300 rounded-xl max-h-36 overflow-y-auto custom-scroll space-y-1.5">
+                            <span class="text-[10px] text-slate-400 font-bold uppercase">Choose a class first</span>
+                        </div>
                     </div>
-                </div>
 
                 <div class="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm">
                     <div class="flex justify-between items-center mb-3 border-b border-slate-100 pb-2">
@@ -1463,13 +1462,14 @@ seatsHtml += `
             activeRowContext = null;
         }
 
-        function onModalClassChange() {
+function onModalClassChange() {
             const cls = document.getElementById('modal-class-select').value;
-            const secSelect = document.getElementById('modal-sec-select');
+            const secContainer = document.getElementById('modal-sec-checkboxes');
             
-            secSelect.innerHTML = '<option value="">-- Choose Section --</option>';
+            secContainer.innerHTML = '';
             if (!cls) {
-                secSelect.disabled = true;
+                secContainer.innerHTML = '<span class="text-[10px] text-slate-400 font-bold uppercase">Choose a class first</span>';
+                document.getElementById('modal-students-checkbox-list').innerHTML = `<div class="text-center py-8 text-slate-400 font-bold text-xs uppercase">Select sections above</div>`;
                 return;
             }
 
@@ -1479,22 +1479,31 @@ seatsHtml += `
                 if (c === cls) validSecs.add(s);
             });
 
-            secSelect.innerHTML += Array.from(validSecs).sort().map(s => `<option value="${s}">Sec ${s}</option>`).join('');
-            secSelect.disabled = false;
-            document.getElementById('modal-students-checkbox-list').innerHTML = `<div class="text-center py-8 text-slate-400 font-bold text-xs uppercase">Select section to view students</div>`;
-        }
-
-    function onModalSectionChange() {
-            const cls = document.getElementById('modal-class-select').value;
-            const sec = document.getElementById('modal-sec-select').value;
-            const container = document.getElementById('modal-students-checkbox-list');
-
-            if (!cls || !sec) {
-                container.innerHTML = `<div class="text-center py-8 text-slate-400 font-bold text-xs uppercase">Select class and section</div>`;
+            if (validSecs.size === 0) {
+                secContainer.innerHTML = '<span class="text-[10px] text-rose-500 font-bold uppercase">No sections scheduled</span>';
                 return;
             }
 
-            // Robust normalizer to strip spaces, dashes, case, and prefixes
+            secContainer.innerHTML = Array.from(validSecs).sort().map(s => `
+                <label class="flex items-center gap-2 p-1.5 hover:bg-slate-50 rounded cursor-pointer">
+                    <input type="checkbox" value="${s}" class="modal-sec-cb w-3.5 h-3.5 accent-amber-600" onchange="onModalSectionChange()">
+                    <span class="text-xs font-black text-slate-700 uppercase">Section ${s}</span>
+                </label>
+            `).join('');
+
+            document.getElementById('modal-students-checkbox-list').innerHTML = `<div class="text-center py-8 text-slate-400 font-bold text-xs uppercase">Select sections above</div>`;
+        }
+
+  function onModalSectionChange() {
+            const cls = document.getElementById('modal-class-select').value;
+            const checkedSecs = Array.from(document.querySelectorAll('.modal-sec-cb:checked')).map(cb => cb.value);
+            const container = document.getElementById('modal-students-checkbox-list');
+
+            if (!cls || checkedSecs.length === 0) {
+                container.innerHTML = `<div class="text-center py-8 text-slate-400 font-bold text-xs uppercase">Select at least one section</div>`;
+                return;
+            }
+
             const norm = (str) => (str || "").toUpperCase().replace(/CLASS|SEC|SECTION/g, "").replace(/[^A-Z0-9]/g, "");
 
             let placedStudentIds = new Set();
@@ -1502,34 +1511,35 @@ seatsHtml += `
                 if (stu && stu.id) placedStudentIds.add(stu.id);
             });
 
-            // Filter using normalized comparison so formatting differences never block matching
             let sectionStudents = allApprovedStudents.filter(s => {
                 if (s.admissionStatus !== "APPROVED" || s.isActive === false) return false;
                 if (placedStudentIds.has(s.id)) return false;
-                
-                return norm(s.className) === norm(cls) && norm(s.section) === norm(sec);
+                if (norm(s.className) !== norm(cls)) return false;
+                return checkedSecs.some(sec => norm(s.section) === norm(sec));
             });
+
             sectionStudents.sort((a, b) => String(a.rollNo || "").localeCompare(String(b.rollNo || ""), undefined, { numeric: true }));
 
             if (sectionStudents.length === 0) {
-                container.innerHTML = `<div class="text-center py-8 text-rose-500 font-bold text-xs uppercase">No unassigned students available in Class ${cls} Sec ${sec}.</div>`;
+                container.innerHTML = `<div class="text-center py-8 text-rose-500 font-bold text-xs uppercase">No unassigned students available in selected sections.</div>`;
                 return;
             }
 
-            const secTheme = getSectionColor(cls, sec);
-
-            container.innerHTML = sectionStudents.map(stu => `
+            container.innerHTML = sectionStudents.map(stu => {
+                const secTheme = getSectionColor(cls, stu.section);
+                return `
                 <label class="flex items-center justify-between p-3 ${secTheme.bg} border ${secTheme.border} rounded-xl cursor-pointer hover:shadow-sm transition-all student-row-label">
                     <div class="flex items-center gap-3">
-                        <input type="checkbox" value="${stu.id}" class="modal-stu-cb w-4 h-4 accent-amber-600 shrink-0" onchange="checkStudentSelectionLimit()">
+                        <input type="checkbox" value="${stu.id}" data-sec="${stu.section}" class="modal-stu-cb w-4 h-4 accent-amber-600 shrink-0" onchange="checkStudentSelectionLimit()">
                         <div>
                             <span class="text-xs font-black text-slate-800 uppercase tracking-tight">${stu.name}</span>
                             <span class="text-[9px] font-bold text-slate-500 uppercase block">Roll: #${stu.rollNo || '—'} • Adm: ${stu.admNo || '—'}</span>
                         </div>
                     </div>
-                    <span class="text-[9px] font-black uppercase px-2 py-0.5 rounded ${secTheme.badge}">Sec ${sec}</span>
+                    <span class="text-[9px] font-black uppercase px-2 py-0.5 rounded ${secTheme.badge}">Sec ${stu.section}</span>
                 </label>
-            `).join('');
+            `;
+            }).join('');
         }
 
         function toggleSelectAllStudents(select) {
@@ -1618,7 +1628,7 @@ seatsHtml += `
             return { riskDetected, riskMessages };
         }
 
-        async function saveRowAllocation() {
+     async function saveRowAllocation() {
             const date = document.getElementById('seating-exam-date').value;
             if (!date || !activeRowContext) return;
 
@@ -1639,15 +1649,41 @@ seatsHtml += `
                 return alert("Selection exceeds remaining vacant seats in this row.");
             }
 
+            // Group selected students by section so we can interleave them (Sec 1, Sec 2, Sec 1, Sec 2...)
+            let studentsBySec = {};
+            checkedCbs.forEach(cb => {
+                const stuId = cb.value;
+                const sec = cb.getAttribute('data-sec');
+                const stuObj = allApprovedStudents.find(s => s.id === stuId);
+                if (stuObj) {
+                    if (!studentsBySec[sec]) studentsBySec[sec] = [];
+                    studentsBySec[sec].push(stuObj);
+                }
+            });
+
+            let interleavedStudents = [];
+            let secKeys = Object.keys(studentsBySec);
+            let hasMore = true;
+            let cursor = 0;
+
+            while (hasMore && interleavedStudents.length < checkedCbs.length) {
+                hasMore = false;
+                for (let sec of secKeys) {
+                    if (studentsBySec[sec].length > cursor) {
+                        interleavedStudents.push(studentsBySec[sec][cursor]);
+                        hasMore = true;
+                    }
+                }
+                cursor++;
+            }
+
             const btn = document.getElementById('modal-save-btn');
             const orig = btn.innerHTML;
             btn.innerHTML = "⏳ Saving..."; btn.disabled = true;
 
             try {
                 let tempAllocations = { ...currentAllocations };
-                checkedCbs.forEach((cb, idx) => {
-                    const stuId = cb.value;
-                    const stuObj = allApprovedStudents.find(s => s.id === stuId);
+                interleavedStudents.forEach((stuObj, idx) => {
                     if (stuObj && vacantSeatIds[idx]) {
                         delete stuObj.cheatRisk; 
                         tempAllocations[vacantSeatIds[idx]] = stuObj;
@@ -1676,7 +1712,7 @@ seatsHtml += `
                     timestamp: Date.now()
                 }, { merge: true });
 
-                alert("✅ Row allocation saved successfully!");
+                alert("✅ Row allocation saved successfully with alternating sections!");
                 closeRowModal();
                 if (activeRoomId) selectRoom(activeRoomId, false);
 
