@@ -163,11 +163,12 @@
                         </button>
                     </div>
 
-                    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                   <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
                         <div class="overflow-x-auto custom-scroll" style="max-height: 60vh;">
                             <table class="w-full text-left border-collapse">
                                 <thead class="bg-slate-100 text-slate-700 text-[10px] uppercase font-black sticky top-0 z-10 shadow-sm border-b border-slate-200">
                                     <tr>
+                                        <th class="p-3 text-center w-12">S.No.</th>
                                         <th class="p-3">Roll No</th>
                                         <th class="p-3">Name</th>
                                         <th class="p-3">Class/Sec</th>
@@ -1174,6 +1175,30 @@ Supports:
             } catch(e) { console.error(e); }
         }
 
+let instituteStructureCache = [];
+        let timetableCacheData = [];
+
+        function getInchargeSubject(className, sectionName) {
+            const norm = val => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const struct = instituteStructureCache.find(st => norm(st.className) === norm(className) && norm(st.sectionName || st.section) === norm(sectionName));
+            if (!struct) return "";
+            const subs = struct.subjects || [];
+            if (subs.length === 0) return "";
+            
+            const inchargeName = norm(struct.secInchargeName || struct.classInchargeName || "");
+            if (inchargeName) {
+                const matchSlot = timetableCacheData.find(t => 
+                    norm(t.className) === norm(className) && 
+                    norm(t.section || t.sectionName) === norm(sectionName) && 
+                    norm(t.teacherName || t.teacher || "") === inchargeName
+                );
+                if (matchSlot && (matchSlot.subject || matchSlot.title)) {
+                    return (matchSlot.subject || matchSlot.title).trim().toUpperCase();
+                }
+            }
+            return subs[0].trim().toUpperCase();
+        }
+
         async function prepareEvalDateData() {
             const date = document.getElementById('eval-date-select').value;
             const uploadBox = document.getElementById('excel-upload-box');
@@ -1192,22 +1217,38 @@ Supports:
             try {
                 const prefix = activeCenter === "DHARAMSHALA" ? "dharamshala_" : "";
 
-                // 1. Fetch Paper Groups for Date
-                const grpSnap = await db.collection("admin_paper_groups").where("date", "==", date).get();
-                activeDateGroups = grpSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                // 1. Fetch Paper Groups, Structure, & Timetable for Incharge Resolution
+                const [grpSnap, structSnap, ttSnap] = await Promise.all([
+                    db.collection("admin_paper_groups").where("date", "==", date).get(),
+                    db.collection(`${prefix}institute_structure`).get(),
+                    db.collection(`${prefix}timetable`).get()
+                ]);
 
-                // 2. Fetch Attendance for Date
+                activeDateGroups = grpSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                instituteStructureCache = structSnap.docs.map(d => d.data());
+                timetableCacheData = ttSnap.docs.map(d => d.data());
+
+                // 2. Fetch Attendance for Date (Strictly checking Section Incharge Register)
                 const [y, m] = date.split('-');
                 const attSnap = await db.collection(`${prefix}attendance_records`).where("monthKey", "==", `${y}_${m}`).get();
                 activeAttendanceCache = {};
+                
                 attSnap.forEach(doc => {
                     const data = doc.data();
                     if(data.records && data.records[date]) {
-                        Object.entries(data.records[date]).forEach(([stuId, status]) => {
-                            if(status === 'P' || activeAttendanceCache[stuId] !== 'P') {
-                                activeAttendanceCache[stuId] = status;
-                            }
-                        });
+                        const cName = data.className;
+                        const sName = data.section;
+                        const sub = (data.subject || "").trim().toUpperCase();
+                        const inchargeSub = getInchargeSubject(cName, sName);
+
+                        // Only ingest attendance if it belongs to the incharge register
+                        if (!inchargeSub || sub === inchargeSub) {
+                            Object.entries(data.records[date]).forEach(([stuId, status]) => {
+                                if(status === 'P' || !activeAttendanceCache[stuId]) {
+                                    activeAttendanceCache[stuId] = status;
+                                }
+                            });
+                        }
                     }
                 });
 
@@ -1399,17 +1440,17 @@ Supports:
             renderExcelValidationTable();
         }
 
-        function renderExcelValidationTable() {
+    function renderExcelValidationTable() {
             const tbody = document.getElementById('validation-table-body');
             let html = "";
 
             if (activeParsedExcelRows.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-center py-10 font-bold text-slate-400">No valid rows processed. Check mapping.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" class="text-center py-10 font-bold text-slate-400">No valid rows processed. Check mapping.</td></tr>`;
                 document.getElementById('validation-ui').classList.remove('hidden');
                 return;
             }
 
-            activeParsedExcelRows.forEach(row => {
+            activeParsedExcelRows.forEach((row, index) => {
                 const isErr = row.status === 'ERROR';
                 
                 const nameStr = isErr ? `<span class="text-rose-500 font-bold">Unrecognized</span>` : `<span class="font-black">${row.stu.name}</span>`;
@@ -1462,8 +1503,9 @@ Supports:
 
                 const bgClass = (isErr || row.action==='DROP') ? 'bg-rose-50/40' : (row.action==='SKIP' ? 'bg-slate-50' : 'bg-white hover:bg-slate-50');
 
-                html += `
+               html += `
                     <tr class="border-b border-slate-100 ${bgClass} transition-colors">
+                        <td class="p-3 text-center font-mono font-black text-slate-400">${index + 1}</td>
                         <td class="p-3 font-mono font-black">${row.rollNo}</td>
                         <td class="p-3 uppercase">${nameStr}</td>
                         <td class="p-3">${classStr}</td>
