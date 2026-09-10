@@ -2127,67 +2127,39 @@ async function executeAutoGenerate() {
             let newAllocations = {};
             let lastSectionPerRoom = {};
 
-            // Flatten all rows across all target rooms to perform strict row-by-row interleaving
-            let allTargetRows = [];
-            targetRooms.forEach(room => {
+       // Allocate seat by seat across all target rooms for strict alternating side-by-side anti-cheat placement
+            let lastSectionPlaced = "";
+
+            for (let room of targetRooms) {
+                const roomName = room.name;
                 (room.rows || []).forEach((row, rIdx) => {
-                    allTargetRows.push({ roomName: room.name, rIdx, row, roomObj: room });
-                });
-            });
+                    const rowNum = rIdx + 1;
+                    
+                    for (let sIdx = 0; sIdx < row.seats; sIdx++) {
+                        let activeSecKeys = Object.keys(sectionPools).filter(k => (sectionPools[k] || []).length > 0);
+                        if (activeSecKeys.length === 0) break;
 
-            // Helper to pick the best available section for a room row, ensuring consecutive rows NEVER share the same section
-            const getBestSectionForRoomRow = (roomName) => {
-                let activeSecKeys = Object.keys(sectionPools).filter(k => (sectionPools[k] || []).length > 0);
-                if (activeSecKeys.length === 0) return null;
+                        // Filter sections allowed in this room based on user preference rules
+                        let allowedSecs = activeSecKeys.filter(k => {
+                            let allowedSet = sectionAllowedRooms[k];
+                            if (!allowedSet || allowedSet.size === 0) return true;
+                            return allowedSet.has(roomName);
+                        });
 
-                let lastSec = lastSectionPerRoom[roomName];
+                        let candidates = allowedSecs.length > 0 ? allowedSecs : activeSecKeys;
+                        candidates.sort((a, b) => sectionPools[b].length - sectionPools[a].length);
 
-                // Filter sections allowed in this room based on user preference rules
-                let allowedSecs = activeSecKeys.filter(k => {
-                    let allowedSet = sectionAllowedRooms[k];
-                    if (!allowedSet || allowedSet.size === 0) return true;
-                    return allowedSet.has(roomName);
-                });
+                        // Pick a section different from the immediately adjacent seat to alternate A-B-A-B
+                        let chosenSec = candidates.find(k => k !== lastSectionPlaced) || candidates[0];
 
-                let candidates = allowedSecs.length > 0 ? allowedSecs : activeSecKeys;
+                        let stu = sectionPools[chosenSec].shift();
+                        let seatNum = String(sIdx + 1).padStart(2, '0');
+                        let seatId = `${roomName}-R${rowNum}-S${seatNum}`;
+                        newAllocations[seatId] = stu;
 
-                // STRICT RULE: Never pick the same section as the immediately preceding row in this room (allows back-to-back with an intervening row)
-                let nonRepeated = candidates.filter(k => k !== lastSec);
-                if (nonRepeated.length > 0) {
-                    nonRepeated.sort((a, b) => sectionPools[b].length - sectionPools[a].length);
-                    return nonRepeated[0];
-                }
-
-                candidates.sort((a, b) => sectionPools[b].length - sectionPools[a].length);
-                return candidates[0];
-            };
-
-            // Allocate row by row across all target rooms with strict section alternation
-            for (let rowMeta of allTargetRows) {
-                const { roomName, rIdx, row, roomObj } = rowMeta;
-                const rowNum = rIdx + 1;
-                let seatsNeeded = row.seats;
-                let rowAllocatedCount = 0;
-
-                // Pick a section for this entire row
-                let secKey = getBestSectionForRoomRow(roomName);
-                if (!secKey || sectionPools[secKey].length === 0) break;
-
-                lastSectionPerRoom[roomName] = secKey;
-
-                for (let sIdx = 0; sIdx < seatsNeeded; sIdx++) {
-                    if (sectionPools[secKey].length === 0) {
-                        secKey = getBestSectionForRoomRow(roomName);
-                        if (!secKey || sectionPools[secKey].length === 0) break;
-                        lastSectionPerRoom[roomName] = secKey;
+                        lastSectionPlaced = chosenSec;
                     }
-
-                    let stu = sectionPools[secKey].shift();
-                    let seatNum = String(sIdx + 1).padStart(2, '0');
-                    let seatId = `${roomName}-R${rowNum}-S${seatNum}`;
-                    newAllocations[seatId] = stu;
-                    rowAllocatedCount++;
-                }
+                });
             }
 
             // Final Anti-Cheat & Save
