@@ -1662,7 +1662,7 @@ function renderRoomSidebarList() {
             }
         }
 
-  // --- EXCEL SEATING PLAN ENGINE ---
+   // --- EXCEL SEATING PLAN ENGINE ---
         function downloadSeatingTemplate() {
             const date = document.getElementById('seating-exam-date').value;
             if (!date) return alert("Please select an exam date from the top menu first.");
@@ -1676,55 +1676,24 @@ function renderRoomSidebarList() {
                 
                 hasRooms = true;
                 
-                // Determine max seats in any row to set grid height
-                let maxSeatsInRoom = 0;
-                (room.rows || []).forEach(row => {
-                    if (row.seats > maxSeatsInRoom) maxSeatsInRoom = row.seats;
-                });
-
-                let wsData = [];
-                for (let i = 0; i <= maxSeatsInRoom; i++) {
-                    wsData.push([]);
-                }
-
-                let colWidths = [];
+                let wsData = [
+                    ["Seat ID", "Row No", "Seat No", "Roll No (Type Here)", "Current Assigned (Info)"]
+                ];
 
                 (room.rows || []).forEach((row, rIdx) => {
                     const rowNum = rIdx + 1;
-                    const colOffset = rIdx * 6; // 5 columns + 1 spacer column
-
-                    wsData[0][colOffset] = "Seat ID";
-                    wsData[0][colOffset + 1] = "Row No";
-                    wsData[0][colOffset + 2] = "Seat No";
-                    wsData[0][colOffset + 3] = "Roll No (Type Here)";
-                    wsData[0][colOffset + 4] = "Current Assigned (Info)";
-                    wsData[0][colOffset + 5] = ""; // spacer
-
-                    colWidths[colOffset] = {wch: 15};
-                    colWidths[colOffset + 1] = {wch: 8};
-                    colWidths[colOffset + 2] = {wch: 8};
-                    colWidths[colOffset + 3] = {wch: 20};
-                    colWidths[colOffset + 4] = {wch: 35};
-                    colWidths[colOffset + 5] = {wch: 3}; // spacer
-
                     for (let sIdx = 0; sIdx < row.seats; sIdx++) {
                         const seatNum = String(sIdx + 1).padStart(2, '0');
                         const seatId = `${room.name}-R${rowNum}-S${seatNum}`;
                         const currentStu = currentAllocations[seatId];
                         const roll = currentStu ? currentStu.rollNo : "";
                         const info = currentStu ? `${currentStu.name} (${currentStu.className} Sec ${currentStu.section})` : "Vacant";
-
-                        wsData[sIdx + 1][colOffset] = seatId;
-                        wsData[sIdx + 1][colOffset + 1] = `Row ${rowNum}`;
-                        wsData[sIdx + 1][colOffset + 2] = `Seat ${sIdx+1}`;
-                        wsData[sIdx + 1][colOffset + 3] = roll;
-                        wsData[sIdx + 1][colOffset + 4] = info;
-                        wsData[sIdx + 1][colOffset + 5] = ""; // spacer
+                        wsData.push([seatId, `Row ${rowNum}`, `Seat ${sIdx+1}`, roll, info]);
                     }
                 });
 
                 const ws = XLSX.utils.aoa_to_sheet(wsData);
-                ws['!cols'] = colWidths;
+                ws['!cols'] = [{wch:15}, {wch:10}, {wch:10}, {wch:20}, {wch:35}];
                 XLSX.utils.book_append_sheet(wb, ws, room.name.substring(0, 31)); // Sheet name max 31 chars
             });
 
@@ -1732,7 +1701,7 @@ function renderRoomSidebarList() {
             XLSX.writeFile(wb, `Seating_Template_${date}.xlsx`);
         }
 
-    let uploadedAllocations = {};
+        let uploadedAllocations = {};
         function handleExcelUpload(event) {
             const file = event.target.files[0];
             if (!file) return;
@@ -1755,60 +1724,42 @@ function renderRoomSidebarList() {
 
                     workbook.SheetNames.forEach(sheetName => {
                         const sheet = workbook.Sheets[sheetName];
-                        // Process as a 2D Array to handle our new horizontal grid layout
-                        const grid = XLSX.utils.sheet_to_json(sheet, {header: 1, defval: ""});
-                        if (grid.length <= 1) return;
-
+                        const jsonData = XLSX.utils.sheet_to_json(sheet);
                         const roomObj = roomsDatabase.find(r => r.name.substring(0,31) === sheetName);
                         
                         if (!roomObj) return; // Skip sheets that don't match our rooms
                         if (busyRoomsMap[cleanRoom(roomObj.name)]) return; // Room is busy, ignore sheet data
 
-                        // Discover mappings for side-by-side rows
-                        let mappings = [];
-                        for(let c = 0; c < grid[0].length; c++) {
-                            if(String(grid[0][c]).trim() === "Seat ID") {
-                                let rollCol = c + 3; // Default based on template
-                                for(let scan = c + 1; scan <= c + 5; scan++) {
-                                    if(String(grid[0][scan] || "").includes("Roll No")) { rollCol = scan; break; }
-                                }
-                                mappings.push({ seatCol: c, rollCol: rollCol });
-                            }
-                        }
-
                         // Temporary object for this room to run cheat check
                         let tempRoomAlloc = {};
 
-                        // Scan down the 2D grid
-                        for (let r = 1; r < grid.length; r++) {
-                            mappings.forEach(map => {
-                                const seatId = String(grid[r][map.seatCol] || "").trim();
-                                const rollNo = String(grid[r][map.rollCol] || "").trim();
+                        jsonData.forEach(row => {
+                            const seatId = row["Seat ID"];
+                            const rollNo = String(row["Roll No (Type Here)"] || "").trim();
                             
-                                if (seatId && rollNo && seatId.includes('-R')) {
-                                    // Find student in database
-                                    const stu = allApprovedStudents.find(s => String(s.rollNo).toUpperCase() === rollNo.toUpperCase());
-                                    if (stu) {
-                                        // Check duplicate within the entire upload so far
-                                        const isDup = Object.values(uploadedAllocations).some(s => s.id === stu.id) || Object.values(tempRoomAlloc).some(s=>s.id === stu.id);
-                                        if (isDup) {
-                                            errors.push(`Roll ${rollNo} assigned multiple times in Excel.`);
-                                        } else {
-                                            tempRoomAlloc[seatId] = {...stu}; // Clone object so we can add cheat flags
-                                            uploadedAllocations[seatId] = tempRoomAlloc[seatId];
-                                        }
+                            if (seatId && rollNo) {
+                                // Find student in database
+                                const stu = allApprovedStudents.find(s => String(s.rollNo).toUpperCase() === rollNo.toUpperCase());
+                                if (stu) {
+                                    // Check duplicate within the entire upload so far
+                                    const isDup = Object.values(uploadedAllocations).some(s => s.id === stu.id) || Object.values(tempRoomAlloc).some(s=>s.id === stu.id);
+                                    if (isDup) {
+                                        errors.push(`Roll ${rollNo} assigned multiple times in Excel.`);
                                     } else {
-                                        errors.push(`Roll ${rollNo} not found in database.`);
+                                        tempRoomAlloc[seatId] = {...stu}; // Clone object so we can add cheat flags
+                                        uploadedAllocations[seatId] = tempRoomAlloc[seatId];
                                     }
+                                } else {
+                                    errors.push(`Roll ${rollNo} not found in database.`);
                                 }
-                            });
-                        }
+                            }
+                        });
 
                         // Run Anti-Cheat Engine for this room
                         const cheatCheck = evaluateCheatRisks(tempRoomAlloc, roomObj);
                         if (cheatCheck.riskDetected) hasCheatRisk = true;
 
-                        // Generate Preview UI for this room
+                    // Generate Preview UI for this room
                         let rowsHtml = "";
                         Object.keys(tempRoomAlloc).forEach(sId => {
                             const st = tempRoomAlloc[sId];
@@ -1877,6 +1828,7 @@ function renderRoomSidebarList() {
             };
             reader.readAsArrayBuffer(file);
         }
+
         function closeExcelPreviewModal() {
             document.getElementById('excel-preview-modal').classList.replace('flex', 'hidden');
             uploadedAllocations = {};
