@@ -462,30 +462,32 @@
             document.getElementById('print-reports-modal').classList.replace('flex', 'hidden');
         }
 
-   async function executeReportPrint() {
+ async function executeReportPrint() {
             const date = document.getElementById('seating-exam-date').value;
             closePrintReportsModal();
             const prettyDate = new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
             // --- TRUE MULTI-SHEET EXCEL WORKBOOK GENERATOR ---
             const wb = XLSX.utils.book_new();
-            let activeSections = {};
             
-            // Fallback collector: ensures sections are always found even if examSectionsMap is empty
-            const sourceMap = Object.keys(examSectionsMap).length > 0 ? examSectionsMap : (() => {
-                let m = {};
-                allApprovedStudents.forEach(s => { if (s.className && s.section) m[`${norm(s.className)}|${norm(s.section)}`] = true; });
-                return m;
-            })();
+            // 1. Gather all active sections directly from allApprovedStudents + currentAllocations
+            let classesMap = {};
+            
+            allApprovedStudents.forEach(s => {
+                if (s.className && s.section && s.admissionStatus === "APPROVED" && s.isActive !== false) {
+                    const cNorm = String(s.className).toUpperCase();
+                    const sNorm = String(s.section).toUpperCase();
+                    if (!classesMap[cNorm]) classesMap[cNorm] = new Set();
+                    classesMap[cNorm].add(sNorm);
+                }
+            });
 
-            Object.keys(sourceMap).forEach(key => {
-                const parts = key.split('|');
-                if (parts.length >= 2) {
-                    const cls = parts[0];
-                    const sec = parts[1];
-                    if (!activeSections[cls]) activeSections[cls] = new Set();
-                    activeSections[cls].add(sec);
+            Object.values(currentAllocations).forEach(s => {
+                if (s && s.className && s.section) {
+                    const cNorm = String(s.className).toUpperCase();
+                    const sNorm = String(s.section).toUpperCase();
+                    if (!classesMap[cNorm]) classesMap[cNorm] = new Set();
+                    classesMap[cNorm].add(sNorm);
                 }
             });
 
@@ -493,7 +495,7 @@
             Object.keys(currentAllocations).forEach(seatId => {
                 const stu = currentAllocations[seatId];
                 if (stu && stu.className && stu.section) {
-                    const secKey = `${norm(stu.className)}|${norm(stu.section)}`;
+                    const secKey = `${String(stu.className).toUpperCase()}|${String(stu.section).toUpperCase()}`;
                     if (!assignedBySec[secKey]) assignedBySec[secKey] = [];
                     assignedBySec[secKey].push({ seatId, stu });
                 }
@@ -501,11 +503,12 @@
 
             let hasSheets = false;
 
-            Object.keys(activeSections).sort().forEach(cls => {
-                Array.from(activeSections[cls]).sort().forEach(sec => {
+            Object.keys(classesMap).sort().forEach(cls => {
+                Array.from(classesMap[cls]).sort().forEach(sec => {
                     hasSheets = true;
-                    const secKey = `${norm(cls)}|${norm(sec)}`;
+                    const secKey = `${cls}|${sec}`;
                     const assignedList = assignedBySec[secKey] || [];
+                    
                     assignedList.sort((a, b) => {
                         const rA = a && a.stu ? String(a.stu.rollNo || "") : "";
                         const rB = b && b.stu ? String(b.stu.rollNo || "") : "";
@@ -513,7 +516,15 @@
                     });
 
                     const placedIds = new Set(assignedList.map(item => item.stu ? item.stu.id : ""));
-                    const unallottedList = allApprovedStudents.filter(s => s && norm(s.className) === norm(cls) && norm(s.section) === norm(sec) && !placedIds.has(s.id));
+                    
+                    const unallottedList = allApprovedStudents.filter(s => 
+                        s && String(s.className).toUpperCase() === cls && 
+                        String(s.section).toUpperCase() === sec && 
+                        s.admissionStatus === "APPROVED" && 
+                        s.isActive !== false &&
+                        !placedIds.has(s.id)
+                    );
+
                     unallottedList.sort((a, b) => {
                         const rA = a ? String(a.rollNo || "") : "";
                         const rB = b ? String(b.rollNo || "") : "";
@@ -1457,12 +1468,13 @@ seatsHtml += `
                 validClasses.add(cls);
             });
 
-            const classSelect = document.getElementById('modal-class-select');
+       const classSelect = document.getElementById('modal-class-select');
             classSelect.innerHTML = '<option value="">-- Choose Class --</option>' + Array.from(validClasses).sort().map(c => `<option value="${c}">${c}</option>`).join('');
 
-            const secSelect = document.getElementById('modal-sec-select');
-            secSelect.innerHTML = '<option value="">-- Choose Section --</option>';
-            secSelect.disabled = true;
+            const secContainer = document.getElementById('modal-sec-checkboxes');
+            if (secContainer) {
+                secContainer.innerHTML = '<span class="text-[10px] text-slate-400 font-bold uppercase">Choose a class first</span>';
+            }
 
             document.getElementById('modal-students-checkbox-list').innerHTML = `<div class="text-center py-8 text-slate-400 font-bold text-xs uppercase">Select a class and section above</div>`;
 
