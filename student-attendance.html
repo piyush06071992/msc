@@ -1711,24 +1711,39 @@ function updateAuditSectionFilter() {
             await loadExamRoomAttendance(roomName, targetDate);
         }
 
-        async function loadExamRoomAttendance(roomName, dateStr) {
+   async function loadExamRoomAttendance(roomName, dateStr) {
             stopTTS();
             const listContainer = document.getElementById('daily-students-list');
             listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
 
             try {
-                const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
-                const allocSnap = await allocDocRef.get();
+                // Fetch the specific partitioned room document
+                const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+                const docId = `${activeCenter}_${dateStr}_${safeRoomName}`;
+                
+                const roomDocRef = db.collection("exam_seating_rooms").doc(docId);
+                const roomSnap = await roomDocRef.get();
                 
                 let seatedStudents = [];
-                if (allocSnap.exists) {
-                    const allocs = allocSnap.data().allocations || {};
+                if (roomSnap.exists) {
+                    const allocs = roomSnap.data().allocations || {};
                     Object.keys(allocs).forEach(seatId => {
-                        if (seatId.startsWith(`${roomName}-`)) {
-                            const stu = allocs[seatId];
-                            if (stu) seatedStudents.push({ seatId, ...stu });
-                        }
+                        const stu = allocs[seatId];
+                        if (stu) seatedStudents.push({ seatId, ...stu });
                     });
+                } else {
+                    // Legacy Fallback
+                    const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                    const allocSnap = await allocDocRef.get();
+                    if (allocSnap.exists) {
+                        const allocs = allocSnap.data().allocations || {};
+                        Object.keys(allocs).forEach(seatId => {
+                            if (seatId.startsWith(`${roomName}-`)) {
+                                const stu = allocs[seatId];
+                                if (stu) seatedStudents.push({ seatId, ...stu });
+                            }
+                        });
+                    }
                 }
 
                 seatedStudents.sort((a,b) => String(a.seatId).localeCompare(String(b.seatId)));
@@ -2781,21 +2796,36 @@ async function saveDailyAttendance() {
     const [y, m, d] = dateStr.split('-');
     const monthKey = `${y}_${m}`;
 
-    // --- EXAM ROOM ATTENDANCE DISTRIBUTION TO INCHARGE REGISTERS ---
+// --- EXAM ROOM ATTENDANCE DISTRIBUTION TO INCHARGE REGISTERS ---
     if (currentReg.isExamRoom) {
-        const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
-        const allocSnap = await allocDocRef.get();
+        const roomName = currentReg.s;
+        const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+        const docId = `${activeCenter}_${dateStr}_${safeRoomName}`;
+        
+        const roomDocRef = db.collection("exam_seating_rooms").doc(docId);
+        const roomSnap = await roomDocRef.get();
+        
         let roomStudentsMap = {};
-        if (allocSnap.exists) {
-            const allocs = allocSnap.data().allocations || {};
+        if (roomSnap.exists) {
+            const allocs = roomSnap.data().allocations || {};
             Object.keys(allocs).forEach(seatId => {
-                if (seatId.startsWith(`${currentReg.s}-`)) {
-                    const stu = allocs[seatId];
-                    if (stu && stu.id) roomStudentsMap[stu.id] = stu;
-                }
+                const stu = allocs[seatId];
+                if (stu && stu.id) roomStudentsMap[stu.id] = stu;
             });
+        } else {
+            // Legacy Fallback
+            const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+            const allocSnap = await allocDocRef.get();
+            if (allocSnap.exists) {
+                const allocs = allocSnap.data().allocations || {};
+                Object.keys(allocs).forEach(seatId => {
+                    if (seatId.startsWith(`${roomName}-`)) {
+                        const stu = allocs[seatId];
+                        if (stu && stu.id) roomStudentsMap[stu.id] = stu;
+                    }
+                });
+            }
         }
-
         const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.email) : "");
         let teacherInchargeRegisters = [];
         if (window.instituteStructures && timetableData) {
