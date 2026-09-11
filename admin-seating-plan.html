@@ -819,14 +819,29 @@
             }
         }
 
-  async function loadSeatingAllocations(date) {
+ async function loadSeatingAllocations(date) {
             try {
-                const docRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${date}`);
-                const docSnap = await docRef.get();
-                if (docSnap.exists) {
-                    currentAllocations = docSnap.data().allocations || {};
+                // Fetch ALL individual room documents for this center and date
+                const roomSnap = await db.collection("exam_seating_rooms")
+                    .where("date", "==", date)
+                    .where("center", "==", activeCenter)
+                    .get();
+
+                currentAllocations = {};
+                
+                if (!roomSnap.empty) {
+                    // Combine all partitioned rooms into the master view
+                    roomSnap.forEach(doc => {
+                        const roomData = doc.data().allocations || {};
+                        Object.assign(currentAllocations, roomData);
+                    });
                 } else {
-                    currentAllocations = {};
+                    // Legacy Fallback: If no partitioned rooms exist yet, check the old master doc
+                    const oldDoc = await db.collection("exam_seating_allocations").doc(`${activeCenter}_${date}`).get();
+                    if (oldDoc.exists) {
+                        const data = oldDoc.data();
+                        currentAllocations = (typeof data.allocations === 'string') ? JSON.parse(data.allocations) : (data.allocations || {});
+                    }
                 }
                 
                 populateSidebarFilters();
@@ -2770,7 +2785,7 @@ async function checkRoomPrintPackageAvailability(roomName) {
             throw new Error(result.error || "Failed to compile room package.");
         }
 
-        btn.dataset.downloadUrl = result.url;
+     btn.dataset.downloadUrl = result.url;
         window.open(result.url, '_blank');
     } catch (e) {
         console.error(e);
@@ -2780,6 +2795,59 @@ async function checkRoomPrintPackageAvailability(roomName) {
         btn.innerHTML = "📥 Download Room Print";
     }
 }
+
+        async function commitMasterSeatingPlanToCloud(date) {
+            // 1. Group the massive allocation object by Room Name
+            let roomGroups = {};
+            
+            // Pre-fill empty objects for all rooms so cleared rooms update properly
+            roomsDatabase.forEach(r => { roomGroups[r.name] = {}; });
+
+            Object.keys(currentAllocations).forEach(seatId => {
+                const roomName = seatId.split('-R')[0];
+                if (!roomGroups[roomName]) roomGroups[roomName] = {};
+                
+                // Keep data clean and light
+                const s = currentAllocations[seatId];
+                if(s) {
+                    roomGroups[roomName][seatId] = {
+                        id: s.id || "", name: s.name || "", rollNo: s.rollNo || "",
+                        admNo: s.admNo || "", className: s.className || "", section: s.section || "",
+                        cheatRisk: s.cheatRisk || false, cheatRiskDetails: s.cheatRiskDetails || []
+                    };
+                }
+            });
+
+            // 2. Batch write each room to its own safe document
+            const batch = db.batch();
+            
+            Object.keys(roomGroups).forEach(roomName => {
+                const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+                const docId = `${activeCenter}_${date}_${safeRoomName}`;
+                const ref = db.collection("exam_seating_rooms").doc(docId);
+                
+                batch.set(ref, {
+                    date: date,
+                    center: activeCenter,
+                    roomName: roomName,
+                    allocations: roomGroups[roomName],
+                    totalAssigned: Object.keys(roomGroups[roomName]).length,
+                    timestamp: Date.now()
+                });
+            });
+
+            // 3. Update the master tracker (No student data inside, just the total count)
+            const masterRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${date}`);
+            batch.set(masterRef, {
+                date: date,
+                center: activeCenter,
+                totalAssigned: Object.keys(currentAllocations).length,
+                isPartitioned: true,
+                timestamp: Date.now()
+            }, { merge: true });
+
+            await batch.commit();
+        }
 
     </script>
 </body>
