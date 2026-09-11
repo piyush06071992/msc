@@ -691,29 +691,47 @@ async function renderRoomSelectors() {
         let activeRooms = roomsData;
         const eDate = document.getElementById('dutyTargetDate')?.value;
 
-    if (currentMode === 'EXAM' && eDate) {
-            await loadSectionTimingsCache(eDate);
-            try {
-                const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${eDate}`);
-                const allocSnap = await allocDocRef.get();
-                if (allocSnap.exists) {
-                    const allocs = allocSnap.data().allocations || {};
+ if (currentMode === 'EXAM' && eDate) {
+        await loadSectionTimingsCache(eDate);
+        try {
+            // Fetch all partitioned room documents for this center and date
+            const roomSnap = await db.collection("exam_seating_rooms")
+                .where("date", "==", eDate)
+                .where("center", "==", activeCenter)
+                .get();
+
+            currentAllocations = {};
+            const seatedRoomNames = new Set();
+
+            if (!roomSnap.empty) {
+                roomSnap.forEach(doc => {
+                    const roomData = doc.data();
+                    const roomAllocs = roomData.allocations || {};
+                    Object.assign(currentAllocations, roomAllocs);
+                    if (roomData.roomName && Object.keys(roomAllocs).length > 0) {
+                        seatedRoomNames.add(roomData.roomName.toUpperCase());
+                    }
+                });
+            } else {
+                // Legacy Fallback
+                const oldDoc = await db.collection("exam_seating_allocations").doc(`${activeCenter}_${eDate}`).get();
+                if (oldDoc.exists) {
+                    const allocs = oldDoc.data().allocations || {};
                     currentAllocations = allocs;
-                    const seatedRoomNames = new Set();
                     Object.keys(allocs).forEach(seatId => {
                         const rName = seatId.split('-R')[0];
                         if (rName) seatedRoomNames.add(rName.toUpperCase());
                     });
-                    activeRooms = roomsData.filter(r => seatedRoomNames.has(r.name.toUpperCase()));
-                } else {
-                    currentAllocations = {};
-                    activeRooms = [];
                 }
-            } catch (e) {
-                console.error("Error filtering rooms by allocation:", e);
-                currentAllocations = {};
             }
+
+            activeRooms = roomsData.filter(r => seatedRoomNames.has(r.name.toUpperCase()));
+        } catch (e) {
+            console.error("Error filtering rooms by allocation:", e);
+            currentAllocations = {};
+            activeRooms = [];
         }
+    }
 
         if (activeRooms.length === 0) {
             roomListArea.innerHTML = `<div class="text-center text-rose-500 font-bold text-xs uppercase py-4">No rooms with student seating allocations found for this date. Please allocate seats in Seating Plan first.</div>`;
@@ -1126,16 +1144,28 @@ async function renderRoomSelectors() {
         }
     }
 
-        async function resolveRoomAutoTiming(roomName, dateStr) {
+     async function resolveRoomAutoTiming(roomName, dateStr) {
             if (!dateStr) return null;
             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
             
             try {
-                const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
-                const allocSnap = await allocDocRef.get();
-                if (!allocSnap.exists) return null;
+                const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+                const docId = `${activeCenter}_${dateStr}_${safeRoomName}`;
+                
+                const roomDocRef = db.collection("exam_seating_rooms").doc(docId);
+                const roomSnap = await roomDocRef.get();
+                
+                let allocs = {};
+                if (roomSnap.exists) {
+                    allocs = roomSnap.data().allocations || {};
+                } else {
+                    // Legacy Fallback
+                    const oldDoc = await db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`).get();
+                    if (oldDoc.exists) {
+                        allocs = oldDoc.data().allocations || {};
+                    }
+                }
 
-                const allocs = allocSnap.data().allocations || {};
                 let seatedSections = new Map();
 
                 Object.keys(allocs).forEach(seatId => {
