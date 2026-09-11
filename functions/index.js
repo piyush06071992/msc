@@ -411,11 +411,14 @@ exports.compileSingleRoomOnDemand = onRequest({
     }
 
     try {
-        const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
+        // Build the safe document ID exactly as the frontend creates it
+        const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+        const docId = `${center}_${date}_${safeRoomName}`;
 
-        const allocDoc = await admin.firestore().collection(`${prefix}exam_seating_allocations`).doc(`${center}_${date}`).get();
+        const allocDoc = await admin.firestore().collection(`exam_seating_rooms`).doc(docId).get();
+        
         if (!allocDoc.exists) {
-            res.status(404).send({ error: "Seating allocations not found for this date." });
+            res.status(404).send({ error: `Seating allocations not found for room: ${roomName} on ${date}.` });
             return;
         }
 
