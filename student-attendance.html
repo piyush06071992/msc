@@ -2387,20 +2387,34 @@ async function loadStudentPersonalView() {
             select.innerHTML = `<option value="">Loading students...</option>`;
             document.getElementById('correction-modal').style.display = 'flex';
 
-            let optionsHtml = "";
+          let optionsHtml = "";
             if (currentReg.isExamRoom) {
                 try {
-                    const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
-                    const allocSnap = await allocDocRef.get();
+                    const roomName = currentReg.s;
+                    const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+                    const docId = `${activeCenter}_${dateStr}_${safeRoomName}`;
+                    const roomDocRef = db.collection("exam_seating_rooms").doc(docId);
+                    const roomSnap = await roomDocRef.get();
+                    
                     let seatedStudents = [];
-                    if (allocSnap.exists) {
-                        const allocs = allocSnap.data().allocations || {};
-                        Object.keys(allocs).forEach(seatId => {
-                            if (seatId.startsWith(`${currentReg.s}-`)) {
-                                const stu = allocs[seatId];
-                                if (stu) seatedStudents.push(stu);
-                            }
+                    if (roomSnap.exists) {
+                        const allocs = roomSnap.data().allocations || {};
+                        Object.values(allocs).forEach(stu => {
+                            if (stu) seatedStudents.push(stu);
                         });
+                    } else {
+                        // Legacy Fallback
+                        const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                        const allocSnap = await allocDocRef.get();
+                        if (allocSnap.exists) {
+                            const allocs = allocSnap.data().allocations || {};
+                            Object.keys(allocs).forEach(seatId => {
+                                if (seatId.startsWith(`${currentReg.s}-`)) {
+                                    const stu = allocs[seatId];
+                                    if (stu) seatedStudents.push(stu);
+                                }
+                            });
+                        }
                     }
                     if (seatedStudents.length === 0) {
                         optionsHtml = `<option value="">-- No students allocated --</option>`;
@@ -2638,29 +2652,43 @@ function shareWholeClassWhatsApp() {
                     }
                 });
 
-                // --- EXAM DAY vs NORMAL DAY VALIDATION ---
+            // --- EXAM DAY vs NORMAL DAY VALIDATION ---
                 let isExamDayForClass = false;
                 let missingRooms = new Set();
                 
                 try {
-                    const allocDocRef = getCollection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
-                    const allocSnap = await allocDocRef.get();
+                    const roomSnap = await getCollection("exam_seating_rooms")
+                        .where("date", "==", dateStr)
+                        .where("center", "==", activeCenter)
+                        .get();
                     
-                    if (allocSnap.exists) {
-                        const allocs = allocSnap.data().allocations || {};
+                    let allAllocs = {};
+                    if (!roomSnap.empty) {
+                        roomSnap.forEach(doc => {
+                            const roomData = doc.data().allocations || {};
+                            Object.assign(allAllocs, roomData);
+                        });
+                    } else {
+                        // Legacy Fallback
+                        const allocDocRef = getCollection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                        const allocSnap = await allocDocRef.get();
+                        if (allocSnap.exists) {
+                            allAllocs = allocSnap.data().allocations || {};
+                        }
+                    }
+
+                    if (Object.keys(allAllocs).length > 0) {
                         let classRoomsMap = {}; // roomName -> [studentIds]
                         
-                        Object.keys(allocs).forEach(seatId => {
-                            const stu = allocs[seatId];
+                        Object.keys(allAllocs).forEach(seatId => {
+                            const stu = allAllocs[seatId];
                             if (stu && normMatch(stu.className) === normMatch(className)) {
                                 isExamDayForClass = true;
-                                // Safely extract the room name by removing the "-R#...-S#..." suffix
                                 const roomName = seatId.replace(/-R\d+-S\d+$/, ''); 
                                 if (!classRoomsMap[roomName]) classRoomsMap[roomName] = [];
                                 classRoomsMap[roomName].push(stu);
                             }
                         });
-
                         if (isExamDayForClass) {
                             Object.keys(classRoomsMap).forEach(room => {
                                 const roomStus = classRoomsMap[room];
