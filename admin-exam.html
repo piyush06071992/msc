@@ -1622,7 +1622,7 @@ window._examMapView = 'class'; // Default view mode
                 '<div class="mapping-mobile-cards" style="display:none;"><div class="flex flex-col gap-4">'+mobileCards+'</div></div>';
         }
 async function rescheduleExamDate(oldDate) {
-            const newDate = prompt(`Enter the new target date (YYYY-MM-DD) to copy exams and schedules from ${oldDate}:`, oldDate);
+            const newDate = prompt(`Enter the new exam date (YYYY-MM-DD) to move all exams from ${oldDate}:`, oldDate);
             if (!newDate || newDate === oldDate) return;
             
             const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
@@ -1630,34 +1630,37 @@ async function rescheduleExamDate(oldDate) {
                 return alert("Invalid date format. Please use YYYY-MM-DD.");
             }
 
-            if (!confirm(`⚠️ Copying all exam schedules, seating layouts, and overrides from ${oldDate} to ${newDate} (keeping ${oldDate} intact).\n\nProceed?`)) return;
+            if (!confirm(`⚠️ This will move all exams, seating plans, and timetable overrides from ${oldDate} to ${newDate} and clear ${oldDate}.\n\nProceed?`)) return;
 
             try {
                 const batch = db.batch();
-                let copiedCount = 0;
+                let count = 0;
 
+                // Calculate the correct weekday name for the new date (e.g., Tuesday)
                 const [y, m, d] = newDate.split('-').map(Number);
                 const newDayName = new Date(y, m - 1, d).toLocaleDateString('en-US', { weekday: 'long' });
 
-                // 1. Copy exam_schedules
+                // 1. Move exam_schedules
                 const schedSnap = await getCollection("exam_schedules").where("date", "==", oldDate).get();
                 schedSnap.forEach(doc => {
                     const newRef = getCollection("exam_schedules").doc();
                     batch.set(newRef, { ...doc.data(), date: newDate });
-                    copiedCount++;
+                    batch.delete(doc.ref);
+                    count++;
                 });
 
-                // 2. Copy admin_paper_groups
+                // 2. Move admin_paper_groups
                 const groupSnap = await db.collection("admin_paper_groups").where("date", "==", oldDate).get();
                 groupSnap.forEach(doc => {
                     const data = doc.data();
                     const newDocId = ('pg_' + newDate + '_' + data.groupKey).replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 80);
                     const newRef = db.collection("admin_paper_groups").doc(newDocId);
                     batch.set(newRef, { ...data, date: newDate });
-                    copiedCount++;
+                    batch.delete(doc.ref);
+                    count++;
                 });
 
-                // 3. Copy exam_seating_rooms
+                // 3. Move exam_seating_rooms
                 const roomSnap = await db.collection("exam_seating_rooms").where("date", "==", oldDate).where("center", "==", activeCenter).get();
                 roomSnap.forEach(doc => {
                     const data = doc.data();
@@ -1665,30 +1668,32 @@ async function rescheduleExamDate(oldDate) {
                     const newDocId = `${activeCenter}_${newDate}_${safeRoomName}`;
                     const newRef = db.collection("exam_seating_rooms").doc(newDocId);
                     batch.set(newRef, { ...data, date: newDate });
-                    copiedCount++;
+                    batch.delete(doc.ref);
+                    count++;
                 });
 
-                // 4. Copy timetable_history
+                // 4. Move timetable_history with corrected weekday mapping
                 const historyRefOld = getCollection("timetable_history").doc(oldDate);
                 const historySnapOld = await historyRefOld.get();
                 if (historySnapOld.exists) {
                     const historyData = historySnapOld.data();
                     const updatedSchedule = (historyData.schedule || []).map(slot => ({
                         ...slot,
-                        day: newDayName
+                        day: newDayName // Maps slots to the correct weekday of the new date
                     }));
                     
                     const historyRefNew = getCollection("timetable_history").doc(newDate);
                     batch.set(historyRefNew, { ...historyData, date: newDate, schedule: updatedSchedule, lastUpdated: Date.now() });
-                    copiedCount++;
+                    batch.delete(historyRefOld);
+                    count++;
                 }
 
                 await batch.commit();
-                alert(`✅ Successfully copied schedule data to ${newDate}! (${copiedCount} records duplicated without deleting ${oldDate}).`);
+                alert(`✅ Successfully moved exams from ${oldDate} to ${newDate}! (${count} records updated).`);
                 listenForExamsTabular();
             } catch (e) {
-                console.error("Reschedule copy failed:", e);
-                alert("Copy error: " + e.message);
+                console.error("Reschedule failed:", e);
+                alert("Error: " + e.message);
             }
         }
     </script>
