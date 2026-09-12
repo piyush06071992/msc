@@ -284,22 +284,37 @@
             document.getElementById('admit-card-modal').classList.remove('hidden');
             document.getElementById('admit-card-modal').classList.add('flex');
 
-            // Fetch Seat Allocation from Firestore
+           // Fetch Seat Allocation from Firestore (using partitioned room structure + fallback)
             try {
-                const allocDocId = `${activeCenter}_${examDate}`;
-                const docSnap = await db.collection("exam_seating_allocations").doc(allocDocId).get();
-                
                 let foundRoom = "Not Allocated Yet";
                 let foundSeat = "Not Allocated Yet";
 
-                if (docSnap.exists) {
-                    const allocs = docSnap.data().allocations || {};
-                    for (const [seatId, stu] of Object.entries(allocs)) {
-                        if (stu && (stu.id === activeStudent.id || (activeStudent.rollNo && String(stu.rollNo).toUpperCase() === String(activeStudent.rollNo).toUpperCase()))) {
-                            foundSeat = seatId;
-                            foundRoom = seatId.split('-R')[0];
-                            break;
-                        }
+                // 1. Query the partitioned exam_seating_rooms collection (matching admin-seating-plan.html)
+                const roomSnap = await db.collection("exam_seating_rooms")
+                    .where("date", "==", examDate)
+                    .where("center", "==", activeCenter)
+                    .get();
+
+                let allAllocs = {};
+                if (!roomSnap.empty) {
+                    roomSnap.forEach(doc => {
+                        const roomData = doc.data().allocations || {};
+                        Object.assign(allAllocs, roomData);
+                    });
+                } else {
+                    // 2. Legacy Fallback
+                    const oldDoc = await db.collection("exam_seating_allocations").doc(`${activeCenter}_${examDate}`).get();
+                    if (oldDoc.exists) {
+                        const data = oldDoc.data();
+                        allAllocs = (typeof data.allocations === 'string') ? JSON.parse(data.allocations) : (data.allocations || {});
+                    }
+                }
+
+                for (const [seatId, stu] of Object.entries(allAllocs)) {
+                    if (stu && (stu.id === activeStudent.id || (activeStudent.rollNo && activeStudent.rollNo.trim() !== "" && String(stu.rollNo).trim().toUpperCase() === String(activeStudent.rollNo).trim().toUpperCase()))) {
+                        foundSeat = seatId;
+                        foundRoom = seatId.split('-R')[0];
+                        break;
                     }
                 }
 
