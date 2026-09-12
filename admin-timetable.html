@@ -4277,7 +4277,7 @@ async function confirmMultiDates() {
             return `${norm(c)}|${norm(s)}`;
         });
 
-        // --- LIVE MASTER DISCREPANCY AUDIT ---
+     // --- LIVE MASTER DISCREPANCY AUDIT ---
         const masterSnapAll = await getCollection("timetable").get();
         const allMasterSlots = masterSnapAll.docs.map(doc => doc.data());
         let allMismatches = [];
@@ -4290,28 +4290,75 @@ async function confirmMultiDates() {
             const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const dayName = daysArr[localDate.getDay()];
             
-           let finalMergedSchedule = [];
-
             const masterSnapDay = allMasterSlots.filter(m => m.day === dayName);
 
-            // Sync teachers & rooms with the target date's Live Master
+            // --- NEW: Sequential Subject Mapping ---
+            let masterOccurrences = {};
+            masterSnapDay.forEach(m => {
+                if (['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'NONE', 'EXAM', 'UT', 'OT'].includes((m.subject || '').toUpperCase())) return;
+                const key = `${norm(m.className)}|${norm(m.section || m.sectionName)}|${norm(m.subject)}`;
+                if (!masterOccurrences[key]) masterOccurrences[key] = [];
+                masterOccurrences[key].push(m);
+            });
+            Object.keys(masterOccurrences).forEach(key => {
+                masterOccurrences[key].sort((a,b) => universalTimeToMins(a.start24) - universalTimeToMins(b.start24));
+            });
+
+            // Smart Sync & Sequential Mismatch Auditing
             const stampedSourceSlots = sourceSlots.map(slot => {
                 let syncedSlot = { ...slot, day: dayName };
-                if (!['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'NONE', 'EXAM', 'UT', 'OT'].includes((syncedSlot.subject || '').toUpperCase())) {
-                    const masterMatch = masterSnapDay.find(m => 
-                        norm(m.className) === norm(syncedSlot.className) && 
-                        norm(m.section || m.sectionName) === norm(syncedSlot.section) && 
-                        norm(m.subject) === norm(syncedSlot.subject)
-                    );
-                    if (masterMatch) {
-                        syncedSlot.teacher = masterMatch.teacher || "NONE";
-                        syncedSlot.teacherName = masterMatch.teacherName || masterMatch.teacher || "NONE";
-                        syncedSlot.teacherEmail = masterMatch.teacherEmail || "";
-                        syncedSlot.room = masterMatch.room || "";
+                const isSpecial = ['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'NONE', 'EXAM', 'UT', 'OT'].includes((syncedSlot.subject || '').toUpperCase());
+                
+                if (!isSpecial) {
+                    const key = `${norm(syncedSlot.className)}|${norm(syncedSlot.section)}|${norm(syncedSlot.subject)}`;
+                    if (masterOccurrences[key] && masterOccurrences[key].length > 0) {
+                        const masterMatch = masterOccurrences[key].shift(); // Pull next sequential slot
+                        const mTeacher = masterMatch.teacherName || masterMatch.teacher || "NONE";
+                        const mRoom = masterMatch.room || "";
+                        
+                        // Heal "NONE" with Live Master Data
+                        if (!syncedSlot.teacher || syncedSlot.teacher === "NONE" || syncedSlot.teacher.trim() === "") {
+                            syncedSlot.teacher = mTeacher;
+                            syncedSlot.teacherName = masterMatch.teacherName || mTeacher;
+                            syncedSlot.teacherEmail = masterMatch.teacherEmail || "";
+                        }
+                        if (!syncedSlot.room || syncedSlot.room.trim() === "") {
+                            syncedSlot.room = mRoom;
+                        }
+                        
+                        // Check Discrepancies
+                        if (mTeacher !== syncedSlot.teacher || mRoom !== syncedSlot.room) {
+                            allMismatches.push({
+                                date: dateIso,
+                                className: syncedSlot.className,
+                                section: syncedSlot.section,
+                                subject: syncedSlot.subject,
+                                time: syncedSlot.start24,
+                                masterTeacher: mTeacher,
+                                newTeacher: syncedSlot.teacher,
+                                masterRoom: mRoom,
+                                newRoom: syncedSlot.room
+                            });
+                        }
+                    } else {
+                        // Slot Count Mismatch (Extra slot added in Override)
+                        allMismatches.push({
+                            date: dateIso,
+                            className: syncedSlot.className,
+                            section: syncedSlot.section,
+                            subject: syncedSlot.subject,
+                            time: syncedSlot.start24,
+                            masterTeacher: "NO MASTER SLOT",
+                            newTeacher: syncedSlot.teacher,
+                            masterRoom: "N/A",
+                            newRoom: syncedSlot.room
+                        });
                     }
                 }
                 return syncedSlot;
             });
+
+            let finalMergedSchedule = [];
 
             if (scope === 'FULL') {
                 finalMergedSchedule = stampedSourceSlots;
@@ -4338,34 +4385,6 @@ async function confirmMultiDates() {
                 
                 finalMergedSchedule = [...normalPortion, ...overridePortion];
             }
-
-            // Audit against Master
-            finalMergedSchedule.forEach(slot => {
-                if (['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'NONE'].includes((slot.subject || '').toUpperCase())) return;
-                const masterMatch = masterSnapDay.find(m => 
-                    norm(m.className) === norm(slot.className) && 
-                    norm(m.section || m.sectionName) === norm(slot.section) && 
-                    norm(m.subject) === norm(slot.subject) &&
-                    m.start24 === slot.start24
-                );
-                if (masterMatch) {
-                    const mTeacher = masterMatch.teacherName || masterMatch.teacher || "NONE";
-                    const mRoom = masterMatch.room || "";
-                    if (mTeacher !== slot.teacher || mRoom !== slot.room) {
-                        allMismatches.push({
-                            date: dateIso,
-                            className: slot.className,
-                            section: slot.section,
-                            subject: slot.subject,
-                            time: slot.start24,
-                            masterTeacher: mTeacher,
-                            newTeacher: slot.teacher,
-                            masterRoom: mRoom,
-                            newRoom: slot.room
-                        });
-                    }
-                }
-            });
 
             batch.set(getCollection("timetable_history").doc(dateIso), {
                 date: dateIso,
@@ -4633,23 +4652,50 @@ async function executeImport() {
         // 3. Clear old data from memory for this section
         globalTimetable = globalTimetable.filter(t => !(t.className === className && t.section === sectionName));
 
-        // 4. Add new data to memory with Master Mismatch Auditing
+      // 4. Add new data to memory with Master Mismatch Auditing
         const cleanNorm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+        // --- NEW: Sequential Subject Mapping ---
+        let masterOccurrences = {};
+        masterSlotsLive.forEach(m => {
+            if (['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'NONE', 'EXAM', 'UT', 'OT'].includes((m.subject || '').toUpperCase())) return;
+            const key = `${cleanNorm(m.className)}|${cleanNorm(m.section || m.sectionName)}|${cleanNorm(m.subject)}`;
+            if (!masterOccurrences[key]) masterOccurrences[key] = [];
+            masterOccurrences[key].push(m);
+        });
+        
+        Object.keys(masterOccurrences).forEach(key => {
+            masterOccurrences[key].sort((a,b) => universalTimeToMins(a.start24) - universalTimeToMins(b.start24));
+        });
         
         importedData.forEach(slot => {
             let mismatchData = null;
-            const masterEntry = masterSlotsLive.find(m => 
-                cleanNorm(m.className) === cleanNorm(className) && 
-                cleanNorm(m.section || m.sectionName) === cleanNorm(sectionName) && 
-                cleanNorm(m.subject) === cleanNorm(slot.subject)
-            );
-            
-            if (masterEntry) {
-                const mTeacher = masterEntry.teacherName || masterEntry.teacher || "NONE";
-                const mRoom = masterEntry.room || "";
-                // If master has a teacher/room but import has it blank/different, flag it!
-                if (mTeacher !== slot.teacher || mRoom !== slot.room) {
-                    mismatchData = { masterTeacher: mTeacher, masterRoom: mRoom };
+            const isSpecial = ['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'NONE', 'EXAM', 'UT', 'OT'].includes((slot.subject || '').toUpperCase());
+
+            if (!isSpecial) {
+                const key = `${cleanNorm(className)}|${cleanNorm(sectionName)}|${cleanNorm(slot.subject)}`;
+                if (masterOccurrences[key] && masterOccurrences[key].length > 0) {
+                    const masterEntry = masterOccurrences[key].shift(); // Pull sequentially
+                    const mTeacher = masterEntry.teacherName || masterEntry.teacher || "NONE";
+                    const mRoom = masterEntry.room || "";
+
+                    // Smart Sync: Heal blank entries from Master
+                    if (!slot.teacher || slot.teacher === "NONE" || slot.teacher.trim() === "") {
+                        slot.teacher = mTeacher;
+                        slot.teacherName = masterEntry.teacherName || mTeacher;
+                        slot.teacherEmail = masterEntry.teacherEmail || "";
+                    }
+                    if (!slot.room || slot.room.trim() === "") {
+                        slot.room = mRoom;
+                    }
+
+                    // Audit Flags
+                    if (mTeacher !== slot.teacher || mRoom !== slot.room) {
+                        mismatchData = { masterTeacher: mTeacher, masterRoom: mRoom };
+                    }
+                } else {
+                    // Extra slot detected compared to Master
+                    mismatchData = { masterTeacher: "NO MASTER SLOT", masterRoom: "N/A" };
                 }
             }
 
