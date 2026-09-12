@@ -1621,72 +1621,82 @@ window._examMapView = 'class'; // Default view mode
                 '<div class="mapping-desktop-view">'+desktopHtml+'</div>'+
                 '<div class="mapping-mobile-cards" style="display:none;"><div class="flex flex-col gap-4">'+mobileCards+'</div></div>';
         }
-        async function rescheduleExamDate(oldDate) {
-    const newDate = prompt(`Enter the new exam date (YYYY-MM-DD) to reschedule all exams from ${oldDate}:`, oldDate);
-    if (!newDate || newDate === oldDate) return;
-    
-    // Validate YYYY-MM-DD format
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(newDate)) {
-        return alert("Invalid date format. Please use YYYY-MM-DD.");
-    }
-
-    if (!confirm(`⚠️ WARNING: You are rescheduling all exams, seating plans, answer keys, and submissions from ${oldDate} to ${newDate}.\n\nProceed with migration?`)) return;
-
-    try {
-        const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-        const batch = db.batch();
-        let migratedCount = 0;
-
-        // 1. Migrate exam_schedules
-        const schedSnap = await getCollection("exam_schedules").where("date", "==", oldDate).get();
-        schedSnap.forEach(doc => {
-            const ref = getCollection("exam_schedules").doc();
-            batch.set(ref, { ...doc.data(), date: newDate });
-            batch.delete(doc.ref);
-            migratedCount++;
-        });
-
-        // 2. Migrate admin_paper_groups
-        const groupSnap = await db.collection("admin_paper_groups").where("date", "==", oldDate).get();
-        groupSnap.forEach(doc => {
-            const data = doc.data();
-            const newDocId = ('pg_' + newDate + '_' + data.groupKey).replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 80);
-            const newRef = db.collection("admin_paper_groups").doc(newDocId);
-            batch.set(newRef, { ...data, date: newDate });
-            batch.delete(doc.ref);
-            migratedCount++;
-        });
-
-        // 3. Migrate exam_seating_rooms
-        const roomSnap = await db.collection("exam_seating_rooms").where("date", "==", oldDate).where("center", "==", activeCenter).get();
-        roomSnap.forEach(doc => {
-            const data = doc.data();
-            const safeRoomName = (data.roomName || "").replace(/[^a-zA-Z0-9]/g, '_');
-            const newDocId = `${activeCenter}_${newDate}_${safeRoomName}`;
-            const newRef = db.collection("exam_seating_rooms").doc(newDocId);
-            batch.set(newRef, { ...data, date: newDate });
-            batch.delete(doc.ref);
-            migratedCount++;
-        });
-
-        // 4. Migrate exam_answer_keys & omr_submissions (if linked by group IDs or dates)
-        const keySnap = await db.collection("exam_answer_keys").get();
-        keySnap.forEach(doc => {
-            const data = doc.data();
-            if (data.date === oldDate) {
-                batch.set(doc.ref, { date: newDate }, { merge: true });
+     async function rescheduleExamDate(oldDate) {
+            const newDate = prompt(`Enter the new exam date (YYYY-MM-DD) to reschedule all exams from ${oldDate}:`, oldDate);
+            if (!newDate || newDate === oldDate) return;
+            
+            // Validate YYYY-MM-DD format
+            const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+            if (!dateRegex.test(newDate)) {
+                return alert("Invalid date format. Please use YYYY-MM-DD.");
             }
-        });
 
-        await batch.commit();
-        alert(`✅ Successfully migrated and rescheduled exams to ${newDate}! (${migratedCount} primary records updated).`);
-        listenForExamsTabular();
-    } catch (e) {
-        console.error("Reschedule migration failed:", e);
-        alert("Migration error: " + e.message);
-    }
-}
+            if (!confirm(`⚠️ WARNING: You are rescheduling all exams, seating plans, timetable overrides, answer keys, and submissions from ${oldDate} to ${newDate}.\n\nProceed with migration?`)) return;
+
+            try {
+                const batch = db.batch();
+                let migratedCount = 0;
+
+                // 1. Migrate exam_schedules
+                const schedSnap = await getCollection("exam_schedules").where("date", "==", oldDate).get();
+                schedSnap.forEach(doc => {
+                    const ref = getCollection("exam_schedules").doc();
+                    batch.set(ref, { ...doc.data(), date: newDate });
+                    batch.delete(doc.ref);
+                    migratedCount++;
+                });
+
+                // 2. Migrate admin_paper_groups
+                const groupSnap = await db.collection("admin_paper_groups").where("date", "==", oldDate).get();
+                groupSnap.forEach(doc => {
+                    const data = doc.data();
+                    const newDocId = ('pg_' + newDate + '_' + data.groupKey).replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 80);
+                    const newRef = db.collection("admin_paper_groups").doc(newDocId);
+                    batch.set(newRef, { ...data, date: newDate });
+                    batch.delete(doc.ref);
+                    migratedCount++;
+                });
+
+                // 3. Migrate exam_seating_rooms
+                const roomSnap = await db.collection("exam_seating_rooms").where("date", "==", oldDate).where("center", "==", activeCenter).get();
+                roomSnap.forEach(doc => {
+                    const data = doc.data();
+                    const safeRoomName = (data.roomName || "").replace(/[^a-zA-Z0-9]/g, '_');
+                    const newDocId = `${activeCenter}_${newDate}_${safeRoomName}`;
+                    const newRef = db.collection("exam_seating_rooms").doc(newDocId);
+                    batch.set(newRef, { ...data, date: newDate });
+                    batch.delete(doc.ref);
+                    migratedCount++;
+                });
+
+                // 4. Migrate timetable_history (Moves the OT/Exam Day override schedule to the new date)
+                const historyRefOld = getCollection("timetable_history").doc(oldDate);
+                const historySnapOld = await historyRefOld.get();
+                if (historySnapOld.exists) {
+                    const historyData = historySnapOld.data();
+                    const historyRefNew = getCollection("timetable_history").doc(newDate);
+                    batch.set(historyRefNew, { ...historyData, date: newDate, lastUpdated: Date.now() });
+                    batch.delete(historyRefOld);
+                    migratedCount++;
+                }
+
+                // 5. Migrate exam_answer_keys (if linked by dates)
+                const keySnap = await db.collection("exam_answer_keys").get();
+                keySnap.forEach(doc => {
+                    const data = doc.data();
+                    if (data.date === oldDate) {
+                        batch.set(doc.ref, { date: newDate }, { merge: true });
+                    }
+                });
+
+                await batch.commit();
+                alert(`✅ Successfully migrated and rescheduled exams & timetable overrides to ${newDate}! (${migratedCount} records updated).`);
+                listenForExamsTabular();
+            } catch (e) {
+                console.error("Reschedule migration failed:", e);
+                alert("Migration error: " + e.message);
+            }
+        }
     </script>
 </body>
 </html>
