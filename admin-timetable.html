@@ -4165,159 +4165,203 @@ function processSave(type) {
         }
 
 async function confirmMultiDates() {
-            const selectedDates = Array.from(document.querySelectorAll('input[name="multi-date-cb"]:checked')).map(cb => cb.value);
-            const scope = document.querySelector('input[name="rep-scope"]:checked').value;
-            const schedName = document.getElementById('schedule-name-tag').value.trim() || "Daily Override";
+    const selectedDates = Array.from(document.querySelectorAll('input[name="multi-date-cb"]:checked')).map(cb => cb.value);
+    const scope = document.querySelector('input[name="rep-scope"]:checked').value;
+    const schedName = document.getElementById('schedule-name-tag').value.trim() || "Daily Override";
+    
+    if(selectedDates.length === 0) return alert("Please select at least one date.");
+    
+    let targetSections = [];
+    if(scope === 'PARTIAL') {
+        targetSections = Array.from(document.querySelectorAll('.rep-sec-cb:checked')).map(cb => cb.value);
+        if(targetSections.length === 0) return alert("Select at least one section to replicate.");
+    }
+
+    if(!confirm(`Apply this schedule to ${selectedDates.length} dates?`)) return;
+    const btn = document.querySelector('button[onclick="confirmMultiDates()"]');
+    btn.disabled = true; btn.innerText = "⌛ Auditing & Writing...";
+
+    try {
+        // 1. Scrape the CURRENT screen (Source of Truth for your edits)
+        const currentBlocks = Array.from(document.querySelectorAll('.time-block'));
+        let sourceSlots = []; 
+        currentBlocks.forEach(b => {
+            const className = b.getAttribute('data-class');
+            const sectionName = b.getAttribute('data-section');
+            const s24 = b.querySelector('.tb-s24').value; const e24 = b.querySelector('.tb-e24').value;
+            const entries = Array.from(b.querySelectorAll('.ent-row'));
+            if (!s24 || !e24) return;
+
+            const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
+            const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
+            const dur = `${eMins - sMins} MINS`;
+            const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
+
+            entries.forEach(ent => {
+                if (ent.classList.contains('temp-duty-row')) return;
+                const sub = ent.querySelector('.ent-sub').value;
+                let teacher = ent.querySelector('.ent-tea').value || "NONE";
+                const room = ent.querySelector('.ent-room').value.trim();
+                let remark = ent.querySelector('.ent-rem').value.trim();
+                let examTypeTag = (sub === 'OT') ? 'OT' : 'UT';
+                
+                let teacherEmail = "";
+                let teacherName = teacher;
+                
+                if (ent.getAttribute('data-temp-sub') === 'true') {
+                    teacher = ent.getAttribute('data-orig-tea') || "NONE";
+                    teacherName = ent.getAttribute('data-orig-tea-name') || teacher;
+                    teacherEmail = ent.getAttribute('data-orig-tea-email') || "";
+                    remark = ent.getAttribute('data-orig-rem') || "";
+                } else if (teacher !== "NONE") {
+                    const tObj = allTeachers.find(t => t.name === teacher);
+                    if (tObj) teacherEmail = tObj.email || ""; 
+                }
+
+                sourceSlots.push({ className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName, teacherEmail, room, remark, sMins, eMins, examType: examTypeTag });
+            });
+        });
+
+        const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+        const normalizedTargetKeys = targetSections.map(ts => {
+            const [c, s] = ts.split('|');
+            return `${norm(c)}|${norm(s)}`;
+        });
+
+        // --- LIVE MASTER DISCREPANCY AUDIT ---
+        const masterSnapAll = await getCollection("timetable").get();
+        const allMasterSlots = masterSnapAll.docs.map(doc => doc.data());
+        let allMismatches = [];
+
+        const batch = db.batch();
+        const auditPayloads = [];
+        for (const dateIso of selectedDates) {
+            const [y, m_val, d_val] = dateIso.split('-');
+            const localDate = new Date(y, m_val - 1, d_val);
+            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const dayName = daysArr[localDate.getDay()];
             
-            if(selectedDates.length === 0) return alert("Please select at least one date.");
-            
-            let targetSections = [];
-            if(scope === 'PARTIAL') {
-                targetSections = Array.from(document.querySelectorAll('.rep-sec-cb:checked')).map(cb => cb.value);
-                if(targetSections.length === 0) return alert("Select at least one section to replicate.");
+            const stampedSourceSlots = sourceSlots.map(slot => ({ ...slot, day: dayName }));
+            let finalMergedSchedule = [];
+
+            const masterSnapDay = allMasterSlots.filter(m => m.day === dayName);
+
+            if (scope === 'FULL') {
+                finalMergedSchedule = stampedSourceSlots;
+            } else {
+                const normalPortion = masterSnapDay.filter(ms => {
+                    const key = `${norm(ms.className)}|${norm(ms.section)}`;
+                    return !normalizedTargetKeys.includes(key);
+                }).map(slot => {
+                    if (slot.start24 && slot.end24) {
+                        const [sh, sm] = slot.start24.split(':').map(Number);
+                        const [eh, em] = slot.end24.split(':').map(Number);
+                        slot.sMins = sh * 60 + sm;
+                        slot.eMins = eh * 60 + em;
+                        slot.timeRange = `${format12Hour(slot.start24)} - ${format12Hour(slot.end24)}`;
+                        slot.duration = `${slot.eMins - slot.sMins} MINS`;
+                    }
+                    return slot;
+                });
+                
+                const overridePortion = stampedSourceSlots.filter(ss => {
+                    const key = `${norm(ss.className)}|${norm(ss.section)}`;
+                    return normalizedTargetKeys.includes(key);
+                });
+                
+                finalMergedSchedule = [...normalPortion, ...overridePortion];
             }
 
-            if(!confirm(`Apply this schedule to ${selectedDates.length} dates?`)) return;
-            const btn = document.querySelector('button[onclick="confirmMultiDates()"]');
-            btn.disabled = true; btn.innerText = "⌛ Merging & Writing...";
-
-            try {
-                // 1. Scrape the CURRENT screen (Source of Truth for your edits)
-                const currentBlocks = Array.from(document.querySelectorAll('.time-block'));
-                let sourceSlots = []; 
-                currentBlocks.forEach(b => {
-                    const className = b.getAttribute('data-class');
-                    const sectionName = b.getAttribute('data-section');
-                    const s24 = b.querySelector('.tb-s24').value; const e24 = b.querySelector('.tb-e24').value;
-                    const entries = Array.from(b.querySelectorAll('.ent-row'));
-                    if (!s24 || !e24) return;
-
-                    const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
-                    const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
-                    const dur = `${eMins - sMins} MINS`;
-                    const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
-
-                    entries.forEach(ent => {
-                        if (ent.classList.contains('temp-duty-row')) return;
-                        const sub = ent.querySelector('.ent-sub').value;
-                        let teacher = ent.querySelector('.ent-tea').value || "NONE";
-                        const room = ent.querySelector('.ent-room').value.trim();
-                        let remark = ent.querySelector('.ent-rem').value.trim();
-                        let examTypeTag = (sub === 'OT') ? 'OT' : 'UT';
-                        
-                        let teacherEmail = "";
-                        let teacherName = teacher;
-                        
-                        if (ent.getAttribute('data-temp-sub') === 'true') {
-                            teacher = ent.getAttribute('data-orig-tea') || "NONE";
-                            teacherName = ent.getAttribute('data-orig-tea-name') || teacher;
-                            teacherEmail = ent.getAttribute('data-orig-tea-email') || "";
-                            remark = ent.getAttribute('data-orig-rem') || "";
-                        } else if (teacher !== "NONE") {
-                            const tObj = allTeachers.find(t => t.name === teacher);
-                            if (tObj) teacherEmail = tObj.email || ""; 
-                        }
-
-                        sourceSlots.push({ className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName, teacherEmail, room, remark, sMins, eMins, examType: examTypeTag });
-                    });
-                });
-
-                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                const normalizedTargetKeys = targetSections.map(ts => {
-                    const [c, s] = ts.split('|');
-                    return `${norm(c)}|${norm(s)}`;
-                });
-
-               const batch = db.batch();
-                const auditPayloads = [];
-                for (const dateIso of selectedDates) {
-                    const [y, m_val, d_val] = dateIso.split('-');
-                    const localDate = new Date(y, m_val - 1, d_val);
-                    const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                    const dayName = daysArr[localDate.getDay()];
-                    
-                    const stampedSourceSlots = sourceSlots.map(slot => ({ ...slot, day: dayName }));
-                    let finalMergedSchedule = [];
-
-                    if (scope === 'FULL') {
-                        finalMergedSchedule = stampedSourceSlots;
-                    } else {
-                        // 2. FETCH MASTER FOR FILLING BLANKS
-                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                        const masterSlots = masterSnap.docs.map(doc => doc.data());
-                        
-                        // 3. RECONSTRUCT MASTER SLOTS
-                        const normalPortion = masterSlots.filter(ms => {
-                            const key = `${norm(ms.className)}|${norm(ms.section)}`;
-                            return !normalizedTargetKeys.includes(key);
-                        }).map(slot => {
-                            if (slot.start24 && slot.end24) {
-                                const [sh, sm] = slot.start24.split(':').map(Number);
-                                const [eh, em] = slot.end24.split(':').map(Number);
-                                slot.sMins = sh * 60 + sm;
-                                slot.eMins = eh * 60 + em;
-                                slot.timeRange = `${format12Hour(slot.start24)} - ${format12Hour(slot.end24)}`;
-                                slot.duration = `${slot.eMins - slot.sMins} MINS`;
-                            }
-                            return slot;
+            // Audit against Master
+            finalMergedSchedule.forEach(slot => {
+                if (['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'NONE'].includes((slot.subject || '').toUpperCase())) return;
+                const masterMatch = masterSnapDay.find(m => 
+                    norm(m.className) === norm(slot.className) && 
+                    norm(m.section || m.sectionName) === norm(slot.section) && 
+                    norm(m.subject) === norm(slot.subject) &&
+                    m.start24 === slot.start24
+                );
+                if (masterMatch) {
+                    const mTeacher = masterMatch.teacherName || masterMatch.teacher || "NONE";
+                    const mRoom = masterMatch.room || "";
+                    if (mTeacher !== slot.teacher || mRoom !== slot.room) {
+                        allMismatches.push({
+                            date: dateIso,
+                            className: slot.className,
+                            section: slot.section,
+                            subject: slot.subject,
+                            time: slot.start24,
+                            masterTeacher: mTeacher,
+                            newTeacher: slot.teacher,
+                            masterRoom: mRoom,
+                            newRoom: slot.room
                         });
-                        
-                        const overridePortion = stampedSourceSlots.filter(ss => {
-                            const key = `${norm(ss.className)}|${norm(ss.section)}`;
-                            return normalizedTargetKeys.includes(key);
-                        });
-                        
-                        finalMergedSchedule = [...normalPortion, ...overridePortion];
-                    }
-
-                  batch.set(getCollection("timetable_history").doc(dateIso), {
-                        date: dateIso,
-                        lastUpdated: Date.now(),
-                        schedule: finalMergedSchedule,
-                        type: "DAILY_OVERRIDE",
-                        tag: schedName
-                    });
-                    auditPayloads.push({ date: dateIso, schedule: finalMergedSchedule });
-                }
-
-                await batch.commit();
-                await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
-                
-            // --- ADDED: TRIGGER PUSH NOTIFICATIONS FOR OVERRIDES ---
-                let allAffectedTeachersMap = new Map();
-
-                for (const payload of auditPayloads) {
-                    const dayName = new Date(payload.date).toLocaleDateString('en-US', { weekday: 'long' });
-                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                    const masterSlots = masterSnap.docs.map(d => d.data());
-                    const affected = detectTeacherChanges(masterSlots, payload.schedule);
-                    
-                 if (affected.length > 0) {
-                        await sendEmailNotification(affected);
-                        affected.forEach(t => allAffectedTeachersMap.set(t.name, t));
                     }
                 }
+            });
 
-                const combinedAffected = Array.from(allAffectedTeachersMap.values());
-                if (combinedAffected.length > 0) {
-                    const dateList = auditPayloads.map(p => p.date).join(', ');
-                    openWhatsAppAlert(combinedAffected, `Specific Dates / Exam Override (${dateList})`);
-                }
-                // ------------------------------------------------------
+            batch.set(getCollection("timetable_history").doc(dateIso), {
+                date: dateIso,
+                lastUpdated: Date.now(),
+                schedule: finalMergedSchedule,
+                type: "DAILY_OVERRIDE",
+                tag: schedName
+            });
+            auditPayloads.push({ date: dateIso, schedule: finalMergedSchedule });
+        }
 
-                alert(`✅ Successfully Replicated and notified affected teachers!`);
-                
-                for (const payload of auditPayloads) {
-                    await auditBrokenLeaves(payload.date, payload.schedule);
-                }
-                
-                document.getElementById('multi-date-modal').classList.replace('flex', 'hidden');
-            } catch (error) {
-                alert("Critical Merge Error: " + error.message);
-            } finally {
+        if (allMismatches.length > 0) {
+            let warningText = "⚠️ Master Schedule Discrepancies Detected:\nThe following slots differ from the Live Master Schedule:\n\n";
+            allMismatches.slice(0, 10).forEach(m => {
+                warningText += `• ${m.date} | ${m.className} Sec ${m.section} (${m.subject} at ${m.time}):\n`;
+                if (m.masterTeacher !== m.newTeacher) warningText += `  Teacher: Master [${m.masterTeacher}] vs New [${m.newTeacher}]\n`;
+                if (m.masterRoom !== m.newRoom) warningText += `  Room: Master [${m.masterRoom || 'None'}] vs New [${m.newRoom || 'None'}]\n`;
+            });
+            if (allMismatches.length > 10) warningText += `\n...and ${allMismatches.length - 10} more discrepancies.`;
+            warningText += "\n\nDo you want to continue saving this schedule with these changes?";
+            
+            if (!confirm(warningText)) {
                 btn.disabled = false; btn.innerText = "🚀 Execute Replication";
+                return;
             }
         }
+
+        await batch.commit();
+        await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
+        
+        let allAffectedTeachersMap = new Map();
+
+        for (const payload of auditPayloads) {
+            const dayName = new Date(payload.date).toLocaleDateString('en-US', { weekday: 'long' });
+            const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+            const masterSlots = masterSnap.docs.map(d => d.data());
+            const affected = detectTeacherChanges(masterSlots, payload.schedule);
+            
+            if (affected.length > 0) {
+                await sendEmailNotification(affected);
+                affected.forEach(t => allAffectedTeachersMap.set(t.name, t));
+            }
+        }
+
+        const combinedAffected = Array.from(allAffectedTeachersMap.values());
+        if (combinedAffected.length > 0) {
+            const dateList = auditPayloads.map(p => p.date).join(', ');
+            openWhatsAppAlert(combinedAffected, `Specific Dates / Exam Override (${dateList})`);
+        }
+
+        alert(`✅ Successfully Replicated and notified affected teachers!`);
+        
+        for (const payload of auditPayloads) {
+            await auditBrokenLeaves(payload.date, payload.schedule);
+        }
+        
+        document.getElementById('multi-date-modal').classList.replace('flex', 'hidden');
+    } catch (error) {
+        alert("Critical Merge Error: " + error.message);
+    } finally {
+        btn.disabled = false; btn.innerText = "🚀 Execute Replication";
+    }
+}
         // --- VISUAL CLASH FILTER ENGINE ---
         let isClashViewActive = false;
 
@@ -4516,8 +4560,52 @@ async function executeImport() {
         const importedData = sourceSlots.filter(s => s.className === className && s.section === sectionName);
         if (importedData.length === 0) throw new Error("No data found for this class on that date.");
 
+        // Fetch Live Master Schedule for comparison
+        let targetDayName = currentContextDate ? new Date(currentContextDate).toLocaleDateString('en-US', { weekday: 'long' }) : new Date().toLocaleDateString('en-US', { weekday: 'long' });
+        const masterSnapDay = await getCollection("timetable").where("day", "==", targetDayName).get();
+        const masterSlotsDay = masterSnapDay.docs.map(d => d.data());
+
+        const cleanNorm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+        let importMismatches = [];
+
+        importedData.forEach(slot => {
+            const masterEntry = masterSlotsDay.find(m => 
+                cleanNorm(m.className) === cleanNorm(className) && 
+                cleanNorm(m.section || m.sectionName) === cleanNorm(sectionName) && 
+                cleanNorm(m.subject) === cleanNorm(slot.subject) &&
+                m.start24 === slot.start24
+            );
+            if (masterEntry) {
+                const mTeacher = masterEntry.teacherName || masterEntry.teacher || "NONE";
+                const mRoom = masterEntry.room || "";
+                if (mTeacher !== slot.teacher || mRoom !== slot.room) {
+                    importMismatches.push({
+                        subject: slot.subject,
+                        time: slot.start24,
+                        masterTeacher: mTeacher,
+                        newTeacher: slot.teacher,
+                        masterRoom: mRoom,
+                        newRoom: slot.room
+                    });
+                }
+            }
+        });
+
+        if (importMismatches.length > 0) {
+            let warnMsg = `⚠️ Master Discrepancies Found in Imported Data for ${className} Sec ${sectionName}:\n\n`;
+            importMismatches.forEach(im => {
+                warnMsg += `• ${im.subject} at ${im.time}:\n`;
+                if (im.masterTeacher !== im.newTeacher) warnMsg += `  Teacher: Master [${im.masterTeacher}] vs Imported [${im.newTeacher}]\n`;
+                if (im.masterRoom !== im.newRoom) warnMsg += `  Room: Master [${im.masterRoom || 'None'}] vs Imported [${im.newRoom || 'None'}]\n`;
+            });
+            warnMsg += "\nDo you wish to proceed with importing these slots?";
+            if (!confirm(warnMsg)) {
+                btn.disabled = false; btn.innerText = "Import Now";
+                return;
+            }
+        }
+
         // 2. Clear old data from memory (The Global Array)
-        // This removes the "Many Blocks" duplication issue
         globalTimetable = globalTimetable.filter(t => !(t.className === className && t.section === sectionName));
 
         // 3. Add new data to memory
