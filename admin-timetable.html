@@ -4564,71 +4564,38 @@ async function confirmMultiDates() {
     document.getElementById('import-modal').classList.replace('hidden', 'flex');
 }
 
-async function executeImport() {
-    const importDate = document.getElementById('import-source-date').value;
-    const secId = document.getElementById('import-target-id').value;
-    const className = document.getElementById('import-target-class').value;
-    const sectionName = document.getElementById('import-target-sec').value;
+function pasteBlock(className, sectionName, secId) {
+            if (!copiedBlockData) return alert("Nothing copied yet! Click the 📋 icon on any block first.");
+            
+            takeSnapshot();
+            
+            // Perform an exact, literal copy of the block and its original timings
+            const dataToPaste = JSON.parse(JSON.stringify(copiedBlockData)); 
+            
+            // --- UNIVERSAL MASTER AUDIT FOR PASTE ---
+            const cleanNorm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            let dayName = currentContextDate ? new Date(currentContextDate).toLocaleDateString('en-US', { weekday: 'long' }) : new Date().toLocaleDateString('en-US', { weekday: 'long' });
 
-    if (!importDate) return alert("Please select a date.");
-    if (!confirm(`Import schedule from ${importDate}? This will overwrite the current section's slots.`)) return;
+            // Fetch live master data for this specific day & section
+            const targetDayMaster = globalTimetable.filter(t => t.day === dayName && cleanNorm(t.className) === cleanNorm(className) && cleanNorm(t.section) === cleanNorm(sectionName));
 
-    const btn = event.target;
-    btn.disabled = true; btn.innerText = "Importing...";
-
-    try {
-        // 1. Fetch Source Data
-        const historySnap = await getCollection("timetable_history").doc(importDate).get();
-        let sourceSlots = [];
-        if (historySnap.exists) {
-            sourceSlots = historySnap.data().schedule || [];
-        } else {
-            const dayName = new Date(importDate).toLocaleDateString('en-US', { weekday: 'long' });
-            const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-            sourceSlots = masterSnap.docs.map(d => d.data());
-        }
-        
-        const importedData = sourceSlots.filter(s => s.className === className && s.section === sectionName);
-        if (importedData.length === 0) throw new Error("No data found for this class on that date.");
-
-        // 2. Clear old data from memory (The Global Array)
-        // This removes the "Many Blocks" duplication issue
-        globalTimetable = globalTimetable.filter(t => !(t.className === className && t.section === sectionName));
-
-        // 3. Add new data to memory
-        importedData.forEach(slot => {
-            globalTimetable.push({
-                day: slot.day,
-                className: className,
-                section: sectionName,
-                start24: slot.start24,
-                end24: slot.end24,
-                timeRange: slot.timeRange,
-                duration: slot.duration,
-                subject: slot.subject,
-                teacher: slot.teacher,
-                teacherName: slot.teacher,
-                teacherEmail: slot.teacherEmail || "",
-                room: slot.room,
-                remark: slot.remark,
-                sMins: slot.sMins,
-                eMins: slot.eMins
+            dataToPaste.entries.forEach(ent => {
+                const masterEntry = targetDayMaster.find(m => cleanNorm(m.subject) === cleanNorm(ent.subject) && m.start24 === dataToPaste.start24);
+                if (masterEntry) {
+                    const mTeacher = masterEntry.teacherName || masterEntry.teacher || "NONE";
+                    const mRoom = masterEntry.room || "";
+                    if (mTeacher !== ent.teacher || mRoom !== ent.room) {
+                        ent.mismatchData = { masterTeacher: mTeacher, masterRoom: mRoom };
+                    }
+                }
             });
-        });
+            // ----------------------------------------
 
-        // 4. Force a clean re-render of the dashboard
-        document.getElementById('timetable-container').innerHTML = ""; // Clear screen
-        renderDirectDashboard(true); // Redraw
-        
-        document.getElementById('import-modal').classList.replace('flex', 'hidden');
-        alert("✅ Import successful! Please click 'Save Changes' to finalize.");
-
-    } catch (e) {
-        alert("Import Error: " + e.message);
-    } finally {
-        btn.disabled = false; btn.innerText = "Import Now";
-    }
-}
+            injectSmartBlock(className, sectionName, secId, dataToPaste);
+            sortSectionBlocks(secId);
+            autoFillGapsForSection(secId); // Heal any gaps left around the paste
+            checkGlobalClash();
+        }
    init();
         // This function converts time strings like "09:00 AM" or "14:30" into total minutes
     function universalTimeToMins(timeStr) {
