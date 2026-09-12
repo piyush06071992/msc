@@ -2573,6 +2573,20 @@ function generateReadHTML(blockData, className, sectionName) {
             div.setAttribute('data-orig-tea-email', entryData.origTeacherEmail || '');
             div.setAttribute('data-orig-rem', entryData.origRemark || '');
             
+          let mismatchBadge = "";
+            if (entryData.mismatchData) {
+                const mT = (entryData.mismatchData.masterTeacher || "").replace(/'/g, "\\'");
+                const mR = (entryData.mismatchData.masterRoom || "").replace(/'/g, "\\'");
+                mismatchBadge = `
+                    <div class="w-full mt-1 bg-amber-50 border border-amber-200 rounded p-1 flex flex-col items-center justify-center shadow-sm z-40 relative">
+                        <span class="text-[8px] font-black text-amber-700 uppercase mb-0.5 text-center leading-tight">⚠️ Master Differs:<br>${entryData.mismatchData.masterTeacher}</span>
+                        <button type="button" onclick="syncToMaster('${blockId}', '${entId}', '${mT}', '${mR}'); this.parentElement.remove();" class="bg-white text-amber-600 border border-amber-300 px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest hover:bg-amber-100 transition-colors w-full cursor-pointer shadow-sm">
+                            Sync to Master
+                        </button>
+                    </div>
+                `;
+            }
+
             div.innerHTML = `
                 <button onclick="document.getElementById('${entId}').remove(); triggerInlineSave('${blockId}')" class="absolute -top-1 -right-1 bg-rose-500 text-white rounded-full w-4 h-4 flex items-center justify-center text-[8px] opacity-0 group-hover/ent:opacity-100 transition-opacity z-20 shadow-md">✕</button>
 
@@ -2597,6 +2611,7 @@ function generateReadHTML(blockData, className, sectionName) {
                 <div class="flex justify-between mt-1 px-0.5 border-t border-slate-50 pt-1">
                     ${daysHtml}
                 </div>
+                ${mismatchBadge}
                 
                 <div class="ent-warn hidden absolute top-0 right-0 w-2 h-2 rounded-full bg-red-600 animate-ping z-30"></div>
             `;
@@ -2859,7 +2874,7 @@ function cancelEditMode(blockId) {
             setTimeout(() => btn.innerHTML = origText, 1000);
         }
 
-   function pasteBlock(className, sectionName, secId) {
+function pasteBlock(className, sectionName, secId) {
             if (!copiedBlockData) return alert("Nothing copied yet! Click the 📋 icon on any block first.");
             
             takeSnapshot();
@@ -2867,12 +2882,72 @@ function cancelEditMode(blockId) {
             // Perform an exact, literal copy of the block and its original timings
             const dataToPaste = JSON.parse(JSON.stringify(copiedBlockData)); 
             
+            // --- OPTION C: POST-PASTE MASTER AUDIT ---
+            const cleanNorm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            let dayName = "";
+            if (currentContextDate) {
+                dayName = new Date(currentContextDate).toLocaleDateString('en-US', { weekday: 'long' });
+            } else {
+                dayName = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+            }
+
+            const masterSnap = timetableData.filter(t => 
+                t.day === dayName && 
+                cleanNorm(t.className) === cleanNorm(className) && 
+                cleanNorm(t.section || t.sectionName) === cleanNorm(sectionName) && 
+                t.start24 === dataToPaste.start24
+            );
+
+            dataToPaste.entries.forEach(ent => {
+                const masterEntry = masterSnap.find(m => cleanNorm(m.subject) === cleanNorm(ent.subject));
+                if (masterEntry) {
+                    const mTeacher = masterEntry.teacherName || masterEntry.teacher || "NONE";
+                    const mRoom = masterEntry.room || "";
+                    if (mTeacher !== ent.teacher || mRoom !== ent.room) {
+                        ent.mismatchData = { masterTeacher: mTeacher, masterRoom: mRoom };
+                    }
+                }
+            });
+            // ------------------------------------------
+
             injectSmartBlock(className, sectionName, secId, dataToPaste);
             sortSectionBlocks(secId);
             autoFillGapsForSection(secId); // Heal any gaps left around the paste
             checkGlobalClash();
         }
-       function sortSectionBlocks(secId) {
+
+        // --- NEW: SYNC TO MASTER BUTTON LOGIC ---
+        function syncToMaster(blockId, entId, masterTeacher, masterRoom) {
+            const entRow = document.getElementById(entId);
+            if (!entRow) return;
+            
+            const tSel = entRow.querySelector('.ent-tea');
+            const rSel = entRow.querySelector('.ent-room');
+            
+            if (tSel && masterTeacher) {
+                let optionExists = Array.from(tSel.options).some(opt => opt.value === masterTeacher);
+                if (!optionExists && masterTeacher !== "NONE") {
+                    tSel.innerHTML += `<option value="${masterTeacher}">${masterTeacher}</option>`;
+                }
+                tSel.value = masterTeacher;
+                tSel.style.color = typeof getDynamicColor === 'function' ? getDynamicColor(masterTeacher) : '#64748b';
+                tSel.setAttribute('data-selected', masterTeacher);
+                entRow.setAttribute('data-tea', masterTeacher);
+                entRow.setAttribute('data-temp-sub', 'false');
+            }
+            
+            if (rSel && masterRoom) {
+                let rOptionExists = Array.from(rSel.options).some(opt => opt.value === masterRoom);
+                if (!rOptionExists && masterRoom !== "") {
+                    rSel.innerHTML += `<option value="${masterRoom}">${masterRoom}</option>`;
+                }
+                rSel.value = masterRoom;
+            }
+            
+            triggerInlineSave(blockId);
+        }
+
+        function sortSectionBlocks(secId) {
             const container = document.getElementById('grid-' + secId);
             if (!container) return;
             const blocks = Array.from(container.querySelectorAll('.time-block'));
