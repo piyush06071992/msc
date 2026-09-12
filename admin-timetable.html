@@ -829,12 +829,13 @@ function updateUndoButtons() {
         }
         // --------------------------------------
 
-     let structureData = [];
+    let structureData = [];
         let allTeachers = [];
-        let allRooms = []; // NEW: Holds infrastructure rooms
+        let allRooms = []; 
         let globalTimetable = []; 
         let oldTimetableState = []; 
-        let holidaysData = []; // NEW: Holds holiday overlays
+        let holidaysData = [];
+        let liveMasterTimetable = []; // Cache for pure Live Master comparison
         
        const SPECIAL_SUBJECTS = ['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM', 'EVENT'];
         const DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -937,9 +938,10 @@ document.getElementById('p-timeframe').addEventListener('change', function() {
         authBtn.classList.remove('hidden');
     }
 // 3. Load the rest of the timetable
-    await checkAndApplyFutureMaster(); 
+   await checkAndApplyFutureMaster(); 
     await Promise.all([fetchStructure(), fetchTeachers(), fetchRooms()]);
     await fetchTimetable();
+    await fetchLiveMasterCache(); // Cache pure master for audit checks
     await fetchHolidays();
     await fetchBellTemplates();
     populateFilterDropdowns();
@@ -1090,6 +1092,14 @@ async function checkAndApplyFutureMaster() {
             oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
             sessionStorage.setItem('minerva_timetable', JSON.stringify(globalTimetable));
         }
+        async function fetchLiveMasterCache() {
+        try {
+            const snap = await getCollection("timetable").get();
+            liveMasterTimetable = snap.docs.map(d => d.data());
+        } catch(e) {
+            console.error("Master cache fetch error:", e);
+        }
+    }
 
         // --- HOLIDAY OVERLAY ENGINE ---
         async function fetchHolidays() {
@@ -1552,19 +1562,20 @@ async function saveHoliday() {
                             if(!existingEntry.days.includes(slot.day)) existingEntry.days.push(slot.day);
                         } else {
                             timeContainers[tKey].entries.push({ 
-                                id: Math.random().toString(36).substr(2,9), 
-                                subject: slot.subject, 
-                                teacher: slot.teacher, 
-                                room: slot.room, 
-                                remark: slot.remark, 
-                                days: [slot.day],
-                                isTemporarySub: slot.isTemporarySub,
-                                origTeacher: slot.origTeacher,
-                                origTeacherName: slot.origTeacherName,
-                                origTeacherEmail: slot.origTeacherEmail,
-                                origRemark: slot.origRemark,
-                                isTemporaryDuty: slot.isTemporaryDuty
-                            });
+                            id: Math.random().toString(36).substr(2,9), 
+                            subject: slot.subject, 
+                            teacher: slot.teacher, 
+                            room: slot.room, 
+                            remark: slot.remark, 
+                            days: [slot.day],
+                            isTemporarySub: slot.isTemporarySub,
+                            origTeacher: slot.origTeacher,
+                            origTeacherName: slot.origTeacherName,
+                            origTeacherEmail: slot.origTeacherEmail,
+                            origRemark: slot.origRemark,
+                            isTemporaryDuty: slot.isTemporaryDuty,
+                            mismatchData: slot.mismatchData // Preserve audit badge state across re-renders
+                        });
                         }
                     });
 
@@ -4560,11 +4571,9 @@ async function executeImport() {
         const importedData = sourceSlots.filter(s => s.className === className && s.section === sectionName);
         if (importedData.length === 0) throw new Error("No data found for this class on that date.");
 
-        // 2. Fetch the TRUE Live Master Schedule from the database for accurate comparison
+   // 2. Use cached Live Master Schedule for accurate comparison
         let targetDayName = currentContextDate ? new Date(currentContextDate).toLocaleDateString('en-US', { weekday: 'long' }) : new Date().toLocaleDateString('en-US', { weekday: 'long' });
-        const masterSnapLive = await getCollection("timetable").where("day", "==", targetDayName).get();
-        const masterSlotsLive = masterSnapLive.docs.map(d => d.data());
-
+        const masterSlotsLive = liveMasterTimetable.filter(m => m.day === targetDayName);
         // 3. Clear old data from memory for this section
         globalTimetable = globalTimetable.filter(t => !(t.className === className && t.section === sectionName));
 
