@@ -1,7 +1,5 @@
-// minerva-core.js - Global Asset for Minerva Study Circle App
-
+// minerva-core.js - Optimized for Android WebViews
 document.addEventListener('DOMContentLoaded', () => {
-    // 1. Automatically inject the Pull-to-Refresh spinner at the top of the page if missing
     if (!document.getElementById('ptr-spinner')) {
         const spinnerDiv = document.createElement('div');
         spinnerDiv.id = 'ptr-spinner';
@@ -15,33 +13,27 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.insertBefore(spinnerDiv, document.body.firstChild);
     }
 
-    // 2. Native-Feel Pull-to-Refresh & Cache Buster Touch Logic
     let pStartY = 0;
     const ptrSpinner = document.getElementById('ptr-spinner');
 
     window.addEventListener('touchstart', e => {
-        // Only register touch if user is at the absolute top of the page
-        if (window.scrollY === 0) {
+        if (window.pageYOffset <= 5 || document.documentElement.scrollTop <= 5) {
             pStartY = e.touches[0].pageY;
+        } else {
+            pStartY = 0;
         }
     }, { passive: true });
 
     window.addEventListener('touchend', e => {
-        if (window.scrollY === 0 && pStartY > 0) {
+        if (pStartY > 0) {
             const pEndY = e.changedTouches[0].pageY;
-            
-            // If pulled down more than 120 pixels
-            if (pEndY > pStartY + 120) { 
+            if (pEndY > pStartY + 100) { 
                 if (ptrSpinner) ptrSpinner.style.height = '45px'; 
-                
-                // Destroy local cost-saving caches to force fresh Firebase reads
-                sessionStorage.removeItem('minerva_struct');
-                sessionStorage.removeItem('minerva_timetable');
-                sessionStorage.removeItem('minerva_teachers');
-                sessionStorage.removeItem('minerva_rooms');
-                
-                // Hard reload to fetch latest data
-                setTimeout(() => window.location.reload(), 800);
+
+                // Wipe all session storage caches across the app
+                sessionStorage.clear();
+
+                setTimeout(() => window.location.reload(), 600);
             }
         }
         pStartY = 0;
