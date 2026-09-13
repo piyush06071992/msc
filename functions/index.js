@@ -122,8 +122,7 @@ exports.sendPreClassReminders = onSchedule({
                 staffSnap = await admin.firestore().collection("staff_applications").get();
             }
 
-            let targetToken = null;
-            let latestTokenTime = 0;
+         let targetTokens = [];
 
             if (staffSnap && !staffSnap.empty) {
                 staffSnap.forEach(staffDoc => {
@@ -135,20 +134,18 @@ exports.sendPreClassReminders = onSchedule({
                         (notif.teacherEmail && staffData.email === notif.teacherEmail) ||
                         (notif.teacherName && staffFullName.toLowerCase() === notif.teacherName.toLowerCase())
                     ) {
-                        if (staffData.fcmToken) {
-                            const tokenTime = staffData.tokenUpdatedAt || 0;
-                            if (tokenTime >= latestTokenTime) {
-                                targetToken = staffData.fcmToken;
-                                latestTokenTime = tokenTime;
-                            }
+                        if (staffData.fcmTokens && Array.isArray(staffData.fcmTokens)) {
+                            staffData.fcmTokens.forEach(t => { if (!targetTokens.includes(t)) targetTokens.push(t); });
+                        } else if (staffData.fcmToken && !targetTokens.includes(staffData.fcmToken)) {
+                            targetTokens.push(staffData.fcmToken);
                         }
                     }
                 });
             }
 
-            if (targetToken) {
+            if (targetTokens.length > 0) {
                 const message = {
-                    token: targetToken,
+                    tokens: targetTokens,
                     notification: {
                         title: "🔔 Class Starting in 10 Mins!",
                         body: `Your lecture for ${notif.subject} (Class ${notif.className} - Sec ${notif.section}) starts at ${notif.timeRange}.`
@@ -159,7 +156,7 @@ exports.sendPreClassReminders = onSchedule({
                         fcmOptions: { link: "https://minervaacademy.web.app/teacher-portal.html" }
                     }
                 };
-                await admin.messaging().send(message);
+                await admin.messaging().sendEachForMulticast(message);
             }
         }
     } catch (error) {
@@ -189,10 +186,7 @@ exports.sendInstantPushAlerts = onDocumentCreated({
 
         if (!staffSnap || staffSnap.empty) continue;
 
-        let targetToken = null;
-        let latestTokenTime = 0;
-
-        staffSnap.forEach(doc => {
+staffSnap.forEach(doc => {
             const staffData = doc.data();
             const nameKey = Object.keys(staffData.details || {}).find(k => k.toLowerCase().includes('name'));
             const staffFullName = nameKey ? staffData.details[nameKey] : (staffData.name || "");
@@ -201,17 +195,15 @@ exports.sendInstantPushAlerts = onDocumentCreated({
                 (t.email && staffData.email === t.email) ||
                 (t.name && staffFullName.toLowerCase() === t.name.toLowerCase())
             ) {
-                if (staffData.fcmToken) {
-                    const tokenTime = staffData.tokenUpdatedAt || 0;
-                    if (tokenTime >= latestTokenTime) {
-                        targetToken = staffData.fcmToken;
-                        latestTokenTime = tokenTime;
-                    }
+                if (staffData.fcmTokens && Array.isArray(staffData.fcmTokens)) {
+                    staffData.fcmTokens.forEach(token => {
+                        if (!tokens.includes(token)) tokens.push(token);
+                    });
+                } else if (staffData.fcmToken && !tokens.includes(staffData.fcmToken)) {
+                    tokens.push(staffData.fcmToken);
                 }
             }
         });
-        
-        if (targetToken && !tokens.includes(targetToken)) tokens.push(targetToken);
     }
 
     if (tokens.length === 0) return null;
