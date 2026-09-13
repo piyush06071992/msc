@@ -110,9 +110,39 @@
         const firebaseConfig = { apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", authDomain: "shop-portal-bbbbb.firebaseapp.com", projectId: "shop-portal-bbbbb", storageBucket: "shop-portal-bbbbb.firebasestorage.app", messagingSenderId: "701377739976", appId: "1:701377739976:web:99998220272090e56e79fd" };
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
-        const auth = firebase.auth();
+      const auth = firebase.auth();
 
         let targetResetDocId = null;
+        let nativeFCMToken = null; // Global variable to hold the hardware token
+
+        // 1. Initialize Native Push Notifications in the background on load
+        document.addEventListener('DOMContentLoaded', async () => {
+            if (window.Capacitor && window.Capacitor.isNativePlatform()) {
+                const PushNotifications = Capacitor.Plugins.PushNotifications;
+                try {
+                    // Capture token silently
+                    PushNotifications.addListener('registration', (token) => {
+                        nativeFCMToken = token.value;
+                    });
+                    
+                    // Handle alerts while the teacher is looking at the screen
+                    PushNotifications.addListener('pushNotificationReceived', (notification) => {
+                        alert(`${notification.title}\n${notification.body}`);
+                    });
+
+                    // Request Android lock screen permissions
+                    let permStatus = await PushNotifications.checkPermissions();
+                    if (permStatus.receive === 'prompt') {
+                        permStatus = await PushNotifications.requestPermissions();
+                    }
+                    if (permStatus.receive === 'granted') {
+                        await PushNotifications.register();
+                    }
+                } catch (err) {
+                    console.error('Push setup failed:', err);
+                }
+            }
+        });
 
         function togglePasswordVisibility(inputId) { const p = document.getElementById(inputId); p.type = p.type === 'password' ? 'text' : 'password'; }
         function showError(msg, elId = 'error-msg') { const el = document.getElementById(elId); el.innerText = msg; el.classList.remove('hidden'); }
@@ -138,7 +168,7 @@
             return { name: staffName, dept: staffDept };
         }
 
-        async function processLoginSuccess(userDoc) {
+       async function processLoginSuccess(userDoc) {
             const userData = userDoc.data();
             const sessionId = generateSessionId();
             await db.collection("staff_applications").doc(userDoc.id).update({ currentSessionId: sessionId });
@@ -146,9 +176,25 @@
             const info = extractTeacherInfo(userData);
             const sessionData = { uid: userDoc.id, email: userData.email, name: info.name, dept: info.dept, sessionId: sessionId };
             localStorage.setItem('minervaActiveStaff', JSON.stringify(sessionData));
+
+            // 2. Automatically link the captured hardware token to this staff member
+            if (nativeFCMToken) {
+                try {
+                    await db.collection('device_tokens').doc(userDoc.id).set({
+                        fcmToken: nativeFCMToken,
+                        email: userData.email,
+                        name: info.name,
+                        role: 'staff',
+                        platform: 'Android App',
+                        lastUpdated: firebase.firestore.FieldValue.serverTimestamp()
+                    }, { merge: true });
+                } catch (e) {
+                    console.error("Token save error:", e);
+                }
+            }
+
             window.location.href = 'teacher-portal.html';
         }
-
         async function handleEmailMobileLogin(e) {
             e.preventDefault();
             const btn = document.getElementById('login-btn');
