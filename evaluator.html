@@ -242,7 +242,7 @@
                     </div>
 
                     <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                        <div class="overflow-x-auto custom-scroll" style="max-height: 60vh;">
+                     <div class="overflow-x-auto custom-scroll" style="max-height: 60vh;">
                             <table class="w-full text-left border-collapse">
                                 <thead class="bg-slate-100 text-slate-700 text-[10px] uppercase font-black sticky top-0 z-10 shadow-sm border-b border-slate-200">
                                     <tr>
@@ -251,6 +251,7 @@
                                         <th class="p-4">Candidate Name</th>
                                         <th class="p-4 text-center w-32">Attendance</th>
                                         <th class="p-4 text-center w-48">Score Obtained</th>
+                                        <th class="p-4 text-center w-32">Status / Action</th>
                                     </tr>
                                 </thead>
                                 <tbody id="manual-table-body" class="divide-y divide-slate-100 text-xs font-bold text-slate-700 bg-white">
@@ -1832,7 +1833,7 @@
             }
         }
 
-        async function loadManualGradingGrid() {
+      async function loadManualGradingGrid() {
             const sub = document.getElementById('manual-sub-select').value;
             const workspace = document.getElementById('manual-grading-workspace');
             const tbody = document.getElementById('manual-table-body');
@@ -1843,8 +1844,19 @@
                 return;
             }
 
-            tbody.innerHTML = `<tr><td colspan="5" class="text-center py-10"><span class="loader"></span></td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10"><span class="loader"></span></td></tr>`;
             workspace.classList.remove('hidden');
+
+            // Hide save button and max marks input for Admins
+            const btnSave = document.getElementById('btn-save-manual');
+            const maxMarksInput = document.getElementById('manual-max-marks');
+            if (isAdmin) {
+                btnSave.style.display = 'none';
+                maxMarksInput.disabled = true;
+            } else {
+                btnSave.style.display = 'block';
+                maxMarksInput.disabled = false;
+            }
 
             try {
                 const normMatchLoc = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
@@ -1891,16 +1903,26 @@
                 subSnap.forEach(doc => {
                     const d = doc.data();
                     if (d.directScores && d.directScores[sub] !== undefined) {
-                        existingScores[String(d.rollNo).trim().toUpperCase()] = d.directScores[sub];
+                        existingScores[String(d.rollNo).trim().toUpperCase()] = {
+                            score: d.directScores[sub],
+                            updatedAt: d.updatedAt || 0,
+                            unlockedAt: d.unlockedAt || 0,
+                            unlockRequested: d.unlockRequested || false
+                        };
                     }
                 });
 
                 if (manualActiveStudents.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="5" class="text-center py-10 font-bold text-slate-400">No students found.</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 font-bold text-slate-400">No students found.</td></tr>`;
                     return;
                 }
 
+                const todayOffset = new Date().getTimezoneOffset() * 60000;
+                const todayISO = new Date(Date.now() - todayOffset).toISOString().split('T')[0];
+
                 let html = "";
+                let canSaveAny = false;
+
                 manualActiveStudents.forEach((stu, idx) => {
                     const att = localAttCache[stu.id] || 'U';
                     const isAbsent = (att === 'A' || att === 'L');
@@ -1910,13 +1932,55 @@
                     if (isAbsent) attBadge = '<span class="bg-rose-100 text-rose-700 px-2 py-0.5 rounded text-[10px] font-black uppercase">Absent</span>';
 
                     const roll = String(stu.rollNo || '').trim().toUpperCase();
-                    const existingVal = existingScores[roll] !== undefined ? existingScores[roll] : '';
+                    const exData = existingScores[roll];
+                    const existingVal = exData ? exData.score : '';
+
+                    let isLocked = false;
+                    let unlockRequested = false;
+                    
+                    if (exData && exData.updatedAt > 0) {
+                        const updatedDate = new Date(exData.updatedAt - todayOffset).toISOString().split('T')[0];
+                        const unlockedDate = exData.unlockedAt ? new Date(exData.unlockedAt - todayOffset).toISOString().split('T')[0] : "";
+                        
+                        // If marks were entered/updated prior to today and no unlock granted today, it locks
+                        if (updatedDate < todayISO && unlockedDate !== todayISO) {
+                            isLocked = true;
+                        }
+                        unlockRequested = exData.unlockRequested;
+                    }
 
                     let inputHtml = '';
+                    let actionHtml = '';
+
                     if (isAbsent) {
                         inputHtml = `<input type="text" disabled value="ABSENT" class="w-full p-2 bg-rose-50 border border-rose-200 rounded text-center font-black text-rose-600 text-xs shadow-inner">`;
+                        actionHtml = `<span class="text-[10px] font-bold text-slate-400 uppercase">N/A</span>`;
                     } else {
-                        inputHtml = `<input type="number" step="any" data-roll="${roll}" value="${existingVal}" class="manual-mark-input w-full p-2 bg-white border border-slate-300 rounded text-center font-black text-slate-800 outline-none focus:border-fuchsia-500 shadow-inner" placeholder="Score">`;
+                        if (isAdmin) {
+                            inputHtml = `<input type="text" disabled value="${existingVal}" class="w-full p-2 bg-slate-100 border border-slate-300 rounded text-center font-black text-slate-500 text-xs shadow-inner" placeholder="Score">`;
+                            if (isLocked && unlockRequested) {
+                                actionHtml = `<button onclick="approveScoreUnlock('${roll}')" class="bg-emerald-500 hover:bg-emerald-400 text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest shadow-sm transition-all animate-pulse w-full">Approve Edit</button>`;
+                            } else if (isLocked) {
+                                actionHtml = `<button onclick="approveScoreUnlock('${roll}')" class="bg-slate-200 hover:bg-slate-300 text-slate-600 px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all w-full border border-slate-300">Force Unlock</button>`;
+                            } else if (existingVal !== '') {
+                                actionHtml = `<span class="text-[10px] font-bold text-emerald-600 uppercase">Saved</span>`;
+                            } else {
+                                actionHtml = `<span class="text-[10px] font-bold text-slate-400 uppercase">Pending</span>`;
+                            }
+                        } else {
+                            if (isLocked) {
+                                inputHtml = `<input type="text" disabled value="${existingVal}" class="w-full p-2 bg-slate-100 border border-slate-300 rounded text-center font-black text-slate-500 text-xs shadow-inner" placeholder="Score">`;
+                                if (unlockRequested) {
+                                    actionHtml = `<span class="text-[9px] font-black text-amber-600 uppercase bg-amber-50 px-2 py-1 rounded border border-amber-200 block text-center">Pending Admin...</span>`;
+                                } else {
+                                    actionHtml = `<button onclick="requestScoreUnlock('${roll}')" class="bg-amber-500 hover:bg-amber-400 text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest shadow-sm transition-all w-full border border-amber-600">Request Edit</button>`;
+                                }
+                            } else {
+                                canSaveAny = true;
+                                inputHtml = `<input type="number" step="any" data-roll="${roll}" value="${existingVal}" class="manual-mark-input w-full p-2 bg-white border border-slate-300 rounded text-center font-black text-slate-800 outline-none focus:border-fuchsia-500 shadow-inner" placeholder="Score">`;
+                                actionHtml = `<span class="text-[10px] font-bold text-emerald-600 uppercase">${existingVal !== '' ? 'Editable (Saved)' : 'Editable'}</span>`;
+                            }
+                        }
                     }
 
                     html += `
@@ -1926,15 +1990,22 @@
                             <td class="p-3 font-black text-slate-900 uppercase">${stu.name}</td>
                             <td class="p-3 text-center">${attBadge}</td>
                             <td class="p-3 px-6">${inputHtml}</td>
+                            <td class="p-3 text-center">${actionHtml}</td>
                         </tr>
                     `;
                 });
 
                 tbody.innerHTML = html;
+                
+                if (!isAdmin) {
+                    btnSave.disabled = !canSaveAny;
+                    if(!canSaveAny) btnSave.classList.add('opacity-50', 'cursor-not-allowed');
+                    else btnSave.classList.remove('opacity-50', 'cursor-not-allowed');
+                }
 
             } catch (e) {
                 console.error(e);
-                tbody.innerHTML = `<tr><td colspan="5" class="text-center py-10 font-bold text-rose-500">Error loading grid.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 font-bold text-rose-500">Error loading grid.</td></tr>`;
             }
         }
 
@@ -1994,7 +2065,7 @@
                 });
 
                 await batch.commit();
-                alert("✅ Scores saved successfully!");
+             alert("✅ Scores saved successfully!");
                 
                 switchViewMode('results');
 
@@ -2006,9 +2077,31 @@
             }
         }
 
+        async function requestScoreUnlock(rollNo) {
+            if (!confirm("Request Admin to unlock this score for editing?")) return;
+            try {
+                await db.collection("omr_submissions").doc(`${manualActiveGroup.id}_${rollNo}`).update({
+                    unlockRequested: true
+                });
+                alert("Unlock request sent to Admin.");
+                loadManualGradingGrid();
+            } catch(e) { alert("Error: " + e.message); }
+        }
+
+        async function approveScoreUnlock(rollNo) {
+            if (!confirm("Unlock this score for the teacher to edit?")) return;
+            try {
+                await db.collection("omr_submissions").doc(`${manualActiveGroup.id}_${rollNo}`).update({
+                    unlockedAt: Date.now(),
+                    unlockRequested: false
+                });
+                alert("Score unlocked successfully.");
+                loadManualGradingGrid();
+            } catch(e) { alert("Error: " + e.message); }
+        }
+
         // ==========================================
         // SECTION 2: RESULTS & SCORECARD EXPLORER
-        // ==========================================
         function toggleDetailedView() {
             isDetailedViewActive = !isDetailedViewActive;
             const btn = document.getElementById('btn-toggle-detailed');
