@@ -136,10 +136,10 @@
                 <div id="mapping-ui" class="hidden space-y-6 mt-6">
                     <div class="bg-slate-50 border border-slate-200 p-6 rounded-2xl shadow-sm">
                         <h3 class="font-black text-slate-800 uppercase border-b border-slate-200 pb-2 mb-4">3. Data Mapping</h3>
-                      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-4">
                             <div>
                                 <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Target Center for this File</label>
-                                <select id="map-center" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer">
+                                <select id="map-center" onchange="onMapCenterChange()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer">
                                     <option value="GHUMARWIN">Ghumarwin</option>
                                     <option value="DHARAMSHALA">Dharamshala</option>
                                 </select>
@@ -151,6 +151,22 @@
                             <div>
                                 <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Roll Number Column</label>
                                 <select id="map-roll" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer"></select>
+                            </div>
+                        </div>
+
+                        <!-- Class & Section Multi-select Pickers -->
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 bg-white p-4 rounded-xl border border-slate-200 mb-4">
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Select Classes (Multi-select)</label>
+                                <div id="map-classes-checkboxes" class="flex flex-wrap gap-2 max-h-36 overflow-y-auto custom-scroll p-2 bg-slate-50 border border-slate-200 rounded-lg">
+                                    <!-- Dynamically populated -->
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Select Sections (Multi-select)</label>
+                                <div id="map-sections-checkboxes" class="flex flex-wrap gap-2 max-h-36 overflow-y-auto custom-scroll p-2 bg-slate-50 border border-slate-200 rounded-lg">
+                                    <!-- Dynamically populated -->
+                                </div>
                             </div>
                         </div>
 
@@ -680,6 +696,8 @@ window.onload = async () => {
             await populateDates();
             if (isAdmin) await populateTemplates();
         };
+       let globalGhumarwinStructure = [];
+        let globalDharamshalaStructure = [];
         async function fetchGlobalRoutingData() {
             try {
                 const [gStruct, dStruct, gTime, dTime] = await Promise.all([
@@ -688,9 +706,11 @@ window.onload = async () => {
                     db.collection("timetable").get(),
                     db.collection("dharamshala_timetable").get()
                 ]);
+                globalGhumarwinStructure = gStruct.docs.map(d=>d.data());
+                globalDharamshalaStructure = dStruct.docs.map(d=>d.data());
                 globalInstituteStructure = [
-                    ...gStruct.docs.map(d=>d.data()),
-                    ...dStruct.docs.map(d=>d.data())
+                    ...globalGhumarwinStructure,
+                    ...globalDharamshalaStructure
                 ];
                 globalTimetable = [
                     ...gTime.docs.map(d=>d.data()),
@@ -1475,9 +1495,69 @@ window.onload = async () => {
             return letter;
         }
 
+    function onMapCenterChange() {
+            const center = document.getElementById('map-center').value;
+            const struct = center === "DHARAMSHALA" ? globalDharamshalaStructure : globalGhumarwinStructure;
+            
+            let classesSet = new Set();
+            struct.forEach(item => {
+                if (item.className) classesSet.add(String(item.className).trim().toUpperCase());
+            });
+
+            const classContainer = document.getElementById('map-classes-checkboxes');
+            const sortedClasses = Array.from(classesSet).sort((a,b)=>a.localeCompare(b, undefined, {numeric:true}));
+            
+            if (sortedClasses.length === 0) {
+                classContainer.innerHTML = '<span class="text-xs text-slate-400 font-bold">No classes found for this center</span>';
+                document.getElementById('map-sections-checkboxes').innerHTML = '<span class="text-xs text-slate-400 font-bold">Select classes first</span>';
+                return;
+            }
+
+            classContainer.innerHTML = sortedClasses.map(c => `
+                <label class="flex items-center gap-2 bg-white px-2.5 py-1 rounded-md border border-slate-200 cursor-pointer hover:bg-indigo-50 text-xs font-black uppercase">
+                    <input type="checkbox" class="map-class-cb w-3.5 h-3.5 accent-indigo-600 rounded" value="${c}" checked onchange="updateMapSections()">
+                    <span>Class ${c}</span>
+                </label>
+            `).join('');
+
+            updateMapSections();
+        }
+
+        function updateMapSections() {
+            const center = document.getElementById('map-center').value;
+            const struct = center === "DHARAMSHALA" ? globalDharamshalaStructure : globalGhumarwinStructure;
+            const selectedClasses = Array.from(document.querySelectorAll('.map-class-cb:checked')).map(cb => cb.value);
+
+            let sectionsSet = new Set();
+            struct.forEach(item => {
+                const cName = String(item.className || '').trim().toUpperCase();
+                const sName = String(item.sectionName || item.section || '').trim().toUpperCase();
+                if (selectedClasses.includes(cName) && sName) {
+                    sectionsSet.add(sName);
+                }
+            });
+
+            const secContainer = document.getElementById('map-sections-checkboxes');
+            const sortedSecs = Array.from(sectionsSet).sort((a,b)=>a.localeCompare(b, undefined, {numeric:true}));
+
+            if (sortedSecs.length === 0) {
+                secContainer.innerHTML = '<span class="text-xs text-slate-400 font-bold">No sections found for selected classes</span>';
+                return;
+            }
+
+            secContainer.innerHTML = sortedSecs.map(s => `
+                <label class="flex items-center gap-2 bg-white px-2.5 py-1 rounded-md border border-slate-200 cursor-pointer hover:bg-indigo-50 text-xs font-black uppercase">
+                    <input type="checkbox" class="map-sec-cb w-3.5 h-3.5 accent-indigo-600 rounded" value="${s}" checked>
+                    <span>Sec ${s}</span>
+                </label>
+            `).join('');
+        }
+
         async function buildMappingUI() {
             const rollSelect = document.getElementById('map-roll');
             const subjContainer = document.getElementById('subject-mapping-container');
+            const centerSelect = document.getElementById('map-center');
+            if (centerSelect) centerSelect.value = activeCenter;
 
             let maxCols = 1;
             window.excelRawData.forEach(row => {
@@ -1491,8 +1571,8 @@ window.onload = async () => {
                 colOpts += `<option value="${i}">Column ${letter}</option>`;
             }
 
-          rollSelect.innerHTML = colOpts;
-            document.getElementById('map-center').value = activeCenter; // Auto-fill with the admin's current branch
+            rollSelect.innerHTML = colOpts;
+            onMapCenterChange();
 
             // Gather unique subjects scheduled for this date from activeDateGroups
             let scheduledSubjects = new Set();
@@ -1558,20 +1638,16 @@ window.onload = async () => {
             document.getElementById('validation-ui').classList.add('hidden');
         }
 
-   function getGroupForStudent(stu, dateStr) {
-            const cNorm = String(stu.className).trim().toUpperCase();
-            const sNorm = String(stu.section).trim().toUpperCase();
-            return activeDateGroups.find(g => {
-                return String(g.className).trim().toUpperCase() === cNorm && String(g.section).trim().toUpperCase() === sNorm;
-            });
-        }
-
-function processMapping() {
+        function processMapping() {
             const rollColIdx = document.getElementById('map-roll').value;
             const startRow = parseInt(document.getElementById('map-start-row').value) - 1; // 0-indexed
             const targetCenter = document.getElementById('map-center').value;
+            const selectedClasses = Array.from(document.querySelectorAll('.map-class-cb:checked')).map(cb => cb.value);
+            const selectedSections = Array.from(document.querySelectorAll('.map-sec-cb:checked')).map(cb => cb.value);
             
             if (rollColIdx === "") return alert("Roll Number column mapping is required.");
+            if (selectedClasses.length === 0) return alert("Please select at least one class.");
+            if (selectedSections.length === 0) return alert("Please select at least one section.");
 
             const subjMappings = {};
             const maxMarksMappings = {};
@@ -1593,15 +1669,17 @@ function processMapping() {
                 const row = window.excelRawData[i];
                 if (!row || row.length === 0) continue;
 
-              const rollNoRaw = row[rollColIdx];
+                const rollNoRaw = row[rollColIdx];
                 if(rollNoRaw === undefined || rollNoRaw === null || String(rollNoRaw).trim() === "") continue;
                 
                 const rollNo = String(rollNoRaw).trim().toUpperCase();
                 
-                // Strictly match the Roll No AND the explicitly selected Center from the dropdown
+                // Strictly look up roll numbers only within the selected Center, Classes, and Sections
                 const stu = globalStudentsData.find(s => 
                     String(s.rollNo).trim().toUpperCase() === rollNo && 
-                    s.actualBranch === targetCenter
+                    s.actualBranch === targetCenter &&
+                    selectedClasses.includes(String(s.className || '').trim().toUpperCase()) &&
+                    selectedSections.includes(String(s.section || '').trim().toUpperCase())
                 );
                 
                 let scores = {};
@@ -1649,10 +1727,10 @@ function processMapping() {
                             id: `r_${i}`, rollNo, stu, group, scores, maxMarksMap: maxMarksMappings, attendance: att, warnings, action: defaultAction, existingRecord: existing
                         });
                     } else {
-                        activeParsedExcelRows.push({ id: `r_${i}`, rollNo, stu, status: 'ERROR', error: 'No exam paper group mapped for student section', action: 'SKIP' });
+                        activeParsedExcelRows.push({ id: `r_${i}`, rollNo, status: 'ERROR', error: 'No exam paper group mapped for student section', action: 'SKIP' });
                     }
-             } else {
-                    activeParsedExcelRows.push({ id: `r_${i}`, rollNo, status: 'ERROR', error: `Roll No not found in ${targetCenter} database`, action: 'SKIP' });
+                } else {
+                    activeParsedExcelRows.push({ id: `r_${i}`, rollNo, status: 'ERROR', error: `Roll No not found in ${targetCenter} selected classes/sections`, action: 'SKIP' });
                 }
             }
 
