@@ -1797,7 +1797,7 @@
             }
         }
 
-      // ==========================================
+// ==========================================
         // SECTION 1.75: MANUAL GRADING ENGINE
         // ==========================================
       async function populateManualDates() {
@@ -1806,10 +1806,43 @@
                 const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
                 const snap = await db.collection(prefix + "exam_schedules").get();
                 let dates = new Set();
-                snap.forEach(d => { if (d.data().date) dates.add(d.data().date); });
+                
+                const normMatch = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const myName = activeStaff ? normMatch(activeStaff.name || activeStaff.email) : "ADMIN";
+
+                snap.forEach(d => { 
+                    const data = d.data();
+                    if (!data.date) return;
+
+                    // Exclude completely objective types from Manual Entry Hub
+                    const type = String(data.type || '').trim().toUpperCase();
+                    if (type === 'OT' || type === 'EXAM') return; 
+
+                    let teachesHere = false;
+                    if (isAdmin) {
+                        teachesHere = true; // Admin retains oversight over everything
+                    } else {
+                        const cNorm = normMatch(data.className);
+                        const sNorm = normMatch(data.section);
+                        teachesHere = (data.subjects || []).some(sub => {
+                            const subNorm = normMatch(sub);
+                            return globalTimetable.some(t => 
+                                normMatch(t.className) === cNorm && 
+                                normMatch(t.section || t.sectionName) === sNorm && 
+                                normMatch(t.subject || t.title) === subNorm &&
+                                (normMatch(t.teacherName) === myName || normMatch(t.teacher) === myName)
+                            );
+                        });
+                    }
+
+                    if (teachesHere) {
+                        dates.add(data.date);
+                    }
+                });
+
                 const sorted = Array.from(dates).sort((a,b) => b.localeCompare(a));
                 if (sorted.length === 0) {
-                    sel.innerHTML = '<option value="">No exams found</option>';
+                    sel.innerHTML = '<option value="">No subjective exams assigned to you</option>';
                 } else {
                     sel.innerHTML = '<option value="">-- Select Exam Date --</option>' + sorted.map(d => `<option value="${d}">${new Date(d + 'T00:00:00').toLocaleDateString('en-GB', {day:'numeric',month:'short',year:'numeric'})}</option>`).join('');
                 }
@@ -1833,12 +1866,38 @@
             try {
                 const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
                 const grpSnap = await db.collection(prefix + "exam_schedules").where("date", "==", date).get();
-                activeDateGroups = grpSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                
+                const normMatch = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const myName = activeStaff ? normMatch(activeStaff.name || activeStaff.email) : "ADMIN";
+
+                activeDateGroups = grpSnap.docs.map(d => ({id: d.id, ...d.data()})).filter(data => {
+                    const type = String(data.type || '').trim().toUpperCase();
+                    if (type === 'OT' || type === 'EXAM') return false; 
+                    
+                    if (isAdmin) return true;
+                    
+                    const cNorm = normMatch(data.className);
+                    const sNorm = normMatch(data.section);
+                    return (data.subjects || []).some(sub => {
+                        const subNorm = normMatch(sub);
+                        return globalTimetable.some(t => 
+                            normMatch(t.className) === cNorm && 
+                            normMatch(t.section || t.sectionName) === sNorm && 
+                            normMatch(t.subject || t.title) === subNorm &&
+                            (normMatch(t.teacherName) === myName || normMatch(t.teacher) === myName)
+                        );
+                    });
+                });
                 
                 let classesSet = new Set();
                 activeDateGroups.forEach(g => classesSet.add(g.className));
 
-                groupSelect.innerHTML = '<option value="">-- Select Class --</option>' + Array.from(classesSet).sort().map(c => `
+                if (classesSet.size === 0) {
+                    groupSelect.innerHTML = '<option value="">-- No Subjective Classes Found --</option>';
+                    return;
+                }
+
+                groupSelect.innerHTML = '<option value="">-- Select Class --</option>' + Array.from(classesSet).sort((a,b)=>String(a).localeCompare(String(b), undefined, {numeric:true})).map(c => `
                     <option value="${c}">Class ${c}</option>
                 `).join('');
             } catch(e) { console.error(e); }
