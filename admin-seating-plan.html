@@ -168,7 +168,10 @@
                         <p id="active-room-timing" class="text-[10px] text-white font-black uppercase tracking-widest mt-1">🕒 Room Timing: Not Assigned</p>
                         <div id="active-room-breakdown"></div>
                     </div>
-            <div class="relative z-10 flex items-center gap-3 flex-wrap justify-end">
+          <div class="relative z-10 flex items-center gap-3 flex-wrap justify-end">
+                    <button onclick="openRoomCountsModal()" class="bg-purple-600 hover:bg-purple-500 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-md transition-all active:scale-95 border border-purple-400 flex items-center gap-1.5" title="View Room Countings & Subjects">
+                        📊 View Countings
+                    </button>
              <!-- NEW: Download Room Print Package -->
                     <button onclick="downloadRoomPrintPackage()" id="btn-download-room-print" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-md transition-all active:scale-95 border border-emerald-400 flex items-center gap-1.5 hidden">
                         📥 Download Room Print
@@ -439,14 +442,106 @@
                 </div>
             </div>
 
-            <div class="p-4 bg-white border-t border-slate-200 flex gap-3 shrink-0">
+       <div class="p-4 bg-white border-t border-slate-200 flex gap-3 shrink-0">
                 <button onclick="closeAutoGenerateModal()" class="flex-1 py-3.5 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-black uppercase text-xs tracking-widest transition-colors">Cancel</button>
                 <button onclick="executeAutoGenerate()" class="flex-1 py-3.5 bg-amber-600 hover:bg-amber-500 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-lg transition-all active:scale-95">⚡ Run Auto Plan</button>
             </div>
         </div>
     </div>
 
+    <!-- ROOM COUNTS MODAL -->
+    <div id="room-counts-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[99999] hidden items-center justify-center p-4">
+        <div class="bg-white rounded-[2.5rem] w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="p-6 bg-gradient-to-r from-purple-600 to-indigo-700 text-white flex justify-between items-center shrink-0">
+                <div>
+                    <h3 id="counts-modal-title" class="font-black text-xl sm:text-2xl uppercase tracking-tight">Room Countings</h3>
+                    <p class="text-[10px] font-bold text-purple-200 uppercase tracking-widest mt-1">Section & Exact Subject Breakdown</p>
+                </div>
+                <button onclick="closeRoomCountsModal()" class="w-10 h-10 bg-white/10 hover:bg-rose-600 rounded-full font-black text-lg transition-colors flex items-center justify-center">✕</button>
+            </div>
+            <div class="p-6 bg-slate-50 flex-1 overflow-y-auto custom-scroll" id="counts-modal-content">
+                <!-- Populated dynamically -->
+            </div>
+            <div class="p-4 bg-white border-t border-slate-200 flex gap-3 shrink-0">
+                <button onclick="closeRoomCountsModal()" class="w-full py-4 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-black uppercase text-xs tracking-widest transition-colors shadow-sm">Close Panel</button>
+            </div>
+        </div>
+    </div>
+
    <script>
+        // --- ROOM COUNTINGS ENGINE ---
+        function openRoomCountsModal() {
+            if (!activeRoomId) return alert("Please select a room first.");
+            const room = roomsDatabase.find(r => r.id === activeRoomId);
+            if (!room) return;
+
+            let breakdown = {};
+            
+            // Loop over seats and calculate dynamically
+            Object.keys(currentAllocations).forEach(seatId => {
+                if (seatId.startsWith(`${room.name}-`)) {
+                    const stu = currentAllocations[seatId];
+                    if (stu && stu.className && stu.section) {
+                        const classSec = `Class ${stu.className} | Sec ${stu.section}`;
+                        if (!breakdown[classSec]) breakdown[classSec] = { total: 0, optionals: {} };
+                        breakdown[classSec].total++;
+                        
+                        let optSub = stu.optionalSubject ? stu.optionalSubject.toUpperCase() : null;
+                        
+                        // If no optional subject exists, pull exact subjects from the Exam Mapping
+                        if (!optSub) {
+                            const secKey = `${norm(stu.className)}|${norm(stu.section)}`;
+                            const papers = sectionPaperMap[secKey];
+                            if (papers && papers.length > 0) {
+                                optSub = papers.map(p => p.subject).join(' + '); // Evaluates to actual names (e.g. "MATHS + PHYSICS")
+                            } else {
+                                optSub = "MAIN EXAM PAPER";
+                            }
+                        }
+
+                        if (!breakdown[classSec].optionals[optSub]) breakdown[classSec].optionals[optSub] = 0;
+                        breakdown[classSec].optionals[optSub]++;
+                    }
+                }
+            });
+
+            document.getElementById('counts-modal-title').innerText = `${room.name} — Live Counting`;
+            
+            const contentEl = document.getElementById('counts-modal-content');
+            if (Object.keys(breakdown).length === 0) {
+                contentEl.innerHTML = `<div class="text-center py-16 text-slate-400 font-bold text-xs uppercase tracking-widest border-2 border-dashed border-slate-200 rounded-3xl bg-white">No students allocated in this room yet.</div>`;
+            } else {
+                let html = '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">';
+                Object.keys(breakdown).sort().forEach(cs => {
+                    let optHtml = Object.keys(breakdown[cs].optionals).sort().map(opt => `
+                        <div class="flex justify-between items-center bg-slate-50 px-4 py-3 rounded-xl border border-slate-200">
+                            <span class="font-black text-slate-700 text-[10px] sm:text-xs uppercase tracking-widest max-w-[75%] leading-tight">${opt}</span>
+                            <span class="bg-indigo-100 text-indigo-700 font-black px-3 py-1.5 rounded-lg text-[10px] tracking-widest shadow-sm border border-indigo-200">${breakdown[cs].optionals[opt]} Students</span>
+                        </div>
+                    `).join('');
+
+                    html += `
+                        <div class="bg-white border-2 border-slate-100 rounded-3xl p-5 shadow-sm hover:border-indigo-300 transition-colors">
+                            <div class="flex justify-between items-center border-b border-slate-100 pb-4 mb-4">
+                                <h4 class="font-black text-indigo-900 uppercase tracking-tighter text-base">${cs}</h4>
+                                <span class="bg-indigo-600 text-white font-black px-4 py-1.5 rounded-xl text-[11px] tracking-widest uppercase shadow-md">Total: ${breakdown[cs].total}</span>
+                            </div>
+                            <div class="space-y-3">
+                                ${optHtml}
+                            </div>
+                        </div>
+                    `;
+                });
+                html += '</div>';
+                contentEl.innerHTML = html;
+            }
+
+            document.getElementById('room-counts-modal').classList.replace('hidden', 'flex');
+        }
+
+        function closeRoomCountsModal() {
+            document.getElementById('room-counts-modal').classList.replace('flex', 'hidden');
+        }
         // --- PRINT REPORTS ENGINE ---
         function openPrintReportsModal() {
             const date = document.getElementById('seating-exam-date').value;
