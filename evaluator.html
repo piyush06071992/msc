@@ -1540,7 +1540,7 @@ function onMapCenterChange() {
             });
         }
 
-        function updateMapSections() {
+     function updateMapSections() {
             const center = document.getElementById('map-center').value;
             const struct = center === "DHARAMSHALA" ? globalDharamshalaStructure : globalGhumarwinStructure;
             const selectedClasses = Array.from(document.querySelectorAll('.map-class-cb:checked')).map(cb => cb.value);
@@ -1559,20 +1559,80 @@ function onMapCenterChange() {
 
             if (sortedSecs.length === 0) {
                 secContainer.innerHTML = '<span class="text-xs text-slate-400 font-bold">No sections found for selected classes</span>';
+                document.getElementById('subject-mapping-container').innerHTML = `<div class="col-span-full text-slate-400 font-bold text-[10px]">Select valid classes and sections to view staged subjects.</div>`;
                 return;
             }
 
             secContainer.innerHTML = sortedSecs.map(s => `
                 <label class="flex items-center gap-2 bg-white px-2.5 py-1 rounded-md border border-slate-200 cursor-pointer hover:bg-indigo-50 text-xs font-black uppercase">
-                    <input type="checkbox" class="map-sec-cb w-3.5 h-3.5 accent-indigo-600 rounded" value="${s}" checked>
+                    <input type="checkbox" class="map-sec-cb w-3.5 h-3.5 accent-indigo-600 rounded" value="${s}" checked onchange="updateMapSubjects()">
                     <span>Sec ${s}</span>
                 </label>
             `).join('');
+
+            updateMapSubjects();
         }
 
-        async function buildMappingUI() {
-            const rollSelect = document.getElementById('map-roll');
+        function updateMapSubjects() {
+            const selectedClasses = Array.from(document.querySelectorAll('.map-class-cb:checked')).map(cb => cb.value);
+            const selectedSections = Array.from(document.querySelectorAll('.map-sec-cb:checked')).map(cb => cb.value);
             const subjContainer = document.getElementById('subject-mapping-container');
+
+            let scheduledSubjects = new Set();
+            activeDateGroups.forEach(g => {
+                const gClass = String(g.className || '').trim().toUpperCase();
+                const gSec = String(g.section || '').trim().toUpperCase();
+                if (selectedClasses.includes(gClass) && selectedSections.includes(gSec)) {
+                    (g.subjects || []).forEach(s => scheduledSubjects.add(s.toUpperCase()));
+                }
+            });
+
+            if (scheduledSubjects.size === 0) {
+                subjContainer.innerHTML = `<div class="col-span-full text-rose-500 font-bold text-[10px]">No subjects staged for the selected classes and sections on this date.</div>`;
+                return;
+            }
+
+            let maxCols = 1;
+            if (window.excelRawData) {
+                window.excelRawData.forEach(row => { if (row && row.length > maxCols) maxCols = row.length; });
+            }
+            let totalCols = Math.max(maxCols, 26);
+
+            let colOpts = `<option value="">-- Select Column --</option>`;
+            for (let i = 0; i < totalCols; i++) {
+                const letter = getColumnLetter(i);
+                colOpts += `<option value="${i}">Column ${letter}</option>`;
+            }
+
+            let subHtml = "";
+            Array.from(scheduledSubjects).sort().forEach(sub => {
+                let defaultMax = 100;
+                for (let g of activeDateGroups) {
+                    if (selectedClasses.includes(String(g.className||'').trim().toUpperCase()) && 
+                        selectedSections.includes(String(g.section||'').trim().toUpperCase()) &&
+                        (g.subjects || []).map(s=>s.toUpperCase()).includes(sub)) {
+                        break;
+                    }
+                }
+
+                subHtml += `
+                <div class="bg-white p-3 border border-slate-200 rounded-xl shadow-sm">
+                    <label class="block text-[10px] font-black text-indigo-700 uppercase tracking-widest mb-1">${sub}</label>
+                    <select class="map-subj-select w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold outline-none cursor-pointer mb-2" data-subject="${sub}">
+                        ${colOpts}
+                    </select>
+                    <div class="flex items-center gap-2 border-t border-slate-100 pt-2">
+                        <span class="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Max Marks:</span>
+                        <input type="number" id="map-max-${sub}" value="${defaultMax}" class="w-16 p-1 bg-white border border-slate-300 rounded text-xs font-black outline-none focus:border-indigo-500 text-center">
+                    </div>
+                </div>
+                `;
+            });
+            subjContainer.innerHTML = subHtml;
+        }
+
+ async function buildMappingUI() {
+            const rollSelect = document.getElementById('map-roll');
             const centerSelect = document.getElementById('map-center');
             if (centerSelect) centerSelect.value = activeCenter;
 
@@ -1589,67 +1649,7 @@ function onMapCenterChange() {
             }
 
             rollSelect.innerHTML = colOpts;
-            onMapCenterChange();
-
-            // Gather unique subjects scheduled for this date from activeDateGroups
-            let scheduledSubjects = new Set();
-            activeDateGroups.forEach(g => {
-                (g.subjects || []).forEach(s => scheduledSubjects.add(s.toUpperCase()));
-            });
-
-            if (scheduledSubjects.size === 0) {
-                subjContainer.innerHTML = `<div class="col-span-full text-rose-500 font-bold text-[10px]">No subjects found scheduled for this date in Admin Exam schedules. Please check exam setup.</div>`;
-            } else {
-                
-                // Fetch Answer Keys to pre-fill known max marks
-                const groupIds = activeDateGroups.map(g => g.id);
-                let keysCache = {};
-                if(groupIds.length > 0) {
-                    for(let i=0; i<groupIds.length; i+=10) {
-                        const chunk = groupIds.slice(i, i+10);
-                        const keysSnap = await db.collection("exam_answer_keys").where(firebase.firestore.FieldPath.documentId(), "in", chunk).get();
-                        keysSnap.forEach(doc => {
-                            keysCache[doc.id] = doc.data();
-                        });
-                    }
-                }
-
-                let subHtml = "";
-                Array.from(scheduledSubjects).sort().forEach(sub => {
-                    // Calculate expected max marks if structure exists
-                    let defaultMax = 100;
-                    for (let g of activeDateGroups) {
-                        if ((g.subjects || []).map(s=>s.toUpperCase()).includes(sub) && keysCache[g.id]) {
-                            const kData = keysCache[g.id];
-                            if (kData.directMaxMarks && kData.directMaxMarks[sub]) {
-                                defaultMax = kData.directMaxMarks[sub];
-                                break;
-                            } else if (kData.structure && kData.structure.length > 0) {
-                                const sec = kData.structure.find(s => s.subject === sub);
-                                if (sec) {
-                                    const pos = sec.correctMarks !== undefined ? sec.correctMarks : 4;
-                                    defaultMax = pos * (sec.end - sec.start + 1);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    subHtml += `
-                    <div class="bg-white p-3 border border-slate-200 rounded-xl shadow-sm">
-                        <label class="block text-[10px] font-black text-indigo-700 uppercase tracking-widest mb-1">${sub}</label>
-                        <select class="map-subj-select w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold outline-none cursor-pointer mb-2" data-subject="${sub}">
-                            ${colOpts}
-                        </select>
-                        <div class="flex items-center gap-2 border-t border-slate-100 pt-2">
-                            <span class="text-[9px] font-bold text-slate-500 uppercase tracking-widest">Max Marks:</span>
-                            <input type="number" id="map-max-${sub}" value="${defaultMax}" class="w-16 p-1 bg-white border border-slate-300 rounded text-xs font-black outline-none focus:border-indigo-500 text-center">
-                        </div>
-                    </div>
-                    `;
-                });
-                subjContainer.innerHTML = subHtml;
-            }
+            onMapCenterChange(); // Automatically populates classes, sections, and filters staged subjects
 
             document.getElementById('mapping-ui').classList.remove('hidden');
             document.getElementById('validation-ui').classList.add('hidden');
