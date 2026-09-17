@@ -290,7 +290,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         });
     }
 
-    const qpSnap = await admin.firestore().collection(`${prefix}question_papers`).where("date", "==", date).get();
+   const qpSnap = await admin.firestore().collection(`${prefix}question_papers`).where("date", "==", date).get();
 
     let papersBySection = {}; 
     let layoutBySection = {};
@@ -300,12 +300,18 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         if (!qp.className || !qp.section) return;
 
         const secKey = `${norm(qp.className)}${norm(qp.section)}`;
+        const subKey = norm(qp.subject || "FULL PAPER");
+
         if (!papersBySection[secKey]) papersBySection[secKey] = {};
+        if (!papersBySection[secKey][subKey]) papersBySection[secKey][subKey] = {};
         
-        if (qp.layout) layoutBySection[secKey] = qp.layout;
+        if (qp.layout) {
+            if (!layoutBySection[secKey]) layoutBySection[secKey] = {};
+            layoutBySection[secKey][subKey] = qp.layout;
+        }
 
         const series = qp.series ? qp.series.toUpperCase() : "SERIES A";
-        papersBySection[secKey][series] = {
+        papersBySection[secKey][subKey][series] = {
             qp: qp.url,
             omr: permanentOmrs[secKey] || qp.omrUrl
         };
@@ -313,10 +319,12 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
     if (docType === 'omr') {
         Object.keys(permanentOmrs).forEach(secKey => {
-            if (!papersBySection[secKey]) papersBySection[secKey] = {};
-            if (!papersBySection[secKey]["SERIES A"]) {
-                papersBySection[secKey]["SERIES A"] = { omr: permanentOmrs[secKey] };
-            }
+            if (!papersBySection[secKey]) papersBySection[secKey] = { "FULL PAPER": {} };
+            Object.keys(papersBySection[secKey]).forEach(subKey => {
+                if (!papersBySection[secKey][subKey]["SERIES A"]) {
+                    papersBySection[secKey][subKey]["SERIES A"] = { omr: permanentOmrs[secKey] };
+                }
+            });
         });
     }
 
@@ -326,7 +334,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
     let pdfBytesCache = {};
 
-    // PASS 1: Generate Checkerboard Series and Buffer A4 Half-Splits 
+    // PASS 1: Generate Checkerboard Series, Map Optional Subjects, and Buffer A4 Half-Splits 
     let pagesToRender = [];
     let splitBuffers = {}; 
 
@@ -335,7 +343,28 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         if (!student || !student.className || !student.section) continue;
 
         const secKey = `${norm(student.className)}${norm(student.section)}`;
-        const sectionPapers = papersBySection[secKey] || {};
+        const studentOpt = norm(student.optionalSubject || "");
+        
+        const availableSubjects = papersBySection[secKey] ? Object.keys(papersBySection[secKey]) : [];
+        let matchedSubKey = null;
+
+        // Smart Optional Subject Matching (Mirrors Frontend Countings)
+        if (availableSubjects.length === 1) {
+            matchedSubKey = availableSubjects[0];
+        } else if (availableSubjects.length > 1) {
+            if (studentOpt) {
+                matchedSubKey = availableSubjects.find(sub => {
+                    if ((studentOpt === "PE" || studentOpt.includes("PHYSICAL")) && (sub.includes("PHYSICAL") || sub.includes("PE"))) return true;
+                    if (studentOpt.includes("IT") && (sub.includes("IT") || sub.includes("COMPUTER"))) return true;
+                    return sub.includes(studentOpt) || studentOpt.includes(sub);
+                });
+            }
+            if (!matchedSubKey) {
+                matchedSubKey = availableSubjects.find(sub => sub === "FULL PAPER" || sub === "UNMAPPED EXAM") || availableSubjects[0];
+            }
+        }
+
+        const sectionPapers = matchedSubKey ? papersBySection[secKey][matchedSubKey] : {};
         const roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers).sort() : availableSeries;
         
         // Dynamic 2D Checkerboard Logic (Alternating Left/Right & Front/Back)
@@ -411,27 +440,30 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 const color = rgb(0.2, 0.2, 0.2);
                 const opacity = 0.8;
 
-                if (pageTask.type === 'split') {
+               if (pageTask.type === 'split') {
                     if (pageTask.top) {
                         const tStu = pageTask.top.student;
+                        const tSub = (pageTask.top.matchedSubKey && pageTask.top.matchedSubKey !== "FULL PAPER") ? `[${pageTask.top.matchedSubKey.substring(0,8)}] ` : "";
                         const leftText = `MINERVA STUDY CIRCLE  |  ${tStu.name.toUpperCase()}  (ROLL: #${tStu.rollNo || "—"})`;
-                        const rightText = `SEAT: ${pageTask.top.seatId}    |    SEC: ${tStu.section}    |    ${pageTask.top.assignedSeries}`;
+                        const rightText = `SEAT: ${pageTask.top.seatId}    |    SEC: ${tStu.section}    |    ${tSub}${pageTask.top.assignedSeries}`;
                         const yTop = height - 15;
                         page.drawText(leftText, { x: 36, y: yTop, size, font, color, opacity });
                         page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: yTop, size, font, color, opacity });
                     }
                     if (pageTask.bottom) {
                         const bStu = pageTask.bottom.student;
+                        const bSub = (pageTask.bottom.matchedSubKey && pageTask.bottom.matchedSubKey !== "FULL PAPER") ? `[${pageTask.bottom.matchedSubKey.substring(0,8)}] ` : "";
                         const leftText = `MINERVA STUDY CIRCLE  |  ${bStu.name.toUpperCase()}  (ROLL: #${bStu.rollNo || "—"})`;
-                        const rightText = `SEAT: ${pageTask.bottom.seatId}    |    SEC: ${bStu.section}    |    ${pageTask.bottom.assignedSeries}`;
+                        const rightText = `SEAT: ${pageTask.bottom.seatId}    |    SEC: ${bStu.section}    |    ${bSub}${pageTask.bottom.assignedSeries}`;
                         const yBottom = (height / 2) - 15;
                         page.drawText(leftText, { x: 36, y: yBottom, size, font, color, opacity });
                         page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: yBottom, size, font, color, opacity });
                     }
                 } else {
                     const stu = pageTask.stuItem.student;
+                    const subLabel = (pageTask.stuItem.matchedSubKey && pageTask.stuItem.matchedSubKey !== "FULL PAPER") ? `[${pageTask.stuItem.matchedSubKey.substring(0,8)}] ` : "";
                     const leftText = `MINERVA STUDY CIRCLE  |  ${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
-                    const rightText = `SEAT: ${pageTask.stuItem.seatId}    |    SEC: ${stu.section}    |    ${pageTask.stuItem.assignedSeries}`;
+                    const rightText = `SEAT: ${pageTask.stuItem.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${pageTask.stuItem.assignedSeries}`;
                     const y = height - 15;
                     page.drawText(leftText, { x: 36, y, size, font, color, opacity });
                     page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y, size, font, color, opacity });
