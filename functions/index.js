@@ -293,6 +293,8 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
     const qpSnap = await admin.firestore().collection(`${prefix}question_papers`).where("date", "==", date).get();
 
     let papersBySection = {}; 
+    let layoutBySection = {};
+
     qpSnap.forEach(doc => {
         const qp = doc.data();
         if (!qp.className || !qp.section) return;
@@ -300,6 +302,8 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const secKey = `${norm(qp.className)}${norm(qp.section)}`;
         if (!papersBySection[secKey]) papersBySection[secKey] = {};
         
+        if (qp.layout) layoutBySection[secKey] = qp.layout;
+
         const series = qp.series ? qp.series.toUpperCase() : "SERIES A";
         papersBySection[secKey][series] = {
             qp: qp.url,
@@ -322,47 +326,116 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
     let pdfBytesCache = {};
 
+    // PASS 1: Generate Checkerboard Series and Buffer A4 Half-Splits 
+    let pagesToRender = [];
+    let splitBuffers = {}; 
+
     for (let i = 0; i < roomOccupants.length; i++) {
         const { seatId, student } = roomOccupants[i];
         if (!student || !student.className || !student.section) continue;
 
         const secKey = `${norm(student.className)}${norm(student.section)}`;
         const sectionPapers = papersBySection[secKey] || {};
-        const roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers) : availableSeries;
+        const roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers).sort() : availableSeries;
         
-        const assignedSeries = roomSeriesList[i % roomSeriesList.length];
+        // Dynamic 2D Checkerboard Logic (Alternating Left/Right & Front/Back)
+        const rMatch = seatId.match(/-R(\d+)-S(\d+)/);
+        const rNum = rMatch ? parseInt(rMatch[1]) : 0;
+        const sNum = rMatch ? parseInt(rMatch[2]) : 0;
+        
+        const sIndex = (rNum + sNum) % roomSeriesList.length;
+        const assignedSeries = roomSeriesList[sIndex];
+        
         const paperLinks = sectionPapers[assignedSeries] || Object.values(sectionPapers)[0] || {};
-        
         const pdfUrl = docType === 'omr' ? paperLinks.omr : paperLinks.qp;
+        const layout = layoutBySection[secKey] || 'A4_STANDARD';
 
         if (!pdfUrl) continue; 
+        
+        const item = { seatId, student, assignedSeries, pdfUrl, layout, secKey };
 
-        try {
-            if (!pdfBytesCache[pdfUrl]) {
-                pdfBytesCache[pdfUrl] = await loadPdfBytes(pdfUrl);
+        if (layout === 'A4_HALF_SPLIT' && docType !== 'omr') {
+            const availableForThisSec = Object.keys(sectionPapers).sort();
+            let seriesIdx = availableForThisSec.indexOf(assignedSeries);
+            if (seriesIdx === -1) seriesIdx = 0;
+            const isTop = (seriesIdx % 2 === 0);
+            
+            if (!splitBuffers[pdfUrl]) splitBuffers[pdfUrl] = { top: null, bottom: null };
+            
+            if (isTop) {
+                if (splitBuffers[pdfUrl].top) {
+                    pagesToRender.push({ type: 'split', pdfUrl, layout, ...splitBuffers[pdfUrl] });
+                    splitBuffers[pdfUrl] = { top: null, bottom: null };
+                }
+                splitBuffers[pdfUrl].top = item;
+            } else {
+                if (splitBuffers[pdfUrl].bottom) {
+                    pagesToRender.push({ type: 'split', pdfUrl, layout, ...splitBuffers[pdfUrl] });
+                    splitBuffers[pdfUrl] = { top: null, bottom: null };
+                }
+                splitBuffers[pdfUrl].bottom = item;
             }
-            const pdfBytes = pdfBytesCache[pdfUrl];
-            const studentPdf = await PDFDocument.load(pdfBytes);
+            
+            if (splitBuffers[pdfUrl].top && splitBuffers[pdfUrl].bottom) {
+                pagesToRender.push({ type: 'split', pdfUrl, layout, ...splitBuffers[pdfUrl] });
+                splitBuffers[pdfUrl] = { top: null, bottom: null };
+            }
+        } else {
+            pagesToRender.push({ type: 'standard', pdfUrl, layout, stuItem: item });
+        }
+    }
 
+    // Flush remaining half-empty buffers
+    Object.keys(splitBuffers).forEach(url => {
+        const buf = splitBuffers[url];
+        if (buf.top || buf.bottom) {
+            const layoutItem = buf.top ? buf.top.layout : (buf.bottom ? buf.bottom.layout : 'A4_HALF_SPLIT');
+            pagesToRender.push({ type: 'split', pdfUrl: url, layout: layoutItem, ...buf });
+        }
+    });
+
+    // PASS 2: Stamping and Final Padding
+    for (const pageTask of pagesToRender) {
+        try {
+            if (!pdfBytesCache[pageTask.pdfUrl]) {
+                pdfBytesCache[pageTask.pdfUrl] = await loadPdfBytes(pageTask.pdfUrl);
+            }
+            const pdfBytes = pdfBytesCache[pageTask.pdfUrl];
+            const studentPdf = await PDFDocument.load(pdfBytes);
             const pages = studentPdf.getPages();
             
             for (let pIdx = 0; pIdx < pages.length; pIdx++) {
                 const page = pages[pIdx];
                 const { width, height } = page.getSize();
-                
-                const leftText = `MINERVA STUDY CIRCLE  |  ${student.name.toUpperCase()}  (ROLL: #${student.rollNo || "—"})`;
-                const rightText = `SEAT: ${seatId}    |    SEC: ${student.section}    |    ${assignedSeries}`;
-
                 const size = 8.5;
                 const color = rgb(0.2, 0.2, 0.2);
                 const opacity = 0.8;
 
-                const y = height - 15;
-                const leftX = 36;
-                const rightX = width - font.widthOfTextAtSize(rightText, size) - 36;
-
-                page.drawText(leftText, { x: leftX, y, size, font, color, opacity });
-                page.drawText(rightText, { x: rightX, y, size, font, color, opacity });
+                if (pageTask.type === 'split') {
+                    if (pageTask.top) {
+                        const tStu = pageTask.top.student;
+                        const leftText = `MINERVA STUDY CIRCLE  |  ${tStu.name.toUpperCase()}  (ROLL: #${tStu.rollNo || "—"})`;
+                        const rightText = `SEAT: ${pageTask.top.seatId}    |    SEC: ${tStu.section}    |    ${pageTask.top.assignedSeries}`;
+                        const yTop = height - 15;
+                        page.drawText(leftText, { x: 36, y: yTop, size, font, color, opacity });
+                        page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: yTop, size, font, color, opacity });
+                    }
+                    if (pageTask.bottom) {
+                        const bStu = pageTask.bottom.student;
+                        const leftText = `MINERVA STUDY CIRCLE  |  ${bStu.name.toUpperCase()}  (ROLL: #${bStu.rollNo || "—"})`;
+                        const rightText = `SEAT: ${pageTask.bottom.seatId}    |    SEC: ${bStu.section}    |    ${pageTask.bottom.assignedSeries}`;
+                        const yBottom = (height / 2) - 15;
+                        page.drawText(leftText, { x: 36, y: yBottom, size, font, color, opacity });
+                        page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: yBottom, size, font, color, opacity });
+                    }
+                } else {
+                    const stu = pageTask.stuItem.student;
+                    const leftText = `MINERVA STUDY CIRCLE  |  ${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
+                    const rightText = `SEAT: ${pageTask.stuItem.seatId}    |    SEC: ${stu.section}    |    ${pageTask.stuItem.assignedSeries}`;
+                    const y = height - 15;
+                    page.drawText(leftText, { x: 36, y, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y, size, font, color, opacity });
+                }
             }
 
             const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
@@ -370,16 +443,18 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
             if (docType !== 'omr') {
                 const currentPagesCount = copiedPages.length;
-                const remainder = currentPagesCount % 4;
-                if (remainder !== 0) {
-                    const pagesNeeded = 4 - remainder;
-                    for (let p = 0; p < pagesNeeded; p++) {
-                        mergedPdf.addPage();
+                if (pageTask.layout === 'A3_BOOKLET') {
+                    const remainder = currentPagesCount % 4;
+                    if (remainder !== 0) {
+                        for (let p = 0; p < (4 - remainder); p++) mergedPdf.addPage();
                     }
+                } else {
+                    const remainder = currentPagesCount % 2;
+                    if (remainder !== 0) mergedPdf.addPage();
                 }
             }
         } catch (err) {
-            console.error(`[PDF Engine] Error processing paper for seat ${seatId}:`, err);
+            console.error(`[PDF Engine] Error processing task for ${pageTask.pdfUrl}:`, err);
         }
     }
 
@@ -389,7 +464,6 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
     }
     return null;
 }
-
 exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
     memory: "1GiB", // Memory drastically reduced since headless chrome is removed
