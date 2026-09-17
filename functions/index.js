@@ -348,15 +348,14 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const availableSubjects = papersBySection[secKey] ? Object.keys(papersBySection[secKey]) : [];
         let matchedSubKey = null;
 
-        // Smart Optional Subject Matching (Mirrors Frontend Countings)
+      // Database-Driven Optional Subject Matching (Mirrors Frontend)
         if (availableSubjects.length === 1) {
             matchedSubKey = availableSubjects[0];
         } else if (availableSubjects.length > 1) {
             if (studentOpt) {
                 matchedSubKey = availableSubjects.find(sub => {
-                    if ((studentOpt === "PE" || studentOpt.includes("PHYSICAL")) && (sub.includes("PHYSICAL") || sub.includes("PE"))) return true;
-                    if (studentOpt.includes("IT") && (sub.includes("IT") || sub.includes("COMPUTER"))) return true;
-                    return sub.includes(studentOpt) || studentOpt.includes(sub);
+                    const subNorm = String(sub).toUpperCase().trim();
+                    return subNorm === studentOpt || subNorm.includes(studentOpt) || studentOpt.includes(subNorm);
                 });
             }
             if (!matchedSubKey) {
