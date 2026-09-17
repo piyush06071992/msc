@@ -591,8 +591,25 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 
                const docData = doc.data();
                  currentPlannerData = docData.syllabusData;
-                window.currentActivityLogs = docData.activityLogs || []; 
+    window.currentActivityLogs = docData.activityLogs || []; 
+                
+                // --- 24-HOUR GOLDEN TICKET CHECK ---
                 window.isSubjectUnlocked = docData.isUnlocked === true;
+                if (window.isSubjectUnlocked && docData.unlockedAt) {
+                    const hoursSinceUnlock = (Date.now() - docData.unlockedAt) / (1000 * 60 * 60);
+                    if (hoursSinceUnlock >= 24) {
+                        window.isSubjectUnlocked = false; // Revoke instantly on client side
+                        
+                        getCollection("lesson_planners").doc(activeSubjectId).update({
+                            isUnlocked: false,
+                            unlockRequested: true,
+                            lockedDate: new Date().toISOString().split('T')[0],
+                            lockReason: "24-Hour Golden Ticket Expired",
+                            lockHistory: firebase.firestore.FieldValue.arrayUnion(`Ticket Expired & Re-Locked on ${new Date().toLocaleDateString('en-GB')}`)
+                        });
+                    }
+                }
+
                 window.unlockRequested = docData.unlockRequested === true;
                 window.lockedDateStr = docData.lockedDate || null;
                 
@@ -1044,11 +1061,11 @@ const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
                         <div class="p-6 text-center bg-blue-50/50 border-t border-slate-200 relative z-10 shadow-sm">
                             <p class="text-[10px] font-black text-blue-600 uppercase tracking-widest mb-3">Chapter topics are locked until chapter is started</p>
                             <div class="flex flex-col sm:flex-row justify-center items-center gap-3">
-                                <div class="flex flex-col text-left">
+                              <div class="flex flex-col text-left">
                                     <span class="text-[9px] font-black text-slate-400 uppercase tracking-widest ml-1 mb-1">Select Start Date</span>
                                     <select id="start-date-${domSafeCh}" class="text-[11px] p-2.5 border border-blue-300 rounded-xl outline-none font-bold text-slate-700 shadow-sm bg-white cursor-pointer min-w-[140px]">
                                         ${window.catchUpDates && window.catchUpDates.length > 0 
-                                            ? window.catchUpDates.map(d => `<option value="${d.date}">${d.label}</option>`).join('') 
+                                            ? `<option value="${window.catchUpDates[0].date}">${window.catchUpDates[0].label} (Strict Chronological)</option>` 
                                             : `<option value="${todayISO}">Today (Fallback)</option>`}
                                     </select>
                                 </div>
@@ -1385,8 +1402,13 @@ const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
                 
             const container = document.getElementById(`tick-container-${idx}`);
                 
-                if (window.isSubjectUnlocked || validDates.length > 1) {
-                    let dateOptions = validDates.map(d => `<option value="${d.date}" data-mins="${d.mins}">${d.label}</option>`).join('');
+               if (window.isSubjectUnlocked || validDates.length > 1) {
+                    let forcedDates = validDates;
+                    // Strict Chronological Enforcement: Force them to pick the absolute oldest missing date
+                    if (window.catchUpDates && window.catchUpDates.length > 0) {
+                        forcedDates = validDates.filter(d => d.date === window.catchUpDates[0].date);
+                    }
+                    let dateOptions = forcedDates.map(d => `<option value="${d.date}" data-mins="${d.mins}">${d.label}</option>`).join('');
                     if (!dateOptions) dateOptions = `<option value="${todayISO}" data-mins="${activeSessionMins}">Today (Fallback)</option>`;
                     
                     container.innerHTML = `
@@ -1572,15 +1594,18 @@ const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
             }
         }
         
-  async function autoRequestUnlock(dateStr) {
+async function autoRequestUnlock(dateStr) {
             if(isDemoMode) return;
             try {
                 const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
                 await getCollection("lesson_planners").doc(activeSubjectId).set({ 
                     unlockRequested: true, 
+                    isUnlocked: false,
                     lockedDate: dateStr,
                     requestedAt: new Date().getTime(),
-                    requestedBy: safeName
+                    requestedBy: safeName,
+                    lockReason: "Missed Compliance Grace Period",
+                    lockHistory: firebase.firestore.FieldValue.arrayUnion(`Locked on ${new Date().toLocaleDateString('en-GB')} for missing ${dateStr}`)
                 }, { merge: true });
                 window.unlockRequested = true;
                 const btn = document.getElementById('request-unlock-btn');
@@ -1593,18 +1618,21 @@ const targetDays = parseInt(rows[0]?.['Target days for chapter']) || 0;
             }
         }
 
-        async function requestUnlock() {
+      async function requestUnlock() {
             if(isDemoMode) return alert("Simulation: Unlock Request Sent to Admin.");
             const btn = document.getElementById('request-unlock-btn');
             btn.innerText = "Requesting..."; btn.disabled = true;
             
             try {
                 const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
+                const todayStr = new Date().toLocaleDateString('en-GB');
                 await getCollection("lesson_planners").doc(activeSubjectId).set({ 
                     unlockRequested: true,
                     lockedDate: "Manual Correction",
                     requestedAt: new Date().getTime(),
-                    requestedBy: safeName
+                    requestedBy: safeName,
+                    lockReason: "Manual Unlock Request",
+                    lockHistory: firebase.firestore.FieldValue.arrayUnion(`Requested Manual Unlock on ${todayStr}`)
                 }, { merge: true });
                 alert("Unlock Request Sent! Please tell the Admin to approve it.");
                 
