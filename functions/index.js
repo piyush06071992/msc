@@ -507,20 +507,38 @@ exports.compileSingleRoomOnDemand = onRequest({
         return;
     }
 
-    try {
-        // Build the safe document ID exactly as the frontend creates it
+  try {
         const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
         const docId = `${center}_${date}_${safeRoomName}`;
 
         const allocDoc = await admin.firestore().collection(`exam_seating_rooms`).doc(docId).get();
+        let allocations = {};
         
-        if (!allocDoc.exists) {
+        if (allocDoc.exists) {
+            allocations = allocDoc.data().allocations || {};
+        } else {
+            // Legacy Fallback: If the room hasn't been saved into the new partitioned format yet
+            const oldDocId = `${center}_${date}`;
+            const oldDoc = await admin.firestore().collection(`exam_seating_allocations`).doc(oldDocId).get();
+            
+            if (oldDoc.exists) {
+                const data = oldDoc.data();
+                const allAllocations = (typeof data.allocations === 'string') ? JSON.parse(data.allocations) : (data.allocations || {});
+                
+                // Filter out only this specific room's students
+                Object.keys(allAllocations).forEach(key => {
+                    if (key.toUpperCase().startsWith(`${roomName}-`.toUpperCase())) {
+                        allocations[key] = allAllocations[key];
+                    }
+                });
+            }
+        }
+
+        if (Object.keys(allocations).length === 0) {
             res.status(404).send({ error: `Seating allocations not found for room: ${roomName} on ${date}.` });
             return;
         }
 
-        const allocations = allocDoc.data().allocations || {};
-        
         let filteredAllocations = allocations;
         if (seatId && allocations[seatId]) {
             filteredAllocations = { [seatId]: allocations[seatId] };
