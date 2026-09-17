@@ -1894,8 +1894,155 @@ async function saveMasterPdfUpload() {
         console.error(e);
         alert("Upload failed: " + e.message);
     } finally {
-        btn.innerHTML = orig;
+      btn.innerHTML = orig;
         btn.disabled = false;
+    }
+}
+
+// ── UPLOADS MANAGER LOGIC ───────────────────────────────────────────
+
+window._masterUploadGroups = {};
+
+function openMasterUploadsManager() {
+    const currentStagingDate = document.getElementById('exam-date').value;
+    if(currentStagingDate) document.getElementById('manage-uploads-date').value = currentStagingDate;
+    
+    document.getElementById('master-uploads-manager-modal').classList.replace('hidden', 'flex');
+    if(currentStagingDate) fetchMasterUploadsForDate();
+}
+
+function closeMasterUploadsManager() {
+    document.getElementById('master-uploads-manager-modal').classList.replace('flex', 'hidden');
+}
+
+async function fetchMasterUploadsForDate() {
+    const date = document.getElementById('manage-uploads-date').value;
+    const container = document.getElementById('master-uploads-list-container');
+    if (!date) return;
+
+    container.innerHTML = '<div class="text-center py-20"><span class="loader border-t-teal-600"></span><p class="text-[10px] font-bold text-slate-400 mt-2 uppercase tracking-widest">Scanning Database...</p></div>';
+
+    try {
+        const snap = await getCollection("question_papers").where("date", "==", date).get();
+        if (snap.empty) {
+            container.innerHTML = '<div class="text-center py-20 bg-white rounded-3xl border border-slate-200"><p class="text-slate-400 font-black uppercase text-xs tracking-widest">No papers uploaded for this date.</p></div>';
+            return;
+        }
+
+        window._masterUploadGroups = {};
+
+        snap.forEach(doc => {
+            const data = doc.data();
+            const qpPath = data.storagePath || "NO_QP";
+            const omrPath = data.omrStoragePath || "NO_OMR";
+            const groupKey = btoa(qpPath + "|||" + omrPath).replace(/=/g, ''); 
+
+            if (!window._masterUploadGroups[groupKey]) {
+                window._masterUploadGroups[groupKey] = {
+                    groupKey: groupKey,
+                    series: data.series || 'DEFAULT',
+                    qpUrl: data.url, qpPath: data.storagePath, qpName: data.fileName,
+                    omrUrl: data.omrUrl, omrPath: data.omrStoragePath, omrName: data.omrFileName,
+                    uploadedBy: data.uploadedBy || 'Unknown',
+                    targets: []
+                };
+            }
+            window._masterUploadGroups[groupKey].targets.push({
+                docId: doc.id,
+                cls: data.className,
+                sec: data.section,
+                sub: data.subject
+            });
+        });
+
+        renderMasterUploadGroups();
+    } catch (e) {
+        console.error(e);
+        container.innerHTML = `<div class="text-center py-20 text-rose-500 font-bold uppercase text-xs">Error: ${e.message}</div>`;
+    }
+}
+
+function renderMasterUploadGroups() {
+    const container = document.getElementById('master-uploads-list-container');
+    const groups = Object.values(window._masterUploadGroups);
+
+    if (groups.length === 0) return;
+
+    let html = '';
+    groups.forEach((group, idx) => {
+        group.targets.sort((a,b) => a.cls.localeCompare(b.cls, undefined, {numeric:true}) || a.sec.localeCompare(b.sec, undefined, {numeric:true}) || a.sub.localeCompare(b.sub));
+
+        const targetPills = group.targets.map(t => `
+            <div class="inline-flex items-center bg-white border border-slate-200 rounded-lg shadow-sm overflow-hidden text-[9px] font-black uppercase">
+                <span class="px-2 py-1 bg-slate-100 text-slate-600 border-r border-slate-200">${t.cls} | ${t.sec}</span>
+                <span class="px-2 py-1 text-indigo-700">${t.sub}</span>
+                <button onclick="removeSingleTargetFromMaster('${group.groupKey}', '${t.docId}')" class="px-2 py-1 bg-rose-50 text-rose-600 hover:bg-rose-500 hover:text-white transition-colors border-l border-rose-100" title="Remove this subject mapping only">✕</button>
+            </div>
+        `).join('');
+
+        html += `
+            <div class="bg-white border-2 border-slate-200 rounded-2xl p-4 sm:p-5 mb-5 shadow-sm">
+                <div class="flex flex-col md:flex-row justify-between md:items-center gap-4 mb-4 pb-4 border-b border-slate-100">
+                    <div>
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="bg-teal-100 text-teal-800 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest">Package #${idx+1}</span>
+                            <span class="font-black text-slate-800 text-sm uppercase tracking-wider">Series: <span class="text-blue-600">${group.series}</span></span>
+                        </div>
+                        <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">Uploaded by ${group.uploadedBy} • Broadcasted to ${group.targets.length} targets</p>
+                    </div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        ${group.qpUrl ? `<button onclick="window.open('${group.qpUrl}', '_blank')" class="bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-600 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-colors shadow-sm">👁️ View QP</button>` : ''}
+                        ${group.omrUrl ? `<button onclick="window.open('${group.omrUrl}', '_blank')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-600 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-colors shadow-sm">⭕ View OMR</button>` : ''}
+                        <button onclick="deleteMasterUploadBatch('${group.groupKey}')" class="bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-600 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-colors shadow-sm ml-2">🗑️ Delete Entire Batch</button>
+                    </div>
+                </div>
+                
+                <h5 class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Common PDF shared by these subjects:</h5>
+                <div class="flex flex-wrap gap-2">
+                    ${targetPills}
+                </div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+}
+
+async function deleteMasterUploadBatch(groupKey) {
+    const group = window._masterUploadGroups[groupKey];
+    if (!group) return;
+
+    if (!confirm(`Are you sure you want to delete this ENTIRE batch?\n\nThis will remove the PDF mapping for ALL ${group.targets.length} linked subjects, and permanently delete the physical file(s) from Firebase.`)) return;
+
+    try {
+        const batch = db.batch();
+        group.targets.forEach(t => {
+            batch.delete(getCollection("question_papers").doc(t.docId));
+        });
+        await batch.commit();
+
+        if (group.qpPath) await firebase.storage().ref(group.qpPath).delete().catch(e => console.log("Storage QP delete error:", e));
+        if (group.omrPath) await firebase.storage().ref(group.omrPath).delete().catch(e => console.log("Storage OMR delete error:", e));
+
+        alert("✅ Master batch and physical files successfully deleted.");
+        fetchMasterUploadsForDate(); 
+    } catch (e) {
+        alert("Delete failed: " + e.message);
+    }
+}
+
+async function removeSingleTargetFromMaster(groupKey, docId) {
+    const group = window._masterUploadGroups[groupKey];
+    const targetInfo = group.targets.find(t => t.docId === docId);
+
+    if (!confirm(`Remove ${targetInfo.sub} (${targetInfo.cls} Sec ${targetInfo.sec}) from this package? \n\nThe physical PDF will remain available for the other subjects.`)) return;
+
+    try {
+        await getCollection("question_papers").doc(docId).delete();
+        alert("✅ Subject unlinked from Master PDF.");
+        fetchMasterUploadsForDate(); 
+    } catch (e) {
+        alert("Failed to remove target: " + e.message);
     }
 }
     </script>
@@ -1956,9 +2103,34 @@ async function saveMasterPdfUpload() {
                 </div>
             </div>
 
-            <div class="p-3 bg-white border-t border-slate-200 flex flex-col sm:flex-row gap-3 shrink-0">
+           <div class="p-3 bg-white border-t border-slate-200 flex flex-col sm:flex-row gap-3 shrink-0">
                 <button onclick="closeMasterUploadModal()" class="flex-1 py-3 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-black uppercase text-xs tracking-widest transition-colors">Cancel</button>
                 <button onclick="saveMasterPdfUpload()" id="btn-save-master-upload" class="flex-2 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-md transition-all active:scale-95">☁️ Upload & Broadcast to Checked Subjects</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MASTER UPLOADS MANAGER MODAL -->
+    <div id="master-uploads-manager-modal" class="fixed inset-0 bg-slate-900/85 backdrop-blur-md z-[400] hidden items-center justify-center p-2 sm:p-4">
+        <div class="bg-white rounded-[2rem] w-full max-w-5xl shadow-2xl overflow-hidden flex flex-col max-h-[96vh]">
+            <div class="p-4 sm:p-5 bg-teal-600 border-b border-teal-700 flex justify-between items-center shrink-0 text-white">
+                <div>
+                    <h3 class="font-black text-lg uppercase tracking-tighter">Uploaded Papers Manager</h3>
+                    <p class="text-[9px] font-bold text-teal-100 uppercase tracking-widest mt-0.5">Review, trace, and bulk-delete shared master PDFs</p>
+                </div>
+                <button onclick="closeMasterUploadsManager()" class="bg-teal-700 text-teal-100 hover:bg-rose-500 hover:text-white w-8 h-8 rounded-full font-black text-base transition-colors flex items-center justify-center">✕</button>
+            </div>
+            
+            <div class="p-4 bg-slate-50 border-b border-slate-200 shrink-0 flex gap-4 items-center">
+                <div>
+                    <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Select Exam Date</label>
+                    <input type="date" id="manage-uploads-date" onchange="fetchMasterUploadsForDate()" class="p-2 bg-white border border-slate-300 rounded-lg text-xs font-bold text-slate-700 outline-none focus:border-teal-500 cursor-pointer shadow-sm">
+                </div>
+                <button onclick="fetchMasterUploadsForDate()" class="mt-4 bg-teal-100 text-teal-700 hover:bg-teal-200 px-4 py-2 rounded-lg font-black uppercase text-[10px] tracking-widest transition-colors border border-teal-200">🔄 Refresh</button>
+            </div>
+
+            <div class="flex-1 overflow-y-auto custom-scroll p-4 sm:p-6 bg-slate-100/50" id="master-uploads-list-container">
+                <div class="text-center py-20 text-slate-400 font-bold text-xs uppercase tracking-widest">Select a date to view uploads</div>
             </div>
         </div>
     </div>
