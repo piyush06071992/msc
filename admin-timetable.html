@@ -2595,15 +2595,20 @@ function generateReadHTML(blockData, className, sectionName) {
                 }
             }
 
-            if (activeMismatch) {
+        if (activeMismatch && !activeMismatch.acknowledged) {
                 const mT = (activeMismatch.masterTeacher || "").replace(/'/g, "\\'");
                 const mR = (activeMismatch.masterRoom || "").replace(/'/g, "\\'");
                 mismatchBadge = `
                     <div class="w-full mt-1 bg-amber-50 border border-amber-200 rounded p-1 flex flex-col items-center justify-center shadow-sm z-40 relative">
-                        <span class="text-[8px] font-black text-amber-700 uppercase mb-0.5 text-center leading-tight">⚠️ Master Differs:<br>${activeMismatch.masterTeacher}</span>
-                        <button type="button" onclick="syncToMaster('${blockId}', '${entId}', '${mT}', '${mR}'); this.parentElement.remove();" class="bg-white text-amber-600 border border-amber-300 px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest hover:bg-amber-100 transition-colors w-full cursor-pointer shadow-sm">
-                            Sync to Master
-                        </button>
+                        <span class="text-[8px] font-black text-amber-700 uppercase mb-0.5 text-center leading-tight">⚠️ Master Differs:<br>T: ${activeMismatch.masterTeacher || 'None'}<br>RM: ${activeMismatch.masterRoom || 'None'}</span>
+                        <div class="flex gap-1 w-full mt-0.5">
+                            <button type="button" onclick="syncToMaster('${blockId}', '${entId}', '${mT}', '${mR}'); this.parentElement.parentElement.remove();" class="bg-white text-amber-600 border border-amber-300 px-1 py-0.5 rounded text-[7px] font-black uppercase tracking-widest hover:bg-amber-100 transition-colors w-full cursor-pointer shadow-sm">
+                                Revert
+                            </button>
+                            <button type="button" onclick="acknowledgeMismatch('${blockId}', '${entId}'); this.parentElement.parentElement.remove();" class="bg-emerald-50 text-emerald-600 border border-emerald-300 px-1 py-0.5 rounded text-[7px] font-black uppercase tracking-widest hover:bg-emerald-100 transition-colors w-full cursor-pointer shadow-sm">
+                                Keep
+                            </button>
+                        </div>
                     </div>
                 `;
             }
@@ -4345,7 +4350,7 @@ async function confirmMultiDates() {
                    const originalSourceTeacher = syncedSlot.teacher || "NONE";
                         const originalSourceRoom = syncedSlot.room || "";
 
-                        // Heal "NONE" with Live Master Data
+                      // Heal "NONE" with Live Master Data
                         let healedTeacher = false;
                         if (!syncedSlot.teacher || syncedSlot.teacher === "NONE" || syncedSlot.teacher.trim() === "") {
                             syncedSlot.teacher = mTeacher;
@@ -4353,11 +4358,9 @@ async function confirmMultiDates() {
                             syncedSlot.teacherEmail = masterMatch.teacherEmail || "";
                             healedTeacher = true;
                         }
+                        
+                        // We DO NOT forcefully heal the room. If the Admin cleared the room or changed it, we respect that override!
                         let healedRoom = false;
-                        if (!syncedSlot.room || syncedSlot.room.trim() === "") {
-                            syncedSlot.room = mRoom;
-                            healedRoom = true;
-                        }
                         
                         // Check Discrepancies using the original unhealed values
                         if (mTeacher !== originalSourceTeacher || mRoom !== originalSourceRoom) {
@@ -4370,8 +4373,10 @@ async function confirmMultiDates() {
                                 masterTeacher: mTeacher,
                                 newTeacher: healedTeacher ? `[BLANK] ➔ Healed to ${mTeacher}` : syncedSlot.teacher,
                                 masterRoom: mRoom,
-                                newRoom: healedRoom ? `[BLANK] ➔ Healed to ${mRoom || 'None'}` : syncedSlot.room
+                                newRoom: syncedSlot.room || 'None'
                             });
+                            // Tag the slot so the UI knows this is an intentional override that was acknowledged during save
+                            syncedSlot.mismatchData = { masterTeacher: mTeacher, masterRoom: mRoom, acknowledged: true };
                         }
                     } else {
                         // Slot Count Mismatch (Extra slot added in Override)
@@ -5457,8 +5462,41 @@ async function executeImport() {
                     sMins: sh * 60 + sm,
                     eMins: eh * 60 + em
                 };
-            }).filter(x => x !== null);
-        }
+       return {
+                        sMins: sh * 60 + sm,
+                        eMins: eh * 60 + em
+                    };
+                }).filter(x => x !== null);
+            }
+
+            // --- MISMATCH RESOLVER FUNCTIONS ---
+            window.syncToMaster = function(blockId, entId, masterTeacher, masterRoom) {
+                const ent = document.getElementById(entId);
+                if (!ent) return;
+                
+                const teaSelect = ent.querySelector('.ent-tea');
+                const roomSelect = ent.querySelector('.ent-room');
+                
+                if (teaSelect && masterTeacher && masterTeacher !== 'NONE') {
+                    teaSelect.value = masterTeacher;
+                    if (typeof getDynamicColor === 'function') {
+                        teaSelect.style.color = getDynamicColor(masterTeacher);
+                    }
+                }
+                
+                if (roomSelect && masterRoom !== undefined) {
+                    roomSelect.value = masterRoom;
+                }
+                
+                triggerInlineSave(blockId);
+            };
+
+            window.acknowledgeMismatch = function(blockId, entId) {
+                // By triggering an inline save, the user's overridden room/teacher are locked in.
+                // The warning badge is removed instantly by the onclick event.
+                triggerInlineSave(blockId);
+            };
+
     </script>
 </body>
 </html>
