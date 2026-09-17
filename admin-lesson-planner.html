@@ -412,7 +412,7 @@
             } catch(e) { console.error("Data Load Error:", e); }
         }
 
-        // --- OPTION A: ADMIN BACKGROUND SCANNER ---
+    // --- OPTION A: ADMIN BACKGROUND SCANNER ---
         async function runGlobalAdminScanner() {
             if (!dailyBlockEnabled) return;
             
@@ -441,8 +441,7 @@
                         }
                     }
 
-                   // 2. Check for silent inactive teachers (Who haven't opened app)
-                    // Admin uses a 3-day buffer to instantly trap severely inactive profiles
+                    // 2. Check for silent inactive teachers using strict working-day calculation
                     if (!needsUpdate && !planner.isUnlocked && !planner.unlockRequested && planner.syllabusData && planner.syllabusData.length > 0) {
                         let lastLogged = null;
                         planner.syllabusData.forEach(r => {
@@ -450,7 +449,6 @@
                             if (r.isDone && r.completedDate && (!lastLogged || r.completedDate > lastLogged)) lastLogged = r.completedDate;
                         });
                         
-                        // FIX: Include Activity Logs in the lastLogged calculation!
                         if (planner.activityLogs && planner.activityLogs.length > 0) {
                             planner.activityLogs.forEach(log => {
                                 if (!lastLogged || log.date > lastLogged) lastLogged = log.date;
@@ -458,16 +456,42 @@
                         }
                         
                         if (lastLogged && lastLogged < todayISO) {
-                            const daysDiff = Math.floor((new Date(todayISO) - new Date(lastLogged)) / (1000 * 60 * 60 * 24));
-                            if (daysDiff > 3) {
-                                updatePayload = {
-                                    unlockRequested: true,
-                                    isUnlocked: false,
-                                    lockedDate: lastLogged,
-                                    lockReason: "Admin Scanner: Silence/Missed Grace Period",
-                                    lockHistory: firebase.firestore.FieldValue.arrayUnion(`Auto-Locked by Admin Scanner on ${new Date().toLocaleDateString('en-GB')}`)
-                                };
-                                needsUpdate = true;
+                            const struct = structureData.find(st => planner.id.startsWith(st.id + '_'));
+                            if (struct) {
+                                const className = struct.className;
+                                const sectionName = struct.sectionName;
+                                const subIdPart = planner.id.substring(struct.id.length + 1);
+                                const subject = struct.subjects.find(s => s.replace(/\s+/g, '_') === subIdPart) || subIdPart.replace(/_/g, ' ');
+
+                                let missedWorkingDays = 0;
+                                let oldestMissingDate = null;
+                                let scanDate = new Date(lastLogged);
+                                scanDate.setDate(scanDate.getDate() + 1); // Check from day after last log
+                                const endLimit = new Date(todayISO); // Don't check today itself
+                                
+                                while(scanDate < endLimit) {
+                                    const offset = scanDate.getTimezoneOffset() * 60000;
+                                    const scanIso = (new Date(scanDate.getTime() - offset)).toISOString().split('T')[0];
+                                    
+                                    const exclusion = checkDateExclusion(scanDate, className, sectionName, subject);
+                                    if (!exclusion.isExcluded && isTimetableWorkingDay(scanDate, className, sectionName, subject)) {
+                                        missedWorkingDays++;
+                                        if (!oldestMissingDate) oldestMissingDate = scanIso; // Capture first missing working day
+                                    }
+                                    scanDate.setDate(scanDate.getDate() + 1);
+                                }
+                                
+                                // EXACT MATCH to Teacher UI 1-day buffer: more than 1 working day missed
+                                if (missedWorkingDays > 1) {
+                                    updatePayload = {
+                                        unlockRequested: true,
+                                        isUnlocked: false,
+                                        lockedDate: oldestMissingDate || lastLogged,
+                                        lockReason: "Admin Scanner: Missed Grace Period",
+                                        lockHistory: firebase.firestore.FieldValue.arrayUnion(`Auto-Locked by Admin Scanner on ${new Date().toLocaleDateString('en-GB')} for missing ${oldestMissingDate || lastLogged}`)
+                                    };
+                                    needsUpdate = true;
+                                }
                             }
                         }
                     }
