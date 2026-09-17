@@ -405,10 +405,79 @@
                     return { email: d.email, name: n };
                 });
                 
-                // Add the missing scanner hook here!
+              // Add the missing scanner hook here!
                 await fetchGlobalUnlockRequests();
+                await runGlobalAdminScanner(); // Option A background scanner
                 
             } catch(e) { console.error("Data Load Error:", e); }
+        }
+
+        // --- OPTION A: ADMIN BACKGROUND SCANNER ---
+        async function runGlobalAdminScanner() {
+            if (!dailyBlockEnabled) return;
+            
+            try {
+                const todayISO = new Date(Date.now() - (new Date().getTimezoneOffset() * 60000)).toISOString().split('T')[0];
+                let batch = db.batch();
+                let opsCount = 0;
+                let newLocksFound = false;
+
+                planners.forEach(planner => {
+                    let needsUpdate = false;
+                    let updatePayload = {};
+
+                    // 1. Check for 24-Hour Golden Ticket Expiry
+                    if (planner.isUnlocked && planner.unlockedAt) {
+                        const hoursSinceUnlock = (Date.now() - planner.unlockedAt) / (1000 * 60 * 60);
+                        if (hoursSinceUnlock >= 24) {
+                            updatePayload = {
+                                isUnlocked: false,
+                                unlockRequested: true,
+                                lockedDate: todayISO,
+                                lockReason: "24-Hour Ticket Expired",
+                                lockHistory: firebase.firestore.FieldValue.arrayUnion(`Ticket Expired & Re-Locked on ${new Date().toLocaleDateString('en-GB')}`)
+                            };
+                            needsUpdate = true;
+                        }
+                    }
+
+                    // 2. Check for silent inactive teachers (Who haven't opened app)
+                    // Admin uses a 3-day buffer to instantly trap severely inactive profiles
+                    if (!needsUpdate && !planner.isUnlocked && !planner.unlockRequested && planner.syllabusData && planner.syllabusData.length > 0) {
+                        let lastLogged = null;
+                        planner.syllabusData.forEach(r => {
+                            if (r.chapterStartDate && (!lastLogged || r.chapterStartDate > lastLogged)) lastLogged = r.chapterStartDate;
+                            if (r.isDone && r.completedDate && (!lastLogged || r.completedDate > lastLogged)) lastLogged = r.completedDate;
+                        });
+                        
+                        if (lastLogged && lastLogged < todayISO) {
+                            const daysDiff = Math.floor((new Date(todayISO) - new Date(lastLogged)) / (1000 * 60 * 60 * 24));
+                            if (daysDiff > 3) {
+                                updatePayload = {
+                                    unlockRequested: true,
+                                    isUnlocked: false,
+                                    lockedDate: lastLogged,
+                                    lockReason: "Admin Scanner: Silence/Missed Grace Period",
+                                    lockHistory: firebase.firestore.FieldValue.arrayUnion(`Auto-Locked by Admin Scanner on ${new Date().toLocaleDateString('en-GB')}`)
+                                };
+                                needsUpdate = true;
+                            }
+                        }
+                    }
+
+                    if (needsUpdate) {
+                        const ref = getCollection("lesson_planners").doc(planner.id);
+                        batch.update(ref, updatePayload);
+                        opsCount++;
+                        newLocksFound = true;
+                    }
+                });
+
+                if (opsCount > 0) {
+                    await batch.commit();
+                    if (newLocksFound) await fetchGlobalUnlockRequests();
+                }
+            } catch(e) { console.error("Admin Scanner Error:", e); }
         }
 
         // --- SETUP ENGINE (Deep Accordion Hierarchy) ---
@@ -1702,10 +1771,19 @@ function getScheduleSnapshotForDate(dateIso) {
             btn.innerText = "Processing..."; btn.disabled = true;
             
             try {
-                await getCollection("lesson_planners").doc(currentUploadId).update({ 
+                const updatePayload = { 
                     unlockRequested: false, 
                     isUnlocked: unlockState 
-                });
+                };
+                if (unlockState) {
+                    updatePayload.unlockedAt = Date.now();
+                    updatePayload.lockHistory = firebase.firestore.FieldValue.arrayUnion(`Force Unlocked by Admin on ${new Date().toLocaleDateString('en-GB')} (Valid 24h)`);
+                } else {
+                    updatePayload.lockHistory = firebase.firestore.FieldValue.arrayUnion(`Force Locked by Admin on ${new Date().toLocaleDateString('en-GB')}`);
+                    updatePayload.lockReason = "Manual Admin Lock";
+                }
+                
+                await getCollection("lesson_planners").doc(currentUploadId).update(updatePayload);
                 alert(`Planner successfully ${actionStr}ed!`);
                 await loadAllData();
                 // Refresh the modal to show the new button state
@@ -1789,14 +1867,25 @@ async function fetchGlobalUnlockRequests() {
                         }
                     }
 
-                   const lockDateStr = req.lockedDate ? `<span class="bg-rose-100 text-rose-700 px-2 py-0.5 rounded border border-rose-200 ml-2">Locked For: ${req.lockedDate}</span>` : '';
+                const lockDateStr = req.lockedDate ? `<span class="bg-rose-100 text-rose-700 px-2 py-0.5 rounded border border-rose-200 ml-2 shadow-sm">${req.lockReason || 'Compliance Lock'}: ${req.lockedDate}</span>` : '';
+                   
+                   let historyHtml = '';
+                   if (req.lockHistory && req.lockHistory.length > 0) {
+                       historyHtml = `<div class="mt-3 bg-white p-2 rounded-lg border border-slate-200 shadow-inner h-16 overflow-y-auto custom-scroll">
+                           <div class="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">Lock/Unlock Rap Sheet</div>
+                           <ul class="text-[9px] font-bold text-slate-600 space-y-0.5 list-disc pl-3">
+                               ${req.lockHistory.slice(-5).map(h => `<li>${h}</li>`).join('')}
+                           </ul>
+                       </div>`;
+                   }
 
                     listContainer.innerHTML += `
-                        <div id="unlock-req-${req.id}" class="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl flex flex-col sm:flex-row justify-between sm:items-center gap-4">
-                            <div>
-                                <h4 class="font-black text-slate-800 uppercase text-sm">${subject} ${lockDateStr}</h4>
-                                <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">${className} ${sectionName ? '| ' + sectionName : ''}</p>
+                        <div id="unlock-req-${req.id}" class="bg-slate-50 border border-slate-200 p-4 sm:p-5 rounded-2xl flex flex-col sm:flex-row justify-between sm:items-start gap-4">
+                            <div class="flex-1 w-full">
+                                <h4 class="font-black text-slate-800 uppercase text-sm flex flex-wrap gap-2 items-center">${subject} ${lockDateStr}</h4>
+                                <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">${className} ${sectionName ? '| ' + sectionName : ''}</p>
                                 <p class="text-[10px] font-black text-indigo-600 uppercase tracking-widest mt-2 flex items-center gap-1"><span class="text-lg leading-none">👨‍🏫</span> ${teacherName}</p>
+                                ${historyHtml}
                             </div>
                             <div class="flex gap-2 w-full sm:w-auto mt-2 sm:mt-0 shrink-0">
                                 <button onclick="approveSingleUnlock('${req.id}')" class="flex-1 sm:flex-none bg-emerald-100 text-emerald-700 hover:bg-emerald-600 hover:text-white border border-emerald-200 font-black px-5 py-3 rounded-xl text-[10px] sm:text-[11px] uppercase tracking-widest transition-all shadow-sm">✓ Approve</button>
@@ -1813,9 +1902,15 @@ async function fetchGlobalUnlockRequests() {
             const origText = btn.innerText;
             btn.innerText = "⏳..."; btn.disabled = true;
             
-           try {
+       try {
                 // Route the update through getCollection to dynamically switch prefixes
-                await getCollection("lesson_planners").doc(reqId).update({ unlockRequested: false, isUnlocked: true });
+                const todayStr = new Date().toLocaleDateString('en-GB');
+                await getCollection("lesson_planners").doc(reqId).update({ 
+                    unlockRequested: false, 
+                    isUnlocked: true,
+                    unlockedAt: Date.now(),
+                    lockHistory: firebase.firestore.FieldValue.arrayUnion(`Unlocked by Admin on ${todayStr} (Valid 24h)`)
+                });
                 document.getElementById(`unlock-req-${reqId}`).remove();
                 
                 // Remove from local array
@@ -1845,10 +1940,16 @@ async function fetchGlobalUnlockRequests() {
             btn.innerText = "Processing Batch..."; btn.disabled = true;
 
             try {
-                const batch = db.batch();
+               const batch = db.batch();
+                const todayStr = new Date().toLocaleDateString('en-GB');
                 globalUnlockRequests.forEach(req => {
                     const ref = getCollection("lesson_planners").doc(req.id);
-                    batch.update(ref, { unlockRequested: false, isUnlocked: true });
+                    batch.update(ref, { 
+                        unlockRequested: false, 
+                        isUnlocked: true,
+                        unlockedAt: Date.now(),
+                        lockHistory: firebase.firestore.FieldValue.arrayUnion(`Batch Unlocked by Admin on ${todayStr} (Valid 24h)`)
+                    });
                 });
                 
                 await batch.commit(); 
