@@ -61,7 +61,7 @@
                 </div>
             </div>
         </div>
-    <div class="flex flex-wrap items-center gap-2 sm:gap-3 w-full sm:w-auto justify-end">
+  <div class="flex flex-wrap items-center gap-2 sm:gap-3 w-full sm:w-auto justify-end">
             <button onclick="openMasterUploadModal()" class="bg-blue-600 hover:bg-blue-500 text-white px-5 py-3 rounded-xl font-black uppercase tracking-widest text-xs sm:text-sm transition-colors shadow-md border border-blue-500 flex items-center gap-2">☁️ Upload Exam PDF</button>
             <button onclick="openExamMappingModal()" class="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-3 rounded-xl font-black uppercase tracking-widest text-xs sm:text-sm transition-colors shadow-md border border-indigo-500 flex items-center gap-2">🗺️ Exam Mapping</button>
             <button onclick="localStorage.setItem('minervaSeatingToken', Date.now()); window.location.href = 'admin-seating-plan.html'" class="bg-amber-600 hover:bg-amber-500 text-white px-5 py-3 rounded-xl font-black uppercase tracking-widest text-xs sm:text-sm transition-colors shadow-md border border-amber-500 flex items-center gap-2">💺 Seating Plan</button>
@@ -1689,7 +1689,7 @@ async function rescheduleExamDate(oldDate) {
                     count++;
                 }
 
-                await batch.commit();
+await batch.commit();
                 alert(`✅ Successfully moved exams from ${oldDate} to ${newDate}! (${count} records updated).`);
                 listenForExamsTabular();
             } catch (e) {
@@ -1697,7 +1697,183 @@ async function rescheduleExamDate(oldDate) {
                 alert("Error: " + e.message);
             }
         }
-        <!-- MASTER EXAM PDF UPLOAD WIZARD MODAL -->
+
+        // ── MASTER PDF UPLOAD ENGINE ───────────────────────────────────────
+        async function openMasterUploadModal() {
+            const dateSelect = document.getElementById('master-upload-date');
+            dateSelect.innerHTML = '<option value="">-- Loading Defined Exam Dates --</option>';
+            
+            try {
+                const snap = await getCollection("exam_schedules").get();
+                let dateMap = {};
+                snap.forEach(doc => {
+                    const d = doc.data();
+                    if (d.date) dateMap[d.date] = true;
+                });
+
+                const dates = Object.keys(dateMap).sort((a,b) => b.localeCompare(a));
+                if (dates.length === 0) {
+                    dateSelect.innerHTML = '<option value="">No exam dates staged in database</option>';
+                } else {
+                    dateSelect.innerHTML = '<option value="">-- Choose Defined Exam Date --</option>' + dates.map(d => {
+                        const pretty = new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+                        return `<option value="${d}">${pretty}</option>`;
+                    }).join('');
+                }
+            } catch(e) {
+                console.error(e);
+                dateSelect.innerHTML = '<option value="">Error loading dates</option>';
+            }
+
+            document.getElementById('master-upload-series').value = "SERIES A";
+            document.getElementById('master-qp-file').value = "";
+            document.getElementById('master-omr-file').value = "";
+            document.getElementById('master-targets-container').innerHTML = '<div class="col-span-full text-center py-10 text-slate-400 font-bold text-xs uppercase">Select a defined exam date above</div>';
+            
+            document.getElementById('master-upload-modal').classList.replace('hidden', 'flex');
+        }
+
+        function closeMasterUploadModal() {
+            document.getElementById('master-upload-modal').classList.replace('flex', 'hidden');
+        }
+
+        async function onMasterUploadDateChange() {
+            const date = document.getElementById('master-upload-date').value;
+            const container = document.getElementById('master-targets-container');
+            if (!date) {
+                container.innerHTML = '<div class="col-span-full text-center py-10 text-slate-400 font-bold text-xs uppercase">Select a defined exam date above</div>';
+                return;
+            }
+
+            container.innerHTML = '<div class="col-span-full text-center py-10"><span class="loader border-t-blue-600"></span></div>';
+
+            try {
+                const snap = await getCollection("exam_schedules").where("date", "==", date).get();
+                let stagingItems = [];
+                snap.forEach(doc => stagingItems.push(doc.data()));
+
+                if (stagingItems.length === 0) {
+                    container.innerHTML = '<div class="col-span-full text-center py-10 text-rose-500 font-bold text-xs uppercase">No exam schedule found for this date.</div>';
+                    return;
+                }
+
+                let html = "";
+                stagingItems.forEach((item, idx) => {
+                    const subs = Array.isArray(item.subjects) ? item.subjects.join(', ') : (item.subject || '');
+                    html += `
+                        <label class="flex items-start gap-3 p-3.5 bg-white border border-slate-200 rounded-2xl cursor-pointer hover:border-blue-300 shadow-sm transition-all">
+                            <input type="checkbox" value="${item.className}|${item.section}|${subs}" class="master-target-cb mt-1 w-4 h-4 accent-blue-600 cursor-pointer" checked>
+                            <div class="min-w-0 flex-1">
+                                <div class="text-xs font-black text-slate-800 uppercase tracking-tight">Class ${item.className} — Sec ${item.section}</div>
+                                <div class="text-[10px] font-bold text-indigo-600 uppercase mt-0.5 break-words">Subjects: ${subs}</div>
+                                <div class="text-[8px] font-black text-slate-400 uppercase mt-1">Type: ${item.type || 'EXAM'}</div>
+                            </div>
+                        </label>
+                    `;
+                });
+                container.innerHTML = html;
+            } catch (e) {
+                console.error(e);
+                container.innerHTML = '<div class="col-span-full text-center py-10 text-rose-500 font-bold text-xs uppercase">Error loading staged sections.</div>';
+            }
+        }
+
+        async function saveMasterPdfUpload() {
+            const date = document.getElementById('master-upload-date').value;
+            const layout = document.getElementById('master-upload-layout').value;
+            const series = document.getElementById('master-upload-series').value.trim().toUpperCase() || "SERIES A";
+            const qpFile = document.getElementById('master-qp-file').files[0];
+            const omrFile = document.getElementById('master-omr-file').files[0];
+            const checkedTargets = Array.from(document.querySelectorAll('.master-target-cb:checked')).map(cb => cb.value);
+
+            if (!date) return alert("Please select an exam date.");
+            if (checkedTargets.length === 0) return alert("Please select at least one target class/section.");
+            if (!qpFile && !omrFile) return alert("Please select at least one PDF file (Question Paper or OMR).");
+
+            const btn = document.getElementById('btn-save-master-upload');
+            const orig = btn.innerHTML;
+            btn.innerHTML = "⏳ Uploading & Broadcasting...";
+            btn.disabled = true;
+
+            try {
+                const storageRef = firebase.storage().ref();
+                
+                let qpUrl = null, qpStoragePath = null, qpFileName = null;
+                if (qpFile) {
+                    const safeQpName = qpFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
+                    const qpRef = storageRef.child(`question_papers/${activeCenter}/${date}/MASTER_${series}_${Date.now()}_${safeQpName}`);
+                    await qpRef.put(qpFile);
+                    qpUrl = await qpRef.getDownloadURL();
+                    qpStoragePath = qpRef.fullPath;
+                    qpFileName = qpFile.name;
+                }
+
+                let omrUrl = null, omrStoragePath = null, omrFileName = null;
+                if (omrFile) {
+                    const safeOmrName = omrFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
+                    const omrRef = storageRef.child(`question_papers/${activeCenter}/${date}/MASTER_OMR_${series}_${Date.now()}_${safeOmrName}`);
+                    await omrRef.put(omrFile);
+                    omrUrl = await omrRef.getDownloadURL();
+                    omrStoragePath = omrRef.fullPath;
+                    omrFileName = omrFile.name;
+                }
+
+                const expiresAt = Date.now() + (30 * 24 * 60 * 60 * 1000);
+                const uploaderName = (typeof activeStaff !== 'undefined' && activeStaff) ? (activeStaff.name || activeStaff.email || "Admin") : "Admin";
+                const norm = (str) => (str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+                const batch = db.batch();
+
+                checkedTargets.forEach(targetStr => {
+                    const [cls, sec, subsStr] = targetStr.split('|');
+                    const subjectsArr = subsStr ? subsStr.split(',').map(s => s.trim()) : ["FULL PAPER"];
+
+                    subjectsArr.forEach(sub => {
+                        const docId = `${date}_${norm(cls)}_${norm(sec)}_${norm(sub)}_${norm(series)}`;
+                        const ref = getCollection("question_papers").doc(docId);
+
+                        let payload = {
+                            center: activeCenter,
+                            date: date,
+                            className: cls,
+                            section: sec,
+                            subject: sub,
+                            series: series,
+                            layout: layout,
+                            uploadedAt: Date.now(),
+                            expiresAt: expiresAt,
+                            uploadedBy: uploaderName
+                        };
+
+                        if (qpUrl) {
+                            payload.fileName = qpFileName;
+                            payload.url = qpUrl;
+                            payload.storagePath = qpStoragePath;
+                        }
+                        if (omrUrl) {
+                            payload.omrFileName = omrFileName;
+                            payload.omrUrl = omrUrl;
+                            payload.omrStoragePath = omrStoragePath;
+                        }
+
+                        batch.set(ref, payload, { merge: true });
+                    });
+                });
+
+                await batch.commit();
+                alert("✅ Master PDF successfully uploaded and broadcasted to all selected sections!");
+                closeMasterUploadModal();
+            } catch (e) {
+                console.error(e);
+                alert("Upload failed: " + e.message);
+            } finally {
+                btn.innerHTML = orig;
+                btn.disabled = false;
+            }
+        }
+    </script>
+
+    <!-- MASTER EXAM PDF UPLOAD WIZARD MODAL -->
     <div id="master-upload-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[350] hidden items-center justify-center p-4">
         <div class="bg-white rounded-[2.5rem] w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
             <div class="p-6 sm:p-8 bg-blue-600 border-b border-blue-700 flex justify-between items-center shrink-0 text-white">
@@ -1759,179 +1935,5 @@ async function rescheduleExamDate(oldDate) {
             </div>
         </div>
     </div>
-        // ── MASTER PDF UPLOAD ENGINE ───────────────────────────────────────
-async function openMasterUploadModal() {
-    const dateSelect = document.getElementById('master-upload-date');
-    dateSelect.innerHTML = '<option value="">-- Loading Defined Exam Dates --</option>';
-    
-    try {
-        const snap = await getCollection("exam_schedules").get();
-        let dateMap = {};
-        snap.forEach(doc => {
-            const d = doc.data();
-            if (d.date) dateMap[d.date] = true;
-        });
-
-        const dates = Object.keys(dateMap).sort((a,b) => b.localeCompare(a));
-        if (dates.length === 0) {
-            dateSelect.innerHTML = '<option value="">No exam dates staged in database</option>';
-        } else {
-            dateSelect.innerHTML = '<option value="">-- Choose Defined Exam Date --</option>' + dates.map(d => {
-                const pretty = new Date(d + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
-                return `<option value="${d}">${pretty}</option>`;
-            }).join('');
-        }
-    } catch(e) {
-        console.error(e);
-        dateSelect.innerHTML = '<option value="">Error loading dates</option>';
-    }
-
-    document.getElementById('master-upload-series').value = "SERIES A";
-    document.getElementById('master-qp-file').value = "";
-    document.getElementById('master-omr-file').value = "";
-    document.getElementById('master-targets-container').innerHTML = '<div class="col-span-full text-center py-10 text-slate-400 font-bold text-xs uppercase">Select a defined exam date above</div>';
-    
-    document.getElementById('master-upload-modal').classList.replace('hidden', 'flex');
-}
-
-function closeMasterUploadModal() {
-    document.getElementById('master-upload-modal').classList.replace('flex', 'hidden');
-}
-
-async function onMasterUploadDateChange() {
-    const date = document.getElementById('master-upload-date').value;
-    const container = document.getElementById('master-targets-container');
-    if (!date) {
-        container.innerHTML = '<div class="col-span-full text-center py-10 text-slate-400 font-bold text-xs uppercase">Select a defined exam date above</div>';
-        return;
-    }
-
-    container.innerHTML = '<div class="col-span-full text-center py-10"><span class="loader border-t-blue-600"></span></div>';
-
-    try {
-        const snap = await getCollection("exam_schedules").where("date", "==", date).get();
-        let stagingItems = [];
-        snap.forEach(doc => stagingItems.push(doc.data()));
-
-        if (stagingItems.length === 0) {
-            container.innerHTML = '<div class="col-span-full text-center py-10 text-rose-500 font-bold text-xs uppercase">No exam schedule found for this date.</div>';
-            return;
-        }
-
-        let html = "";
-        stagingItems.forEach((item, idx) => {
-            const subs = Array.isArray(item.subjects) ? item.subjects.join(', ') : (item.subject || '');
-            html += `
-                <label class="flex items-start gap-3 p-3.5 bg-white border border-slate-200 rounded-2xl cursor-pointer hover:border-blue-300 shadow-sm transition-all">
-                    <input type="checkbox" value="${item.className}|${item.section}|${subs}" class="master-target-cb mt-1 w-4 h-4 accent-blue-600 cursor-pointer" checked>
-                    <div class="min-w-0 flex-1">
-                        <div class="text-xs font-black text-slate-800 uppercase tracking-tight">Class ${item.className} — Sec ${item.section}</div>
-                        <div class="text-[10px] font-bold text-indigo-600 uppercase mt-0.5 break-words">Subjects: ${subs}</div>
-                        <div class="text-[8px] font-black text-slate-400 uppercase mt-1">Type: ${item.type || 'EXAM'}</div>
-                    </div>
-                </label>
-            `;
-        });
-        container.innerHTML = html;
-    } catch (e) {
-        console.error(e);
-        container.innerHTML = '<div class="col-span-full text-center py-10 text-rose-500 font-bold text-xs uppercase">Error loading staged sections.</div>';
-    }
-}
-
-async function saveMasterPdfUpload() {
-    const date = document.getElementById('master-upload-date').value;
-    const layout = document.getElementById('master-upload-layout').value;
-    const series = document.getElementById('master-upload-series').value.trim().toUpperCase() || "SERIES A";
-    const qpFile = document.getElementById('master-qp-file').files[0];
-    const omrFile = document.getElementById('master-omr-file').files[0];
-    const checkedTargets = Array.from(document.querySelectorAll('.master-target-cb:checked')).map(cb => cb.value);
-
-    if (!date) return alert("Please select an exam date.");
-    if (checkedTargets.length === 0) return alert("Please select at least one target class/section.");
-    if (!qpFile && !omrFile) return alert("Please select at least one PDF file (Question Paper or OMR).");
-
-    const btn = document.getElementById('btn-save-master-upload');
-    const orig = btn.innerHTML;
-    btn.innerHTML = "⏳ Uploading & Broadcasting...";
-    btn.disabled = true;
-
-    try {
-        const storageRef = firebase.storage().ref();
-        
-        let qpUrl = null, qpStoragePath = null, qpFileName = null;
-        if (qpFile) {
-            const safeQpName = qpFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
-            const qpRef = storageRef.child(`question_papers/${activeCenter}/${date}/MASTER_${series}_${Date.now()}_${safeQpName}`);
-            await qpRef.put(qpFile);
-            qpUrl = await qpRef.getDownloadURL();
-            qpStoragePath = qpRef.fullPath;
-            qpFileName = qpFile.name;
-        }
-
-        let omrUrl = null, omrStoragePath = null, omrFileName = null;
-        if (omrFile) {
-            const safeOmrName = omrFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
-            const omrRef = storageRef.child(`question_papers/${activeCenter}/${date}/MASTER_OMR_${series}_${Date.now()}_${safeOmrName}`);
-            await omrRef.put(omrFile);
-            omrUrl = await omrRef.getDownloadURL();
-            omrStoragePath = omrRef.fullPath;
-            omrFileName = omrFile.name;
-        }
-
-        const expiresAt = Date.now() + (30 * 24 * 60 * 60 * 1000);
-        const uploaderName = (typeof activeStaff !== 'undefined' && activeStaff) ? (activeStaff.name || activeStaff.email || "Admin") : "Admin";
-        const norm = (str) => (str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-
-        const batch = db.batch();
-
-        checkedTargets.forEach(targetStr => {
-            const [cls, sec, subsStr] = targetStr.split('|');
-            const subjectsArr = subsStr ? subsStr.split(',').map(s => s.trim()) : ["FULL PAPER"];
-
-            subjectsArr.forEach(sub => {
-                const docId = `${date}_${norm(cls)}_${norm(sec)}_${norm(sub)}_${norm(series)}`;
-                const ref = getCollection("question_papers").doc(docId);
-
-                let payload = {
-                    center: activeCenter,
-                    date: date,
-                    className: cls,
-                    section: sec,
-                    subject: sub,
-                    series: series,
-                    layout: layout,
-                    uploadedAt: Date.now(),
-                    expiresAt: expiresAt,
-                    uploadedBy: uploaderName
-                };
-
-                if (qpUrl) {
-                    payload.fileName = qpFileName;
-                    payload.url = qpUrl;
-                    payload.storagePath = qpStoragePath;
-                }
-                if (omrUrl) {
-                    payload.omrFileName = omrFileName;
-                    payload.omrUrl = omrUrl;
-                    payload.omrStoragePath = omrStoragePath;
-                }
-
-                batch.set(ref, payload, { merge: true });
-            });
-        });
-
-        await batch.commit();
-        alert("✅ Master PDF successfully uploaded and broadcasted to all selected sections!");
-        closeMasterUploadModal();
-    } catch (e) {
-        console.error(e);
-        alert("Upload failed: " + e.message);
-    } finally {
-        btn.innerHTML = orig;
-        btn.disabled = false;
-    }
-}
-    </script>
 </body>
 </html>
