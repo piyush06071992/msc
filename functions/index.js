@@ -437,7 +437,12 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
                 });
                 
-                // Only pad if it is explicitly standard layout. Do not pad A4_HALF_SPLIT layout.
+                // DUPLEX PADDING: If the PDF is an odd number of pages (like 1 or 3),
+                // we MUST add a blank page at the end of each copy. Otherwise, Copy 2 
+                // will print on the back of Copy 1, ruining the cut!
+                if (copiedPages.length % 2 !== 0) {
+                    mergedPdf.addPage();
+                }
             }
         } catch (err) {
             console.error(`[PDF Engine] Error processing bulk task for ${bulkData.pdfUrl}:`, err);
@@ -518,7 +523,7 @@ exports.compileSingleRoomOnDemand = onRequest({
         if (allocDoc.exists) {
             allocations = allocDoc.data().allocations || {};
         } else {
-            // Case-Insensitive Fallback Lookup (Solves frontend HTML innerText casing bugs)
+            // Case-Insensitive Fallback Lookup
             const snap = await admin.firestore().collection(`exam_seating_rooms`)
                 .where("date", "==", date)
                 .where("center", "==", center)
@@ -570,7 +575,7 @@ exports.compileSingleRoomOnDemand = onRequest({
         const suffix = docType === 'omr' ? `_omr_package_${timestamp}.pdf` : `_print_package_${timestamp}.pdf`;
         const storagePath = `print_packages/${center}/${date}/${filePrefix}${suffix}`;
         
-        // Clean up older PDFs for this specific room to save Firebase Storage space
+        // Clean up older PDFs for this specific room
         try {
             const bucket = admin.storage().bucket();
             const [files] = await bucket.getFiles({ prefix: `print_packages/${center}/${date}/` });
