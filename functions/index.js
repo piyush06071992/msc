@@ -349,7 +349,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const availableSubjects = papersBySection[secKey] ? Object.keys(papersBySection[secKey]) : [];
         let matchedSubKey = null;
 
-        // Pure Database-Driven Optional Subject Matching
+      // Pure Database-Driven Optional Subject Matching
         if (availableSubjects.length === 1) {
             matchedSubKey = availableSubjects[0];
         } else if (availableSubjects.length > 1) {
@@ -368,10 +368,14 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         let roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers).sort() : availableSeries;
         const layout = (layoutBySection[secKey] && layoutBySection[secKey][matchedSubKey]) ? layoutBySection[secKey][matchedSubKey] : 'A4_STANDARD';
 
-        // VITAL FIX: If A4_HALF_SPLIT is used, but the admin only uploaded one file under "SERIES A", 
-        // we MUST mathematically force the system to alternate between A and B so the bottom half gets populated.
-        if (layout === 'A4_HALF_SPLIT' && roomSeriesList.length === 1 && roomSeriesList[0] === 'SERIES A') {
-            roomSeriesList = ['SERIES A', 'SERIES B'];
+        // VITAL FIX: Force alternation for A4_HALF_SPLIT even if user uploaded the file as just "A" instead of "SERIES A"
+        if (layout === 'A4_HALF_SPLIT' && roomSeriesList.length === 1) {
+            let s1 = roomSeriesList[0];
+            let s2 = 'SERIES B';
+            if (s1.toUpperCase() === 'A') s2 = 'B';
+            else if (s1.toUpperCase().endsWith(' A')) s2 = s1.replace(/ A$/i, ' B');
+            else if (s1.toUpperCase().endsWith('A')) s2 = s1.replace(/A$/i, 'B');
+            roomSeriesList = [s1, s2];
         }
         
         // Grab the base PDF Url to act as the subject sequence tracker
@@ -468,7 +472,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                         const bSub = (pageTask.bottom.matchedSubKey && pageTask.bottom.matchedSubKey !== "FULL PAPER" && pageTask.bottom.matchedSubKey !== "UNMAPPED EXAM") ? `[${pageTask.bottom.matchedSubKey.substring(0,8)}] ` : "";
                         const leftText = `${bStu.name.toUpperCase()}  (ROLL: #${bStu.rollNo || "—"})`;
                         const rightText = `SEAT: ${pageTask.bottom.seatId}    |    SEC: ${bStu.section}    |    ${bSub}${pageTask.bottom.assignedSeries}`;
-                        const yBottom = (height / 2) - 15;
+                        const yBottom = 20; // Exact footer placement
                         page.drawText(leftText, { x: 36, y: yBottom, size, font, color, opacity });
                         page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: yBottom, size, font, color, opacity });
                     }
@@ -493,7 +497,8 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     if (remainder !== 0) {
                         for (let p = 0; p < (4 - remainder); p++) mergedPdf.addPage();
                     }
-                } else {
+                } else if (pageTask.layout === 'A4_STANDARD') {
+                    // Only apply duplex blank page padding to A4_STANDARD, ensuring A4_HALF_SPLIT limits pages correctly
                     const remainder = currentPagesCount % 2;
                     if (remainder !== 0) mergedPdf.addPage();
                 }
