@@ -186,7 +186,7 @@ exports.sendInstantPushAlerts = onDocumentCreated({
 
         if (!staffSnap || staffSnap.empty) continue;
 
-staffSnap.forEach(doc => {
+        staffSnap.forEach(doc => {
             const staffData = doc.data();
             const nameKey = Object.keys(staffData.details || {}).find(k => k.toLowerCase().includes('name'));
             const staffFullName = nameKey ? staffData.details[nameKey] : (staffData.name || "");
@@ -348,7 +348,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const availableSubjects = papersBySection[secKey] ? Object.keys(papersBySection[secKey]) : [];
         let matchedSubKey = null;
 
-      // Database-Driven Optional Subject Matching (Mirrors Frontend)
+      // Pure Database-Driven Optional Subject Matching
         if (availableSubjects.length === 1) {
             matchedSubKey = availableSubjects[0];
         } else if (availableSubjects.length > 1) {
@@ -376,11 +376,11 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         
         const paperLinks = sectionPapers[assignedSeries] || Object.values(sectionPapers)[0] || {};
         const pdfUrl = docType === 'omr' ? paperLinks.omr : paperLinks.qp;
-        const layout = layoutBySection[secKey] || 'A4_STANDARD';
+        const layout = (layoutBySection[secKey] && layoutBySection[secKey][matchedSubKey]) ? layoutBySection[secKey][matchedSubKey] : 'A4_STANDARD';
 
         if (!pdfUrl) continue; 
         
-        const item = { seatId, student, assignedSeries, pdfUrl, layout, secKey };
+        const item = { seatId, student, assignedSeries, pdfUrl, layout, matchedSubKey };
 
         if (layout === 'A4_HALF_SPLIT' && docType !== 'omr') {
             const availableForThisSec = Object.keys(sectionPapers).sort();
@@ -442,7 +442,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                if (pageTask.type === 'split') {
                     if (pageTask.top) {
                         const tStu = pageTask.top.student;
-                        const tSub = (pageTask.top.matchedSubKey && pageTask.top.matchedSubKey !== "FULL PAPER") ? `[${pageTask.top.matchedSubKey.substring(0,8)}] ` : "";
+                        const tSub = (pageTask.top.matchedSubKey && pageTask.top.matchedSubKey !== "FULL PAPER" && pageTask.top.matchedSubKey !== "UNMAPPED EXAM") ? `[${pageTask.top.matchedSubKey.substring(0,8)}] ` : "";
                         const leftText = `MINERVA STUDY CIRCLE  |  ${tStu.name.toUpperCase()}  (ROLL: #${tStu.rollNo || "—"})`;
                         const rightText = `SEAT: ${pageTask.top.seatId}    |    SEC: ${tStu.section}    |    ${tSub}${pageTask.top.assignedSeries}`;
                         const yTop = height - 15;
@@ -451,7 +451,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     }
                     if (pageTask.bottom) {
                         const bStu = pageTask.bottom.student;
-                        const bSub = (pageTask.bottom.matchedSubKey && pageTask.bottom.matchedSubKey !== "FULL PAPER") ? `[${pageTask.bottom.matchedSubKey.substring(0,8)}] ` : "";
+                        const bSub = (pageTask.bottom.matchedSubKey && pageTask.bottom.matchedSubKey !== "FULL PAPER" && pageTask.bottom.matchedSubKey !== "UNMAPPED EXAM") ? `[${pageTask.bottom.matchedSubKey.substring(0,8)}] ` : "";
                         const leftText = `MINERVA STUDY CIRCLE  |  ${bStu.name.toUpperCase()}  (ROLL: #${bStu.rollNo || "—"})`;
                         const rightText = `SEAT: ${pageTask.bottom.seatId}    |    SEC: ${bStu.section}    |    ${bSub}${pageTask.bottom.assignedSeries}`;
                         const yBottom = (height / 2) - 15;
@@ -460,7 +460,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     }
                 } else {
                     const stu = pageTask.stuItem.student;
-                    const subLabel = (pageTask.stuItem.matchedSubKey && pageTask.stuItem.matchedSubKey !== "FULL PAPER") ? `[${pageTask.stuItem.matchedSubKey.substring(0,8)}] ` : "";
+                    const subLabel = (pageTask.stuItem.matchedSubKey && pageTask.stuItem.matchedSubKey !== "FULL PAPER" && pageTask.stuItem.matchedSubKey !== "UNMAPPED EXAM") ? `[${pageTask.stuItem.matchedSubKey.substring(0,8)}] ` : "";
                     const leftText = `MINERVA STUDY CIRCLE  |  ${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
                     const rightText = `SEAT: ${pageTask.stuItem.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${pageTask.stuItem.assignedSeries}`;
                     const y = height - 15;
@@ -495,9 +495,10 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
     }
     return null;
 }
+
 exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
-    memory: "1GiB", // Memory drastically reduced since headless chrome is removed
+    memory: "1GiB",
     timeoutSeconds: 300,
     cors: true
 }, async (req, res) => {
