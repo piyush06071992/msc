@@ -363,8 +363,15 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             }
         }
 
-        const sectionPapers = matchedSubKey ? papersBySection[secKey][matchedSubKey] : {};
-        const roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers).sort() : availableSeries;
+      const sectionPapers = matchedSubKey ? papersBySection[secKey][matchedSubKey] : {};
+        let roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers).sort() : availableSeries;
+        const layout = (layoutBySection[secKey] && layoutBySection[secKey][matchedSubKey]) ? layoutBySection[secKey][matchedSubKey] : 'A4_STANDARD';
+
+        // VITAL FIX: If A4_HALF_SPLIT is used, but the admin only uploaded one file under "SERIES A", 
+        // we MUST mathematically force the system to alternate between A and B so the bottom half gets populated.
+        if (layout === 'A4_HALF_SPLIT' && roomSeriesList.length === 1 && roomSeriesList[0] === 'SERIES A') {
+            roomSeriesList = ['SERIES A', 'SERIES B'];
+        }
         
         // Dynamic 2D Checkerboard Logic (Alternating Left/Right & Front/Back)
         const rMatch = seatId.match(/-R(\d+)-S(\d+)/);
@@ -374,19 +381,17 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const sIndex = (rNum + sNum) % roomSeriesList.length;
         const assignedSeries = roomSeriesList[sIndex];
         
-        const paperLinks = sectionPapers[assignedSeries] || Object.values(sectionPapers)[0] || {};
+        // Fallback to "SERIES A" link if "SERIES B" is mathematically assigned but missing in DB
+        const paperLinks = sectionPapers[assignedSeries] || sectionPapers["SERIES A"] || Object.values(sectionPapers)[0] || {};
         const pdfUrl = docType === 'omr' ? paperLinks.omr : paperLinks.qp;
-        const layout = (layoutBySection[secKey] && layoutBySection[secKey][matchedSubKey]) ? layoutBySection[secKey][matchedSubKey] : 'A4_STANDARD';
 
         if (!pdfUrl) continue; 
         
         const item = { seatId, student, assignedSeries, pdfUrl, layout, matchedSubKey };
 
         if (layout === 'A4_HALF_SPLIT' && docType !== 'omr') {
-            const availableForThisSec = Object.keys(sectionPapers).sort();
-            let seriesIdx = availableForThisSec.indexOf(assignedSeries);
-            if (seriesIdx === -1) seriesIdx = 0;
-            const isTop = (seriesIdx % 2 === 0);
+            // Top explicitly gets Series A (or C), Bottom explicitly gets Series B (or D)
+            const isTop = (assignedSeries === 'SERIES A' || assignedSeries === 'SERIES C');
             
             if (!splitBuffers[pdfUrl]) splitBuffers[pdfUrl] = { top: null, bottom: null };
             
