@@ -334,10 +334,9 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
     let pdfBytesCache = {};
 
-    // PASS 1: Generate Subject-Specific Sequences, Map Optionals, and Buffer Half-Splits 
-    let pagesToRender = [];
-    let splitBuffers = {}; 
-    let subjectCounters = {}; // Tracks exactly how many students of each subject we have seen
+    let seatSpecificTasks = [];
+    let bulkSplitCounts = {}; 
+    let subjectCounters = {};
 
     for (let i = 0; i < roomOccupants.length; i++) {
         const { seatId, student } = roomOccupants[i];
@@ -349,7 +348,6 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const availableSubjects = papersBySection[secKey] ? Object.keys(papersBySection[secKey]) : [];
         let matchedSubKey = null;
 
-      // Pure Database-Driven Optional Subject Matching
         if (availableSubjects.length === 1) {
             matchedSubKey = availableSubjects[0];
         } else if (availableSubjects.length > 1) {
@@ -367,86 +365,94 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const sectionPapers = matchedSubKey ? papersBySection[secKey][matchedSubKey] : {};
         let roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers).sort() : availableSeries;
         const layout = (layoutBySection[secKey] && layoutBySection[secKey][matchedSubKey]) ? layoutBySection[secKey][matchedSubKey] : 'A4_STANDARD';
-
-        // VITAL FIX: Force alternation for A4_HALF_SPLIT even if user uploaded the file as just "A" instead of "SERIES A"
-        if (layout === 'A4_HALF_SPLIT' && roomSeriesList.length === 1) {
-            let s1 = roomSeriesList[0];
-            let s2 = 'SERIES B';
-            if (s1.toUpperCase() === 'A') s2 = 'B';
-            else if (s1.toUpperCase().endsWith(' A')) s2 = s1.replace(/ A$/i, ' B');
-            else if (s1.toUpperCase().endsWith('A')) s2 = s1.replace(/A$/i, 'B');
-            roomSeriesList = [s1, s2];
-        }
         
-        // Grab the base PDF Url to act as the subject sequence tracker
         const basePaperLinks = sectionPapers["SERIES A"] || Object.values(sectionPapers)[0] || {};
         const basePdfUrl = docType === 'omr' ? basePaperLinks.omr : basePaperLinks.qp;
         if (!basePdfUrl) continue; 
 
-        // Subject-Specific Sequence Logic (Guarantees A and B alternate properly for the same subject cross-section)
-        const trackerKey = basePdfUrl;
-        if (subjectCounters[trackerKey] === undefined) {
-            subjectCounters[trackerKey] = 0;
-        }
-        
-        const sIndex = subjectCounters[trackerKey];
-        const assignedSeries = roomSeriesList[sIndex % roomSeriesList.length];
-        
-        // Increment for the next student of this exact subject
-        subjectCounters[trackerKey]++;
-        
-        // Resolve the final link (fallback to SERIES A if B is mathematically assigned but missing in DB)
-        const paperLinks = sectionPapers[assignedSeries] || sectionPapers["SERIES A"] || Object.values(sectionPapers)[0] || {};
-        const pdfUrl = docType === 'omr' ? paperLinks.omr : paperLinks.qp;
-
-        const item = { seatId, student, assignedSeries, pdfUrl, layout, matchedSubKey };
-
         if (layout === 'A4_HALF_SPLIT' && docType !== 'omr') {
-            // Even indexes go Top, Odd indexes go Bottom.
-            const isTop = (sIndex % 2 === 0);
+            // BULK COUNTING MODE FOR SPLIT PDFS (No personalized seats)
             const bufferKey = basePdfUrl;
-            
-            if (!splitBuffers[bufferKey]) splitBuffers[bufferKey] = { top: null, bottom: null, actualUrl: pdfUrl };
-            
-            if (isTop) {
-                if (splitBuffers[bufferKey].top) {
-                    pagesToRender.push({ type: 'split', pdfUrl: splitBuffers[bufferKey].actualUrl, layout, ...splitBuffers[bufferKey] });
-                    splitBuffers[bufferKey] = { top: null, bottom: null, actualUrl: pdfUrl };
-                }
-                splitBuffers[bufferKey].top = item;
-            } else {
-                if (splitBuffers[bufferKey].bottom) {
-                    pagesToRender.push({ type: 'split', pdfUrl: splitBuffers[bufferKey].actualUrl, layout, ...splitBuffers[bufferKey] });
-                    splitBuffers[bufferKey] = { top: null, bottom: null, actualUrl: pdfUrl };
-                }
-                splitBuffers[bufferKey].bottom = item;
+            if (!bulkSplitCounts[bufferKey]) {
+                bulkSplitCounts[bufferKey] = { pdfUrl: basePdfUrl, layout, count: 0, matchedSubKey };
             }
-            
-            if (splitBuffers[bufferKey].top && splitBuffers[bufferKey].bottom) {
-                pagesToRender.push({ type: 'split', pdfUrl: splitBuffers[bufferKey].actualUrl, layout, ...splitBuffers[bufferKey] });
-                splitBuffers[bufferKey] = { top: null, bottom: null, actualUrl: pdfUrl };
-            }
+            bulkSplitCounts[bufferKey].count++;
+
         } else {
-            pagesToRender.push({ type: 'standard', pdfUrl, layout, stuItem: item });
+            // SEAT SPECIFIC MODE (Standard, Booklet, and all OMRs)
+            const trackerKey = `${secKey}_${matchedSubKey}`;
+            if (subjectCounters[trackerKey] === undefined) {
+                subjectCounters[trackerKey] = 0;
+            }
+            
+            const sIndex = subjectCounters[trackerKey];
+            const assignedSeries = roomSeriesList[sIndex % roomSeriesList.length];
+            subjectCounters[trackerKey]++;
+            
+            const paperLinks = sectionPapers[assignedSeries] || sectionPapers["SERIES A"] || Object.values(sectionPapers)[0] || {};
+            const pdfUrl = docType === 'omr' ? paperLinks.omr : paperLinks.qp;
+
+            if (!pdfUrl) continue; 
+            
+            seatSpecificTasks.push({ seatId, student, assignedSeries, pdfUrl, layout, matchedSubKey });
         }
     }
 
-    // Flush remaining half-empty buffers (if a room had an odd number of students for a subject)
-    Object.keys(splitBuffers).forEach(key => {
-        const buf = splitBuffers[key];
-        if (buf.top || buf.bottom) {
-            const layoutItem = buf.top ? buf.top.layout : (buf.bottom ? buf.bottom.layout : 'A4_HALF_SPLIT');
-            pagesToRender.push({ type: 'split', pdfUrl: buf.actualUrl, layout: layoutItem, ...buf });
-        }
-    });
-
-    // PASS 2: Stamping and Final Padding
-    for (const pageTask of pagesToRender) {
+    // PASS 2: Render Bulk Split Tasks First
+    for (const key in bulkSplitCounts) {
+        const bulkData = bulkSplitCounts[key];
+        const copiesNeeded = Math.ceil(bulkData.count / 2); // 1 copy = 2 halves = 2 students
+        
         try {
-            if (!pdfBytesCache[pageTask.pdfUrl]) {
-                pdfBytesCache[pageTask.pdfUrl] = await loadPdfBytes(pageTask.pdfUrl);
+            if (!pdfBytesCache[bulkData.pdfUrl]) {
+                pdfBytesCache[bulkData.pdfUrl] = await loadPdfBytes(bulkData.pdfUrl);
             }
-            const pdfBytes = pdfBytesCache[pageTask.pdfUrl];
+            const originalBytes = pdfBytesCache[bulkData.pdfUrl];
+            
+            for (let c = 0; c < copiesNeeded; c++) {
+                const pdfDoc = await PDFDocument.load(originalBytes);
+                const pages = pdfDoc.getPages();
+                
+                for (let pIdx = 0; pIdx < pages.length; pIdx++) {
+                    const page = pages[pIdx];
+                    const { width, height } = page.getSize();
+                    const size = 10;
+                    const color = rgb(0.2, 0.2, 0.2);
+                    const opacity = 0.8;
+                    
+                    const subLabel = (bulkData.matchedSubKey && bulkData.matchedSubKey !== "FULL PAPER" && bulkData.matchedSubKey !== "UNMAPPED EXAM") ? `[${bulkData.matchedSubKey.substring(0,10)}] ` : "";
+                    const leftText = `ROOM: ${roomName}`;
+                    const rightText = `${subLabel}COPY ${c+1}/${copiesNeeded}`;
+                    
+                    // Header Stamp (Extreme Top)
+                    page.drawText(leftText, { x: 36, y: height - 15, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 15, size, font, color, opacity });
+                    
+                    // Footer Stamp (Extreme Bottom)
+                    page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
+                }
+                
+                const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+                copiedPages.forEach(p => mergedPdf.addPage(p));
+                
+                // Ensure double-sided alignment: pad to an even number of pages so the next copy starts fresh
+                if (copiedPages.length % 2 !== 0) {
+                    mergedPdf.addPage();
+                }
+            }
+        } catch (err) {
+            console.error(`[PDF Engine] Error processing bulk task for ${bulkData.pdfUrl}:`, err);
+        }
+    }
+
+    // PASS 3: Render Seat Specific Tasks
+    for (const task of seatSpecificTasks) {
+        try {
+            if (!pdfBytesCache[task.pdfUrl]) {
+                pdfBytesCache[task.pdfUrl] = await loadPdfBytes(task.pdfUrl);
+            }
+            const pdfBytes = pdfBytesCache[task.pdfUrl];
             const studentPdf = await PDFDocument.load(pdfBytes);
             const pages = studentPdf.getPages();
             
@@ -457,34 +463,14 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 const color = rgb(0.2, 0.2, 0.2);
                 const opacity = 0.8;
 
-               if (pageTask.type === 'split') {
-                    if (pageTask.top) {
-                        const tStu = pageTask.top.student;
-                        const tSub = (pageTask.top.matchedSubKey && pageTask.top.matchedSubKey !== "FULL PAPER" && pageTask.top.matchedSubKey !== "UNMAPPED EXAM") ? `[${pageTask.top.matchedSubKey.substring(0,8)}] ` : "";
-                        const leftText = `${tStu.name.toUpperCase()}  (ROLL: #${tStu.rollNo || "—"})`;
-                        const rightText = `SEAT: ${pageTask.top.seatId}    |    SEC: ${tStu.section}    |    ${tSub}${pageTask.top.assignedSeries}`;
-                        const yTop = height - 15;
-                        page.drawText(leftText, { x: 36, y: yTop, size, font, color, opacity });
-                        page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: yTop, size, font, color, opacity });
-                    }
-                    if (pageTask.bottom) {
-                        const bStu = pageTask.bottom.student;
-                        const bSub = (pageTask.bottom.matchedSubKey && pageTask.bottom.matchedSubKey !== "FULL PAPER" && pageTask.bottom.matchedSubKey !== "UNMAPPED EXAM") ? `[${pageTask.bottom.matchedSubKey.substring(0,8)}] ` : "";
-                        const leftText = `${bStu.name.toUpperCase()}  (ROLL: #${bStu.rollNo || "—"})`;
-                        const rightText = `SEAT: ${pageTask.bottom.seatId}    |    SEC: ${bStu.section}    |    ${bSub}${pageTask.bottom.assignedSeries}`;
-                        const yBottom = 20; // Exact footer placement
-                        page.drawText(leftText, { x: 36, y: yBottom, size, font, color, opacity });
-                        page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: yBottom, size, font, color, opacity });
-                    }
-                } else {
-                    const stu = pageTask.stuItem.student;
-                    const subLabel = (pageTask.stuItem.matchedSubKey && pageTask.stuItem.matchedSubKey !== "FULL PAPER" && pageTask.stuItem.matchedSubKey !== "UNMAPPED EXAM") ? `[${pageTask.stuItem.matchedSubKey.substring(0,8)}] ` : "";
-                    const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
-                    const rightText = `SEAT: ${pageTask.stuItem.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${pageTask.stuItem.assignedSeries}`;
-                    const y = height - 15;
-                    page.drawText(leftText, { x: 36, y, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y, size, font, color, opacity });
-                }
+                const stu = task.student;
+                const subLabel = (task.matchedSubKey && task.matchedSubKey !== "FULL PAPER" && task.matchedSubKey !== "UNMAPPED EXAM") ? `[${task.matchedSubKey.substring(0,8)}] ` : "";
+                const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
+                const rightText = `SEAT: ${task.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${task.assignedSeries}`;
+                const y = height - 15;
+                
+                page.drawText(leftText, { x: 36, y, size, font, color, opacity });
+                page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y, size, font, color, opacity });
             }
 
             const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
@@ -492,19 +478,18 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
             if (docType !== 'omr') {
                 const currentPagesCount = copiedPages.length;
-                if (pageTask.layout === 'A3_BOOKLET') {
+                if (task.layout === 'A3_BOOKLET') {
                     const remainder = currentPagesCount % 4;
                     if (remainder !== 0) {
                         for (let p = 0; p < (4 - remainder); p++) mergedPdf.addPage();
                     }
-                } else if (pageTask.layout === 'A4_STANDARD') {
-                    // Only apply duplex blank page padding to A4_STANDARD, ensuring A4_HALF_SPLIT limits pages correctly
+                } else if (task.layout === 'A4_STANDARD') {
                     const remainder = currentPagesCount % 2;
                     if (remainder !== 0) mergedPdf.addPage();
                 }
             }
         } catch (err) {
-            console.error(`[PDF Engine] Error processing task for ${pageTask.pdfUrl}:`, err);
+            console.error(`[PDF Engine] Error processing specific task for ${task.pdfUrl}:`, err);
         }
     }
 
