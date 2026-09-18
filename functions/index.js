@@ -334,9 +334,10 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
     let pdfBytesCache = {};
 
-    // PASS 1: Generate Checkerboard Series, Map Optional Subjects, and Buffer A4 Half-Splits 
+    // PASS 1: Generate Subject-Specific Sequences, Map Optionals, and Buffer Half-Splits 
     let pagesToRender = [];
     let splitBuffers = {}; 
+    let subjectCounters = {}; // Tracks exactly how many students of each subject we have seen
 
     for (let i = 0; i < roomOccupants.length; i++) {
         const { seatId, student } = roomOccupants[i];
@@ -363,7 +364,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             }
         }
 
-      const sectionPapers = matchedSubKey ? papersBySection[secKey][matchedSubKey] : {};
+        const sectionPapers = matchedSubKey ? papersBySection[secKey][matchedSubKey] : {};
         let roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers).sort() : availableSeries;
         const layout = (layoutBySection[secKey] && layoutBySection[secKey][matchedSubKey]) ? layoutBySection[secKey][matchedSubKey] : 'A4_STANDARD';
 
@@ -373,13 +374,17 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             roomSeriesList = ['SERIES A', 'SERIES B'];
         }
         
-        // Dynamic 2D Checkerboard Logic (Alternating Left/Right & Front/Back)
-        const rMatch = seatId.match(/-R(\d+)-S(\d+)/);
-        const rNum = rMatch ? parseInt(rMatch[1]) : 0;
-        const sNum = rMatch ? parseInt(rMatch[2]) : 0;
+        // Subject-Specific Sequence Logic (Guarantees A and B alternate properly for the same subject)
+        const trackerKey = `${secKey}_${matchedSubKey}`;
+        if (subjectCounters[trackerKey] === undefined) {
+            subjectCounters[trackerKey] = 0;
+        }
         
-        const sIndex = (rNum + sNum) % roomSeriesList.length;
+        const sIndex = subjectCounters[trackerKey] % roomSeriesList.length;
         const assignedSeries = roomSeriesList[sIndex];
+        
+        // Increment for the next student of this exact subject
+        subjectCounters[trackerKey]++;
         
         // Fallback to "SERIES A" link if "SERIES B" is mathematically assigned but missing in DB
         const paperLinks = sectionPapers[assignedSeries] || sectionPapers["SERIES A"] || Object.values(sectionPapers)[0] || {};
@@ -390,40 +395,41 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const item = { seatId, student, assignedSeries, pdfUrl, layout, matchedSubKey };
 
         if (layout === 'A4_HALF_SPLIT' && docType !== 'omr') {
-            // Top explicitly gets Series A (or C), Bottom explicitly gets Series B (or D)
-            const isTop = (assignedSeries === 'SERIES A' || assignedSeries === 'SERIES C');
+            // Since sIndex alternates 0, 1, 0, 1... Even indexes go Top, Odd indexes go Bottom.
+            const isTop = (sIndex % 2 === 0);
+            const bufferKey = `${trackerKey}_${pdfUrl}`;
             
-            if (!splitBuffers[pdfUrl]) splitBuffers[pdfUrl] = { top: null, bottom: null };
+            if (!splitBuffers[bufferKey]) splitBuffers[bufferKey] = { top: null, bottom: null, actualUrl: pdfUrl };
             
             if (isTop) {
-                if (splitBuffers[pdfUrl].top) {
-                    pagesToRender.push({ type: 'split', pdfUrl, layout, ...splitBuffers[pdfUrl] });
-                    splitBuffers[pdfUrl] = { top: null, bottom: null };
+                if (splitBuffers[bufferKey].top) {
+                    pagesToRender.push({ type: 'split', pdfUrl: splitBuffers[bufferKey].actualUrl, layout, ...splitBuffers[bufferKey] });
+                    splitBuffers[bufferKey] = { top: null, bottom: null, actualUrl: pdfUrl };
                 }
-                splitBuffers[pdfUrl].top = item;
+                splitBuffers[bufferKey].top = item;
             } else {
-                if (splitBuffers[pdfUrl].bottom) {
-                    pagesToRender.push({ type: 'split', pdfUrl, layout, ...splitBuffers[pdfUrl] });
-                    splitBuffers[pdfUrl] = { top: null, bottom: null };
+                if (splitBuffers[bufferKey].bottom) {
+                    pagesToRender.push({ type: 'split', pdfUrl: splitBuffers[bufferKey].actualUrl, layout, ...splitBuffers[bufferKey] });
+                    splitBuffers[bufferKey] = { top: null, bottom: null, actualUrl: pdfUrl };
                 }
-                splitBuffers[pdfUrl].bottom = item;
+                splitBuffers[bufferKey].bottom = item;
             }
             
-            if (splitBuffers[pdfUrl].top && splitBuffers[pdfUrl].bottom) {
-                pagesToRender.push({ type: 'split', pdfUrl, layout, ...splitBuffers[pdfUrl] });
-                splitBuffers[pdfUrl] = { top: null, bottom: null };
+            if (splitBuffers[bufferKey].top && splitBuffers[bufferKey].bottom) {
+                pagesToRender.push({ type: 'split', pdfUrl: splitBuffers[bufferKey].actualUrl, layout, ...splitBuffers[bufferKey] });
+                splitBuffers[bufferKey] = { top: null, bottom: null, actualUrl: pdfUrl };
             }
         } else {
             pagesToRender.push({ type: 'standard', pdfUrl, layout, stuItem: item });
         }
     }
 
-    // Flush remaining half-empty buffers
-    Object.keys(splitBuffers).forEach(url => {
-        const buf = splitBuffers[url];
+    // Flush remaining half-empty buffers (if a room had an odd number of students for a subject)
+    Object.keys(splitBuffers).forEach(key => {
+        const buf = splitBuffers[key];
         if (buf.top || buf.bottom) {
             const layoutItem = buf.top ? buf.top.layout : (buf.bottom ? buf.bottom.layout : 'A4_HALF_SPLIT');
-            pagesToRender.push({ type: 'split', pdfUrl: url, layout: layoutItem, ...buf });
+            pagesToRender.push({ type: 'split', pdfUrl: buf.actualUrl, layout: layoutItem, ...buf });
         }
     });
 
