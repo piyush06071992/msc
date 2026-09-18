@@ -398,7 +398,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         }
     }
 
-    // PASS 2: Render Bulk Split Tasks First
+   // PASS 2: Render Bulk Split Tasks First
     for (const key in bulkSplitCounts) {
         const bulkData = bulkSplitCounts[key];
         const copiesNeeded = Math.ceil(bulkData.count / 2); // 1 copy = 2 halves = 2 students
@@ -411,10 +411,12 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             
             for (let c = 0; c < copiesNeeded; c++) {
                 const pdfDoc = await PDFDocument.load(originalBytes);
-                const pages = pdfDoc.getPages();
                 
-                for (let pIdx = 0; pIdx < pages.length; pIdx++) {
-                    const page = pages[pIdx];
+                // COPY FIRST to fix font mapping on multi-page PDFs
+                const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+                
+                copiedPages.forEach(p => {
+                    const page = mergedPdf.addPage(p); // Now working directly on the merged document
                     const { width, height } = page.getSize();
                     const size = 10;
                     const color = rgb(0.2, 0.2, 0.2);
@@ -431,10 +433,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     // Footer Stamp (Extreme Bottom)
                     page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
                     page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
-                }
-                
-                const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
-                copiedPages.forEach(p => mergedPdf.addPage(p));
+                });
                 
                 // Ensure double-sided alignment: pad to an even number of pages so the next copy starts fresh
                 if (copiedPages.length % 2 !== 0) {
@@ -454,10 +453,12 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             }
             const pdfBytes = pdfBytesCache[task.pdfUrl];
             const studentPdf = await PDFDocument.load(pdfBytes);
-            const pages = studentPdf.getPages();
             
-            for (let pIdx = 0; pIdx < pages.length; pIdx++) {
-                const page = pages[pIdx];
+            // COPY FIRST to fix font mapping on multi-page PDFs
+            const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
+            
+            copiedPages.forEach(p => {
+                const page = mergedPdf.addPage(p);
                 const { width, height } = page.getSize();
                 const size = 8.5;
                 const color = rgb(0.2, 0.2, 0.2);
@@ -471,10 +472,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 
                 page.drawText(leftText, { x: 36, y, size, font, color, opacity });
                 page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y, size, font, color, opacity });
-            }
-
-            const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
-            copiedPages.forEach(p => mergedPdf.addPage(p));
+            });
 
             if (docType !== 'omr') {
                 const currentPagesCount = copiedPages.length;
