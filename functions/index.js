@@ -338,6 +338,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
     let bulkSplitCounts = {}; 
     let subjectCounters = {};
 
+    // PASS 1: Map Subjects and Build Processing Tasks
     for (let i = 0; i < roomOccupants.length; i++) {
         const { seatId, student } = roomOccupants[i];
         if (!student || !student.className || !student.section) continue;
@@ -348,6 +349,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const availableSubjects = papersBySection[secKey] ? Object.keys(papersBySection[secKey]) : [];
         let matchedSubKey = null;
 
+        // Pure Database-Driven Optional Subject Matching
         if (availableSubjects.length === 1) {
             matchedSubKey = availableSubjects[0];
         } else if (availableSubjects.length > 1) {
@@ -398,7 +400,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         }
     }
 
-   // PASS 2: Render Bulk Split Tasks First
+    // PASS 2: Render Bulk Split Tasks First
     for (const key in bulkSplitCounts) {
         const bulkData = bulkSplitCounts[key];
         const copiesNeeded = Math.ceil(bulkData.count / 2); // 1 copy = 2 halves = 2 students
@@ -412,17 +414,17 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             for (let c = 0; c < copiesNeeded; c++) {
                 const pdfDoc = await PDFDocument.load(originalBytes);
                 
-                // COPY FIRST to fix font mapping on multi-page PDFs
+                // Copy pages FIRST to preserve all pages and fix font mapping
                 const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
                 
                 copiedPages.forEach(p => {
-                    const page = mergedPdf.addPage(p); // Now working directly on the merged document
+                    const page = mergedPdf.addPage(p);
                     const { width, height } = page.getSize();
                     const size = 10;
                     const color = rgb(0.2, 0.2, 0.2);
                     const opacity = 0.8;
                     
-                    const subLabel = (bulkData.matchedSubKey && bulkData.matchedSubKey !== "FULL PAPER" && bulkData.matchedSubKey !== "UNMAPPED EXAM") ? `[${bulkData.matchedSubKey.substring(0,10)}] ` : "";
+                    const subLabel = (bulkData.matchedSubKey && bulkData.matchedSubKey !== "FULL PAPER" && bulkData.matchedSubKey !== "UNMAPPED EXAM") ? `[${bulkData.matchedSubKey}] ` : "";
                     const leftText = `ROOM: ${roomName}`;
                     const rightText = `${subLabel}COPY ${c+1}/${copiesNeeded}`;
                     
@@ -435,10 +437,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
                 });
                 
-                // Ensure double-sided alignment: pad to an even number of pages so the next copy starts fresh
-                if (copiedPages.length % 2 !== 0) {
-                    mergedPdf.addPage();
-                }
+                // Only pad if it is explicitly standard layout. Do not pad A4_HALF_SPLIT layout.
             }
         } catch (err) {
             console.error(`[PDF Engine] Error processing bulk task for ${bulkData.pdfUrl}:`, err);
@@ -454,7 +453,6 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             const pdfBytes = pdfBytesCache[task.pdfUrl];
             const studentPdf = await PDFDocument.load(pdfBytes);
             
-            // COPY FIRST to fix font mapping on multi-page PDFs
             const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
             
             copiedPages.forEach(p => {
@@ -465,7 +463,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 const opacity = 0.8;
 
                 const stu = task.student;
-                const subLabel = (task.matchedSubKey && task.matchedSubKey !== "FULL PAPER" && task.matchedSubKey !== "UNMAPPED EXAM") ? `[${task.matchedSubKey.substring(0,8)}] ` : "";
+                const subLabel = (task.matchedSubKey && task.matchedSubKey !== "FULL PAPER" && task.matchedSubKey !== "UNMAPPED EXAM") ? `[${task.matchedSubKey}] ` : "";
                 const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
                 const rightText = `SEAT: ${task.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${task.assignedSeries}`;
                 const y = height - 15;
@@ -514,25 +512,37 @@ exports.compileSingleRoomOnDemand = onRequest({
         const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
         const docId = `${center}_${date}_${safeRoomName}`;
 
-        const allocDoc = await admin.firestore().collection(`exam_seating_rooms`).doc(docId).get();
+        let allocDoc = await admin.firestore().collection(`exam_seating_rooms`).doc(docId).get();
         let allocations = {};
         
         if (allocDoc.exists) {
             allocations = allocDoc.data().allocations || {};
         } else {
-            // Legacy Fallback
-            const oldDocId = `${center}_${date}`;
-            const oldDoc = await admin.firestore().collection(`exam_seating_allocations`).doc(oldDocId).get();
+            // Case-Insensitive Fallback Lookup (Solves frontend HTML innerText casing bugs)
+            const snap = await admin.firestore().collection(`exam_seating_rooms`)
+                .where("date", "==", date)
+                .where("center", "==", center)
+                .get();
             
-            if (oldDoc.exists) {
-                const data = oldDoc.data();
-                const allAllocations = (typeof data.allocations === 'string') ? JSON.parse(data.allocations) : (data.allocations || {});
+            const match = snap.docs.find(d => (d.data().roomName || "").toUpperCase() === roomName.toUpperCase());
+            
+            if (match) {
+                allocations = match.data().allocations || {};
+            } else {
+                // Legacy Monolithic Fallback
+                const oldDocId = `${center}_${date}`;
+                const oldDoc = await admin.firestore().collection(`exam_seating_allocations`).doc(oldDocId).get();
                 
-                Object.keys(allAllocations).forEach(key => {
-                    if (key.toUpperCase().startsWith(`${roomName}-`.toUpperCase())) {
-                        allocations[key] = allAllocations[key];
-                    }
-                });
+                if (oldDoc.exists) {
+                    const data = oldDoc.data();
+                    const allAllocations = (typeof data.allocations === 'string') ? JSON.parse(data.allocations) : (data.allocations || {});
+                    
+                    Object.keys(allAllocations).forEach(key => {
+                        if (key.toUpperCase().startsWith(`${roomName}-`.toUpperCase())) {
+                            allocations[key] = allAllocations[key];
+                        }
+                    });
+                }
             }
         }
 
