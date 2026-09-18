@@ -349,7 +349,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         const availableSubjects = papersBySection[secKey] ? Object.keys(papersBySection[secKey]) : [];
         let matchedSubKey = null;
 
-      // Pure Database-Driven Optional Subject Matching
+        // Pure Database-Driven Optional Subject Matching
         if (availableSubjects.length === 1) {
             matchedSubKey = availableSubjects[0];
         } else if (availableSubjects.length > 1) {
@@ -374,30 +374,33 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             roomSeriesList = ['SERIES A', 'SERIES B'];
         }
         
-        // Subject-Specific Sequence Logic (Guarantees A and B alternate properly for the same subject)
-        const trackerKey = `${secKey}_${matchedSubKey}`;
+        // Grab the base PDF Url to act as the subject sequence tracker
+        const basePaperLinks = sectionPapers["SERIES A"] || Object.values(sectionPapers)[0] || {};
+        const basePdfUrl = docType === 'omr' ? basePaperLinks.omr : basePaperLinks.qp;
+        if (!basePdfUrl) continue; 
+
+        // Subject-Specific Sequence Logic (Guarantees A and B alternate properly for the same subject cross-section)
+        const trackerKey = basePdfUrl;
         if (subjectCounters[trackerKey] === undefined) {
             subjectCounters[trackerKey] = 0;
         }
         
-        const sIndex = subjectCounters[trackerKey] % roomSeriesList.length;
-        const assignedSeries = roomSeriesList[sIndex];
+        const sIndex = subjectCounters[trackerKey];
+        const assignedSeries = roomSeriesList[sIndex % roomSeriesList.length];
         
         // Increment for the next student of this exact subject
         subjectCounters[trackerKey]++;
         
-        // Fallback to "SERIES A" link if "SERIES B" is mathematically assigned but missing in DB
+        // Resolve the final link (fallback to SERIES A if B is mathematically assigned but missing in DB)
         const paperLinks = sectionPapers[assignedSeries] || sectionPapers["SERIES A"] || Object.values(sectionPapers)[0] || {};
         const pdfUrl = docType === 'omr' ? paperLinks.omr : paperLinks.qp;
 
-        if (!pdfUrl) continue; 
-        
         const item = { seatId, student, assignedSeries, pdfUrl, layout, matchedSubKey };
 
         if (layout === 'A4_HALF_SPLIT' && docType !== 'omr') {
-            // Since sIndex alternates 0, 1, 0, 1... Even indexes go Top, Odd indexes go Bottom.
+            // Even indexes go Top, Odd indexes go Bottom.
             const isTop = (sIndex % 2 === 0);
-            const bufferKey = `${trackerKey}_${pdfUrl}`;
+            const bufferKey = basePdfUrl;
             
             if (!splitBuffers[bufferKey]) splitBuffers[bufferKey] = { top: null, bottom: null, actualUrl: pdfUrl };
             
@@ -454,7 +457,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     if (pageTask.top) {
                         const tStu = pageTask.top.student;
                         const tSub = (pageTask.top.matchedSubKey && pageTask.top.matchedSubKey !== "FULL PAPER" && pageTask.top.matchedSubKey !== "UNMAPPED EXAM") ? `[${pageTask.top.matchedSubKey.substring(0,8)}] ` : "";
-                        const leftText = `MINERVA STUDY CIRCLE  |  ${tStu.name.toUpperCase()}  (ROLL: #${tStu.rollNo || "—"})`;
+                        const leftText = `${tStu.name.toUpperCase()}  (ROLL: #${tStu.rollNo || "—"})`;
                         const rightText = `SEAT: ${pageTask.top.seatId}    |    SEC: ${tStu.section}    |    ${tSub}${pageTask.top.assignedSeries}`;
                         const yTop = height - 15;
                         page.drawText(leftText, { x: 36, y: yTop, size, font, color, opacity });
@@ -463,7 +466,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     if (pageTask.bottom) {
                         const bStu = pageTask.bottom.student;
                         const bSub = (pageTask.bottom.matchedSubKey && pageTask.bottom.matchedSubKey !== "FULL PAPER" && pageTask.bottom.matchedSubKey !== "UNMAPPED EXAM") ? `[${pageTask.bottom.matchedSubKey.substring(0,8)}] ` : "";
-                        const leftText = `MINERVA STUDY CIRCLE  |  ${bStu.name.toUpperCase()}  (ROLL: #${bStu.rollNo || "—"})`;
+                        const leftText = `${bStu.name.toUpperCase()}  (ROLL: #${bStu.rollNo || "—"})`;
                         const rightText = `SEAT: ${pageTask.bottom.seatId}    |    SEC: ${bStu.section}    |    ${bSub}${pageTask.bottom.assignedSeries}`;
                         const yBottom = (height / 2) - 15;
                         page.drawText(leftText, { x: 36, y: yBottom, size, font, color, opacity });
@@ -472,7 +475,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 } else {
                     const stu = pageTask.stuItem.student;
                     const subLabel = (pageTask.stuItem.matchedSubKey && pageTask.stuItem.matchedSubKey !== "FULL PAPER" && pageTask.stuItem.matchedSubKey !== "UNMAPPED EXAM") ? `[${pageTask.stuItem.matchedSubKey.substring(0,8)}] ` : "";
-                    const leftText = `MINERVA STUDY CIRCLE  |  ${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
+                    const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
                     const rightText = `SEAT: ${pageTask.stuItem.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${pageTask.stuItem.assignedSeries}`;
                     const y = height - 15;
                     page.drawText(leftText, { x: 36, y, size, font, color, opacity });
@@ -529,7 +532,7 @@ exports.compileSingleRoomOnDemand = onRequest({
         if (allocDoc.exists) {
             allocations = allocDoc.data().allocations || {};
         } else {
-            // Legacy Fallback: If the room hasn't been saved into the new partitioned format yet
+            // Legacy Fallback
             const oldDocId = `${center}_${date}`;
             const oldDoc = await admin.firestore().collection(`exam_seating_allocations`).doc(oldDocId).get();
             
@@ -537,7 +540,6 @@ exports.compileSingleRoomOnDemand = onRequest({
                 const data = oldDoc.data();
                 const allAllocations = (typeof data.allocations === 'string') ? JSON.parse(data.allocations) : (data.allocations || {});
                 
-                // Filter out only this specific room's students
                 Object.keys(allAllocations).forEach(key => {
                     if (key.toUpperCase().startsWith(`${roomName}-`.toUpperCase())) {
                         allocations[key] = allAllocations[key];
@@ -566,9 +568,23 @@ exports.compileSingleRoomOnDemand = onRequest({
         }
 
         const filePrefix = seatId ? seatId : roomName;
-        const suffix = docType === 'omr' ? '_omr_package.pdf' : '_print_package.pdf';
+        const timestamp = Date.now(); // FORCES FRESH GENERATION EVERY TIME
+        const suffix = docType === 'omr' ? `_omr_package_${timestamp}.pdf` : `_print_package_${timestamp}.pdf`;
         const storagePath = `print_packages/${center}/${date}/${filePrefix}${suffix}`;
         
+        // Clean up older PDFs for this specific room to save Firebase Storage space
+        try {
+            const bucket = admin.storage().bucket();
+            const [files] = await bucket.getFiles({ prefix: `print_packages/${center}/${date}/` });
+            const filesToDelete = files.filter(f => 
+                f.name.includes(`/${filePrefix}_print_package`) || 
+                f.name.includes(`/${filePrefix}_omr_package`)
+            );
+            await Promise.all(filesToDelete.map(f => f.delete()));
+        } catch(e) {
+            console.error("Cleanup error:", e);
+        }
+
         const fileRef = admin.storage().bucket().file(storagePath);
         await fileRef.save(Buffer.from(mergedPdfBytes), {
             metadata: { contentType: "application/pdf" },
