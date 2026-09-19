@@ -666,9 +666,9 @@
     </div>
 
     <script>
-     const firebaseConfig = { 
-            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", 
-            authDomain: "shop-portal-bbbbb.firebaseapp.com", 
+   const firebaseConfig = {
+            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
+            authDomain: "shop-portal-bbbbb.firebaseapp.com",
             projectId: "shop-portal-bbbbb",
             storageBucket: "shop-portal-bbbbb.firebasestorage.app",
             messagingSenderId: "701377739976",
@@ -3091,36 +3091,28 @@ async function saveDailyAttendance() {
     const [y, m, d] = dateStr.split('-');
     const monthKey = `${y}_${m}`;
 
-// --- EXAM ROOM ATTENDANCE DISTRIBUTION TO INCHARGE REGISTERS ---
+    // --- EXAM ROOM ATTENDANCE DISTRIBUTION TO INCHARGE REGISTERS ---
     if (currentReg.isExamRoom) {
         const roomName = currentReg.s;
         const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
         const docId = `${activeCenter}_${dateStr}_${safeRoomName}`;
         
-        const roomDocRef = db.collection("exam_seating_rooms").doc(docId);
-        const roomSnap = await roomDocRef.get();
-        
         let roomStudentsMap = {};
-        if (roomSnap.exists) {
-            const allocs = roomSnap.data().allocations || {};
-            Object.keys(allocs).forEach(seatId => {
-                const stu = allocs[seatId];
-                if (stu && stu.id) roomStudentsMap[stu.id] = stu;
-            });
-        } else {
-            // Legacy Fallback
-            const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
-            const allocSnap = await allocDocRef.get();
-            if (allocSnap.exists) {
-                const allocs = allocSnap.data().allocations || {};
-                Object.keys(allocs).forEach(seatId => {
-                    if (seatId.startsWith(`${roomName}-`)) {
+        if (navigator.onLine) {
+            // Only try to fetch room verification if online
+            try {
+                const roomDocRef = db.collection("exam_seating_rooms").doc(docId);
+                const roomSnap = await roomDocRef.get();
+                if (roomSnap.exists) {
+                    const allocs = roomSnap.data().allocations || {};
+                    Object.keys(allocs).forEach(seatId => {
                         const stu = allocs[seatId];
                         if (stu && stu.id) roomStudentsMap[stu.id] = stu;
-                    }
-                });
-            }
+                    });
+                }
+            } catch(e) { console.warn("Offline room verification skipped"); }
         }
+
         const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.email) : "");
         let teacherInchargeRegisters = [];
         if (window.instituteStructures && timetableData) {
@@ -3153,20 +3145,27 @@ async function saveDailyAttendance() {
         absentWhatsAppList = [];
         let markedExamTotal = 0;
 
-        Object.keys(roomStudentsMap).forEach(stuId => {
-            const checked = document.querySelector(`input[name="att_${stuId}"]:checked`);
+        // Loop over the DOM elements directly so it works perfectly offline
+        document.querySelectorAll('.student-row').forEach(row => {
+            const stuId = row.id.replace('row_', '');
+            const checked = row.querySelector(`input[name="att_${stuId}"]:checked`);
             if (checked) {
                 markedExamTotal++;
-                const stu = roomStudentsMap[stuId];
                 const status = checked.value === 'A' ? 'L' : checked.value;
+                const stuName = row.querySelector('.student-name').innerText;
+                const stuRoll = row.querySelector('span[title="Roll No"]').innerText.replace('#', '');
                 
+                // Extract class and section from DOM
+                const classSecSpan = row.querySelectorAll('span')[1].innerText; // e.g. "12-A"
+                const [cName, sName] = classSecSpan.split('-');
+
                 if (status === 'L' || status === 'A') {
-                    absentWhatsAppList.push({ name: stu.name, roll: stu.rollNo, id: stu.id, status: 'L', section: stu.section });
+                    absentWhatsAppList.push({ name: stuName, roll: stuRoll, id: stuId, status: 'L', section: sName });
                 }
 
                 const matchingReg = teacherInchargeRegisters.find(r => 
-                    normMatch(r.className) === normMatch(stu.className) && 
-                    normMatch(r.section) === normMatch(stu.section)
+                    normMatch(r.className) === normMatch(cName) && 
+                    normMatch(r.section) === normMatch(sName)
                 );
 
                 if (matchingReg) {
@@ -3184,18 +3183,11 @@ async function saveDailyAttendance() {
             }
         });
 
-     if (markedExamTotal !== Object.keys(roomStudentsMap).length) {
-            const firstUnmarkedId = Object.keys(roomStudentsMap).find(stuId => !document.querySelector(`input[name="att_${stuId}"]:checked`));
-            if (firstUnmarkedId) {
-                const rowEl = document.getElementById(`row_${firstUnmarkedId}`);
-                if (rowEl) {
-                    rowEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    rowEl.classList.add('ring-4', 'ring-rose-400', 'bg-rose-50');
-                    setTimeout(() => rowEl.classList.remove('ring-4', 'ring-rose-400', 'bg-rose-50'), 2500);
-                }
-            }
+        const totalExpected = document.querySelectorAll('.student-row').length;
+        if (markedExamTotal !== totalExpected) {
             return alert("🚨 Action Blocked: You must mark attendance (Present or Leave) for ALL students in this room before saving.");
         }
+
         let confirmMsg = "⚠️ FINAL CONFIRMATION\n\n";
         if (absentWhatsAppList.length > 0) {
             confirmMsg += `You are marking ${absentWhatsAppList.length} student(s) as ABSENT/LEAVE:\n`;
@@ -3209,12 +3201,16 @@ async function saveDailyAttendance() {
         
         if (!confirm(confirmMsg)) return;
 
-        const origText = btn.innerHTML; btn.innerHTML = "⏳ Distributing to Incharge Registers..."; btn.disabled = true;
+        const origText = btn.innerHTML; 
+        btn.innerHTML = navigator.onLine ? "⏳ Distributing..." : "💾 Saving Offline..."; 
+        btn.disabled = true;
 
-try {
+        try {
             const batch = db.batch();
             for (const [docId, regData] of Object.entries(sectionUpdates)) {
                 const docRef = getCollection("attendance_records").doc(docId);
+                
+                // Pure Merge Object (No offline-blocking GET requests)
                 let mergeData = {
                     className: regData.className,
                     section: regData.section,
@@ -3228,18 +3224,14 @@ try {
                 batch.set(docRef, mergeData, { merge: true });
             }
 
-            await batch.commit();
-            
-            if (!navigator.onLine) {
-                btn.innerHTML = "💾 Offline Save (Will sync automatically)";
-            } else {
-                btn.innerHTML = "✅ Distributed Successfully!";
-            }
-            
+            // Asynchronous background commit so UI doesn't freeze
+            batch.commit().catch(e => console.log("Offline batch queued", e));
+
+            btn.innerHTML = navigator.onLine ? "✅ Distributed Successfully!" : "💾 Saved Offline!";
             setTimeout(() => {
-                if(navigator.onLine) { btn.innerHTML = origText; btn.disabled = false; }
+                if (navigator.onLine) { btn.innerHTML = origText; btn.disabled = false; }
                 loadExamRoomAttendance(currentReg.s, dateStr);
-            }, 1500);
+            }, 1200);
             return;
         } catch(e) {
             console.error(e);
@@ -3249,12 +3241,13 @@ try {
         }
     }
 
-   const isPastDateSave = dateStr < todayISO;
+    // --- STANDARD SAVE FLOW ---
+    const isPastDateSave = dateStr < todayISO;
     if (isPastDateSave && window.approvedEditUnlocked !== true) {
         const reason = prompt("This is a past date. Please enter a reason to request edit access from Admin:");
         if (!reason) return;
         try {
-           const reqPayload = {
+            const reqPayload = {
                 center: activeCenter,
                 className: currentReg.c,
                 section: currentReg.s,
@@ -3267,10 +3260,11 @@ try {
                 timestamp: Date.now()
             };
 
-            await getCollection("attendance_edit_requests").add(reqPayload);
-            sendEditRequestEmailNotification({ type: "ATTENDANCE_EDIT_REQUEST", ...reqPayload });
+            // Don't await in case they are offline, let it queue
+            getCollection("attendance_edit_requests").add(reqPayload);
+            if(navigator.onLine) sendEditRequestEmailNotification({ type: "ATTENDANCE_EDIT_REQUEST", ...reqPayload });
 
-            alert("✅ Edit request sent to Admin successfully! Notifications have been emailed.");
+            alert("✅ Edit request sent to Admin successfully! (Will sync when online)");
         } catch(err) {
             alert("Failed to submit request.");
         }
@@ -3296,7 +3290,7 @@ try {
     let markedTotal = 0;
     Object.values(recordsBySection).forEach(secMap => { markedTotal += Object.keys(secMap).length; });
 
- if (markedTotal !== myStudents.length) {
+    if (markedTotal !== myStudents.length) {
         const firstUnmarkedStu = myStudents.find(stu => !document.querySelector(`input[name="att_${stu.id}"]:checked`));
         if (firstUnmarkedStu) {
             const rowEl = document.getElementById(`row_${firstUnmarkedStu.id}`);
@@ -3324,74 +3318,78 @@ try {
     
     if (!confirm(confirmMsg)) return;
 
-    const origText = btn.innerHTML; btn.innerHTML = "⏳ Saving..."; btn.disabled = true;
+    const origText = btn.innerHTML; 
+    btn.innerHTML = navigator.onLine ? "⏳ Saving..." : "💾 Saving Offline..."; 
+    btn.disabled = true;
 
     try {
         const todaysData = Object.assign({}, ...Object.values(recordsBySection));
         
-        // --- DISCREPANCY CHECK START ---
-        let discrepancies = [];
-        let activeSecs = Object.keys(recordsBySection).map(s => normMatch(s));
-        
-        const otherSubSnap = await getCollection("attendance_records")
-            .where("monthKey", "==", monthKey)
-            .where("className", "==", currentReg.c)
-            .get();
-
-        otherSubSnap.forEach(doc => {
-            const data = doc.data();
-            if (!activeSecs.includes(normMatch(data.section))) return;
+        // --- DISCREPANCY CHECK START (ONLY IF ONLINE) ---
+        if (navigator.onLine) {
+            let discrepancies = [];
+            let activeSecs = Object.keys(recordsBySection).map(s => normMatch(s));
             
-            if (normMatch(data.subject) !== normMatch(currentReg.sub) && data.records && data.records[dateStr]) {
-                const otherRecs = data.records[dateStr];
-                Object.keys(todaysData).forEach(stuId => {
-                    const curStat = todaysData[stuId];
-                    const othStat = otherRecs[stuId];
-                    let effOthStat = othStat === 'A' ? 'L' : othStat;
-                    let effCurStat = curStat === 'A' ? 'L' : curStat;
-                    if (effOthStat && effCurStat && effCurStat !== effOthStat) {
-                        const stu = studentsData.find(s => s.id === stuId);
-                        discrepancies.push({
-                            stuName: stu ? stu.name : 'Unknown', rollNo: stu ? stu.rollNo : 'N/A', stuId: stuId, section: data.section,
-                            currentStatus: effCurStat, otherSubject: data.subject, otherStatus: effOthStat
+            try {
+                const otherSubSnap = await getCollection("attendance_records")
+                    .where("monthKey", "==", monthKey)
+                    .where("className", "==", currentReg.c)
+                    .get();
+
+                otherSubSnap.forEach(doc => {
+                    const data = doc.data();
+                    if (!activeSecs.includes(normMatch(data.section))) return;
+                    
+                    if (normMatch(data.subject) !== normMatch(currentReg.sub) && data.records && data.records[dateStr]) {
+                        const otherRecs = data.records[dateStr];
+                        Object.keys(todaysData).forEach(stuId => {
+                            const curStat = todaysData[stuId];
+                            const othStat = otherRecs[stuId];
+                            let effOthStat = othStat === 'A' ? 'L' : othStat;
+                            let effCurStat = curStat === 'A' ? 'L' : curStat;
+                            if (effOthStat && effCurStat && effCurStat !== effOthStat) {
+                                const stu = studentsData.find(s => s.id === stuId);
+                                discrepancies.push({
+                                    stuName: stu ? stu.name : 'Unknown', rollNo: stu ? stu.rollNo : 'N/A', stuId: stuId, section: data.section,
+                                    currentStatus: effCurStat, otherSubject: data.subject, otherStatus: effOthStat
+                                });
+                            }
                         });
                     }
                 });
-            }
-        });
 
-        if (discrepancies.length > 0) {
-            let msg = `⚠️ WARNING: ${discrepancies.length} DISCREPANCY(IES) FOUND!\n\n`;
-            const getFullStatus = (code) => code === 'P' ? 'Present' : 'Leave';
-            
-            discrepancies.slice(0, 5).forEach(d => {
-                msg += `• #${d.rollNo} ${d.stuName}: Marked ${getFullStatus(d.currentStatus)} here, but was marked ${getFullStatus(d.otherStatus)} in ${d.otherSubject}.\n`;
-            });
-            if (discrepancies.length > 5) msg += `...and ${discrepancies.length - 5} more.\n`;
-            msg += `\nDo you want to proceed and save anyway? (Admin will be notified)`;
+                if (discrepancies.length > 0) {
+                    let msg = `⚠️ WARNING: ${discrepancies.length} DISCREPANCY(IES) FOUND!\n\n`;
+                    const getFullStatus = (code) => code === 'P' ? 'Present' : 'Leave';
+                    
+                    discrepancies.slice(0, 5).forEach(d => {
+                        msg += `• #${d.rollNo} ${d.stuName}: Marked ${getFullStatus(d.currentStatus)} here, but was marked ${getFullStatus(d.otherStatus)} in ${d.otherSubject}.\n`;
+                    });
+                    if (discrepancies.length > 5) msg += `...and ${discrepancies.length - 5} more.\n`;
+                    msg += `\nDo you want to proceed and save anyway? (Admin will be notified)`;
 
-            if (!confirm(msg)) {
-                btn.innerHTML = origText; btn.disabled = false;
-                return;
-            }
+                    if (!confirm(msg)) {
+                        btn.innerHTML = origText; btn.disabled = false;
+                        return;
+                    }
 
-            const batch2 = db.batch();
-            discrepancies.forEach(d => {
-                const logRef = db.collection("attendance_discrepancies").doc();
-                batch2.set(logRef, {
-                    date: dateStr, center: activeCenter, className: currentReg.c, section: d.section,
-                    currentSubject: currentReg.sub, currentStatus: d.currentStatus, teacherEmail: activeStaff ? activeStaff.email : 'Admin',
-                    otherSubject: d.otherSubject, otherStatus: d.otherStatus, 
-                    studentId: d.stuId, studentName: d.stuName, rollNo: d.rollNo, timestamp: Date.now()
-                });
-            });
-            await batch2.commit();
+                    const batch2 = db.batch();
+                    discrepancies.forEach(d => {
+                        const logRef = db.collection("attendance_discrepancies").doc();
+                        batch2.set(logRef, {
+                            date: dateStr, center: activeCenter, className: currentReg.c, section: d.section,
+                            currentSubject: currentReg.sub, currentStatus: d.currentStatus, teacherEmail: activeStaff ? activeStaff.email : 'Admin',
+                            otherSubject: d.otherSubject, otherStatus: d.otherStatus, 
+                            studentId: d.stuId, studentName: d.stuName, rollNo: d.rollNo, timestamp: Date.now()
+                        });
+                    });
+                    batch2.commit().catch(e => console.log(e));
+                }
+            } catch(e) { console.warn("Skipping discrepancy check due to network error", e); }
         }
-        
-        btn.innerHTML = "⏳ Saving Database...";
         // --- DISCREPANCY CHECK END ---
 
-   const batch = db.batch();
+        const batch = db.batch();
         for (const [secName, secRecords] of Object.entries(recordsBySection)) {
             const secDocId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(secName)}_${normDoc(currentReg.sub)}_${monthKey}`;
             const secDocRef = getCollection("attendance_records").doc(secDocId);
@@ -3409,22 +3407,19 @@ try {
             batch.set(secDocRef, mergeData, { merge: true });
         }
 
-        await batch.commit();
+        // Asynchronous background commit so UI doesn't freeze
+        batch.commit().catch(e => console.log("Offline batch queued", e));
 
         if(!currentMonthDoc) currentMonthDoc = {};
         currentMonthDoc[dateStr] = todaysData;
         
-        if (window.activeEditTokenId) {
+        if (window.activeEditTokenId && navigator.onLine) {
             getCollection("attendance_edit_requests").doc(window.activeEditTokenId).update({ status: "USED", usedAt: Date.now() }).catch(e=>console.log(e));
             window.approvedEditUnlocked = false;
             window.activeEditTokenId = null;
         }
 
-        if (!navigator.onLine) {
-            btn.innerHTML = "💾 Saved Offline (Syncing Later)";
-        } else {
-            btn.innerHTML = "✅ Saved Successfully!";
-        }
+        btn.innerHTML = navigator.onLine ? "✅ Saved Successfully!" : "💾 Saved Offline (Syncing Later)";
         
         document.getElementById('exclusion-warning-banner').classList.add('hidden');
         document.getElementById('exclusion-warning-banner').classList.remove('flex');
@@ -3461,7 +3456,7 @@ try {
             setTimeout(() => document.getElementById('wa-modal-content').classList.replace('scale-95', 'scale-100'), 10);
             
             loadDailyAttendance();
-        }, 1000);
+        }, 1200);
     } catch(e) { 
         console.error(e); 
         alert("Failed to save."); 
