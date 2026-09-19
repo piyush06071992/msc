@@ -2690,13 +2690,91 @@ async function loadStudentPersonalView() {
                         </div>
                     `;
                 });
-                if (!isRemedial) {
+               if (!isRemedial) {
                     listContainer.innerHTML = html;
                 } else {
                     listContainer.innerHTML += html;
                 }
                 updateDailyStats();
+                
+                // --- NEW: Check missing past attendance ---
+                setTimeout(checkMissingPastAttendance, 500);
+
             } catch(e) { console.error(e); }
+        }
+
+        async function checkMissingPastAttendance() {
+            // Do not show warnings to Admins, Students, or during temporary Exam Duties
+            if (!currentReg || !currentReg.canEdit || isAdmin || activeStudent || currentReg.isExamRoom) return;
+
+            const START_DATE = "2026-09-01";
+            const offset = new Date().getTimezoneOffset() * 60000;
+            const todayIso = new Date(Date.now() - offset).toISOString().split('T')[0];
+
+            if (todayIso <= START_DATE) return;
+
+            // Safe Date iteration ignoring timezone shifts
+            let dCur = new Date(START_DATE + "T00:00:00");
+            const dEnd = new Date(todayIso + "T00:00:00");
+            dEnd.setDate(dEnd.getDate() - 1); // Check up to yesterday
+
+            let datesToCheck = [];
+            let monthsToFetch = new Set();
+
+            while (dCur <= dEnd) {
+                const y = dCur.getFullYear();
+                const m = String(dCur.getMonth() + 1).padStart(2, '0');
+                const d = String(dCur.getDate()).padStart(2, '0');
+                const iso = `${y}-${m}-${d}`;
+                
+                monthsToFetch.add(`${y}_${m}`);
+                
+                if (dCur.getDay() !== 0) { // Not Sunday
+                    const status = checkDateStatus(iso);
+                    const remKey = `${iso}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}`;
+                    const isRemedial = remedialDataMap[remKey] ? true : false;
+                    
+                    // Only check days that were officially scheduled and not holidays/remedial
+                    if (!status.isExcluded && !isRemedial) {
+                        datesToCheck.push(iso);
+                    }
+                }
+                dCur.setDate(dCur.getDate() + 1);
+            }
+
+            if (datesToCheck.length === 0) return;
+
+            let missingDates = [];
+
+            // Group fetches by month to minimize database reads
+            for (let mKey of monthsToFetch) {
+                const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
+                try {
+                    const docSnap = await getCollection("attendance_records").doc(docId).get();
+                    let records = docSnap.exists ? docSnap.data().records || {} : {};
+
+                    datesToCheck.filter(d => d.startsWith(mKey.replace('_', '-'))).forEach(d => {
+                        if (!records[d] || Object.keys(records[d]).length === 0) {
+                            missingDates.push(d);
+                        }
+                    });
+                } catch(e) { console.warn("Could not fetch past records for audit", e); }
+            }
+
+            // Trigger the UI Banner
+            const banner = document.getElementById('lock-warning-banner');
+            if (missingDates.length > 0) {
+                missingDates.sort((a,b) => b.localeCompare(a));
+                const count = missingDates.length;
+                const oldest = new Date(missingDates[missingDates.length-1]).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'});
+                
+                document.getElementById('lock-warning-text').innerHTML = `⚠️ YOU HAVE ${count} PAST DATE(S) WITH UNMARKED ATTENDANCE (OLDEST: ${oldest}). PLEASE MARK THEM ASAP.`;
+                banner.classList.remove('hidden');
+                banner.classList.add('flex');
+            } else {
+                banner.classList.add('hidden');
+                banner.classList.remove('flex');
+            }
         }
 
 function getActiveTeacherName() {
