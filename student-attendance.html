@@ -3613,9 +3613,29 @@ async function loadLedger() {
                 
                 let oldSectionRecords = {};
                 let oldSectionPrevStats = {};
+                
+                let anySubjectPresentStatus = {}; // Tracks { date: { stuId: 'P'/'L' } }
 
                 curQuerySnap.forEach(doc => {
                     const data = doc.data();
+                    
+                    // --- CAPTURE CROSS-SUBJECT DATA FOR INCHARGE FALLBACK ---
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                        if (data.records) {
+                            Object.keys(data.records).forEach(dateStr => {
+                                if (!anySubjectPresentStatus[dateStr]) anySubjectPresentStatus[dateStr] = {};
+                                Object.keys(data.records[dateStr]).forEach(stuId => {
+                                    const status = data.records[dateStr][stuId];
+                                    if (status === 'P') {
+                                        anySubjectPresentStatus[dateStr][stuId] = 'P';
+                                    } else if ((status === 'L' || status === 'A') && anySubjectPresentStatus[dateStr][stuId] !== 'P') {
+                                        anySubjectPresentStatus[dateStr][stuId] = 'L';
+                                    }
+                                });
+                            });
+                        }
+                    }
+                    
                     if (normMatch(data.subject) !== normMatch(currentReg.sub)) return;
 
                     if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
@@ -3736,10 +3756,14 @@ async function loadLedger() {
                 let totalWorkingDaysMonth = 0;
                 let dayHeaders = ""; let dayStatuses = []; 
                 
-            for(let d=1; d<=daysInMonth; d++) {
+          for(let d=1; d<=daysInMonth; d++) {
                     const dateStr = `${y}-${m}-${String(d).padStart(2,'0')}`;
                     const status = checkDateStatus(dateStr);
-                    const hasAttendanceMarked = curRecords[dateStr] && Object.keys(curRecords[dateStr]).length > 0;
+                    let hasAttendanceMarked = curRecords[dateStr] && Object.keys(curRecords[dateStr]).length > 0;
+                    
+                    if (currentReg.sub === 'CLASS INCHARGE' && !hasAttendanceMarked && anySubjectPresentStatus[dateStr]) {
+                        hasAttendanceMarked = Object.keys(anySubjectPresentStatus[dateStr]).length > 0;
+                    }
                     
                     const remKey = `${dateStr}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}`;
                     const isRemedialDay = remedialDataMap[remKey] ? true : false;
@@ -3908,7 +3932,7 @@ let inchargeDisplay = "";
                             }
                         }
 
-              if (ds.verticalReason) {
+        if (ds.verticalReason) {
                             const repeatedReason = ds.verticalReason + "   ";
                             cellContent = repeatedReason[rowIndex % repeatedReason.length];
                             inlineStyle = "font-weight: 900; background-color: #fee2e2; color: #991b1b;";
@@ -3917,16 +3941,23 @@ let inchargeDisplay = "";
                             inlineStyle = "color: #ef4444; font-weight: 900; background-color: #f1f5f9;";
                         } else if (ds.isFuture) { 
                             cellContent = ""; 
-                      } else if (curRecords[ds.date] && curRecords[ds.date][stu.id]) {
-                            const val = curRecords[ds.date][stu.id];
-                            if (val === 'P') { 
-                                cellContent = "P"; 
-                                inlineStyle = "color: #000080; font-weight: 900;"; 
-                                pCount++; 
-                            } else if (val === 'A' || val === 'L') { 
-                                cellContent = "L"; 
-                                inlineStyle = "color: #8b0000; font-weight: 900;"; 
-                                lCount++; 
+                        } else {
+                            let effectiveRecStatus = curRecords[ds.date] && curRecords[ds.date][stu.id];
+                            if (!effectiveRecStatus && currentReg.sub === 'CLASS INCHARGE' && anySubjectPresentStatus[ds.date] && anySubjectPresentStatus[ds.date][stu.id]) {
+                                effectiveRecStatus = anySubjectPresentStatus[ds.date][stu.id];
+                            }
+
+                            if (effectiveRecStatus) {
+                                const val = effectiveRecStatus;
+                                if (val === 'P') { 
+                                    cellContent = "P"; 
+                                    inlineStyle = "color: #000080; font-weight: 900;"; 
+                                    pCount++; 
+                                } else if (val === 'A' || val === 'L') { 
+                                    cellContent = "L"; 
+                                    inlineStyle = "color: #8b0000; font-weight: 900;"; 
+                                    lCount++; 
+                                }
                             }
                         }
                         
