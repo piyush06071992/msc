@@ -87,6 +87,15 @@
 </head>
 <body class="bg-slate-50 min-h-screen font-sans pb-20 relative">
 
+    <!-- OFFLINE SYNC BANNER -->
+    <div id="offline-banner" class="hidden bg-rose-600 text-white p-3 text-center font-black uppercase tracking-widest text-xs sticky top-0 z-[60] shadow-md justify-center items-center gap-2 transition-all">
+        <span class="animate-pulse text-lg">📡</span>
+        <div class="text-left">
+            <div class="text-sm">No Internet Connection</div>
+            <div class="text-[9px] text-rose-200">You can still take attendance. It will save locally and sync automatically when connection returns.</div>
+        </div>
+    </div>
+
     <header class="bg-[#1e1b4b] text-white p-4 sm:px-6 sm:py-5 flex flex-col sm:flex-row items-center justify-between shadow-xl sticky top-0 z-40 border-b-4 border-purple-500 gap-4 no-print">
         <div class="flex items-center gap-4 w-full sm:w-auto justify-between sm:justify-start">
             <div class="flex items-center gap-4">
@@ -657,9 +666,9 @@
     </div>
 
     <script>
-        const firebaseConfig = {
-            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
-            authDomain: "shop-portal-bbbbb.firebaseapp.com",
+     const firebaseConfig = { 
+            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", 
+            authDomain: "shop-portal-bbbbb.firebaseapp.com", 
             projectId: "shop-portal-bbbbb",
             storageBucket: "shop-portal-bbbbb.firebasestorage.app",
             messagingSenderId: "701377739976",
@@ -667,6 +676,36 @@
         };
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
+
+        // --- ENABLE FIRESTORE OFFLINE PERSISTENCE ---
+        db.enablePersistence({ synchronizeTabs: true }).catch(err => {
+            console.warn("Offline persistence issue:", err.message);
+        });
+
+        // --- NETWORK CONNECTION LISTENERS ---
+        window.addEventListener('offline', () => {
+            const banner = document.getElementById('offline-banner');
+            if(banner) { banner.classList.remove('hidden'); banner.classList.add('flex'); }
+        });
+
+        window.addEventListener('online', () => {
+            const banner = document.getElementById('offline-banner');
+            if(banner) { banner.classList.add('hidden'); banner.classList.remove('flex'); }
+            
+            // Auto-refresh the Save button if they just came online so they know it synced
+            const saveBtn = document.getElementById('save-daily-btn');
+            if(saveBtn && saveBtn.innerHTML.includes('Offline')) {
+                saveBtn.innerHTML = "✅ Synced to Cloud";
+                setTimeout(() => { saveBtn.innerHTML = "💾 Save Attendance"; saveBtn.disabled = false; }, 3000);
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', () => {
+            if (!navigator.onLine) {
+                const banner = document.getElementById('offline-banner');
+                if(banner) { banner.classList.remove('hidden'); banner.classList.add('flex'); }
+            }
+        });
 
  let activeCenter = "GHUMARWIN";
         let activeStaff = null;
@@ -3172,32 +3211,35 @@ async function saveDailyAttendance() {
 
         const origText = btn.innerHTML; btn.innerHTML = "⏳ Distributing to Incharge Registers..."; btn.disabled = true;
 
-        try {
+try {
             const batch = db.batch();
             for (const [docId, regData] of Object.entries(sectionUpdates)) {
                 const docRef = getCollection("attendance_records").doc(docId);
-                const docSnap = await docRef.get();
-                let docData = docSnap.exists ? docSnap.data() : {
+                let mergeData = {
                     className: regData.className,
                     section: regData.section,
                     subject: regData.subject,
                     monthKey: monthKey,
-                    records: {}
+                    lastUpdated: Date.now(),
+                    records: {
+                        [dateStr]: regData.records
+                    }
                 };
-
-                if (!docData.records) docData.records = {};
-                docData.records[dateStr] = { ...(docData.records[dateStr] || {}), ...regData.records };
-                docData.lastUpdated = Date.now();
-
-                batch.set(docRef, docData);
+                batch.set(docRef, mergeData, { merge: true });
             }
 
             await batch.commit();
-            btn.innerHTML = "✅ Distributed Successfully!";
+            
+            if (!navigator.onLine) {
+                btn.innerHTML = "💾 Offline Save (Will sync automatically)";
+            } else {
+                btn.innerHTML = "✅ Distributed Successfully!";
+            }
+            
             setTimeout(() => {
-                btn.innerHTML = origText; btn.disabled = false;
+                if(navigator.onLine) { btn.innerHTML = origText; btn.disabled = false; }
                 loadExamRoomAttendance(currentReg.s, dateStr);
-            }, 1200);
+            }, 1500);
             return;
         } catch(e) {
             console.error(e);
@@ -3349,25 +3391,22 @@ async function saveDailyAttendance() {
         btn.innerHTML = "⏳ Saving Database...";
         // --- DISCREPANCY CHECK END ---
 
-        const batch = db.batch();
+   const batch = db.batch();
         for (const [secName, secRecords] of Object.entries(recordsBySection)) {
             const secDocId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(secName)}_${normDoc(currentReg.sub)}_${monthKey}`;
             const secDocRef = getCollection("attendance_records").doc(secDocId);
             
-            const docSnap = await secDocRef.get();
-            let docData = docSnap.exists ? docSnap.data() : {
+            let mergeData = {
                 className: currentReg.c,
                 section: secName,
                 subject: currentReg.sub,
                 monthKey: monthKey,
-                records: {}
+                lastUpdated: Date.now(),
+                records: {
+                    [dateStr]: secRecords
+                }
             };
-
-            if (!docData.records) docData.records = {};
-            docData.records[dateStr] = secRecords;
-            docData.lastUpdated = Date.now();
-
-            batch.set(secDocRef, docData);
+            batch.set(secDocRef, mergeData, { merge: true });
         }
 
         await batch.commit();
@@ -3376,18 +3415,22 @@ async function saveDailyAttendance() {
         currentMonthDoc[dateStr] = todaysData;
         
         if (window.activeEditTokenId) {
-            await getCollection("attendance_edit_requests").doc(window.activeEditTokenId).update({ status: "USED", usedAt: Date.now() });
+            getCollection("attendance_edit_requests").doc(window.activeEditTokenId).update({ status: "USED", usedAt: Date.now() }).catch(e=>console.log(e));
             window.approvedEditUnlocked = false;
             window.activeEditTokenId = null;
         }
 
-        btn.innerHTML = "✅ Saved Successfully!";
+        if (!navigator.onLine) {
+            btn.innerHTML = "💾 Saved Offline (Syncing Later)";
+        } else {
+            btn.innerHTML = "✅ Saved Successfully!";
+        }
         
         document.getElementById('exclusion-warning-banner').classList.add('hidden');
         document.getElementById('exclusion-warning-banner').classList.remove('flex');
 
         setTimeout(() => { 
-            btn.innerHTML = origText; btn.disabled = false; 
+            if(navigator.onLine) { btn.innerHTML = origText; btn.disabled = false; }
             
             const leaveCount = absentWhatsAppList.filter(a => a.status === 'L' || a.status === 'A').length;
             document.getElementById('wa-absent-count').innerText = `${leaveCount} On Leave Today`;
