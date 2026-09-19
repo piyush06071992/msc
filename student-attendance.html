@@ -742,22 +742,9 @@
             return match.secInchargeName || match.classInchargeName || "";
         }
 
-     function isRegisterSubjectIncharge(className, sectionName, subjectName) {
-            if (!window.instituteStructures || !timetableData) return false;
-            const match = window.instituteStructures.find(st => normMatch(st.className) === normMatch(className) && normMatch(st.sectionName || st.section) === normMatch(sectionName));
-            if (!match) return false;
-            const inchargeName = normMatch(match.secInchargeName || match.classInchargeName || "");
-            if (!inchargeName) return false;
-
-            // Check if ANY timetable slot for this subject is taught by the section incharge
-            const matchingSlots = timetableData.filter(t => 
-                normMatch(t.className) === normMatch(className) && 
-                normMatch(t.section || t.sectionName) === normMatch(sectionName) && 
-                normMatch(t.subject || t.title) === normMatch(subjectName)
-            );
-            if (matchingSlots.length === 0) return false;
-
-            return matchingSlots.some(slot => normMatch(slot.teacherName || slot.teacher || "") === inchargeName);
+  function isRegisterSubjectIncharge(className, sectionName, subjectName) {
+            // Dedicated standalone register for Incharges
+            return normMatch(subjectName) === normMatch("CLASS INCHARGE");
         }
         function getSectionIncharge(className, sectionName) {
             if (!window.instituteStructures) return "";
@@ -1233,20 +1220,24 @@ function switchMainTab(tab) {
                 let remCheckboxes = "";
                 const SPECIAL_SUBJECTS_ADMIN = ['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM', 'EVENT'];
                 
-                structures.forEach(st => {
+         structures.forEach(st => {
                     let secAdded = false;
-                    (st.subjects || []).forEach(sub => { 
-                        if (SPECIAL_SUBJECTS_ADMIN.includes((sub || '').toUpperCase())) return;
-                        
-                        if (window.adminShowInchargeOnly && !isRegisterSubjectIncharge(st.className, st.sectionName, sub)) {
-                            return;
-                        }
-                        
-                        if (!grouped[st.className]) grouped[st.className] = {};
-                        if (!grouped[st.className][st.sectionName]) grouped[st.className][st.sectionName] = [];
-                        grouped[st.className][st.sectionName].push(sub);
+                    if (!grouped[st.className]) grouped[st.className] = {};
+                    if (!grouped[st.className][st.sectionName]) grouped[st.className][st.sectionName] = [];
+                    
+                    // Add dedicated Incharge Register
+                    if (!window.adminShowInchargeOnly || st.secInchargeName) {
+                        grouped[st.className][st.sectionName].push("CLASS INCHARGE");
                         secAdded = true;
-                    });
+                    }
+
+                    if (!window.adminShowInchargeOnly) {
+                        (st.subjects || []).forEach(sub => { 
+                            if (SPECIAL_SUBJECTS_ADMIN.includes((sub || '').toUpperCase())) return;
+                            grouped[st.className][st.sectionName].push(sub);
+                            secAdded = true;
+                        });
+                    }
                     
                     if (secAdded) {
                         remCheckboxes += `<label class="flex items-center gap-1.5 p-2 bg-slate-50 border border-slate-200 rounded cursor-pointer hover:bg-slate-100"><input type="checkbox" class="g-rem-cb accent-indigo-600" value="${st.className}|${st.sectionName}" checked><span class="text-[9px] font-black uppercase text-slate-700">${st.className}-${st.sectionName}</span></label>`;
@@ -1313,13 +1304,26 @@ function switchMainTab(tab) {
                     `;
                 }
 
-                timetableData.forEach(t => {
+         timetableData.forEach(t => {
                     let subjectName = t.subject || t.title || "";
                     let key = `${normMatch(t.className)}|${normMatch(t.section || t.sectionName)}|${normMatch(subjectName)}`;
                     if (subjectsWithTeachers.has(key) && (normMatch(t.teacherName) === mySafeName || normMatch(t.teacher) === mySafeName)) {
                         let entry = { c: t.className, s: t.section || t.sectionName, sub: subjectName, canEdit: true };
                         regMap.set(key, entry);
                         myRegMap.set(key, entry);
+                    }
+                });
+
+                // --- NEW: Add Dedicated Incharge Registers ---
+                structures.forEach(st => {
+                    const inchargeName = normMatch(st.secInchargeName || st.classInchargeName || "");
+                    if (inchargeName) {
+                        let key = `${normMatch(st.className)}|${normMatch(st.sectionName || st.section)}|classincharge`;
+                        let entry = { c: st.className, s: st.sectionName || st.section, sub: "CLASS INCHARGE", canEdit: true, isInchargeReg: true };
+                        if (inchargeName === mySafeName) {
+                            regMap.set(key, entry);
+                            myRegMap.set(key, entry);
+                        }
                     }
                 });
 
@@ -1332,6 +1336,12 @@ function switchMainTab(tab) {
                         let key = `${normMatch(t.className)}|${normMatch(t.section || t.sectionName)}|${normMatch(subjectName)}`;
                         if (subjectsWithTeachers.has(key) && !regMap.has(key)) {
                             regMap.set(key, { c: t.className, s: t.section || t.sectionName, sub: subjectName, canEdit: false });
+                        }
+                    });
+                    structures.forEach(st => {
+                        let key = `${normMatch(st.className)}|${normMatch(st.sectionName || st.section)}|classincharge`;
+                        if (st.secInchargeName && !regMap.has(key)) {
+                            regMap.set(key, { c: st.className, s: st.sectionName || st.section, sub: "CLASS INCHARGE", canEdit: false, isInchargeReg: true });
                         }
                     });
                 }
@@ -2406,17 +2416,31 @@ async function loadStudentPersonalView() {
                 listContainer.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs border-2 border-dashed border-slate-300 rounded-2xl">No active students found in this section.</div>`; return;
             }
 
-            try {
-                // Robust Fetch: Get everything matching this class+section+subject+month
-                const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).get();
+        try {
+                // Robust Fetch: Get everything matching this class+section+month
+                const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).where("className", "==", currentReg.c).get();
                 let mergedRecords = {};
+                let anySubjectPresentStatus = {}; // Tracks if student was present in ANY subject
+
                 querySnap.forEach(doc => {
                     const data = doc.data();
-                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s) && normMatch(data.subject) === normMatch(currentReg.sub)) {
-                        if (data.records) {
-                            Object.keys(data.records).forEach(dKey => {
-                                mergedRecords[dKey] = { ...(mergedRecords[dKey] || {}), ...data.records[dKey] };
+                    if (normMatch(data.section) === normMatch(currentReg.s)) {
+                        // Gather Cross-Subject Present Data for Incharge Auto-Present Logic
+                        if (data.records && data.records[dateStr]) {
+                            Object.keys(data.records[dateStr]).forEach(stuId => {
+                                if (data.records[dateStr][stuId] === 'P') {
+                                    anySubjectPresentStatus[stuId] = 'P';
+                                }
                             });
+                        }
+
+                        // Extract actual records for the currently viewed subject
+                        if (normMatch(data.subject) === normMatch(currentReg.sub)) {
+                            if (data.records) {
+                                Object.keys(data.records).forEach(dKey => {
+                                    mergedRecords[dKey] = { ...(mergedRecords[dKey] || {}), ...data.records[dKey] };
+                                });
+                            }
                         }
                     }
                 });
@@ -2536,7 +2560,7 @@ async function loadStudentPersonalView() {
                 });
                 // -----------------------------------------------------------------
 
-                let lastSec = "";
+   let lastSec = "";
                 myStudents.forEach((stu, index) => {
                     if (stu.section !== lastSec) {
                         lastSec = stu.section;
@@ -2547,7 +2571,11 @@ async function loadStudentPersonalView() {
                         `;
                     }
 
-                const val = todaysData[stu.id]; 
+                // If Incharge Register is unmarked, but they are present in ANY other subject, auto-suggest 'P'
+                let val = todaysData[stu.id] || "";
+                if (currentReg.sub === "CLASS INCHARGE" && val === "" && anySubjectPresentStatus[stu.id] === 'P') {
+                    val = "P";
+                }
                     
                     const dDate = new Date(dateStr);
                    const dayName = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dDate.getDay()];
@@ -3113,31 +3141,18 @@ async function saveDailyAttendance() {
             } catch(e) { console.warn("Offline room verification skipped"); }
         }
 
-        const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.email) : "");
+const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.email) : "");
         let teacherInchargeRegisters = [];
-        if (window.instituteStructures && timetableData) {
+        if (window.instituteStructures) {
             window.instituteStructures.forEach(st => {
-                (st.subjects || []).forEach(sub => {
-                    if (isRegisterSubjectIncharge(st.className, st.sectionName, sub)) {
-                        const slotMatch = timetableData.find(t => 
-                            normMatch(t.className) === normMatch(st.className) && 
-                            normMatch(t.section || t.sectionName) === normMatch(st.sectionName) && 
-                            normMatch(t.subject || t.title) === normMatch(sub)
-                        );
-                        if (slotMatch) {
-                            const tName = normMatch(slotMatch.teacherName || slotMatch.teacher || "");
-                            const matchSt = window.instituteStructures.find(struct => normMatch(struct.className) === normMatch(st.className) && normMatch(struct.sectionName || struct.section) === normMatch(st.sectionName));
-                            const inchargeName = normMatch(matchSt ? (matchSt.secInchargeName || matchSt.classInchargeName || "") : "");
-                            if (tName === mySafeName || tName === inchargeName) {
-                                teacherInchargeRegisters.push({
-                                    className: st.className,
-                                    section: st.sectionName,
-                                    subject: sub
-                                });
-                            }
-                        }
-                    }
-                });
+                const inchargeName = normMatch(st.secInchargeName || st.classInchargeName || "");
+                if (inchargeName === mySafeName || isAdmin) {
+                    teacherInchargeRegisters.push({
+                        className: st.className,
+                        section: st.sectionName || st.section,
+                        subject: "CLASS INCHARGE"
+                    });
+                }
             });
         }
 
