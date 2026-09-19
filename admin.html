@@ -621,15 +621,17 @@ listenForUnconfiguredExams();
                     }
                 });
 
-                // Fetch Timetable History, Live Timetable, and Holidays
-                const [histSnap, ttSnap, holSnap] = await Promise.all([
+              // Fetch Timetable History, Live Timetable, Holidays, and Leaves
+                const [histSnap, ttSnap, holSnap, leaveSnap] = await Promise.all([
                     db.collection(prefix + "timetable_history").get(),
                     db.collection(prefix + "timetable").get(),
-                    db.collection(prefix + "school_holidays").get()
+                    db.collection(prefix + "school_holidays").get(),
+                    db.collection(prefix + "leave_requests").where("status", "in", ["APPROVED", "PENDING"]).get()
                 ]);
                 const ttHist = histSnap.docs.map(d => d.data());
                 const ttLive = ttSnap.docs.map(d => d.data());
                 const holidaysData = holSnap.docs.map(d => d.data());
+                const allLeaves = leaveSnap.docs.map(d => d.data());
 
                 function getScheduleSnapshot(dateIso) {
                     const exactOverride = ttHist.find(h => h.date === dateIso && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE"));
@@ -706,26 +708,30 @@ listenForUnconfiguredExams();
                         const secKey = `${norm(slot.className)}|${norm(slot.section)}`;
                         if (!sectionCounts[secKey] || sectionCounts[secKey] === 0) return;
 
-                        // Time / Grace Period Check
+                      // Time / Grace Period Check
                         if (!slot.end24) return;
                         const [eh, em] = slot.end24.split(':').map(Number);
                         const endMins = eh * 60 + em;
+                        const [sh, sm_slot] = (slot.start24 || "00:00").split(':').map(Number);
+                        const startMins = sh * 60 + sm_slot;
+                        
                         if (isToday && (currentMins < endMins + 30)) return;
 
                         // --- HOLIDAY / HALF-DAY SCANNER LOGIC ---
                         let isHoliday = false;
-                        if (holidaysData && holidaysData.length > 0) {
+                        if (typeof holidaysData !== 'undefined' && holidaysData.length > 0) {
                             for (let h of holidaysData) {
                                 if (h.suspendClasses === false || !h.startDate) continue;
 
-                                const [sy, sm, sd] = h.startDate.split('-');
-                                let hs = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd));
+                                const [sy, sm_hol, sd] = h.startDate.split('-');
+                                let hs = new Date(parseInt(sy), parseInt(sm_hol)-1, parseInt(sd));
+                                
                                 let he = hs;
                                 if (h.endDate) {
-                                    const [ey, em, ed] = h.endDate.split('-');
-                                    he = new Date(parseInt(ey), parseInt(em)-1, parseInt(ed), 23, 59, 59);
+                                    const [ey, em_hol, ed] = h.endDate.split('-');
+                                    he = new Date(parseInt(ey), parseInt(em_hol)-1, parseInt(ed), 23, 59, 59);
                                 } else {
-                                    he = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd), 23, 59, 59);
+                                    he = new Date(parseInt(sy), parseInt(sm_hol)-1, parseInt(sd), 23, 59, 59);
                                 }
 
                                 if (dateObj >= hs && dateObj <= he) {
@@ -741,13 +747,12 @@ listenForUnconfiguredExams();
                                         if (h.isFullDay) {
                                             isHoliday = true; break;
                                         } else if (h.startTime && h.endTime) {
-                                            const [sh, sm] = (slot.start24 || "00:00").split(':').map(Number);
-                                            const startMins = sh * 60 + sm;
                                             const [hsh, hsm] = h.startTime.split(':').map(Number);
                                             const [heh, hem] = h.endTime.split(':').map(Number);
                                             const hStartMins = hsh * 60 + hsm;
                                             const hEndMins = heh * 60 + hem;
                                             
+                                            // Check if this specific class slot overlaps with the event timeframe
                                             if (startMins < hEndMins && endMins > hStartMins) {
                                                 isHoliday = true; break;
                                             }
@@ -756,8 +761,35 @@ listenForUnconfiguredExams();
                                 }
                             }
                         }
-                        if (isHoliday) return; // Skip holidays and half-days
+                        if (isHoliday) return; // Skip requesting attendance for suspended classes
                         // --- END HOLIDAY SCANNER LOGIC ---
+
+                        // --- NEW: OVERLAY SUBSTITUTE TEACHER IF APPLICABLE ---
+                        let displayTeacher = slot.teacherName || slot.teacher;
+                        
+                        if (typeof allLeaves !== 'undefined') {
+                            allLeaves.forEach(l => {
+                                if (l.adjustments) {
+                                    l.adjustments.forEach(adj => {
+                                        if (adj.date === dateStr && adj.substituteResponse === "ACCEPTED") {
+                                            const adjSubNorm = norm(adj.title);
+                                            const parts = (adj.sub || "").split('|');
+                                            const adjClassNorm = norm(parts[0]);
+                                            const adjSecNorm = norm(parts[1] ? parts[1].replace(/sec/gi, '') : '');
+                                            
+                                            if (adjSubNorm === norm(sub) && adjClassNorm === norm(slot.className) && adjSecNorm === norm(slot.section)) {
+                                                // Check time overlap
+                                                if (adj.start < endMins && adj.end > startMins) {
+                                                    const subFirstName = (adj.adjustedTo || "Sub").split(' ')[0];
+                                                    displayTeacher = `${displayTeacher} (Sub: ${subFirstName})`;
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                        // -----------------------------------------------------
 
                         // Did they mark it?
                         const attKey = `${dateStr}_${norm(slot.className)}_${norm(slot.section)}_${norm(sub)}`;
@@ -767,7 +799,7 @@ listenForUnconfiguredExams();
                                 className: slot.className,
                                 section: slot.section,
                                 subject: sub,
-                                teacher: slot.teacherName || slot.teacher,
+                                teacher: displayTeacher,
                                 end24: slot.end24
                             });
                         }
