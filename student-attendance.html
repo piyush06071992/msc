@@ -2179,10 +2179,36 @@ function updateAuditSectionFilter() {
             return timetableData.some(t => t.day === dayName && normMatch(t.className) === normMatch(currentReg.c) && normMatch(t.section || t.sectionName) === normMatch(currentReg.s) && normMatch(t.subject) === normMatch(currentReg.sub));
         }
 
-        function checkDateStatus(dateToCheckStr) {
+     function checkDateStatus(dateToCheckStr) {
             const [cy, cm, cd] = dateToCheckStr.split('-');
             const checkD = new Date(parseInt(cy), parseInt(cm)-1, parseInt(cd));
+            const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+            const dayName = dayNames[checkD.getDay()];
+            
             if (checkD.getDay() === 0) return { isExcluded: true, reason: "Sunday" }; 
+
+            // Extract the specific class time for the current subject on this day
+            let currentClassStartMins = 0;
+            let currentClassEndMins = 0;
+            
+            // Look for it in Overrides first, then Live Master
+            let scheduleToCheck = timetableData;
+            const overrideData = timetableHistoryData.find(o => o.date === dateToCheckStr && o.type !== "FUTURE_MASTER");
+            if (overrideData && overrideData.schedule) scheduleToCheck = overrideData.schedule;
+            
+            const slotMatch = scheduleToCheck.find(t => 
+                (overrideData ? true : t.day === dayName) && 
+                normMatch(t.className) === normMatch(currentReg.c) && 
+                normMatch(t.section || t.sectionName) === normMatch(currentReg.s) && 
+                normMatch(t.subject) === normMatch(currentReg.sub)
+            );
+
+            if (slotMatch && slotMatch.start24 && slotMatch.end24) {
+                const [sh, sm] = slotMatch.start24.split(':').map(Number);
+                const [eh, em] = slotMatch.end24.split(':').map(Number);
+                currentClassStartMins = (sh * 60) + sm;
+                currentClassEndMins = (eh * 60) + em;
+            }
 
             // 1. Check strict holidays from school_holidays
             for(let h of holidaysData) {
@@ -2211,7 +2237,17 @@ function updateAuditSectionFilter() {
                             if (h.isFullDay) {
                                 return { isExcluded: true, reason: h.reason };
                             } else if (h.startTime && h.endTime) {
-                                return { isExcluded: true, reason: h.reason + " (Half Day)" };
+                                // If it is a partial day event, CHECK IF IT ACTUALLY OVERLAPS with this subject's time!
+                                const [hsh, hsm] = h.startTime.split(':').map(Number);
+                                const [heh, hem] = h.endTime.split(':').map(Number);
+                                const eventStartMins = (hsh * 60) + hsm;
+                                const eventEndMins = (heh * 60) + hem;
+                                
+                                // Only exclude the class if the times physically overlap.
+                                // Incharge Registers (which have 0 mins mapped) or classes overlapping the event are suspended.
+                                if (currentReg.sub === 'CLASS INCHARGE' || (currentClassStartMins < eventEndMins && currentClassEndMins > eventStartMins)) {
+                                    return { isExcluded: true, reason: h.reason + " (Half Day)" };
+                                }
                             }
                         }
                     }
