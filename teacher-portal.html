@@ -1146,93 +1146,38 @@ document.getElementById('current-date').innerText = `Date: ${new Date().toLocale
                         }
                         
                         if (lastLog && lastLog < todayISO) {
-                            let scanDate = new Date(lastLog);
+                            const [ly, lm, ld] = lastLog.split('-');
+                            let scanDate = new Date(parseInt(ly), parseInt(lm)-1, parseInt(ld));
                             scanDate.setDate(scanDate.getDate() + 1); 
-                            let missedDays = 0;
-                            const endD = new Date(todayISO);
-                            endD.setDate(endD.getDate() - 1); 
+
+                            let missingDatesArr = [];
+                            
+                            // Safe date parsing to avoid timezone shifts
+                            const [ty, tm, td] = todayISO.split('-');
+                            const endD = new Date(parseInt(ty), parseInt(tm)-1, parseInt(td));
+                            endD.setDate(endD.getDate() - 1); // Check up to yesterday
 
                             while(scanDate <= endD) {
-                                const scanIso = scanDate.toISOString().split('T')[0];
-                                const dayName = daysArr[scanDate.getDay()];
+                                const offset = scanDate.getTimezoneOffset() * 60000;
+                                const scanIso = (new Date(scanDate.getTime() - offset)).toISOString().split('T')[0];
 
-                                if(scanDate.getDay() !== 0) { 
-                                    let isHol = false;
-                                    for(let h of holidays) {
-                                        if(h.startDate && h.isFullDay) {
-                                            let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
-                                            let he = new Date(h.endDate || h.startDate); he.setHours(23,59,59,999);
-                                            if(scanDate >= hs && scanDate <= he) { isHol = true; break; }
-                                        }
-                                    }
-
-                                    let isExamOrOverride = false;
-                                    const override = historyOverrides.find(o => o.date === scanIso);
-                                    if (override && override.schedule) {
-                                        const classSlots = override.schedule.filter(s => norm(s.className) === norm(classInfo.c) && norm(s.section) === norm(classInfo.s));
-                                        if (classSlots.length > 0) {
-                                            const subSlot = classSlots.find(s => norm(s.subject) === norm(classInfo.sub));
-                                            if (!subSlot || (subSlot.remark && subSlot.remark.toLowerCase().includes("doubt session"))) {
-                                                isExamOrOverride = true; 
-                                            }
-                                        } else {
-                                            isExamOrOverride = true; 
-                                        }
-                                    }
-
-                                    let hasRoutineClass = myFullTimetable.some(t =>
-                                        t.day === dayName && norm(t.className) === norm(classInfo.c) && norm(t.section) === norm(classInfo.s) && norm(t.subject) === norm(classInfo.sub)
-                                    );
-
-                                    if(!isHol && !isExamOrOverride && hasRoutineClass) {
-                                        missedDays++;
-                                    }
+                                const exclusion = checkDateExclusion(scanDate, classInfo.c, classInfo.s, classInfo.sub);
+                                
+                                if (!exclusion.isExcluded && isTimetableWorkingDay(scanDate, classInfo.c, classInfo.s, classInfo.sub)) {
+                                    const shortDate = new Date(scanDate).toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+                                    missingDatesArr.push(shortDate);
                                 }
                                 scanDate.setDate(scanDate.getDate() + 1);
                             }
                             
-                            let isTodayExcluded = false;
-                            const todayDayName = daysArr[today.getDay()];
-                            const todayDateOnly = new Date(todayISO); 
-                            todayDateOnly.setHours(0,0,0,0);
+                            const todayDateOnly = new Date(parseInt(ty), parseInt(tm)-1, parseInt(td));
+                            const todayExclusion = checkDateExclusion(todayDateOnly, classInfo.c, classInfo.s, classInfo.sub);
+                            const hasRoutineClassToday = isTimetableWorkingDay(todayDateOnly, classInfo.c, classInfo.s, classInfo.sub);
                             
-                            if (today.getDay() === 0) {
-                                isTodayExcluded = true; 
-                            } else {
-                                let isHolToday = false;
-                                for(let h of holidays) {
-                                    if(h.startDate && h.isFullDay) {
-                                        let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
-                                        let he = new Date(h.endDate || h.startDate); he.setHours(23,59,59,999);
-                                        if(todayDateOnly >= hs && todayDateOnly <= he) { isHolToday = true; break; }
-                                    }
-                                }
-                                
-                                let isExamOrOverrideToday = false;
-                                const overrideToday = historyOverrides.find(o => o.date === todayISO);
-                                if (overrideToday && overrideToday.schedule) {
-                                    const classSlotsToday = overrideToday.schedule.filter(s => norm(s.className) === norm(classInfo.c) && norm(s.section) === norm(classInfo.s));
-                                    if (classSlotsToday.length > 0) {
-                                        const subSlotToday = classSlotsToday.find(s => norm(s.subject) === norm(classInfo.sub));
-                                        if (!subSlotToday || (subSlotToday.remark && subSlotToday.remark.toLowerCase().includes("doubt session"))) {
-                                            isExamOrOverrideToday = true; 
-                                        }
-                                    } else {
-                                        isExamOrOverrideToday = true; 
-                                    }
-                                }
-                                
-                                let hasRoutineClassToday = myFullTimetable.some(t =>
-                                    t.day === todayDayName && norm(t.className) === norm(classInfo.c) && norm(t.section) === norm(classInfo.s) && norm(t.subject) === norm(classInfo.sub)
-                                );
-                                
-                                if (isHolToday || isExamOrOverrideToday || !hasRoutineClassToday) {
-                                    isTodayExcluded = true;
-                                }
-                            }
+                            let isTodayExcluded = todayExclusion.isExcluded || !hasRoutineClassToday;
                             
-                            if(missedDays > 0 && !isTodayExcluded) {
-                                missingLogs.push(classInfo.displayName);
+                            if(missingDatesArr.length > 0 && !isTodayExcluded) {
+                                missingLogs.push(`${classInfo.displayName} [${missingDatesArr.join(', ')}]`);
                             }
                         }
                     }
