@@ -2747,15 +2747,47 @@ async function loadStudentPersonalView() {
 
             let missingDates = [];
 
-            // Group fetches by month to minimize database reads
+           // Group fetches by month to minimize database reads
             for (let mKey of monthsToFetch) {
-                const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
                 try {
-                    const docSnap = await getCollection("attendance_records").doc(docId).get();
-                    let records = docSnap.exists ? docSnap.data().records || {} : {};
+                    let directRecords = {};
+                    let hasInchargeFallback = {}; 
+                    
+                    if (currentReg.sub === 'CLASS INCHARGE') {
+                        // For Incharge, we must check if ANY subject in this section has attendance
+                        const monthSnap = await getCollection("attendance_records")
+                            .where("monthKey", "==", mKey)
+                            .where("className", "==", currentReg.c)
+                            .get();
+                            
+                        monthSnap.forEach(doc => {
+                            const data = doc.data();
+                            if (normMatch(data.section) === normMatch(currentReg.s)) {
+                                if (normMatch(data.subject) === normMatch("CLASS INCHARGE")) {
+                                    directRecords = data.records || {};
+                                } else if (data.records) {
+                                    // Cross-subject check: Log any day where another subject has attendance
+                                    Object.keys(data.records).forEach(date => {
+                                        if (Object.keys(data.records[date]).length > 0) {
+                                            hasInchargeFallback[date] = true;
+                                        }
+                                    });
+                                }
+                            }
+                        });
+                    } else {
+                        // Normal subject fetch
+                        const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
+                        const docSnap = await getCollection("attendance_records").doc(docId).get();
+                        directRecords = docSnap.exists ? docSnap.data().records || {} : {};
+                    }
 
                     datesToCheck.filter(d => d.startsWith(mKey.replace('_', '-'))).forEach(d => {
-                        if (!records[d] || Object.keys(records[d]).length === 0) {
+                        const hasDirect = directRecords[d] && Object.keys(directRecords[d]).length > 0;
+                        const hasFallback = currentReg.sub === 'CLASS INCHARGE' && hasInchargeFallback[d];
+                        
+                        // Only flag as missing if BOTH the incharge register and all other subjects are completely empty
+                        if (!hasDirect && !hasFallback) {
                             missingDates.push(d);
                         }
                     });
