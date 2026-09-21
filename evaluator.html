@@ -870,7 +870,7 @@ window.onload = async () => {
                         center: activeCenter,
                         results: currentExamResults,
                         structure: activeExamStructure
-                    })
+                 })
                 });
                 const data = await response.json();
                 */
@@ -884,6 +884,418 @@ window.onload = async () => {
             } finally {
                 btn.innerHTML = orig; btn.disabled = false;
             }
+        }
+
+        // ==========================================
+        // REPORT CARD GENERATOR ENGINE
+        // ==========================================
+        let reportCardData = [];
+        let reportCardSubjects = [];
+        let activeIndividualStudent = null;
+
+        function generateReportCards() {
+            document.getElementById('report-card-modal').classList.replace('hidden', 'flex');
+            document.getElementById('rc-center').value = activeCenter;
+            populateRcClasses();
+        }
+
+        async function populateRcClasses() {
+            const center = document.getElementById('rc-center').value;
+            const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
+            try {
+                const snap = await db.collection(`${prefix}institute_structure`).get();
+                let classes = new Set();
+                snap.forEach(d => classes.add(d.data().className.toUpperCase()));
+                document.getElementById('rc-class').innerHTML = Array.from(classes).sort().map(c => `<option value="${c}">${c}</option>`).join('');
+                populateRcSections();
+            } catch(e) { console.error(e); }
+        }
+
+        async function populateRcSections() {
+            const center = document.getElementById('rc-center').value;
+            const cls = document.getElementById('rc-class').value;
+            const prefix = center === "DHARAMSHALA" ? "dharamshala_" : "";
+            try {
+                const snap = await db.collection(`${prefix}institute_structure`).where("className", "==", cls).get();
+                let secs = new Set();
+                snap.forEach(d => secs.add(d.data().sectionName.toUpperCase()));
+                document.getElementById('rc-sec').innerHTML = '<option value="ALL">ALL SECTIONS</option>' + Array.from(secs).sort().map(s => `<option value="${s}">${s}</option>`).join('');
+            } catch(e) { console.error(e); }
+        }
+
+        async function fetchReportCardData() {
+            const center = document.getElementById('rc-center').value;
+            const cls = document.getElementById('rc-class').value;
+            const sec = document.getElementById('rc-sec').value;
+            const startD = document.getElementById('rc-start').value;
+            const endD = document.getElementById('rc-end').value;
+            
+            const selectedTypes = Array.from(document.querySelectorAll('#rc-types input:checked')).map(cb => cb.value.toUpperCase());
+
+            if (!startD || !endD) return alert("Please select a Start and End Date.");
+            if (startD > endD) return alert("Start Date cannot be after End Date.");
+            if (selectedTypes.length === 0) return alert("Please select at least one Exam Type.");
+
+            const container = document.getElementById('rc-table-container');
+            container.innerHTML = `<div class="text-center py-20"><span class="loader border-t-fuchsia-600"></span><p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-2">Aggregating Cloud Data...</p></div>`;
+            document.getElementById('btn-export-rc').classList.add('hidden');
+
+            try {
+                const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
+                
+                // 1. Fetch relevant exam schedules
+                const schSnap = await db.collection(prefix + "exam_schedules")
+                    .where("className", "==", cls)
+                    .where("date", ">=", startD)
+                    .where("date", "<=", endD)
+                    .get();
+
+                let validGroupIds = [];
+                let groupMetaMap = {}; 
+
+                schSnap.forEach(doc => {
+                    const d = doc.data();
+                    const sType = String(d.type || '').toUpperCase();
+                    const secMatch = (sec === "ALL") || (String(d.section).toUpperCase() === sec);
+                    
+                    let typeMatch = false;
+                    selectedTypes.forEach(t => { if (sType.includes(t)) typeMatch = true; });
+                    if (!typeMatch) {
+                        const title = String(d.title || d.tag || '').toUpperCase();
+                        selectedTypes.forEach(t => { if (title.includes(t)) typeMatch = true; });
+                    }
+
+                    if (secMatch && typeMatch) {
+                        validGroupIds.push(doc.id);
+                        groupMetaMap[doc.id] = d;
+                    }
+                });
+
+                if (validGroupIds.length === 0) {
+                    container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest border-2 border-dashed border-slate-300 rounded-3xl bg-white">No exams found matching these criteria.</div>`;
+                    return;
+                }
+
+                // 2. Fetch Keys/Max Marks & Submissions in Chunks
+                let allSubmissions = [];
+                let keysCache = {};
+                
+                for(let i=0; i<validGroupIds.length; i+=10) {
+                    const chunk = validGroupIds.slice(i, i+10);
+                    const [keysSnap, subSnap] = await Promise.all([
+                        db.collection("exam_answer_keys").where(firebase.firestore.FieldPath.documentId(), "in", chunk).get(),
+                        db.collection("omr_submissions").where("groupId", "in", chunk).get()
+                    ]);
+
+                    keysSnap.forEach(d => keysCache[d.id] = d.data());
+                    subSnap.forEach(d => allSubmissions.push(d.data()));
+                }
+
+                // 3. Setup student base data
+                let studentsMap = {};
+                globalStudentsData.forEach(s => {
+                    if (s.actualBranch === center && String(s.className).toUpperCase() === cls && (sec === "ALL" || String(s.section).toUpperCase() === sec)) {
+                        studentsMap[String(s.rollNo).toUpperCase()] = {
+                            id: s.id, rollNo: String(s.rollNo).toUpperCase(), name: s.name, className: s.className, section: s.section,
+                            subjects: {}, totalObt: 0, totalMax: 0, examsAttended: 0
+                        };
+                    }
+                });
+
+                let globalSubjectsSet = new Set();
+
+                // 4. Process Submissions
+                allSubmissions.forEach(sub => {
+                    const roll = String(sub.rollNo).toUpperCase();
+                    if (!studentsMap[roll]) return;
+
+                    const gId = sub.groupId;
+                    const keyMeta = keysCache[gId] || {};
+                    const isDirect = sub.isDirectImport === true;
+                    
+                    let examTotalObt = 0;
+                    let examTotalMax = 0;
+
+                    if (isDirect) {
+                        const directMax = keyMeta.directMaxMarks || {};
+                        Object.entries(sub.directScores || {}).forEach(([subj, score]) => {
+                            const upperSub = subj.toUpperCase();
+                            const max = directMax[subj] || 100;
+                            globalSubjectsSet.add(upperSub);
+                            
+                            if (!studentsMap[roll].subjects[upperSub]) studentsMap[roll].subjects[upperSub] = { obt: 0, max: 0 };
+                            studentsMap[roll].subjects[upperSub].obt += score;
+                            studentsMap[roll].subjects[upperSub].max += max;
+                            
+                            examTotalObt += score;
+                            examTotalMax += max;
+                        });
+                    } else {
+                        const answers = keyMeta.answers || {};
+                        const bonuses = keyMeta.bonusConfig || {};
+                        const responses = sub.responses || {};
+                        const structure = keyMeta.structure || [];
+
+                        structure.forEach(st => {
+                            const upperSub = (st.subject || "UNKNOWN").toUpperCase();
+                            globalSubjectsSet.add(upperSub);
+                            
+                            let secScore = 0; let secMax = 0;
+                            for (let q = st.start; q <= st.end; q++) {
+                                const pos = st.correctMarks !== undefined ? st.correctMarks : 4;
+                                const neg = st.wrongMarks !== undefined ? st.wrongMarks : -1;
+                                const unatt = st.unattemptedMarks !== undefined ? st.unattemptedMarks : 0;
+                                secMax += pos;
+
+                                const isAttempted = (responses[q] !== undefined && responses[q] !== "");
+                                const isCorrect = isAttempted && (String(responses[q]).trim() === String(answers[q]).trim());
+                                const bRule = bonuses[q] || 'NONE';
+
+                                if (bRule === 'ALL') secScore += pos;
+                                else if (bRule === 'ATTEMPTED') { if(isAttempted) secScore += pos; else secScore += unatt; }
+                                else { if(!isAttempted) secScore += unatt; else if(isCorrect) secScore += pos; else secScore += neg; }
+                            }
+
+                            if (!studentsMap[roll].subjects[upperSub]) studentsMap[roll].subjects[upperSub] = { obt: 0, max: 0 };
+                            studentsMap[roll].subjects[upperSub].obt += secScore;
+                            studentsMap[roll].subjects[upperSub].max += secMax;
+                            
+                            examTotalObt += secScore;
+                            examTotalMax += secMax;
+                        });
+                    }
+
+                    if (examTotalMax > 0) {
+                        studentsMap[roll].totalObt += examTotalObt;
+                        studentsMap[roll].totalMax += examTotalMax;
+                        studentsMap[roll].examsAttended++;
+                    }
+                });
+
+                reportCardData = Object.values(studentsMap).map(s => {
+                    s.percentage = s.totalMax > 0 ? ((s.totalObt / s.totalMax) * 100).toFixed(2) : 0;
+                    return s;
+                }).filter(s => s.examsAttended > 0);
+
+                reportCardSubjects = Array.from(globalSubjectsSet).sort();
+
+                if (reportCardData.length === 0) {
+                    container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest border-2 border-dashed border-slate-300 rounded-3xl bg-white">No score data found for the selected students in this period.</div>`;
+                    return;
+                }
+
+                document.getElementById('rc-stats').innerText = `${reportCardData.length} Students Evaluated`;
+                document.getElementById('btn-export-rc').classList.remove('hidden');
+                sortReportCardData();
+
+            } catch (error) {
+                console.error(error);
+                container.innerHTML = `<div class="text-center py-20 text-rose-500 font-bold uppercase text-xs tracking-widest">Error generating report: ${error.message}</div>`;
+            }
+        }
+
+        function sortReportCardData() {
+            const sortBy = document.getElementById('rc-sort').value;
+            reportCardData.sort((a, b) => {
+                if (sortBy === 'total_desc') return b.totalObt - a.totalObt || a.name.localeCompare(b.name);
+                if (sortBy === 'pct_desc') return parseFloat(b.percentage) - parseFloat(a.percentage) || a.name.localeCompare(b.name);
+                return a.name.localeCompare(b.name); // name_asc
+            });
+            renderReportCardTable();
+        }
+
+        function renderReportCardTable() {
+            const container = document.getElementById('rc-table-container');
+            let theadHtml = `
+                <tr>
+                    <th class="p-3 text-center w-12 sticky left-0 bg-slate-100 z-20 border-r border-b border-slate-200">Rank</th>
+                    <th class="p-3 sticky left-[48px] bg-slate-100 z-20 border-r border-b border-slate-200 w-24">Roll No</th>
+                    <th class="p-3 sticky left-[144px] bg-slate-100 z-20 border-r border-b border-slate-200 min-w-[150px]">Student Name</th>
+                    ${reportCardSubjects.map(sub => `<th class="p-3 text-center border-b border-slate-200 bg-white whitespace-nowrap"><div class="text-[10px] text-fuchsia-600 mb-0.5">${sub}</div><div>Obt / Max</div></th>`).join('')}
+                    <th class="p-3 text-center border-b border-slate-200 bg-indigo-50 text-indigo-900 border-l border-indigo-200">Grand Total</th>
+                    <th class="p-3 text-center border-b border-slate-200 bg-emerald-50 text-emerald-900 border-l border-emerald-200">%</th>
+                </tr>
+            `;
+
+            let tbodyHtml = reportCardData.map((s, idx) => `
+                <tr class="hover:bg-slate-50 transition-colors cursor-pointer group" onclick="viewIndividualReportCard('${s.rollNo}')">
+                    <td class="p-3 text-center font-black text-slate-500 sticky left-0 bg-white group-hover:bg-slate-50 z-10 border-r border-slate-100 border-b">${idx + 1}</td>
+                    <td class="p-3 font-mono font-black sticky left-[48px] bg-white group-hover:bg-slate-50 z-10 border-r border-slate-100 border-b">#${s.rollNo}</td>
+                    <td class="p-3 font-black text-slate-800 uppercase sticky left-[144px] bg-white group-hover:bg-slate-50 z-10 border-r border-slate-100 border-b truncate">
+                        ${s.name} <span class="text-[9px] text-slate-400 block sm:inline font-bold">(${s.section})</span>
+                    </td>
+                    ${reportCardSubjects.map(sub => {
+                        const sd = s.subjects[sub];
+                        if (!sd) return `<td class="p-3 text-center font-mono font-bold text-slate-300 border-b border-slate-100">—</td>`;
+                        return `<td class="p-3 text-center font-mono font-bold text-slate-700 border-b border-slate-100 whitespace-nowrap">${sd.obt} <span class="text-[9px] text-slate-400">/ ${sd.max}</span></td>`;
+                    }).join('')}
+                    <td class="p-3 text-center font-mono font-black text-indigo-700 bg-indigo-50/30 border-l border-indigo-100 border-b border-slate-100 whitespace-nowrap">${s.totalObt} <span class="text-[9px] text-indigo-300">/ ${s.totalMax}</span></td>
+                    <td class="p-3 text-center font-mono font-black text-emerald-700 bg-emerald-50/30 border-l border-emerald-100 border-b border-slate-100">${s.percentage}%</td>
+                </tr>
+            `).join('');
+
+            container.innerHTML = `
+                <table class="w-full text-left border-collapse border border-slate-200 bg-white" id="rc-dom-table">
+                    <thead class="bg-slate-100 text-slate-700 text-[10px] uppercase font-black">${theadHtml}</thead>
+                    <tbody class="text-xs font-bold text-slate-700">${tbodyHtml}</tbody>
+                </table>
+            `;
+        }
+
+        // --- BEAUTIFUL EXCEL GENERATOR (INJECTS HTML STYLE TO EXCEL) ---
+        function exportHTMLTableToBeautifulExcel(htmlContent, filename) {
+            const fullHTML = `
+                <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+                <head>
+                    <meta charset="utf-8">
+                    <style>
+                        table { border-collapse: collapse; width: 100%; font-family: Arial, sans-serif; }
+                        th, td { border: 1px solid #cbd5e1; padding: 6px; text-align: center; }
+                        .header-main { background-color: #8b5cf6; color: #ffffff; font-size: 16px; font-weight: bold; text-align: center; }
+                        .header-sub { background-color: #c4b5fd; color: #1e1b4b; font-size: 12px; font-weight: bold; }
+                        .bg-blue { background-color: #eff6ff; color: #1e3a8a; font-weight: bold; }
+                        .bg-green { background-color: #f0fdf4; color: #14532d; font-weight: bold; }
+                        .bg-amber { background-color: #fffbeb; color: #78350f; font-weight: bold; }
+                        .bold-row { font-weight: bold; background-color: #f8fafc; }
+                    </style>
+                </head>
+                <body>${htmlContent}</body>
+                </html>
+            `;
+            const blob = new Blob(['\ufeff', fullHTML], { type: 'application/vnd.ms-excel' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = filename;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        }
+
+        function exportClassReportExcel() {
+            if (reportCardData.length === 0) return alert("No data to export.");
+            
+            const center = document.getElementById('rc-center').value;
+            const cls = document.getElementById('rc-class').value;
+            const sec = document.getElementById('rc-sec').value;
+            const startD = document.getElementById('rc-start').value;
+            const endD = document.getElementById('rc-end').value;
+
+            let tableHtml = `<table border="1">
+                <tr><th colspan="${4 + (reportCardSubjects.length * 2) + 2}" class="header-main">CONSOLIDATED REPORT CARD - CLASS ${cls} (SEC ${sec}) - ${center}</th></tr>
+                <tr><th colspan="${4 + (reportCardSubjects.length * 2) + 2}" class="header-sub">Period: ${startD} to ${endD}</th></tr>
+                <tr>
+                    <th class="header-sub">Rank</th>
+                    <th class="header-sub">Roll No</th>
+                    <th class="header-sub">Student Name</th>
+                    <th class="header-sub">Section</th>
+            `;
+            
+            reportCardSubjects.forEach(sub => {
+                tableHtml += `<th class="bg-blue">${sub}<br>Obt</th><th class="bg-blue">${sub}<br>Max</th>`;
+            });
+            tableHtml += `<th class="bg-amber">Grand Total<br>Obt / Max</th><th class="bg-green">Percentage<br>(%)</th></tr>`;
+
+            reportCardData.forEach((s, idx) => {
+                tableHtml += `<tr>
+                    <td>${idx + 1}</td>
+                    <td>${s.rollNo}</td>
+                    <td style="text-align: left; font-weight: bold;">${s.name}</td>
+                    <td>${s.section}</td>
+                `;
+                reportCardSubjects.forEach(sub => {
+                    const sd = s.subjects[sub];
+                    if (sd) {
+                        tableHtml += `<td>${sd.obt}</td><td>${sd.max}</td>`;
+                    } else {
+                        tableHtml += `<td>-</td><td>-</td>`;
+                    }
+                });
+                tableHtml += `<td class="bg-amber">${s.totalObt} / ${s.totalMax}</td><td class="bg-green">${s.percentage}%</td></tr>`;
+            });
+            tableHtml += `</table>`;
+            
+            exportHTMLTableToBeautifulExcel(tableHtml, `ReportCard_Class${cls}_${startD}_to_${endD}.xls`);
+        }
+
+        // --- INDIVIDUAL REPORT CARD ---
+        function viewIndividualReportCard(rollNo) {
+            const stu = reportCardData.find(s => s.rollNo === rollNo);
+            if (!stu) return;
+
+            activeIndividualStudent = stu;
+
+            document.getElementById('ind-name').innerText = stu.name;
+            document.getElementById('ind-meta').innerText = `#${stu.rollNo} | Class ${stu.className} | Sec ${stu.section}`;
+            
+            document.getElementById('ind-exams').innerText = stu.examsAttended;
+            document.getElementById('ind-max').innerText = stu.totalMax;
+            document.getElementById('ind-obt').innerText = stu.totalObt;
+            document.getElementById('ind-pct').innerText = `${stu.percentage}%`;
+
+            let subHtml = reportCardSubjects.map(sub => {
+                const sd = stu.subjects[sub];
+                if (!sd) return '';
+                
+                const pct = sd.max > 0 ? ((sd.obt / sd.max) * 100).toFixed(1) : 0;
+                let colorClass = pct >= 75 ? 'text-emerald-600' : (pct >= 50 ? 'text-amber-500' : 'text-rose-600');
+                let bgClass = pct >= 75 ? 'bg-emerald-50 border-emerald-200' : (pct >= 50 ? 'bg-amber-50 border-amber-200' : 'bg-rose-50 border-rose-200');
+
+                return `
+                    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                        <div class="bg-slate-100 px-4 py-2 border-b border-slate-200 font-black text-slate-700 uppercase tracking-widest text-xs flex justify-between items-center">
+                            ${sub}
+                            <span class="text-[10px] bg-white px-2 py-0.5 rounded border border-slate-200 shadow-sm">${pct}%</span>
+                        </div>
+                        <div class="p-4 flex justify-between items-center bg-white flex-1">
+                            <div class="flex flex-col">
+                                <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Marks Obtained</span>
+                                <span class="text-xl font-black ${colorClass}">${sd.obt}</span>
+                            </div>
+                            <div class="h-8 w-px bg-slate-200 mx-2"></div>
+                            <div class="flex flex-col items-end">
+                                <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Maximum</span>
+                                <span class="text-xl font-black text-slate-800">${sd.max}</span>
+                            </div>
+                        </div>
+                        <div class="${bgClass} h-1.5 w-full">
+                            <div class="h-full bg-current opacity-50" style="width: ${pct}%"></div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            document.getElementById('ind-subject-breakdown').innerHTML = subHtml;
+            document.getElementById('ind-report-modal').classList.replace('hidden', 'flex');
+        }
+
+        function exportIndividualReportExcel() {
+            if (!activeIndividualStudent) return;
+            const stu = activeIndividualStudent;
+            const startD = document.getElementById('rc-start').value;
+            const endD = document.getElementById('rc-end').value;
+
+            let tableHtml = `<table border="1">
+                <tr><th colspan="4" class="header-main">STUDENT PERFORMANCE REPORT - MINERVA STUDY CIRCLE</th></tr>
+                <tr><th colspan="2" class="header-sub">Name: ${stu.name}</th><th colspan="2" class="header-sub">Roll No: ${stu.rollNo}</th></tr>
+                <tr><th colspan="2" class="header-sub">Class: ${stu.className}</th><th colspan="2" class="header-sub">Section: ${stu.section}</th></tr>
+                <tr><th colspan="2" class="header-sub">Period: ${startD} to ${endD}</th><th colspan="2" class="header-sub">Exams Attended: ${stu.examsAttended}</th></tr>
+                <tr>
+                    <th class="bg-blue">Subject</th>
+                    <th class="bg-blue">Marks Obtained</th>
+                    <th class="bg-blue">Maximum Marks</th>
+                    <th class="bg-blue">Percentage (%)</th>
+                </tr>
+            `;
+            
+            reportCardSubjects.forEach(sub => {
+                const sd = stu.subjects[sub];
+                if (sd) {
+                    const pct = sd.max > 0 ? ((sd.obt / sd.max) * 100).toFixed(2) : 0;
+                    tableHtml += `<tr><td style="font-weight: bold;">${sub}</td><td>${sd.obt}</td><td>${sd.max}</td><td>${pct}%</td></tr>`;
+                }
+            });
+            
+            tableHtml += `<tr><td class="header-sub">GRAND TOTAL</td><td class="bg-amber">${stu.totalObt}</td><td class="bg-amber">${stu.totalMax}</td><td class="bg-green">${stu.percentage}%</td></tr>`;
+            tableHtml += `</table>`;
+            
+            exportHTMLTableToBeautifulExcel(tableHtml, `${stu.name}_ReportCard.xls`);
         }
 
         let globalGhumarwinStructure = [];
