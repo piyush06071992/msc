@@ -780,13 +780,14 @@
         let isSidebarOpen = true;
         let currentAllocations = {}; 
         let busyRoomsMap = {}; 
-        let examSectionsMap = {}; 
+      let examSectionsMap = {}; 
         let sectionPaperMap = {}; 
         let sectionTimingsCache = {}; 
      let allApprovedStudents = [];
         let activeRowContext = null;
         let autogenRules = [];
         let globalStructureData = [];
+        let holidaysData = []; // NEW: Added globally
 
         // Global normalizer: preserves spaces, standardizes case and whitespace
         const norm = (str) => (str || "").replace(/\s+/g, " ").trim().toUpperCase();
@@ -826,11 +827,19 @@
         }
 
 window.onload = async () => {
+            await fetchHolidays();
             await fetchAvailableExamDates();
             await fetchAllStudents();
             await fetchInstituteStructure();
             initLiveRoomsListener();
         };
+
+        async function fetchHolidays() {
+            try {
+                const snap = await getCollection("school_holidays").get();
+                holidaysData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            } catch(e) { console.error("Holiday Fetch Error:", e); }
+        }
 
         async function fetchInstituteStructure() {
             try {
@@ -1071,10 +1080,66 @@ window.onload = async () => {
                 examEndMin = 12 * 60; 
             }
 
-            // 3. Mark busy rooms based on timetable overlaps
+  // 3. Mark busy rooms based on timetable overlaps
             daySlots.forEach(slot => {
                 const roomName = cleanRoom(slot.room);
                 if (!roomName || roomName === 'TBD' || roomName === 'NONE') return;
+
+                let sM = 0, eM = 0;
+                if (slot.start24 && slot.end24) {
+                    const [sh, sm] = slot.start24.split(':').map(Number);
+                    const [eh, em] = slot.end24.split(':').map(Number);
+                    sM = sh * 60 + sm; eM = eh * 60 + em;
+                } else if (slot.sMins !== undefined && slot.eMins !== undefined) {
+                    sM = slot.sMins; eM = slot.eMins;
+                }
+
+                // NEW: Holiday Scanner Logic to free up rooms
+                let isHoliday = false;
+                if (typeof holidaysData !== 'undefined' && holidaysData.length > 0) {
+                    const targetDate = new Date(dateStr + 'T00:00:00');
+                    for (let h of holidaysData) {
+                        if (h.suspendClasses === false || !h.startDate) continue;
+
+                        const [sy, sm_hol, sd] = h.startDate.split('-');
+                        let hs = new Date(parseInt(sy), parseInt(sm_hol)-1, parseInt(sd));
+                        
+                        let he = hs;
+                        if (h.endDate) {
+                            const [ey, em_hol, ed] = h.endDate.split('-');
+                            he = new Date(parseInt(ey), parseInt(em_hol)-1, parseInt(ed), 23, 59, 59);
+                        } else {
+                            he = new Date(parseInt(sy), parseInt(sm_hol)-1, parseInt(sd), 23, 59, 59);
+                        }
+
+                        if (targetDate >= hs && targetDate <= he) {
+                            const targetCls = `${norm(slot.className)}|${norm(slot.section)}`;
+                            const matchesClass = h.targetClasses.some(tc => {
+                                if (tc === 'ALL') return true;
+                                const parts = tc.split('|');
+                                const tcNorm = norm(parts[0]) + (parts[1] ? '|' + norm(parts[1]) : '');
+                                return tcNorm === targetCls || norm(parts[0]) === norm(slot.className);
+                            });
+
+                            if (matchesClass) {
+                                if (h.isFullDay) {
+                                    isHoliday = true; break;
+                                } else if (h.startTime && h.endTime) {
+                                    const [hsh, hsm] = h.startTime.split(':').map(Number);
+                                    const [heh, hem] = h.endTime.split(':').map(Number);
+                                    const hStartMins = hsh * 60 + hsm; 
+                                    const hEndMins = heh * 60 + hem;
+                                    
+                                    if (sM < hEndMins && eM > hStartMins) {
+                                        isHoliday = true; break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (isHoliday) return; // Free the room since the class is suspended!
 
                 const subUpper = (slot.subject || '').toUpperCase();
                 
@@ -1089,15 +1154,6 @@ window.onload = async () => {
 
                 // If a section is having regular class (not exams/breaks) during the global Exam Window, lock the room
                 if (!isExamSection && !isSpecialSub) {
-                    let sM = 0, eM = 0;
-                    if (slot.start24 && slot.end24) {
-                        const [sh, sm] = slot.start24.split(':').map(Number);
-                        const [eh, em] = slot.end24.split(':').map(Number);
-                        sM = sh * 60 + sm; eM = eh * 60 + em;
-                    } else if (slot.sMins !== undefined && slot.eMins !== undefined) {
-                        sM = slot.sMins; eM = slot.eMins;
-                    }
-
                     if (sM < examEndMin && eM > examStartMin) {
                         busyRoomsMap[roomName] = { isBusy: true, reason: `Busy: Regular Class (${slot.className} Sec ${slot.section} - ${slot.subject})` };
                     }
