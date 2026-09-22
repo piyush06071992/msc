@@ -108,6 +108,24 @@
             </div>
         </div>
 
+       <!-- EMERGENCY LEAVE INCHARGE BANNER -->
+        <div id="emergency-sub-banner" class="hidden bg-rose-600 text-white rounded-[2rem] shadow-2xl mb-6 border-2 border-rose-400 relative overflow-hidden group mt-4 cursor-pointer hover:bg-rose-500 transition-colors" onclick="window.location.href='teacher-leave.html?tab=incharge'">
+            <div class="p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 relative z-10">
+                <div class="flex items-center gap-4 w-full">
+                    <div class="bg-white/20 p-3 rounded-2xl shadow-inner animate-pulse shrink-0"><span class="text-3xl">🚨</span></div>
+                    <div class="flex-1">
+                        <h3 class="font-black text-lg sm:text-xl uppercase tracking-widest text-rose-50 leading-none">Emergency Substitution Required</h3>
+                        <p class="text-[10px] sm:text-xs font-bold text-rose-200 mt-1.5 uppercase tracking-widest"><span id="emergency-sub-count" class="px-1 font-black text-white">0</span> Classes pending Incharge assignment.</p>
+                    </div>
+                </div>
+                <div class="shrink-0 relative z-10 w-full sm:w-auto">
+                    <span class="w-full sm:w-auto text-center bg-white text-rose-600 px-6 py-3.5 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest shadow-lg whitespace-nowrap border border-rose-200 block sm:inline-block">
+                        Resolve Now ➔
+                    </span>
+                </div>
+            </div>
+        </div>
+
         <!-- MISSING ATTENDANCE BANNER -->
         <details id="missing-attendance-banner" class="hidden bg-orange-600 text-white rounded-[2rem] shadow-2xl mb-6 border-2 border-orange-400 relative overflow-hidden group mt-4">
             <summary class="p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 cursor-pointer outline-none hover:bg-orange-500 transition-colors relative z-10">
@@ -390,7 +408,7 @@ function updateLiveTickerHub() {
                         if (hodBtn) hodBtn.classList.remove('hidden');
                     }
 
-                    const studentAuthLevel = data.canManageStudents;
+                   const studentAuthLevel = data.canManageStudents;
                     if (studentAuthLevel === true) {
                         const stuBtn = document.getElementById('manage-students-btn');
                         if (stuBtn) {
@@ -398,6 +416,13 @@ function updateLiveTickerHub() {
                             const levelText = data.studentAccessLevel === 'view' ? 'View Only' : 'Manage';
                             document.getElementById('manage-students-badge').innerText = levelText;
                         }
+                    }
+
+                    const isLeaveIncharge = data.isLeaveIncharge === true;
+                    if (isLeaveIncharge) {
+                        activeStaff.isLeaveIncharge = true;
+                        localStorage.setItem('minervaActiveStaff', JSON.stringify(activeStaff));
+                        listenForEmergencySubstitutions(activeStaff);
                     }
                 }
             } catch(e) {
@@ -440,7 +465,7 @@ document.getElementById('current-date').innerText = `Date: ${new Date().toLocale
             listenForPendingAdjustments(activeStaff);
             loadLeaveNoticeBoard();
 
-            // Run background scans immediately and concurrently to make alerts appear/disappear instantly
+        // Run background scans immediately and concurrently to make alerts appear/disappear instantly
             Promise.all([
                 checkMissingAttendanceTeacher(safeName),
                 checkLessonCompliance(safeName)
@@ -448,6 +473,60 @@ document.getElementById('current-date').innerText = `Date: ${new Date().toLocale
                 updateLiveTickerHub();
             });
         };
+
+        function listenForEmergencySubstitutions(staffObj) {
+            const center = staffObj.center || "GHUMARWIN";
+            const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
+
+            db.collection(prefix + "leave_requests")
+              .where("status", "in", ["PENDING", "APPROVED"])
+              .onSnapshot(snap => {
+                  let pendingEmergencyCount = 0;
+                  const todayIso = new Date(new Date().getTime() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0];
+
+                  snap.forEach(doc => {
+                      const req = doc.data();
+                      if (req.adjustments) {
+                          req.adjustments.forEach(adj => {
+                              // If it is in the future/today, is requested by incharge, and hasn't been handled yet
+                              if (adj.date >= todayIso && adj.isEmergency && (!adj.substituteResponse || adj.substituteResponse === "PENDING")) {
+                                  pendingEmergencyCount++;
+                              }
+                          });
+                      }
+                  });
+
+                  const banner = document.getElementById('emergency-sub-banner');
+                  const countEl = document.getElementById('emergency-sub-count');
+                  
+                  if (pendingEmergencyCount > 0) {
+                      if (countEl) countEl.innerText = pendingEmergencyCount;
+                      if (banner) {
+                          banner.classList.remove('hidden');
+                          banner.classList.add('block');
+                      }
+                      
+                      // Inject directly into the Ticker
+                      globalSystemAlerts = globalSystemAlerts.filter(a => a.id !== 'emergency_sub');
+                      globalSystemAlerts.push({
+                          id: 'emergency_sub',
+                          icon: '🚨',
+                          title: 'Emergency Substitution',
+                          text: `${pendingEmergencyCount} classes need Leave Incharge assignment.`,
+                          link: 'teacher-leave.html?tab=incharge'
+                      });
+                      updateLiveTickerHub();
+                  } else {
+                      if (banner) {
+                          banner.classList.add('hidden');
+                          banner.classList.remove('block');
+                      }
+                      // Clear from Ticker
+                      globalSystemAlerts = globalSystemAlerts.filter(a => a.id !== 'emergency_sub');
+                      updateLiveTickerHub();
+                  }
+              });
+        }
 
 
         async function saveTokenToFirestore(token) {
