@@ -1010,7 +1010,7 @@ window.onload = async () => {
           let globalSubjectsSet = new Set();
                 reportCardSubjectDates = {}; // Reset the map
                 
-                // Pre-populate global subjects from scheduled exams so pending/ungraded exams always show up as columns
+              // Pre-populate global subjects from scheduled exams so pending/ungraded exams always show up as columns
                 Object.values(groupMetaMap).forEach(g => {
                     (g.subjects || []).forEach(sub => {
                         const upperSub = sub.toUpperCase();
@@ -1021,6 +1021,44 @@ window.onload = async () => {
                         }
                     });
                 });
+
+                // --- FETCH ATTENDANCE TO IDENTIFY ABSENTEES IN REPORT CARD ---
+                let attRecordsMap = {};
+                try {
+                    let monthKeysToFetch = new Set();
+                    let dCur = new Date(startD);
+                    let dEndObj = new Date(endD);
+                    while(dCur <= dEndObj) {
+                        monthKeysToFetch.add(`${dCur.getFullYear()}_${String(dCur.getMonth()+1).padStart(2,'0')}`);
+                        dCur.setDate(dCur.getDate() + 15); // Jump ahead to collect all spanned months
+                    }
+                    monthKeysToFetch.add(`${dEndObj.getFullYear()}_${String(dEndObj.getMonth()+1).padStart(2,'0')}`);
+
+                    const attPromises = [];
+                    Array.from(monthKeysToFetch).forEach(mKey => {
+                        attPromises.push(db.collection("attendance_records").where("monthKey", "==", mKey).where("className", "==", cls).get());
+                        attPromises.push(db.collection("dharamshala_attendance_records").where("monthKey", "==", mKey).where("className", "==", cls).get());
+                    });
+                    
+                    const attSnaps = await Promise.all(attPromises);
+                    attSnaps.forEach(snap => {
+                        snap.forEach(doc => {
+                            const data = doc.data();
+                            if (sec !== "ALL" && String(data.section).trim().toUpperCase() !== sec) return;
+                            if (data.records) {
+                                Object.keys(data.records).forEach(d => {
+                                    if (!attRecordsMap[d]) attRecordsMap[d] = {};
+                                    Object.entries(data.records[d]).forEach(([stuId, status]) => {
+                                        if (status === 'P' || !attRecordsMap[d][stuId]) {
+                                            attRecordsMap[d][stuId] = status;
+                                        }
+                                    });
+                                });
+                            }
+                        });
+                    });
+                } catch(e) { console.warn("Failed to fetch attendance for report card", e); }
+                // -------------------------------------------------------------
 
                 // 4. Process Submissions
                 allSubmissions.forEach(sub => {
@@ -1083,14 +1121,30 @@ window.onload = async () => {
                         });
                     }
 
-     if (examTotalMax > 0) {
+    if (examTotalMax > 0) {
                         studentsMap[roll].totalObt += examTotalObt;
                         studentsMap[roll].totalMax += examTotalMax;
                         studentsMap[roll].examsAttended++;
                     }
                 });
 
-             reportCardData = Object.values(studentsMap).map(s => {
+                // --- TAG ABSENT STUDENTS ---
+                Object.values(studentsMap).forEach(stu => {
+                    globalSubjectsSet.forEach(sub => {
+                        if (!stu.subjects[sub]) {
+                            const examDate = reportCardSubjectDates[sub];
+                            if (examDate && attRecordsMap[examDate]) {
+                                const status = attRecordsMap[examDate][stu.id];
+                                if (status === 'A' || status === 'L') {
+                                    stu.subjects[sub] = { obt: 'ABSENT', max: 0, isAbsent: true };
+                                }
+                            }
+                        }
+                    });
+                });
+                // ----------------------------
+
+                reportCardData = Object.values(studentsMap).map(s => {
                     s.percentage = s.totalMax > 0 ? ((s.totalObt / s.totalMax) * 100).toFixed(2) : 0;
                     return s;
                 });
@@ -1221,10 +1275,12 @@ reportCardSubjects = Array.from(globalSubjectsSet).sort();
                         </td>
                 `;
                     
-           reportCardSubjects.forEach(sub => {
+      reportCardSubjects.forEach(sub => {
                     const sd = s.subjects[sub];
                     if (!sd) {
                         rowHtml += `<td class="p-3 text-center font-black text-amber-500 text-[9px] uppercase tracking-widest border-b border-slate-100 bg-amber-50/30">Pending</td>`;
+                    } else if (sd.isAbsent) {
+                        rowHtml += `<td class="p-3 text-center font-black text-rose-500 text-[9px] uppercase tracking-widest border-b border-slate-100 bg-rose-50/30">Absent</td>`;
                     } else {
                         rowHtml += `<td class="p-3 text-center font-mono font-bold text-slate-700 border-b border-slate-100 whitespace-nowrap">${sd.obt}</td>`;
                     }
@@ -1308,14 +1364,18 @@ reportCardSubjects = Array.from(globalSubjectsSet).sort();
                     <td style="text-align: left; font-weight: bold;">${s.name}${starMark}</td>
                     <td>${s.section}</td>
                 `;
-           reportCardSubjects.forEach(sub => {
-                    const sd = s.subjects[sub];
-                    if (sd) {
-                        tableHtml += `<td style="font-weight:bold;">${sd.obt}</td>`;
+       reportCardSubjects.forEach(sub => {
+                const sd = s.subjects[sub];
+                if (sd) {
+                    if (sd.isAbsent) {
+                        tableHtml += `<td style="color:#ef4444; font-weight:bold;">Absent</td>`;
                     } else {
-                        tableHtml += `<td style="color:#d97706; font-weight:bold;">Pending</td>`;
+                        tableHtml += `<td style="font-weight:bold;">${sd.obt}</td>`;
                     }
-                });
+                } else {
+                    tableHtml += `<td style="color:#d97706; font-weight:bold;">Pending</td>`;
+                }
+            });
                 
                 // FIX: mso-number-format forces Excel to treat the fraction purely as text, stopping auto-date conversion
                 tableHtml += `<td class="bg-amber" style='mso-number-format:"\\@";'>${s.totalObt} / ${s.totalMax}</td><td class="bg-green">${s.percentage}%</td><td class="bg-amber" style="font-weight:bold;">#${s.rank}${starMark}</td></tr>`;
@@ -1357,6 +1417,19 @@ let subHtml = reportCardSubjects.map(sub => {
                                 <span class="text-[10px] font-black text-slate-400 uppercase tracking-widest">Awaiting Scores</span>
                             </div>
                             <div class="bg-slate-100 h-1.5 w-full"></div>
+                        </div>
+                    `;
+                } else if (sd.isAbsent) {
+                    return `
+                        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col opacity-80">
+                            <div class="bg-rose-50 px-4 py-2 border-b border-rose-100 font-black text-rose-700 uppercase tracking-widest text-xs flex justify-between items-center">
+                                <div>${sub} <span class="block text-[8px] text-rose-500 mt-0.5 normal-case tracking-normal">${dateStr}</span></div>
+                                <span class="text-[9px] bg-rose-100 text-rose-800 px-2 py-0.5 rounded border border-rose-200 shadow-sm uppercase tracking-widest">Absent</span>
+                            </div>
+                            <div class="p-4 flex justify-center items-center bg-white flex-1">
+                                <span class="text-[10px] font-black text-rose-400 uppercase tracking-widest">Did Not Attend</span>
+                            </div>
+                            <div class="bg-rose-100 h-1.5 w-full"></div>
                         </div>
                     `;
                 }
@@ -1413,14 +1486,18 @@ let subHtml = reportCardSubjects.map(sub => {
                 </tr>
             `;
             
-            reportCardSubjects.forEach(sub => {
+          reportCardSubjects.forEach(sub => {
                 const sd = stu.subjects[sub];
                 const dateRaw = reportCardSubjectDates[sub];
                 const dateStr = dateRaw ? new Date(dateRaw).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'}) : '-';
                 
                 if (sd) {
-                    const pct = sd.max > 0 ? ((sd.obt / sd.max) * 100).toFixed(2) : 0;
-                    tableHtml += `<tr><td style="font-size:11px; text-align:center;">${dateStr}</td><td style="font-weight: bold;">${sub}</td><td>${sd.obt}</td><td>${sd.max}</td><td>${pct}%</td></tr>`;
+                    if (sd.isAbsent) {
+                        tableHtml += `<tr><td style="font-size:11px; text-align:center;">${dateStr}</td><td style="font-weight: bold;">${sub}</td><td style="color:#ef4444; font-weight:bold;">Absent</td><td>-</td><td>-</td></tr>`;
+                    } else {
+                        const pct = sd.max > 0 ? ((sd.obt / sd.max) * 100).toFixed(2) : 0;
+                        tableHtml += `<tr><td style="font-size:11px; text-align:center;">${dateStr}</td><td style="font-weight: bold;">${sub}</td><td>${sd.obt}</td><td>${sd.max}</td><td>${pct}%</td></tr>`;
+                    }
                 } else {
                     tableHtml += `<tr><td style="font-size:11px; text-align:center;">${dateStr}</td><td style="font-weight: bold;">${sub}</td><td style="color:#d97706; font-weight:bold;">Pending</td><td>-</td><td>-</td></tr>`;
                 }
