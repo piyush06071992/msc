@@ -3671,27 +3671,32 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
             batch.set(secDocRef, mergeData, { merge: true });
         }
 
-    // FIX: Wait for actual cloud confirmation if online, otherwise queue it for later
-        if (navigator.onLine) {
-            await batch.commit();
-            // Automatically sync Class Incharge record in the background for all saved sections
-            for (const secName of Object.keys(recordsBySection)) {
-                backgroundSyncClassIncharge(dateStr, monthKey, currentReg.c, secName);
-            }
-        } else {
-            batch.commit().catch(e => console.log("Offline batch queued", e));
-        }
-
-        if(!currentMonthDoc) currentMonthDoc = {};
-        currentMonthDoc[dateStr] = todaysData;
+// FIX: Await full cloud batch commit AND background sync before declaring success
+    try {
+        await batch.commit();
         
-        if (window.activeEditTokenId && navigator.onLine) {
-            getCollection("attendance_edit_requests").doc(window.activeEditTokenId).update({ status: "USED", usedAt: Date.now() }).catch(e=>console.log(e));
-            window.approvedEditUnlocked = false;
-            window.activeEditTokenId = null;
+        // Ensure background Incharge sync finishes and confirms before UI locks
+        if (navigator.onLine) {
+            let syncPromises = Object.keys(recordsBySection).map(secName => 
+                backgroundSyncClassIncharge(dateStr, monthKey, currentReg.c, secName)
+            );
+            await Promise.all(syncPromises);
         }
 
-        btn.innerHTML = navigator.onLine ? "✅ Saved Successfully!" : "💾 Saved Offline (Syncing Later)";
+        btn.innerHTML = "✅ Cloud Synced Successfully!";
+    } catch (firebaseErr) {
+        console.warn("Cloud commit delayed, queuing offline:", firebaseErr);
+        btn.innerHTML = "💾 Saved Locally (Will Sync Online)";
+    }
+
+    if(!currentMonthDoc) currentMonthDoc = {};
+    currentMonthDoc[dateStr] = todaysData;
+    
+    if (window.activeEditTokenId && navigator.onLine) {
+        await getCollection("attendance_edit_requests").doc(window.activeEditTokenId).update({ status: "USED", usedAt: Date.now() }).catch(e=>console.log(e));
+        window.approvedEditUnlocked = false;
+        window.activeEditTokenId = null;
+    }
         
         document.getElementById('exclusion-warning-banner').classList.add('hidden');
         document.getElementById('exclusion-warning-banner').classList.remove('flex');
