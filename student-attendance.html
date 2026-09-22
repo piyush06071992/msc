@@ -2989,7 +2989,7 @@ function getActiveTeacherName() {
             const docId = `att_${activeCenter}_${normDoc(targetClass)}_${normDoc(targetSection)}_${normDoc(targetSubject)}_${monthKey}`;
             const docRef = getCollection("attendance_records").doc(docId);
 
-            try {
+         try {
                 const snap = await docRef.get();
                 if (!snap.exists) return alert("No attendance record found for this month.");
                 let data = snap.data();
@@ -3004,6 +3004,12 @@ function getActiveTeacherName() {
                 });
 
                 await docRef.set(data);
+
+                // --- AUTO-SYNC CLASS INCHARGE ON CORRECTION ---
+                if (!currentReg.isExamRoom) {
+                    backgroundSyncClassIncharge(dateStr, monthKey, currentReg.c, currentReg.s);
+                }
+
                 document.getElementById('correction-modal').style.display = 'none';
                 alert("✅ Attendance corrected successfully. (Audit logged securely).");
                 loadDailyAttendance();
@@ -3296,6 +3302,55 @@ function shareWholeClassWhatsApp() {
             speakNext();
         }
         function stopTTS() { if(ttsActive) toggleTTS(); }
+async function backgroundSyncClassIncharge(dateStr, monthKey, className, sectionName) {
+    try {
+        const snap = await getCollection("attendance_records")
+            .where("monthKey", "==", monthKey)
+            .where("className", "==", className)
+            .get();
+        
+        let aggregated = {};
+        snap.forEach(doc => {
+            const data = doc.data();
+            if (normMatch(data.section) === normMatch(sectionName) && normMatch(data.subject) !== "classincharge") {
+                if (data.records && data.records[dateStr]) {
+                    Object.keys(data.records[dateStr]).forEach(stuId => {
+                        const status = data.records[dateStr][stuId];
+                        if (status === 'P') {
+                            aggregated[stuId] = 'P';
+                        } else if ((status === 'L' || status === 'A') && aggregated[stuId] !== 'P') {
+                            aggregated[stuId] = 'L';
+                        }
+                    });
+                }
+            }
+        });
+
+        const inchargeDocId = `att_${activeCenter}_${normDoc(className)}_${normDoc(sectionName)}_CLASS_INCHARGE_${monthKey}`;
+        const inchargeDocRef = getCollection("attendance_records").doc(inchargeDocId);
+
+        if (Object.keys(aggregated).length > 0) {
+            await inchargeDocRef.set({
+                className: className,
+                section: sectionName,
+                subject: "CLASS INCHARGE",
+                monthKey: monthKey,
+                lastUpdated: Date.now(),
+                records: {
+                    [dateStr]: aggregated
+                }
+            }, { merge: true });
+        } else {
+            // If all other subjects are unmarked/deleted, automatically clean up the Incharge record too
+            await inchargeDocRef.update({
+                [`records.${dateStr}`]: firebase.firestore.FieldValue.delete()
+            }).catch(() => {});
+        }
+    } catch (err) {
+        console.warn("Background Class Incharge auto-sync failed:", err);
+    }
+}
+
 async function saveDailyAttendance() {
     if(!currentReg.canEdit || activeStudent || isAdmin) return;
     const dateStr = document.getElementById('daily-date-picker').value;
@@ -3616,9 +3671,13 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
             batch.set(secDocRef, mergeData, { merge: true });
         }
 
-        // FIX: Wait for actual cloud confirmation if online, otherwise queue it for later
+    // FIX: Wait for actual cloud confirmation if online, otherwise queue it for later
         if (navigator.onLine) {
             await batch.commit();
+            // Automatically sync Class Incharge record in the background for all saved sections
+            for (const secName of Object.keys(recordsBySection)) {
+                backgroundSyncClassIncharge(dateStr, monthKey, currentReg.c, secName);
+            }
         } else {
             batch.commit().catch(e => console.log("Offline batch queued", e));
         }
