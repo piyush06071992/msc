@@ -562,7 +562,7 @@
                     <button onclick="saveDailyAttendance()" id="save-daily-btn" class="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-black py-4 rounded-xl uppercase tracking-widest text-sm shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2">
                         💾 Save Attendance
                     </button>
-                    <button onclick="initiateUnmarkAttendance()" id="unmark-daily-btn" class="hidden bg-rose-600 hover:bg-rose-700 text-white font-black px-6 py-4 rounded-xl uppercase tracking-widest text-sm shadow-lg transition-all active:scale-95 items-center justify-center gap-2 shrink-0">
+                 <button onclick="requestUnmarkAttendance()" id="unmark-daily-btn" class="hidden bg-rose-600 hover:bg-rose-700 text-white font-black px-6 py-4 rounded-xl uppercase tracking-widest text-sm shadow-lg transition-all active:scale-95 items-center justify-center gap-2 shrink-0">
                         🗑️ Unmark
                     </button>
                 </div>
@@ -648,12 +648,12 @@
         </div>
     </div>
 
-   <!-- UNMARK CONFIRMATION MODAL -->
+   <!-- UNMARK CONFIRMATION MODAL (ADMIN ONLY) -->
     <div id="unmark-modal" class="fixed inset-0 bg-slate-900/90 backdrop-blur-sm z-[250] hidden items-center justify-center p-4">
         <div class="bg-white rounded-[2rem] w-full max-w-md shadow-2xl p-6 text-center space-y-4 border-4 border-rose-500">
             <div class="text-5xl mb-2">⚠️</div>
             <h3 class="font-black text-rose-600 text-xl uppercase tracking-wider">DANGER: UNMARK ATTENDANCE</h3>
-            <p class="text-xs font-bold text-slate-600 uppercase tracking-widest">This will permanently delete today's attendance for this register. You will have to mark it again.</p>
+            <p class="text-xs font-bold text-slate-600 uppercase tracking-widest">This will permanently delete this requested attendance from the ledger.</p>
             <div class="bg-rose-50 p-4 rounded-xl border border-rose-200">
                 <label class="block text-[10px] font-black text-rose-700 uppercase tracking-widest mb-2">Type "UNMARK" to confirm:</label>
                 <input type="text" id="unmark-confirm-input" class="w-full border border-rose-300 rounded-xl p-3 text-center text-sm font-black text-rose-700 uppercase outline-none focus:ring-2 focus:ring-rose-500" placeholder="UNMARK" onkeyup="checkUnmarkInput()">
@@ -2609,9 +2609,9 @@ async function loadStudentPersonalView() {
                    }
                 }
 
-                const unmarkBtn = document.getElementById('unmark-daily-btn');
+               const unmarkBtn = document.getElementById('unmark-daily-btn');
                 if (unmarkBtn) {
-                    if (hasAttendanceMarked && currentReg.canEdit && !activeStudent && !isAdmin && (!isPastDate || window.approvedEditUnlocked) && !currentReg.isExamRoom) {
+                    if (hasAttendanceMarked && currentReg.canEdit && !activeStudent && !currentReg.isExamRoom) {
                         unmarkBtn.classList.remove('hidden');
                         unmarkBtn.classList.add('flex');
                     } else {
@@ -3670,9 +3670,41 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
     }
 }
 
-let unmarkInterval;
+async function requestUnmarkAttendance() {
+            const dateStr = document.getElementById('daily-date-picker').value;
+            const reason = prompt(`Enter reason for unmarking attendance on ${dateStr}:\n(This will be sent to the Admin for approval)`);
+            
+            if (!reason) return;
+            if (reason.trim().length < 3) return alert("Please provide a valid reason.");
+            
+            try {
+                const reqPayload = {
+                    center: activeCenter,
+                    className: currentReg.c,
+                    section: currentReg.s,
+                    subject: currentReg.sub,
+                    date: dateStr,
+                    teacherEmail: activeStaff.email,
+                    teacherName: getActiveTeacherName(),
+                    reason: `[Unmark Request] ${reason}`,
+                    status: "PENDING",
+                    requestType: "UNMARK",
+                    timestamp: Date.now()
+                };
 
-        function initiateUnmarkAttendance() {
+                await getCollection("attendance_edit_requests").add(reqPayload);
+                if(navigator.onLine) sendEditRequestEmailNotification({ type: "ATTENDANCE_UNMARK_REQUEST", ...reqPayload });
+                alert("✅ Unmark request sent to Admin successfully!");
+            } catch(err) {
+                alert("Failed to submit unmark request.");
+            }
+        }
+
+        let activeUnmarkReq = null;
+        let unmarkInterval;
+
+        function adminInitiateUnmark(reqId, dateStr, c, s, sub) {
+            activeUnmarkReq = { reqId, dateStr, c, s, sub };
             document.getElementById('unmark-confirm-input').value = "";
             document.getElementById('btn-start-unmark').disabled = true;
             document.getElementById('btn-start-unmark').classList.add('opacity-50', 'cursor-not-allowed');
@@ -3706,7 +3738,7 @@ let unmarkInterval;
             }
         }
 
-        function startUnmarkCountdown() {
+    function startUnmarkCountdown() {
             document.getElementById('btn-start-unmark').classList.add('hidden');
             document.getElementById('btn-close-unmark').classList.add('hidden');
             document.getElementById('unmark-confirm-input').disabled = true;
@@ -3725,7 +3757,7 @@ let unmarkInterval;
                 
                 if (seconds <= 0) {
                     clearInterval(unmarkInterval);
-                    executeUnmarkAttendance();
+                    executeAdminUnmark();
                 }
             }, 1000);
         }
@@ -3740,44 +3772,29 @@ let unmarkInterval;
             if (document.getElementById('unmark-timer')) document.getElementById('unmark-timer').innerText = "10";
         }
 
-        async function executeUnmarkAttendance() {
-            const dateStr = document.getElementById('daily-date-picker').value;
+        async function executeAdminUnmark() {
+            if (!activeUnmarkReq) return;
+            const { reqId, dateStr, c, s, sub } = activeUnmarkReq;
             const [y, m] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
-            
-            let targetClass = currentReg.c;
-            let targetSection = currentReg.s;
-            let targetSubject = currentReg.sub;
-
-            if (currentReg.isExamRoom) {
-                alert("Unmarking exam rooms globally is not supported directly. Please adjust individual incharges.");
-                closeUnmarkModal();
-                return;
-            }
-
-            const docId = `att_${activeCenter}_${normDoc(targetClass)}_${normDoc(targetSection)}_${normDoc(targetSubject)}_${monthKey}`;
+            const docId = `att_${activeCenter}_${normDoc(c)}_${normDoc(s)}_${normDoc(sub)}_${monthKey}`;
             const docRef = getCollection("attendance_records").doc(docId);
 
             const timerContainerText = document.getElementById('unmark-countdown-container').querySelector('p');
             if (timerContainerText) timerContainerText.innerHTML = "Deleting from Cloud... <span class='loader border-rose-500 border-top-transparent w-4 h-4 inline-block ml-2'></span>";
 
             try {
-                // Remove the specific date's node entirely from this document
                 await docRef.update({
                     [`records.${dateStr}`]: firebase.firestore.FieldValue.delete()
                 });
-
-                // Clear from local memory to update UI instantly
-                if (currentMonthDoc && currentMonthDoc[dateStr]) {
-                    delete currentMonthDoc[dateStr];
-                }
-
+                await db.collection("attendance_edit_requests").doc(reqId).update({ status: "APPROVED_AND_UNMARKED", approvedAt: Date.now() });
+                
                 closeUnmarkModal();
-                alert("✅ Attendance successfully unmarked.");
-                loadDailyAttendance();
+                alert("✅ Attendance successfully unmarked by Admin.");
+                loadAttendanceEditRequests();
             } catch(e) {
                 console.error(e);
-                alert("Failed to unmark attendance. Check your network.");
+                alert("Failed to unmark attendance.");
                 closeUnmarkModal();
             }
         }
@@ -4672,11 +4689,15 @@ schedule.forEach(slot => {
                         if (nameKey) tName = tObj.details[nameKey];
                     }
 
+     const actionButtons = data.requestType === 'UNMARK' 
+                        ? `<button onclick="adminInitiateUnmark('${data.id}', '${data.date}', '${String(data.className).replace(/'/g, "\\'")}', '${String(data.section).replace(/'/g, "\\'")}', '${String(data.subject).replace(/'/g, "\\'")}')" class="flex-1 sm:flex-none bg-rose-600 text-white hover:bg-rose-500 px-4 py-2.5 rounded-lg font-black text-xs uppercase tracking-widest shadow-md transition-colors">Approve & Unmark</button>`
+                        : `<button onclick="approveEditRequest('${data.id}')" class="flex-1 sm:flex-none bg-emerald-600 text-white hover:bg-emerald-500 px-4 py-2.5 rounded-lg font-black text-xs uppercase tracking-widest shadow-md transition-colors">Approve Unlock</button>`;
+
                     html += `
                     <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                         <div>
                             <div class="flex items-center gap-2 mb-1">
-                                <span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest">Pending Request</span>
+                                <span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest">${data.requestType === 'UNMARK' ? 'Unmark Request' : 'Pending Request'}</span>
                                 <span class="text-[10px] font-bold text-slate-400">${reqDate}</span>
                             </div>
                             <h4 class="font-black text-slate-800 text-sm uppercase">${data.className} | Sec ${data.section} <span class="text-purple-600">(${data.subject})</span></h4>
@@ -4689,7 +4710,7 @@ schedule.forEach(slot => {
                         </div>
                         <div class="flex gap-2 w-full sm:w-auto shrink-0 mt-2 sm:mt-0">
                             <button onclick="rejectEditRequest('${data.id}')" class="flex-1 sm:flex-none bg-white text-rose-600 hover:bg-rose-50 px-4 py-2.5 rounded-lg font-black text-xs uppercase tracking-widest border border-rose-200 shadow-sm transition-colors">Reject</button>
-                            <button onclick="approveEditRequest('${data.id}')" class="flex-1 sm:flex-none bg-emerald-600 text-white hover:bg-emerald-500 px-4 py-2.5 rounded-lg font-black text-xs uppercase tracking-widest shadow-md transition-colors">Approve Unlock</button>
+                            ${actionButtons}
                         </div>
                     </div>`;
                 });
