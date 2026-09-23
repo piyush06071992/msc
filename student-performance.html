@@ -599,27 +599,46 @@
         }
 
         // --- PAST RESULTS & SCORECARDS ---
-        async function fetchPastExams() {
+ async function fetchPastExams() {
             const listCont = document.getElementById('past-exams-list');
             const offset = (new Date()).getTimezoneOffset() * 60000;
             const todayIso = (new Date(Date.now() - offset)).toISOString().split('T')[0];
 
             try {
-                // Fetch admin_paper_groups for this class (contains strictly "officially clubbed" exams)
-                const snap = await db.collection("admin_paper_groups")
-                    .where("className", "==", activeStudent.className)
-                    .get();
+                // Fetch from both admin_paper_groups and standard exam_schedules to ensure all past exams appear
+                const [pgSnap, schSnap] = await Promise.all([
+                    db.collection("admin_paper_groups").get(),
+                    getCollection("exam_schedules").where("className", "==", activeStudent.className).where("section", "==", activeStudent.section).get()
+                ]);
 
-             let pastExams = [];
-                const targetSecKey = `${activeCenter}|${activeStudent.className}|${activeStudent.section}`;
+                let pastExamsMap = {};
+                const targetSecKey = `${activeCenter}|${activeStudent.className}|${activeStudent.section}`.toUpperCase();
 
-                snap.forEach(doc => {
+                // 1. Process Paper Groups
+                pgSnap.forEach(doc => {
                     const data = doc.data();
-                    // Filter: Must be past date, and must include student's section key (Branch|Class|Section)
-                    if (data.date < todayIso && data.sectionKeys && data.sectionKeys.includes(targetSecKey)) {
-                        pastExams.push({ id: doc.id, ...data });
+                    if (data.date < todayIso) {
+                        const matchesSec = (data.sectionKeys || []).some(k => k.trim().toUpperCase() === targetSecKey) ||
+                                           (String(data.className || '').toUpperCase() === activeStudent.className.toUpperCase() && 
+                                            (data.sections || []).some(s => String(s).toUpperCase() === activeStudent.section.toUpperCase()));
+                        if (matchesSec) {
+                            pastExamsMap[data.date + '_' + (data.subjects || []).sort().join('_')] = { id: doc.id, ...data };
+                        }
                     }
                 });
+
+                // 2. Process Standard Schedules (Fallback for un-mapped exams)
+                schSnap.forEach(doc => {
+                    const data = doc.data();
+                    if (data.date < todayIso) {
+                        const mapKey = data.date + '_' + (data.subjects || []).sort().join('_');
+                        if (!pastExamsMap[mapKey]) {
+                            pastExamsMap[mapKey] = { id: doc.id, ...data, examType: data.type || 'EXAM' };
+                        }
+                    }
+                });
+
+                let pastExams = Object.values(pastExamsMap);
 
                 if (pastExams.length === 0) {
                     listCont.innerHTML = `<div class="col-span-full text-center py-10"><p class="text-slate-400 font-bold uppercase tracking-widest text-xs">No evaluated past exams found.</p></div>`;
@@ -642,7 +661,7 @@
                                 </div>
                                 <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50 px-2 py-1 rounded border border-slate-100">${prettyDate}</span>
                             </div>
-                            <button onclick="generateStudentScorecard('${exam.date}', '${exam.groupKey}')" class="w-full bg-slate-900 hover:bg-slate-800 text-white py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-colors shadow-sm flex items-center justify-center gap-2">
+                            <button onclick="generateStudentScorecard('${exam.date}', '${exam.id}')" class="w-full bg-slate-900 hover:bg-slate-800 text-white py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-colors shadow-sm flex items-center justify-center gap-2">
                                 📊 View Scorecard
                             </button>
                         </div>
