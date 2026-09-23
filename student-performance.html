@@ -7,6 +7,8 @@
     <script src="tailwind-engine.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <!-- Chart.js for Dynamic Performance Graph -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
@@ -51,7 +53,21 @@
 
     <main class="max-w-5xl mx-auto p-4 sm:p-8 mt-4 space-y-8 relative z-10">
         
-        <!-- UPCOMING EXAMS NOTIFICATION BUTTON -->
+        <!-- 1. DYNAMIC PERFORMANCE GRAPH & DASHBOARD -->
+        <div class="glass-card p-6 sm:p-8 rounded-[2.5rem]">
+            <div class="flex items-center gap-4 mb-6 border-b border-slate-200 pb-4">
+                <span class="text-3xl sm:text-4xl bg-indigo-50 p-3 sm:p-4 rounded-2xl border border-indigo-200">📈</span>
+                <div>
+                    <h2 class="text-xl sm:text-2xl font-black text-slate-900 uppercase tracking-tight">Performance Trend Dashboard</h2>
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Exam-wise & subject-wise growth trajectory</p>
+                </div>
+            </div>
+            <div id="performance-chart-container" class="relative min-h-[320px] sm:min-h-[380px] flex items-center justify-center bg-slate-50/50 p-4 rounded-2xl border border-slate-100">
+                <span class="loader border-t-indigo-600"></span>
+            </div>
+        </div>
+
+        <!-- 2. UPCOMING EXAMS SECTION -->
         <div class="w-full flex justify-center relative z-20">
             <button id="exam-btn" onclick="toggleExamView()" class="relative group bg-white border-2 border-slate-200 hover:border-indigo-400 p-6 rounded-[2rem] shadow-lg hover:shadow-2xl hover:-translate-y-1 transition-all flex items-center gap-5 w-full sm:w-auto min-w-[300px]">
                 <div class="bg-indigo-50 text-indigo-600 w-16 h-16 rounded-2xl flex items-center justify-center text-3xl shadow-inner group-hover:scale-110 transition-transform">
@@ -59,7 +75,7 @@
                 </div>
                 <div class="text-left flex-1">
                     <h3 class="font-black text-slate-800 text-xl uppercase tracking-tighter">Upcoming Exams</h3>
-                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Check your schedule & syllabus</p>
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Check your schedule, admit card & syllabus</p>
                 </div>
                 <div id="exam-count-badge" class="absolute -top-3 -right-3 bg-rose-500 text-white w-8 h-8 flex items-center justify-center rounded-full font-black text-sm shadow-[0_0_15px_rgba(225,29,72,0.5)] border-2 border-white hidden transition-all">
                     0
@@ -82,13 +98,13 @@
             </div>
         </div>
 
-        <!-- PERFORMANCE METRICS & PAST EXAMS -->
+        <!-- 3. PAST EXAM PERFORMANCE SECTION -->
         <div class="glass-card p-6 sm:p-8 rounded-[2.5rem] bg-white/80">
             <div class="flex items-center gap-4 mb-6 border-b border-slate-200 pb-4">
-                <span class="text-3xl sm:text-4xl bg-indigo-50 p-3 sm:p-4 rounded-2xl border border-indigo-200">📈</span>
+                <span class="text-3xl sm:text-4xl bg-indigo-50 p-3 sm:p-4 rounded-2xl border border-indigo-200">🏆</span>
                 <div>
-                    <h2 class="text-xl sm:text-2xl font-black text-slate-900 uppercase tracking-tight">Past Results & Scorecards</h2>
-                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">View your performance in officially clubbed exams</p>
+                    <h2 class="text-xl sm:text-2xl font-black text-slate-900 uppercase tracking-tight">Past Exam Performance</h2>
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-1">Review your scorecards, rankings, and section leaderboards</p>
                 </div>
             </div>
             <div id="past-exams-list" class="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -259,6 +275,7 @@
 
         let activeStudent = null;
         let activeCenter = "GHUMARWIN";
+        let activeChartInstance = null;
 
         window.onload = async () => {
             const isAuth = sessionStorage.getItem('minervaStudentAuth');
@@ -277,6 +294,7 @@
             applyBranchTheme();
             await fetchUpcomingExams();
             await fetchPastExams();
+            await loadStudentPerformanceDashboard();
         };
 
         function applyBranchTheme() {
@@ -289,6 +307,149 @@
 
         function getCollection(name) {
             return activeCenter === "GHUMARWIN" ? db.collection(name) : db.collection(`${activeCenter.toLowerCase()}_${name}`);
+        }
+
+        // --- DYNAMIC PERFORMANCE GRAPH DASHBOARD ---
+        async function loadStudentPerformanceDashboard() {
+            const chartCont = document.getElementById('performance-chart-container');
+            if (!chartCont) return;
+
+            try {
+                const roll = String(activeStudent.rollNo || '').trim().toUpperCase();
+                const subSnap = await db.collection("omr_submissions").where("rollNo", "==", roll).get();
+                
+                if (subSnap.empty) {
+                    chartCont.innerHTML = '<p class="text-center font-bold text-slate-400 py-12 text-xs uppercase tracking-widest">No historical exam performance data recorded yet.</p>';
+                    return;
+                }
+
+                let resultsData = [];
+                let subjectSet = new Set();
+
+                const promises = subSnap.docs.map(async (doc) => {
+                    const subData = doc.data();
+                    const gId = subData.groupId;
+                    const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+                    const [gDoc, kDoc] = await Promise.all([
+                        db.collection(prefix + "exam_schedules").doc(gId).get(),
+                        db.collection("exam_answer_keys").doc(gId).get()
+                    ]);
+
+                    if (gDoc.exists && kDoc.exists) {
+                        const date = gDoc.data().date;
+                        const kData = kDoc.data();
+                        const structure = kData.structure || [];
+                        let totalMax = 0;
+                        let totalObtained = 0;
+                        let subScores = {};
+
+                        if (subData.isDirectImport) {
+                            const scores = subData.directScores || {};
+                            const directMax = kData.directMaxMarks || {};
+                            Object.keys(scores).forEach(sub => {
+                                const sMax = directMax[sub] || 100;
+                                totalMax += sMax;
+                                totalObtained += scores[sub];
+                                subScores[sub] = (scores[sub] / sMax) * 100;
+                                subjectSet.add(sub);
+                            });
+                        } else {
+                            const answers = kData.answers || {};
+                            const bonuses = kData.bonusConfig || {};
+                            const responses = subData.responses || {};
+
+                            structure.forEach(sec => {
+                                let secScore = 0; let secMax = 0;
+                                for (let q = sec.start; q <= sec.end; q++) {
+                                    const pos = sec.correctMarks !== undefined ? sec.correctMarks : 4;
+                                    const neg = sec.wrongMarks !== undefined ? sec.wrongMarks : -1;
+                                    const unatt = sec.unattemptedMarks !== undefined ? sec.unattemptedMarks : 0;
+                                    secMax += pos;
+
+                                    const isAttempted = (responses[q] !== undefined && responses[q] !== "");
+                                    const isCorrect = isAttempted && (String(responses[q]).trim() === String(answers[q]).trim());
+                                    const bRule = bonuses[q] || 'NONE';
+
+                                    if (bRule === 'ALL') secScore += pos;
+                                    else if (bRule === 'ATTEMPTED') { if (isAttempted) secScore += pos; else secScore += unatt; }
+                                    else { if (!isAttempted) secScore += unatt; else if (isCorrect) secScore += pos; else secScore += neg; }
+                                }
+                                totalMax += secMax;
+                                totalObtained += secScore;
+                                if (secMax > 0) {
+                                    subScores[sec.subject] = (secScore / secMax) * 100;
+                                    subjectSet.add(sec.subject);
+                                }
+                            });
+                        }
+
+                        if (totalMax > 0) {
+                            resultsData.push({
+                                date: date,
+                                overall: (totalObtained / totalMax) * 100,
+                                subScores: subScores
+                            });
+                        }
+                    }
+                });
+
+                await Promise.all(promises);
+
+                if (resultsData.length === 0) {
+                    chartCont.innerHTML = '<p class="text-center font-bold text-slate-400 py-12 text-xs uppercase tracking-widest">No evaluated performance metrics available.</p>';
+                    return;
+                }
+
+                resultsData.sort((a, b) => a.date.localeCompare(b.date));
+                const labels = resultsData.map(d => new Date(d.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }));
+                const colors = ['#f43f5e', '#10b981', '#f59e0b', '#06b6d4', '#8b5cf6'];
+                
+                let datasets = [{
+                    label: 'Overall Performance (%)',
+                    data: resultsData.map(d => d.overall.toFixed(1)),
+                    borderColor: '#4f46e5',
+                    backgroundColor: 'rgba(79, 70, 229, 0.1)',
+                    borderWidth: 4,
+                    fill: true,
+                    tension: 0.3,
+                    order: 1
+                }];
+
+                let cIdx = 0;
+                Array.from(subjectSet).sort().forEach(sub => {
+                    datasets.push({
+                        label: `${sub} (%)`,
+                        data: resultsData.map(d => d.subScores[sub] !== undefined ? d.subScores[sub].toFixed(1) : null),
+                        borderColor: colors[cIdx % colors.length],
+                        borderWidth: 2,
+                        borderDash: [5, 5],
+                        fill: false,
+                        tension: 0.3,
+                        spanGaps: true,
+                        order: 2
+                    });
+                    cIdx++;
+                });
+
+                chartCont.innerHTML = '<canvas id="studentPerformanceChart" style="max-height: 350px;"></canvas>';
+                const ctx = document.getElementById('studentPerformanceChart').getContext('2d');
+                if (activeChartInstance) activeChartInstance.destroy();
+
+                activeChartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: { labels: labels, datasets: datasets },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: { tooltip: { mode: 'index', intersect: false } },
+                        scales: { y: { min: 0, max: 100, title: { display: true, text: 'Percentage Score (%)' } } }
+                    }
+                });
+
+            } catch (e) {
+                console.error("Trend Graph Error:", e);
+                chartCont.innerHTML = `<p class="text-center font-bold text-rose-500 py-12 text-xs uppercase">Error loading trend graph: ${e.message}</p>`;
+            }
         }
 
         // --- UPCOMING EXAMS & ADMIT CARD ---
@@ -613,7 +774,7 @@
             }, 500);
         }
 
-        // --- PAST RESULTS & SCORECARDS ---
+        // --- PAST EXAMS & SCORECARDS ---
         async function fetchPastExams() {
             const listCont = document.getElementById('past-exams-list');
             const offset = (new Date()).getTimezoneOffset() * 60000;
@@ -720,9 +881,7 @@
                     groupMetaMap[doc.id] = doc.data();
                 });
                 
-                if (adminGroupId) {
-                    validGroupIds.push(adminGroupId);
-                }
+                if (adminGroupId) validGroupIds.push(adminGroupId);
 
                 if (validGroupIds.length === 0) {
                     modal.classList.replace('flex', 'hidden');
