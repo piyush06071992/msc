@@ -369,10 +369,12 @@
                     </div>
                 </div>
                 
-                <div class="flex flex-col sm:flex-row gap-3 mb-6 items-center">
-                    <div class="flex-1 w-full bg-slate-50 p-4 rounded-2xl border border-slate-200">
-                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">6. Search Student</label>
-                        <input type="text" id="res-search-input" onkeyup="filterResultsTable()" placeholder="Roll No or Name..." class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none placeholder:text-slate-400">
+               <div class="flex flex-col sm:flex-row gap-3 mb-6 items-center">
+                    <div class="flex-1 w-full bg-slate-50 p-4 rounded-2xl border border-slate-200 relative">
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">6. Search Student (Instant Dossier)</label>
+                        <input type="text" id="res-search-input" onkeyup="handleStudentDossierSearch()" placeholder="Type Roll No or Name for Full Dossier..." class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none placeholder:text-slate-400 uppercase">
+                        <!-- Student Autocomplete Search Results Dropdown -->
+                        <div id="student-search-dropdown" class="absolute top-full left-0 w-full bg-white border border-slate-200 shadow-2xl rounded-xl mt-1 hidden z-50 max-h-72 overflow-y-auto custom-scroll divide-y divide-slate-100"></div>
                     </div>
                     <div class="w-full sm:w-64 bg-slate-50 p-4 rounded-2xl border border-slate-200">
                         <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">7. Sort By</label>
@@ -717,6 +719,31 @@
                 <div id="exam-auth-list-container" class="space-y-3">
                     <div class="text-center py-4"><span class="loader border-t-purple-600"></span></div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+  <!-- COMPREHENSIVE STUDENT DOSSIER MODAL -->
+    <div id="comprehensive-student-modal" class="fixed inset-0 bg-slate-900/95 backdrop-blur-md z-[700] hidden items-center justify-center p-2 sm:p-4 no-print">
+        <div class="bg-white rounded-[2.5rem] w-full max-w-5xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden border border-slate-700">
+            <div class="p-6 bg-gradient-to-r from-indigo-900 via-blue-900 to-slate-900 text-white flex justify-between items-center shrink-0 shadow-lg">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 bg-white/10 rounded-2xl flex items-center justify-center text-2xl border border-white/20">🎓</div>
+                    <div>
+                        <h3 id="comp-stu-name" class="font-black text-xl sm:text-2xl uppercase tracking-tighter text-amber-400">Student Name</h3>
+                        <p id="comp-stu-meta" class="text-[10px] font-bold text-indigo-200 uppercase tracking-widest mt-0.5">Roll No | Class | Section</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    <button onclick="exportComprehensiveStudentExcel()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-md transition-all flex items-center gap-2 border border-emerald-500">
+                        <span>📊</span> Download Excel
+                    </button>
+                    <button onclick="document.getElementById('comprehensive-student-modal').classList.replace('flex', 'hidden')" class="w-10 h-10 bg-white/10 hover:bg-rose-500 rounded-full font-black text-xl transition-colors flex items-center justify-center border border-white/20">✕</button>
+                </div>
+            </div>
+            
+            <div class="p-6 bg-slate-50 flex-1 overflow-y-auto custom-scroll space-y-6" id="comp-student-body">
+                <div class="text-center py-20"><span class="loader border-t-indigo-600"></span><p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-2">Loading Comprehensive Student Dossier...</p></div>
             </div>
         </div>
     </div>
@@ -4470,6 +4497,327 @@ const promises = subSnap.docs.map(async (doc) => {
                     <button onclick="revokeExamAuth('${s.id}')" class="bg-rose-50 text-rose-600 px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest border border-rose-200 shadow-sm hover:bg-rose-600 hover:text-white transition-colors">Revoke</button>
                 </div>`; 
             }).join('');
+        }
+        // --- COMPREHENSIVE STUDENT DOSSIER & MULTICOLOURED EXCEL ENGINE ---
+        let activeDossierData = null;
+
+        function handleStudentDossierSearch() {
+            const query = document.getElementById('res-search-input').value.toLowerCase().trim();
+            const dropdown = document.getElementById('student-search-dropdown');
+            
+            filterResultsTable();
+
+            if (query.length < 2) {
+                dropdown.classList.add('hidden');
+                return;
+            }
+
+            const matches = globalStudentsData.filter(s => 
+                (s.name || "").toLowerCase().includes(query) || 
+                (s.rollNo || "").toLowerCase().includes(query)
+            ).slice(0, 15);
+
+            if (matches.length === 0) {
+                dropdown.innerHTML = `<div class="p-3 text-center text-xs font-bold text-slate-400 uppercase">No students found.</div>`;
+            } else {
+                dropdown.innerHTML = matches.map(s => `
+                    <div onclick="openComprehensiveStudentReport('${s.rollNo}', '${s.actualBranch || activeCenter}')" class="p-3 hover:bg-indigo-50 cursor-pointer transition-colors flex justify-between items-center group">
+                        <div>
+                            <div class="font-black text-xs text-slate-800 uppercase group-hover:text-indigo-700">${s.name} <span class="text-[10px] text-indigo-500 font-bold ml-1">#${s.rollNo || '—'}</span></div>
+                            <div class="text-[9px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">Class ${s.className} | Sec ${s.section} • ${s.actualBranch || activeCenter}</div>
+                        </div>
+                        <span class="text-indigo-500 font-black text-xs opacity-0 group-hover:opacity-100 transition-opacity">View Dossier ➔</span>
+                    </div>
+                `).join('');
+            }
+            dropdown.classList.remove('hidden');
+        }
+
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('#res-search-input') && !e.target.closest('#student-search-dropdown')) {
+                const dd = document.getElementById('student-search-dropdown');
+                if (dd) dd.classList.add('hidden');
+            }
+        });
+
+        async function openComprehensiveStudentReport(rollNo, branch) {
+            const dropdown = document.getElementById('student-search-dropdown');
+            if (dropdown) dropdown.classList.add('hidden');
+
+            const modal = document.getElementById('comprehensive-student-modal');
+            const body = document.getElementById('comp-student-body');
+            modal.classList.replace('hidden', 'flex');
+            body.innerHTML = `<div class="text-center py-20"><span class="loader border-t-indigo-600"></span><p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-2">Gathering all exam records across UT, OT, & Terminals...</p></div>`;
+
+            try {
+                const prefix = branch === "GHUMARWIN" ? "" : "dharamshala_";
+                const stu = globalStudentsData.find(s => String(s.rollNo).toUpperCase() === String(rollNo).toUpperCase() && (s.actualBranch || activeCenter) === branch);
+                if (!stu) throw new Error("Student record not found.");
+
+                const subSnap = await db.collection("omr_submissions").where("rollNo", "==", String(rollNo).toUpperCase()).get();
+                
+                if (subSnap.empty) {
+                    body.innerHTML = `
+                        <div class="text-center py-20 bg-white rounded-3xl border-2 border-dashed border-slate-200">
+                            <span class="text-4xl mb-2 block">🏖️</span>
+                            <h4 class="font-black text-slate-700 text-sm uppercase">No Exam Submissions Found</h4>
+                            <p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Student #${rollNo} (${stu.name}) has no evaluated records yet.</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                let examRecords = [];
+                let subjectPerformanceMap = {};
+
+                for (const doc of subSnap.docs) {
+                    const subData = doc.data();
+                    const gId = subData.groupId;
+
+                    const [gDoc, kDoc] = await Promise.all([
+                        db.collection(prefix + "exam_schedules").doc(gId).get().catch(() => null),
+                        db.collection("exam_answer_keys").doc(gId).get().catch(() => null)
+                    ]);
+
+                    let examDate = "Unknown Date";
+                    let examType = "EXAM";
+                    let examTitle = "Assessment";
+                    let structure = [];
+
+                    if (gDoc && gDoc.exists) {
+                        const gd = gDoc.data();
+                        examDate = gd.date || "Unknown Date";
+                        examType = gd.type || "EXAM";
+                        examTitle = gd.title || gd.tag || `${gd.className} Assessment`;
+                    }
+
+                    let kData = kDoc && kDoc.exists ? kDoc.data() : { answers: {}, structure: [], bonusConfig: {}, directMaxMarks: {} };
+                    structure = kData.structure || [];
+                    const directMax = kData.directMaxMarks || {};
+                    const answers = kData.answers || {};
+                    const bonuses = kData.bonusConfig || {};
+                    const responses = subData.responses || {};
+                    const directScores = subData.directScores || {};
+                    const isDirect = subData.isDirectImport === true;
+
+                    if (structure.length === 0 && Object.keys(directMax).length > 0) {
+                        structure = Object.keys(directMax).map(sub => ({ subject: sub, isDirect: true, maxMarks: directMax[sub] }));
+                    }
+
+                    let examObt = 0;
+                    let examMax = 0;
+                    let subjectBreakdown = {};
+
+                    if (isDirect) {
+                        Object.entries(directScores).forEach(([sub, score]) => {
+                            const upperSub = sub.toUpperCase();
+                            const max = directMax[sub] || 100;
+                            examObt += Number(score);
+                            examMax += Number(max);
+                            subjectBreakdown[upperSub] = { obt: Number(score), max: Number(max) };
+
+                            if (!subjectPerformanceMap[upperSub]) subjectPerformanceMap[upperSub] = { obt: 0, max: 0, exams: 0 };
+                            subjectPerformanceMap[upperSub].obt += Number(score);
+                            subjectPerformanceMap[upperSub].max += Number(max);
+                            subjectPerformanceMap[upperSub].exams++;
+                        });
+                    } else {
+                        structure.forEach(st => {
+                            const upperSub = (st.subject || "UNKNOWN").toUpperCase();
+                            let secScore = 0;
+                            let secMax = 0;
+
+                            for (let q = st.start; q <= st.end; q++) {
+                                const pos = st.correctMarks !== undefined ? st.correctMarks : 4;
+                                const neg = st.wrongMarks !== undefined ? st.wrongMarks : -1;
+                                const unatt = st.unattemptedMarks !== undefined ? st.unattemptedMarks : 0;
+                                secMax += pos;
+
+                                const isAttempted = (responses[q] !== undefined && responses[q] !== null && String(responses[q]).trim() !== "");
+                                const isCorrect = isAttempted && (String(responses[q]).trim() === String(answers[q]).trim());
+                                const bRule = bonuses[q] || 'NONE';
+
+                                if (bRule === 'ALL') secScore += pos;
+                                else if (bRule === 'ATTEMPTED') { if (isAttempted) secScore += pos; else secScore += unatt; }
+                                else { if (!isAttempted) secScore += unatt; else if (isCorrect) secScore += pos; else secScore += neg; }
+                            }
+
+                            examObt += secScore;
+                            examMax += secMax;
+                            subjectBreakdown[upperSub] = { obt: secScore, max: secMax };
+
+                            if (!subjectPerformanceMap[upperSub]) subjectPerformanceMap[upperSub] = { obt: 0, max: 0, exams: 0 };
+                            subjectPerformanceMap[upperSub].obt += secScore;
+                            subjectPerformanceMap[upperSub].max += secMax;
+                            subjectPerformanceMap[upperSub].exams++;
+                        });
+                    }
+
+                    const pct = examMax > 0 ? ((examObt / examMax) * 100).toFixed(1) : 0;
+
+                    examRecords.push({
+                        date: examDate,
+                        type: examType,
+                        title: examTitle,
+                        obt: examObt,
+                        max: examMax,
+                        percentage: pct,
+                        subjects: subjectBreakdown
+                    });
+                }
+
+                examRecords.sort((a, b) => a.date.localeCompare(b.date));
+
+                const totalExamsAttended = examRecords.length;
+                const grandTotalObt = examRecords.reduce((sum, r) => sum + r.obt, 0);
+                const grandTotalMax = examRecords.reduce((sum, r) => sum + r.max, 0);
+                const overallPercentage = grandTotalMax > 0 ? ((grandTotalObt / grandTotalMax) * 100).toFixed(1) : 0;
+
+                activeDossierData = { stu, examRecords, subjectPerformanceMap, totalExamsAttended, grandTotalObt, grandTotalMax, overallPercentage };
+
+                let subjectsCardsHtml = Object.entries(subjectPerformanceMap).map(([sub, data]) => {
+                    const subPct = data.max > 0 ? ((data.obt / data.max) * 100).toFixed(1) : 0;
+                    const color = subPct >= 75 ? 'text-emerald-600 bg-emerald-50 border-emerald-200' : (subPct >= 50 ? 'text-amber-600 bg-amber-50 border-amber-200' : 'text-rose-600 bg-rose-50 border-rose-200');
+                    return `
+                        <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+                            <div>
+                                <span class="text-[9px] font-black text-slate-400 uppercase tracking-widest block">${sub}</span>
+                                <span class="text-sm font-black text-slate-800 uppercase mt-0.5 block">${data.obt} / ${data.max} Marks</span>
+                            </div>
+                            <div class="px-3 py-1.5 rounded-xl border font-black text-xs ${color}">${subPct}%</div>
+                        </div>
+                    `;
+                }).join('');
+
+                let tableRowsHtml = examRecords.map((ex, idx) => {
+                    const datePretty = new Date(ex.date + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+                    const subsSummary = Object.entries(ex.subjects).map(([s, d]) => `${s}: ${d.obt}/${d.max}`).join(' | ');
+                    let typeBadge = "bg-slate-100 text-slate-700";
+                    if (ex.type === 'UT') typeBadge = "bg-blue-100 text-blue-800";
+                    else if (ex.type === 'OT') typeBadge = "bg-amber-100 text-amber-800";
+                    else if (['TERMINAL', 'PREBOARD', 'BOARD'].some(t => ex.type.toUpperCase().includes(t))) typeBadge = "bg-rose-100 text-rose-800";
+
+                    return `
+                        <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100">
+                            <td class="p-3 text-center font-mono font-bold text-slate-400">${idx + 1}</td>
+                            <td class="p-3 font-bold text-slate-700">${datePretty}</td>
+                            <td class="p-3"><span class="px-2 py-0.5 rounded text-[9px] font-black uppercase ${typeBadge}">${ex.type}</span></td>
+                            <td class="p-3 font-black text-slate-900 uppercase">${ex.title}</td>
+                            <td class="p-3 text-xs text-slate-600">${subsSummary}</td>
+                            <td class="p-3 text-center font-mono font-black text-indigo-700">${ex.obt} / ${ex.max}</td>
+                            <td class="p-3 text-center font-mono font-black text-emerald-700">${ex.percentage}%</td>
+                        </tr>
+                    `;
+                }).join('');
+
+                body.innerHTML = `
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                        <div class="bg-indigo-50 border border-indigo-200 p-4 rounded-2xl text-center shadow-sm">
+                            <span class="text-[9px] font-black uppercase tracking-widest text-indigo-700 block">Exams Attended</span>
+                            <span class="text-2xl font-black text-indigo-900 mt-1 block">${totalExamsAttended}</span>
+                        </div>
+                        <div class="bg-blue-50 border border-blue-200 p-4 rounded-2xl text-center shadow-sm">
+                            <span class="text-[9px] font-black uppercase tracking-widest text-blue-700 block">Total Scored</span>
+                            <span class="text-2xl font-black text-blue-900 mt-1 block">${grandTotalObt} / ${grandTotalMax}</span>
+                        </div>
+                        <div class="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl text-center shadow-sm">
+                            <span class="text-[9px] font-black uppercase tracking-widest text-emerald-700 block">Overall %age</span>
+                            <span class="text-2xl font-black text-emerald-900 mt-1 block">${overallPercentage}%</span>
+                        </div>
+                        <div class="bg-purple-50 border border-purple-200 p-4 rounded-2xl text-center shadow-sm">
+                            <span class="text-[9px] font-black uppercase tracking-widest text-purple-700 block">Branch</span>
+                            <span class="text-xl font-black text-purple-900 mt-1 block uppercase">${branch}</span>
+                        </div>
+                    </div>
+
+                    <div>
+                        <h4 class="font-black text-slate-800 uppercase tracking-widest text-xs mb-3">Subject Cumulative Performance</h4>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                            ${subjectsCardsHtml}
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                        <div class="p-4 bg-slate-100 border-b border-slate-200 flex justify-between items-center">
+                            <h4 class="font-black text-slate-700 uppercase tracking-widest text-xs">Complete Exam History Log</h4>
+                            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">${examRecords.length} Records</span>
+                        </div>
+                        <div class="overflow-x-auto custom-scroll max-h-80">
+                            <table class="w-full text-left border-collapse text-xs">
+                                <thead class="bg-slate-50 text-slate-500 uppercase font-black sticky top-0 border-b border-slate-200 text-[9px]">
+                                    <tr>
+                                        <th class="p-3 text-center w-10">#</th>
+                                        <th class="p-3">Date</th>
+                                        <th class="p-3">Type</th>
+                                        <th class="p-3">Exam Title</th>
+                                        <th class="p-3">Subject Breakdown</th>
+                                        <th class="p-3 text-center">Score</th>
+                                        <th class="p-3 text-center">%age</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100 font-bold text-slate-700">
+                                    ${tableRowsHtml}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
+
+                document.getElementById('comp-stu-name').innerText = stu.name;
+                document.getElementById('comp-stu-meta').innerText = `Roll #${stu.rollNo || '—'} | Class ${stu.className} | Sec ${stu.section}`;
+
+            } catch (e) {
+                console.error(e);
+                body.innerHTML = `<div class="text-center py-20 text-rose-500 font-bold uppercase text-xs">Error generating dossier: ${e.message}</div>`;
+            }
+        }
+
+        function exportComprehensiveStudentExcel() {
+            if (!activeDossierData) return;
+            const { stu, examRecords, totalExamsAttended, grandTotalObt, grandTotalMax, overallPercentage } = activeDossierData;
+
+            let tableHtml = `
+                <table border="1">
+                    <tr><th colspan="7" class="header-main">STUDENT COMPREHENSIVE PERFORMANCE DOSSIER - MINERVA STUDY CIRCLE</th></tr>
+                    <tr><th colspan="4" class="header-sub">Student Name: ${stu.name}</th><th colspan="3" class="header-sub">Roll No: #${stu.rollNo || '—'}</th></tr>
+                    <tr><th colspan="4" class="header-sub">Class & Section: Class ${stu.className} - Sec ${stu.section}</th><th colspan="3" class="header-sub">Center: ${stu.actualBranch || activeCenter}</th></tr>
+                    <tr><th colspan="4" class="header-sub">Total Exams Attended: ${totalExamsAttended}</th><th colspan="3" class="header-sub">Overall Percentage: ${overallPercentage}%</th></tr>
+                    <tr>
+                        <th class="bg-blue">S.No.</th>
+                        <th class="bg-blue">Date</th>
+                        <th class="bg-blue">Exam Type</th>
+                        <th class="bg-blue">Exam Title</th>
+                        <th class="bg-blue">Subject-wise Scores</th>
+                        <th class="bg-amber">Total Obtained / Max</th>
+                        <th class="bg-green">Percentage (%)</th>
+                    </tr>
+            `;
+
+            examRecords.forEach((ex, idx) => {
+                const subsStr = Object.entries(ex.subjects).map(([s, d]) => `${s}: ${d.obt}/${d.max}`).join(' | ');
+                tableHtml += `
+                    <tr>
+                        <td>${idx + 1}</td>
+                        <td>${ex.date}</td>
+                        <td><b>${ex.type}</b></td>
+                        <td style="text-align: left; font-weight: bold;">${ex.title}</td>
+                        <td style="text-align: left;">${subsStr}</td>
+                        <td class="bg-amber" style='mso-number-format:"\\@";'>${ex.obt} / ${ex.max}</td>
+                        <td class="bg-green"><b>${ex.percentage}%</b></td>
+                    </tr>
+                `;
+            });
+
+            tableHtml += `
+                <tr>
+                    <td colspan="5" class="header-sub" style="text-align: right;">GRAND CUMULATIVE TOTAL:</td>
+                    <td class="bg-amber" style='mso-number-format:"\\@"; font-weight: bold;'>${grandTotalObt} / ${grandTotalMax}</td>
+                    <td class="bg-green" style="font-weight: bold;">${overallPercentage}%</td>
+                </tr>
+                </table>
+            `;
+
+            exportHTMLTableToBeautifulExcel(tableHtml, `Student_Dossier_${stu.name.replace(/\s+/g, '_')}_${stu.rollNo || 'Record'}.xls`);
         }
     </script>
 </body>
