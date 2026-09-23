@@ -996,7 +996,7 @@ listenForUnconfiguredExams();
             }
         }
 
-        async function listenForGlobalClashes() {
+    async function listenForGlobalClashes() {
             if (authStatus !== 'true') return;
             const center = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
@@ -1004,12 +1004,53 @@ listenForUnconfiguredExams();
             
             let liveSchedule = [];
             let historySchedules = [];
+            let holidaysData = []; // NEW: Cache holidays
             
+            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+            function isBlockSuspendedByHoliday(targetDateIso, className, sectionName, sMins, eMins) {
+                if (!targetDateIso || !holidaysData || holidaysData.length === 0) return false;
+                const [cy, cm, cd] = targetDateIso.split('-').map(Number);
+                const ctxDate = new Date(cy, cm - 1, cd);
+                const targetCls = `${norm(className)}|${norm(sectionName)}`;
+                
+                for (let h of holidaysData) {
+                    if (h.suspendClasses === false || !h.startDate) continue;
+                    const [sy, sm_h, sd] = h.startDate.split('-').map(Number);
+                    const hStart = new Date(sy, sm_h - 1, sd);
+                    const [ey, em_h, ed] = (h.endDate || h.startDate).split('-').map(Number);
+                    const hEnd = new Date(ey, em_h - 1, ed, 23, 59, 59);
+                    
+                    if (ctxDate >= hStart && ctxDate <= hEnd) {
+                        const matchesClass = (h.targetClasses || []).some(tc => {
+                            if (tc === 'ALL') return true;
+                            const parts = tc.split('|');
+                            const tcNorm = norm(parts[0]) + (parts[1] ? '|' + norm(parts[1]) : '');
+                            return tcNorm === targetCls || norm(parts[0]) === norm(className);
+                        });
+                        
+                        if (matchesClass) {
+                            if (h.isFullDay) return true;
+                            if (h.startTime && h.endTime && sMins > 0) {
+                                const [hsh, hsm] = h.startTime.split(':').map(Number);
+                                const [heh, hem] = h.endTime.split(':').map(Number);
+                                const hStartMins = hsh * 60 + hsm;
+                                const hEndMins = heh * 60 + hem;
+                                if (sMins < hEndMins && eMins > hStartMins) return true;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+
             const checkClashes = () => {
                 let clashMessages = new Set();
                 
-                const detectClashesInSchedule = (schedule, dateLabel) => {
+                const detectClashesInSchedule = (schedule, dateLabel, specificDateIso = null) => {
                     const teacherSlots = [];
+                    const evaluateDateIso = specificDateIso || todayIso;
+
                     schedule.forEach(slot => {
                         const s24 = slot.start24; const e24 = slot.end24;
                         const teacher = slot.teacherName || slot.teacher;
@@ -1022,6 +1063,9 @@ listenForUnconfiguredExams();
                         const [eh, em] = e24.split(':').map(Number);
                         const sMins = sh * 60 + sm;
                         const eMins = eh * 60 + em;
+
+                        // HOLIDAY CHECK: Skip if this specific block is suspended on this date
+                        if (isBlockSuspendedByHoliday(evaluateDateIso, slot.className, slot.section || slot.sectionName, sMins, eMins)) return;
                         
                         teacherSlots.push({
                             teacher,
@@ -1049,13 +1093,13 @@ listenForUnconfiguredExams();
                     }
                 };
 
-                detectClashesInSchedule(liveSchedule, "Live Master");
+              detectClashesInSchedule(liveSchedule, "Live Master", todayIso);
                 
                 historySchedules.forEach(h => {
                     if (h.date >= todayIso && h.schedule) {
                         const prettyDate = new Date(h.date).toLocaleDateString('en-GB', {day:'numeric', month:'short'});
                         const label = h.type === "FUTURE_MASTER" ? `Master (${prettyDate})` : `Override (${prettyDate})`;
-                        detectClashesInSchedule(h.schedule, label);
+                        detectClashesInSchedule(h.schedule, label, h.date);
                     }
                 });
                 
@@ -1080,6 +1124,11 @@ listenForUnconfiguredExams();
 
             db.collection(prefix + "timetable_history").where("date", ">=", todayIso).onSnapshot(snap => {
                 historySchedules = snap.docs.map(d => d.data());
+                checkClashes();
+            });
+
+            db.collection(prefix + "school_holidays").onSnapshot(snap => {
+                holidaysData = snap.docs.map(d => d.data());
                 checkClashes();
             });
         }
