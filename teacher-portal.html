@@ -175,6 +175,31 @@
             </div>
         </details>
 
+        <!-- MISSING GRADES BANNER -->
+        <details id="missing-grades-banner" class="hidden bg-fuchsia-600 text-white rounded-[2rem] shadow-2xl mb-6 border-2 border-fuchsia-400 relative overflow-hidden group mt-4">
+            <summary class="p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 cursor-pointer outline-none hover:bg-fuchsia-500 transition-colors relative z-10">
+                <div class="absolute top-0 right-0 w-32 h-32 bg-white rounded-bl-full opacity-10 pointer-events-none"></div>
+                <div class="flex items-center gap-4 w-full">
+                    <div class="bg-white/20 p-3 rounded-2xl shadow-inner animate-pulse shrink-0"><span class="text-3xl">📝</span></div>
+                    <div class="flex-1">
+                        <h3 class="font-black text-lg sm:text-xl uppercase tracking-widest text-fuchsia-50 leading-none">Missing Exam Marks</h3>
+                        <p class="text-[10px] sm:text-xs font-bold text-fuchsia-200 mt-1.5 uppercase tracking-widest"><span id="missing-grades-count" class="px-1 font-black text-white">0</span> Subjective exams are pending your evaluation.</p>
+                    </div>
+                </div>
+                <div class="shrink-0 relative z-10 w-full sm:w-auto">
+                    <span class="w-full sm:w-auto text-center bg-white text-fuchsia-600 px-6 py-3.5 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest shadow-lg transition-colors whitespace-nowrap border border-fuchsia-200 group-open:hidden block sm:inline-block">
+                        View List ▼
+                    </span>
+                    <span class="w-full sm:w-auto text-center bg-fuchsia-800 text-fuchsia-100 px-6 py-3.5 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest shadow-lg transition-colors whitespace-nowrap border border-fuchsia-700 hidden group-open:block sm:group-open:inline-block">
+                        Close ▲
+                    </span>
+                </div>
+            </summary>
+            <div class="p-5 bg-fuchsia-700/30 border-t border-fuchsia-500/50">
+                <div id="missing-grades-list" class="flex flex-col gap-3 max-h-[50vh] overflow-y-auto custom-scroll pr-2 w-full"></div>
+            </div>
+        </details>
+
 <!-- 🌟 LIVE SLIDING TICKER HUB 🌟 -->
         <div id="live-ticker-card" class="hidden sticky top-20 sm:top-24 z-30 bg-amber-100 border-2 border-amber-300 rounded-2xl p-4 shadow-lg flex items-center justify-between gap-4 my-4">
             <div class="flex items-center gap-3 min-w-0 flex-1">
@@ -489,9 +514,10 @@ document.getElementById('current-date').innerText = `Date: ${new Date().toLocale
             listenForPendingAdjustments(activeStaff);
             loadLeaveNoticeBoard();
 
-        // Run background scans immediately and concurrently to make alerts appear/disappear instantly
+   // Run background scans immediately and concurrently to make alerts appear/disappear instantly
             Promise.all([
                 checkMissingAttendanceTeacher(safeName),
+                checkMissingManualGradesTeacher(safeName),
                 checkLessonCompliance(safeName)
             ]).then(() => {
                 updateLiveTickerHub();
@@ -1016,6 +1042,140 @@ window.ackDuty = function(dutyId) {
 
                board.innerHTML = html;
             }, error => console.error("Notice board error:", error));
+        }
+
+async function checkMissingManualGradesTeacher(safeName) {
+            const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+            const center = activeStaff.center || "GHUMARWIN";
+            const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
+
+            const banner = document.getElementById('missing-grades-banner');
+            const listEl = document.getElementById('missing-grades-list');
+            if(!banner || !listEl) return;
+
+            try {
+                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+                // 1. Setup Validation Dates
+                const START_DATE = "2026-08-08";
+                const today = new Date();
+                const offset = today.getTimezoneOffset() * 60000;
+                const todayIso = new Date(today.getTime() - offset).toISOString().split('T')[0];
+
+                // 2. Fetch Exams past date but after START_DATE
+                const examsSnap = await db.collection(prefix + "exam_schedules")
+                    .where("date", ">=", START_DATE)
+                    .where("date", "<", todayIso)
+                    .get();
+
+                if (examsSnap.empty) {
+                    banner.classList.add('hidden');
+                    return;
+                }
+
+                // 3. Match exams to this teacher's subject footprint
+                const ttSnap = await db.collection(prefix + "timetable").where("teacherName", "==", safeName).get();
+                let myClasses = [];
+                ttSnap.docs.forEach(d => {
+                    const data = d.data();
+                    if(!myClasses.some(c => norm(c.c)===norm(data.className) && norm(c.s)===norm(data.section) && norm(c.sub)===norm(data.subject))) {
+                        myClasses.push({ c: data.className, s: data.section, sub: data.subject });
+                    }
+                });
+
+                if (myClasses.length === 0) return;
+
+                let pendingExams = [];
+                examsSnap.docs.forEach(doc => {
+                    const data = doc.data();
+                    const type = String(data.type || '').trim().toUpperCase();
+                    if (type === 'OT') return; // Bypass Objective Tests since Admin handles them
+
+                    (data.subjects || []).forEach(sub => {
+                        const isMine = myClasses.some(c => norm(c.c) === norm(data.className) && norm(c.s) === norm(data.section) && norm(c.sub) === norm(sub));
+                        if (isMine) {
+                            pendingExams.push({ id: doc.id, className: data.className, section: data.section, subject: sub, date: data.date, type: type });
+                        }
+                    });
+                });
+
+                if (pendingExams.length === 0) return;
+
+                // 4. Group fetches to check omr_submissions efficiently
+                let missingLogs = [];
+                const groupIds = pendingExams.map(e => e.id);
+                let submissionsCache = {};
+                
+                for(let i=0; i<groupIds.length; i+=10) {
+                    const chunk = groupIds.slice(i, i+10);
+                    const subSnap = await db.collection("omr_submissions").where("groupId", "in", chunk).get();
+                    subSnap.forEach(doc => {
+                        const d = doc.data();
+                        if (!submissionsCache[d.groupId]) submissionsCache[d.groupId] = [];
+                        submissionsCache[d.groupId].push(d);
+                    });
+                }
+
+                for (let exam of pendingExams) {
+                    const subs = submissionsCache[exam.id] || [];
+                    let submittedCount = 0;
+                    
+                    subs.forEach(d => {
+                        if (d.directScores && d.directScores[exam.subject] !== undefined) {
+                            submittedCount++;
+                        }
+                    });
+
+                    // If zero submissions exist for this subjective exam, it's considered fully missing
+                    if (submittedCount === 0) {
+                        missingLogs.push(exam);
+                    }
+                }
+
+                // 5. Render Notifications & Alerts
+                if (missingLogs.length > 0) {
+                    missingLogs.sort((a,b) => b.date.localeCompare(a.date));
+
+                    const countEl = document.getElementById('missing-grades-count');
+                    if(countEl) countEl.innerText = missingLogs.length;
+
+                    let html = '';
+                    missingLogs.forEach(log => {
+                        const prettyDate = new Date(log.date).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'});
+                        html += `
+                            <div class="bg-fuchsia-900/40 rounded-xl p-4 sm:p-5 border border-fuchsia-400/50 shadow-inner flex flex-col sm:flex-row justify-between sm:items-center w-full gap-3 sm:gap-0">
+                                <div class="flex flex-col">
+                                    <div class="font-black text-white text-base uppercase tracking-widest">${log.subject} <span class="text-fuchsia-300 ml-1">(${log.type})</span></div>
+                                    <div class="text-[11px] font-bold text-fuchsia-200 mt-1 uppercase tracking-widest">Class ${log.className} | Sec ${log.section}</div>
+                                </div>
+                                <div class="flex flex-col sm:items-end shrink-0">
+                                    <span class="bg-fuchsia-500 text-white px-4 py-2 rounded-lg text-[11px] font-black uppercase shadow-md whitespace-nowrap">Exam on ${prettyDate}</span>
+                                    <button onclick="window.location.href='evaluator.html'" class="mt-2 text-[10px] font-black text-fuchsia-100 hover:text-white uppercase tracking-widest text-right underline underline-offset-2">Go to Evaluator ➔</button>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    
+                    listEl.innerHTML = html;
+                    banner.classList.remove('hidden');
+                    banner.classList.add('block');
+                    banner.classList.remove('flex');
+                    
+                    globalSystemAlerts = globalSystemAlerts.filter(a => a.id !== 'missing_grades');
+                    globalSystemAlerts.push({
+                        id: 'missing_grades',
+                        icon: '📝',
+                        title: 'Missing Exam Marks',
+                        text: `You have ${missingLogs.length} pending subjective exams to evaluate.`,
+                        link: 'evaluator.html'
+                    });
+                } else {
+                    banner.classList.add('hidden');
+                    banner.classList.remove('block');
+                    globalSystemAlerts = globalSystemAlerts.filter(a => a.id !== 'missing_grades');
+                }
+
+            } catch (e) { console.error("Error scanning missing grades:", e); }
         }
 
  async function checkMissingAttendanceTeacher(safeName) {
