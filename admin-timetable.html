@@ -2377,16 +2377,17 @@ async function saveHoliday() {
             }
             // ----------------------------------------------------
             
-            const div = document.createElement('div');
+      const div = document.createElement('div');
             // Hard-locked width. 'group' class allows us to show/hide the footer purely via CSS
             div.className = "time-block flex flex-col border-r border-b border-slate-200 bg-white relative shrink-0 group hover:bg-slate-50 transition-colors";
             div.id = blockId;
             div.style.width = '170px'; 
             div.style.minWidth = '170px';
-          div.setAttribute('data-class', className);
+            div.setAttribute('data-class', className);
             div.setAttribute('data-section', sectionName);
             div.setAttribute('data-s24', blockData.start24);
             div.setAttribute('data-e24', blockData.end24);
+            div.setAttribute('data-is-holiday', isHoliday ? 'true' : 'false');
             // Add original state to memory for the Revert button
             div.setAttribute('data-original', JSON.stringify(blockData));
 
@@ -3013,11 +3014,48 @@ function peekTeacher(teacherName) {
        // ============================================================================
         // === GLOBAL VIRTUAL CLASH DETECTOR                                        ===
         // ============================================================================
+    function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
+            if (!currentContextDate || !holidaysData || holidaysData.length === 0) return false;
+            const [cy, cm, cd] = currentContextDate.split('-').map(Number);
+            const ctxDate = new Date(cy, cm - 1, cd);
+            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const targetCls = `${norm(className)}|${norm(sectionName)}`;
+            
+            for (let h of holidaysData) {
+                if (h.suspendClasses === false || !h.startDate) continue;
+                const [sy, sm_h, sd] = h.startDate.split('-').map(Number);
+                const hStart = new Date(sy, sm_h - 1, sd);
+                const [ey, em_h, ed] = (h.endDate || h.startDate).split('-').map(Number);
+                const hEnd = new Date(ey, em_h - 1, ed, 23, 59, 59);
+                
+                if (ctxDate >= hStart && ctxDate <= hEnd) {
+                    const matchesClass = (h.targetClasses || []).some(tc => {
+                        if (tc === 'ALL') return true;
+                        const parts = tc.split('|');
+                        const tcNorm = norm(parts[0]) + (parts[1] ? '|' + norm(parts[1]) : '');
+                        return tcNorm === targetCls || norm(parts[0]) === norm(className);
+                    });
+                    
+                    if (matchesClass) {
+                        if (h.isFullDay) return true;
+                        if (h.startTime && h.endTime && sMins > 0) {
+                            const [hsh, hsm] = h.startTime.split(':').map(Number);
+                            const [heh, hem] = h.endTime.split(':').map(Number);
+                            const hStartMins = hsh * 60 + hsm;
+                            const hEndMins = heh * 60 + hem;
+                            if (sMins < hEndMins && eMins > hStartMins) return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
         function checkGlobalClash() {
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             const virtualDb = [];
             
-            // Build virtual DB
+            // Build virtual DB (Only active, non-suspended blocks)
             allBlocks.forEach(b => {
                 const s24 = b.querySelector('.tb-s24').value; const e24 = b.querySelector('.tb-e24').value;
                 if(!s24 || !e24) return;
@@ -3027,6 +3065,10 @@ function peekTeacher(teacherName) {
                 const bCls = b.getAttribute('data-class');
                 const bSec = b.getAttribute('data-section');
                 
+                // If this section has classes suspended due to a holiday/event, it cannot clash with anyone!
+                const isSuspended = b.getAttribute('data-is-holiday') === 'true' || isBlockSuspendedByHoliday(bCls, bSec, sMins, eMins);
+                if (isSuspended) return;
+
                 const entries = Array.from(b.querySelectorAll('.ent-row'));
                 entries.forEach(ent => {
                     const tea = ent.querySelector('.ent-tea').value;
@@ -3045,13 +3087,32 @@ function peekTeacher(teacherName) {
                 const readWarn = b.querySelector('.read-warn');
                 if(readWarn) { readWarn.classList.add('hidden'); readWarn.innerHTML = ""; }
                 
+                const s24 = b.querySelector('.tb-s24').value; const e24 = b.querySelector('.tb-e24').value;
+                const [sh, sm] = (s24 || "0:0").split(':').map(Number); const [eh, em] = (e24 || "0:0").split(':').map(Number);
+                const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
+                const bCls = b.getAttribute('data-class');
+                const bSec = b.getAttribute('data-section');
+
+                const isSuspended = b.getAttribute('data-is-holiday') === 'true' || isBlockSuspendedByHoliday(bCls, bSec, sMins, eMins);
+                const entries = Array.from(b.querySelectorAll('.ent-row'));
+
+                // If this block is on a suspended holiday, clear warnings and skip evaluating clashes
+                if (isSuspended) {
+                    entries.forEach(ent => {
+                        const warnLbl = ent.querySelector('.ent-warn');
+                        if (warnLbl) {
+                            warnLbl.className = "ent-warn hidden absolute top-0 right-0 w-2 h-2 rounded-full bg-red-600 animate-ping z-30";
+                            warnLbl.innerHTML = "";
+                        }
+                    });
+                    return;
+                }
+
                 let blockHasClash = false;
                 
-                const entries = Array.from(b.querySelectorAll('.ent-row'));
                 entries.forEach(ent => {
                     const warnLbl = ent.querySelector('.ent-warn');
                     warnLbl.classList.add('hidden'); warnLbl.innerHTML = "";
-                    // Clean up default padding/bg so our new clickable buttons look clean
                     warnLbl.classList.remove('bg-red-600', 'p-1'); 
                     
                     const tea = ent.querySelector('.ent-tea').value;
@@ -3096,7 +3157,6 @@ function peekTeacher(teacherName) {
                     });
                     
                     if(clashes.length > 0) {
-                        // Remove duplicates in case a teacher clashes on multiple identical days at once
                         const uniqueClashes = Array.from(new Set(clashes.map(c => JSON.stringify(c)))).map(s => JSON.parse(s));
                         
                         let clashHtml = uniqueClashes.map(c => `
@@ -3107,20 +3167,19 @@ function peekTeacher(teacherName) {
                         `).join('');
                         
                         warnLbl.innerHTML = clashHtml;
-                        warnLbl.className = "ent-warn flex flex-col w-full mt-1 relative z-50"; // Expand the container to fit the text
+                        warnLbl.className = "ent-warn flex flex-col w-full mt-1 relative z-50";
                         blockHasClash = true;
                     } else {
-                        // Shrink it back down if the clash is resolved
                         warnLbl.className = "ent-warn hidden absolute top-0 right-0 w-2 h-2 rounded-full bg-red-600 animate-ping z-30";
                         warnLbl.innerHTML = "";
                     }
                 });
                 
-           if(blockHasClash && readWarn) {
-                        readWarn.innerHTML = ""; // Keep the cell overlay clean so you can see the details inside
-                        readWarn.classList.remove('hidden');
-                    }
-                });
+                if(blockHasClash && readWarn) {
+                    readWarn.innerHTML = "";
+                    readWarn.classList.remove('hidden');
+                }
+            });
 
                 // --- SECTION OVERLAP HIGHLIGHTER (BLUISH COLOR) ---
                 const grids = document.querySelectorAll('.tt-grid');
@@ -5430,12 +5489,14 @@ async function executeImport() {
             return false; // Could not find a valid shuffle after 100 tries
         }
 
-        function isTeacherAvailableGlobally(teacher, day, sMins, eMins, currentClass, currentSec) {
+function isTeacherAvailableGlobally(teacher, day, sMins, eMins, currentClass, currentSec) {
             if (teacher === "NONE" || !teacher) return true;
             return !globalTimetable.some(slot => {
                 // Ignore the section we are currently trying to fix
                 if (slot.className === currentClass && slot.section === currentSec) return false;
                 if (slot.teacher !== teacher || slot.day !== day) return false;
+                // Ignore classes suspended by holiday/event
+                if (isBlockSuspendedByHoliday(slot.className, slot.section, slot.sMins, slot.eMins)) return false;
                 return (sMins < slot.eMins && eMins > slot.sMins);
             });
         }
