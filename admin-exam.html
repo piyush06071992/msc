@@ -678,8 +678,54 @@
         }
 
         async function deleteExamGroup(id) {
-            if (!confirm("Permanently remove this exam block?")) return;
-            try { await getCollection("exam_schedules").doc(id).delete(); } catch(e) { alert("Error: "+e.message); }
+            if (!confirm("Permanently remove this exam block? This will revert these sections to their regular timetable for this date.")) return;
+            try {
+                const docRef = getCollection("exam_schedules").doc(id);
+                const docSnap = await docRef.get();
+                if (!docSnap.exists) return;
+                const examData = docSnap.data();
+                
+                let affectedSections = [];
+                if (examData.targets && examData.targets.length > 0) {
+                    examData.targets.forEach(t => t.sections.forEach(s => {
+                        affectedSections.push({ cName: t.className, sName: typeof s === 'object' ? s.section : s });
+                    }));
+                } else {
+                    affectedSections.push({ cName: examData.className, sName: examData.section });
+                }
+
+                const histRef = getCollection("timetable_history").doc(examData.date);
+                const histSnap = await histRef.get();
+                
+                if (histSnap.exists) {
+                    let historyData = histSnap.data();
+                    let schedule = historyData.schedule || [];
+                    
+                    const [y, m, d] = examData.date.split('-');
+                    const dateObj = new Date(parseInt(y), parseInt(m)-1, parseInt(d));
+                    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+                    const dayName = dayNames[dateObj.getDay()];
+                    
+                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                    const masterSlots = masterSnap.docs.map(d => d.data());
+                    
+                    const norm = str => (str||"").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                    
+                    const remainingSchedule = schedule.filter(slot => {
+                        return !affectedSections.some(sec => norm(slot.className) === norm(sec.cName) && norm(slot.section) === norm(sec.sName));
+                    });
+                    
+                    affectedSections.forEach(sec => {
+                        const masterClassSlots = masterSlots.filter(s => norm(s.className) === norm(sec.cName) && (norm(s.section) === norm(sec.sName) || norm(s.sectionName) === norm(sec.sName)));
+                        remainingSchedule.push(...masterClassSlots);
+                    });
+                    
+                    await histRef.update({ schedule: remainingSchedule, lastUpdated: Date.now() });
+                }
+                
+                await docRef.delete();
+                alert("✅ Exam block removed and timetable reverted successfully.");
+            } catch(e) { alert("Error: "+e.message); }
         }
 
         function viewAdminSyllabus(cls, sec, sub, text) {
