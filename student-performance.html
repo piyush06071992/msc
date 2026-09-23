@@ -548,17 +548,34 @@
             const offset = (new Date()).getTimezoneOffset() * 60000;
             const todayIso = (new Date(Date.now() - offset)).toISOString().split('T')[0];
 
-            try {
-                const snap = await getCollection("exam_schedules")
+      try {
+            const [snap, pgSnap] = await Promise.all([
+                getCollection("exam_schedules")
                     .where("className", "==", activeStudent.className)
                     .where("section", "==", activeStudent.section)
-                    .get();
-                
-                let upcoming = [];
-                snap.forEach(doc => {
-                    const data = doc.data();
-                    if (data.date >= todayIso) upcoming.push(data);
-                });
+                    .get(),
+                db.collection("admin_paper_groups").where("date", ">=", todayIso).get().catch(() => ({ forEach: () => {} }))
+            ]);
+            
+            let paperGroupsMap = {};
+            pgSnap.forEach(doc => {
+                const pg = doc.data();
+                if (pg.date && pg.subjects && pg.sectionKeys) {
+                    pg.sectionKeys.forEach(sk => {
+                        pg.subjects.forEach(sub => {
+                            const mapKey = `${pg.date}_${sk.toUpperCase()}_${sub.trim().toUpperCase()}`;
+                            const subObj = pg.subExams && pg.subExams[sub];
+                            paperGroupsMap[mapKey] = (subObj && subObj.mode) ? subObj.mode : (pg.mode || 'Offline');
+                        });
+                    });
+                }
+            });
+
+            let upcoming = [];
+            snap.forEach(doc => {
+                const data = doc.data();
+                if (data.date >= todayIso) upcoming.push(data);
+            });
 
                 upcoming.sort((a,b) => a.date.localeCompare(b.date));
 
@@ -596,7 +613,15 @@
                     if (exam.type === 'OT') typeColor = "bg-amber-500 text-white";
                     if (['Terminal Exams', 'Preboard', 'Board Exam'].includes(exam.type)) typeColor = "bg-rose-600 text-white";
 
+                  const secKey = `${activeCenter}|${exam.className}|${exam.section}`.toUpperCase();
                     let subsHtml = (exam.subjects || []).map(sub => {
+                        const cleanSub = sub.trim().toUpperCase();
+                        const mapKey = `${exam.date}_${secKey}_${cleanSub}`;
+                        const examMode = paperGroupsMap[mapKey] || 'Offline';
+                        const modeBadge = examMode === 'Online' 
+                            ? `<span class="bg-blue-100 text-blue-700 border border-blue-200 px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ml-2">🌐 Online</span>`
+                            : `<span class="bg-amber-100 text-amber-800 border border-amber-200 px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ml-2">📍 Offline</span>`;
+
                         let syllabusBtnHtml = "";
                         if (exam.syllabi && exam.syllabi[sub] && exam.syllabi[sub].trim() !== "") {
                             const safeSyllabus = encodeURIComponent(exam.syllabi[sub]).replace(/'/g, "%27");
@@ -616,9 +641,12 @@
 
                         return `
                             <div class="mt-3 bg-white border border-slate-200 rounded-[1.25rem] p-5 shadow-sm hover:border-indigo-300 transition-colors flex flex-col justify-between">
-                                <div class="flex items-center gap-3">
-                                    <span class="bg-indigo-50 text-indigo-700 w-10 h-10 flex items-center justify-center rounded-xl text-lg font-black shadow-inner shrink-0">📘</span>
-                                    <h4 class="font-black text-slate-800 uppercase text-sm tracking-widest leading-tight">${sub}</h4>
+                                <div class="flex items-center justify-between">
+                                    <div class="flex items-center gap-3">
+                                        <span class="bg-indigo-50 text-indigo-700 w-10 h-10 flex items-center justify-center rounded-xl text-lg font-black shadow-inner shrink-0">📘</span>
+                                        <h4 class="font-black text-slate-800 uppercase text-sm tracking-widest leading-tight">${sub}</h4>
+                                    </div>
+                                    ${modeBadge}
                                 </div>
                                 ${syllabusBtnHtml}
                             </div>
