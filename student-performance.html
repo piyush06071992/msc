@@ -182,10 +182,9 @@
         </div>
     </div>
 
-    <!-- INDIVIDUAL REPORT CARD MODAL (Ported from Evaluator) -->
+    <!-- INDIVIDUAL REPORT CARD MODAL -->
     <div id="ind-report-modal" class="fixed inset-0 bg-slate-900/95 backdrop-blur-md z-[600] hidden items-center justify-center p-4">
         <div class="bg-white rounded-3xl w-full max-w-3xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden border border-slate-700">
-            <!-- Header Section -->
             <div class="p-6 bg-gradient-to-br from-slate-800 to-indigo-900 text-white flex justify-between items-start shrink-0 relative overflow-hidden">
                 <div class="absolute -right-10 -top-10 text-white/5 text-[150px] font-black leading-none">🎓</div>
                 <div class="relative z-10">
@@ -225,6 +224,22 @@
                     <h4 class="font-black text-slate-800 uppercase tracking-widest text-xs mb-3 border-b border-slate-200 pb-2">Subject-wise Breakdown</h4>
                     <div id="ind-subject-breakdown" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SECTION LEADERBOARD MODAL -->
+    <div id="section-leaderboard-modal" class="fixed inset-0 bg-slate-900/95 backdrop-blur-md z-[600] hidden items-center justify-center p-4">
+        <div class="bg-white rounded-3xl w-full max-w-4xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden border border-slate-700">
+            <div class="p-6 bg-gradient-to-br from-indigo-900 to-slate-900 text-white flex justify-between items-center shrink-0">
+                <div>
+                    <h3 id="lb-title" class="font-black text-xl uppercase tracking-tighter text-amber-400">Section Leaderboard</h3>
+                    <p id="lb-meta" class="text-[10px] font-bold text-indigo-200 uppercase tracking-widest mt-0.5">Combined Results & Rankings</p>
+                </div>
+                <button onclick="document.getElementById('section-leaderboard-modal').classList.replace('flex', 'hidden')" class="w-8 h-8 bg-white/10 hover:bg-rose-500 rounded-full font-black text-sm transition-colors flex items-center justify-center">✕</button>
+            </div>
+            <div class="p-6 bg-slate-50 flex-1 overflow-y-auto custom-scroll" id="lb-table-container">
+                <div class="text-center py-20"><span class="loader border-t-indigo-600"></span><p class="text-xs font-bold text-slate-400 mt-2 uppercase">Computing Leaderboard...</p></div>
             </div>
         </div>
     </div>
@@ -599,13 +614,12 @@
         }
 
         // --- PAST RESULTS & SCORECARDS ---
- async function fetchPastExams() {
+        async function fetchPastExams() {
             const listCont = document.getElementById('past-exams-list');
             const offset = (new Date()).getTimezoneOffset() * 60000;
             const todayIso = (new Date(Date.now() - offset)).toISOString().split('T')[0];
 
             try {
-                // Fetch from both admin_paper_groups and standard exam_schedules to ensure all past exams appear
                 const [pgSnap, schSnap] = await Promise.all([
                     db.collection("admin_paper_groups").get(),
                     getCollection("exam_schedules").where("className", "==", activeStudent.className).where("section", "==", activeStudent.section).get()
@@ -614,7 +628,6 @@
                 let pastExamsMap = {};
                 const targetSecKey = `${activeCenter}|${activeStudent.className}|${activeStudent.section}`.toUpperCase();
 
-                // 1. Process Paper Groups
                 pgSnap.forEach(doc => {
                     const data = doc.data();
                     if (data.date < todayIso) {
@@ -627,7 +640,6 @@
                     }
                 });
 
-                // 2. Process Standard Schedules (Fallback for un-mapped exams)
                 schSnap.forEach(doc => {
                     const data = doc.data();
                     if (data.date < todayIso) {
@@ -661,9 +673,14 @@
                                 </div>
                                 <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50 px-2 py-1 rounded border border-slate-100">${prettyDate}</span>
                             </div>
-                            <button onclick="generateStudentScorecard('${exam.date}', '${exam.id}')" class="w-full bg-slate-900 hover:bg-slate-800 text-white py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-colors shadow-sm flex items-center justify-center gap-2">
-                                📊 View Scorecard
-                            </button>
+                            <div class="grid grid-cols-2 gap-2">
+                                <button onclick="generateStudentScorecard('${exam.date}', '${exam.id}')" class="bg-slate-900 hover:bg-slate-800 text-white py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-colors shadow-sm flex items-center justify-center gap-1.5">
+                                    📊 My Score
+                                </button>
+                                <button onclick="openSectionLeaderboard('${exam.date}', '${exam.id}')" class="bg-indigo-600 hover:bg-indigo-500 text-white py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-colors shadow-sm flex items-center justify-center gap-1.5">
+                                    🏆 Leaderboard
+                                </button>
+                            </div>
                         </div>
                     `;
                 });
@@ -676,7 +693,7 @@
             }
         }
 
-        async function generateStudentScorecard(date, groupKey) {
+        async function generateStudentScorecard(date, adminGroupId) {
             const modal = document.getElementById('ind-report-modal');
             const loader = document.getElementById('report-loader');
             const content = document.getElementById('report-content');
@@ -690,7 +707,6 @@
             try {
                 const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
 
-                // 1. Fetch exact schedule group IDs for this date/class/section
                 const schSnap = await db.collection(prefix + "exam_schedules")
                     .where("date", "==", date)
                     .where("className", "==", activeStudent.className)
@@ -703,13 +719,16 @@
                     validGroupIds.push(doc.id);
                     groupMetaMap[doc.id] = doc.data();
                 });
+                
+                if (adminGroupId) {
+                    validGroupIds.push(adminGroupId);
+                }
 
                 if (validGroupIds.length === 0) {
                     modal.classList.replace('flex', 'hidden');
                     return alert("No exam schedules found matching your section for this date.");
                 }
 
-                // 2. Fetch Keys and Submissions for the entire section
                 let allSubmissions = [];
                 let keysCache = {};
                 for (let i = 0; i < validGroupIds.length; i += 10) {
@@ -722,7 +741,6 @@
                     subSnap.forEach(d => allSubmissions.push(d.data()));
                 }
 
-                // 3. Fetch all students in this class/section to calculate true rank
                 const stuSnap = await db.collection(prefix === "" ? "students" : "dharamshala_students")
                     .where("className", "==", activeStudent.className)
                     .where("section", "==", activeStudent.section)
@@ -740,7 +758,6 @@
                     }
                 });
 
-                // 4. Process Submissions
                 allSubmissions.forEach(sub => {
                     const roll = String(sub.rollNo).toUpperCase();
                     if (!studentsMap[roll]) return;
@@ -796,7 +813,6 @@
                     }
                 });
 
-                // 5. Calculate Ranks
                 let reportCardData = Object.values(studentsMap).map(s => {
                     s.percentage = s.totalMax > 0 ? ((s.totalObt / s.totalMax) * 100).toFixed(2) : 0;
                     return s;
@@ -819,7 +835,6 @@
                     return;
                 }
 
-                // 6. Populate Modal
                 document.getElementById('ind-name').innerText = myData.name + (myData.isTop3 ? ' ⭐' : '');
                 document.getElementById('ind-meta').innerText = `#${myData.rollNo} | Class ${activeStudent.className} | Sec ${activeStudent.section} | Section Rank: #${myData.rank}`;
                 document.getElementById('ind-exams').innerText = myData.examsAttended;
@@ -869,6 +884,199 @@
             }
         }
 
+        async function openSectionLeaderboard(date, adminGroupId) {
+            const modal = document.getElementById('section-leaderboard-modal');
+            const container = document.getElementById('lb-table-container');
+            
+            modal.classList.replace('hidden', 'flex');
+            container.innerHTML = `<div class="text-center py-20"><span class="loader border-t-indigo-600"></span><p class="text-xs font-bold text-slate-400 mt-2 uppercase tracking-widest">Aggregating Section Results...</p></div>`;
+
+            try {
+                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+
+                const pgDoc = await db.collection("admin_paper_groups").doc(adminGroupId).get();
+                let sectionKeys = [];
+                let examTitle = "Exam Leaderboard";
+
+                if (pgDoc.exists) {
+                    const pg = pgDoc.data();
+                    sectionKeys = pg.sectionKeys || [];
+                    examTitle = `${pg.examType || 'EXAM'} (${(pg.subjects || []).join(' + ')})`;
+                }
+
+                if (sectionKeys.length === 0) {
+                    sectionKeys.push(`${activeCenter}|${activeStudent.className}|${activeStudent.section}`);
+                }
+
+                document.getElementById('lb-title').innerText = examTitle;
+                document.getElementById('lb-meta').innerText = `Date: ${new Date(date).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'})} • Combined Sections`;
+
+                const schSnap = await db.collection(prefix + "exam_schedules")
+                    .where("date", "==", date)
+                    .get();
+
+                let validGroupIds = [];
+                schSnap.forEach(doc => {
+                    const d = doc.data();
+                    const sKey = `${activeCenter}|${d.className}|${d.section}`.toUpperCase();
+                    if (sectionKeys.includes(sKey) || doc.id === adminGroupId) {
+                        validGroupIds.push(doc.id);
+                    }
+                });
+                validGroupIds = [...new Set(validGroupIds)];
+                if (validGroupIds.length === 0) validGroupIds.push(adminGroupId);
+
+                let allSubmissions = [];
+                let keysCache = {};
+                for (let i = 0; i < validGroupIds.length; i += 10) {
+                    const chunk = validGroupIds.slice(i, i + 10);
+                    const [keysSnap, subSnap] = await Promise.all([
+                        db.collection("exam_answer_keys").where(firebase.firestore.FieldPath.documentId(), "in", chunk).get(),
+                        db.collection("omr_submissions").where("groupId", "in", chunk).get()
+                    ]);
+                    keysSnap.forEach(d => keysCache[d.id] = d.data());
+                    subSnap.forEach(d => allSubmissions.push(d.data()));
+                }
+
+                let targetClasses = new Set();
+                let targetSections = new Set();
+                sectionKeys.forEach(sk => {
+                    const parts = sk.split('|');
+                    if (parts.length >= 3) {
+                        targetClasses.add(parts[1].toUpperCase());
+                        targetSections.add(parts[2].toUpperCase());
+                    }
+                });
+
+                const stuSnap = await db.collection(prefix === "" ? "students" : "dharamshala_students").get();
+                let studentsMap = {};
+                stuSnap.forEach(doc => {
+                    const s = doc.data();
+                    const cNorm = String(s.className || '').trim().toUpperCase();
+                    const sNorm = String(s.section || '').trim().toUpperCase();
+                    if (s.admissionStatus !== 'PENDING' && targetClasses.has(cNorm) && targetSections.has(sNorm)) {
+                        studentsMap[String(s.rollNo).toUpperCase()] = {
+                            rollNo: String(s.rollNo).toUpperCase(),
+                            name: s.name,
+                            className: s.className,
+                            section: s.section,
+                            totalObt: 0, totalMax: 0, examsAttended: 0
+                        };
+                    }
+                });
+
+                allSubmissions.forEach(sub => {
+                    const roll = String(sub.rollNo).toUpperCase();
+                    if (!studentsMap[roll]) return;
+
+                    const gId = sub.groupId;
+                    const keyMeta = keysCache[gId] || {};
+                    const isDirect = sub.isDirectImport === true;
+                    let examTotalObt = 0; let examTotalMax = 0;
+
+                    if (isDirect) {
+                        const directMax = keyMeta.directMaxMarks || {};
+                        Object.entries(sub.directScores || {}).forEach(([subj, score]) => {
+                            const max = directMax[subj] || 100;
+                            examTotalObt += score; examTotalMax += max;
+                        });
+                    } else {
+                        const answers = keyMeta.answers || {};
+                        const bonuses = keyMeta.bonusConfig || {};
+                        const responses = sub.responses || {};
+                        const structure = keyMeta.structure || [];
+
+                        structure.forEach(st => {
+                            let secScore = 0; let secMax = 0;
+                            for (let q = st.start; q <= st.end; q++) {
+                                const pos = st.correctMarks !== undefined ? st.correctMarks : 4;
+                                const neg = st.wrongMarks !== undefined ? st.wrongMarks : -1;
+                                const unatt = st.unattemptedMarks !== undefined ? st.unattemptedMarks : 0;
+                                secMax += pos;
+
+                                const isAttempted = (responses[q] !== undefined && responses[q] !== "");
+                                const isCorrect = isAttempted && (String(responses[q]).trim() === String(answers[q]).trim());
+                                const bRule = bonuses[q] || 'NONE';
+
+                                if (bRule === 'ALL') secScore += pos;
+                                else if (bRule === 'ATTEMPTED') { if(isAttempted) secScore += pos; else secScore += unatt; }
+                                else { if(!isAttempted) secScore += unatt; else if(isCorrect) secScore += pos; else secScore += neg; }
+                            }
+                            examTotalObt += secScore; examTotalMax += secMax;
+                        });
+                    }
+                    if (examTotalMax > 0) {
+                        studentsMap[roll].totalObt += examTotalObt;
+                        studentsMap[roll].totalMax += examTotalMax;
+                        studentsMap[roll].examsAttended++;
+                    }
+                });
+
+                let leaderboardData = Object.values(studentsMap).filter(s => s.examsAttended > 0);
+                leaderboardData.forEach(s => {
+                    s.percentage = s.totalMax > 0 ? ((s.totalObt / s.totalMax) * 100).toFixed(2) : 0;
+                });
+
+                leaderboardData.sort((a, b) => b.totalObt - a.totalObt);
+
+                let currentRank = 1; let previousScore = null;
+                leaderboardData.forEach((s, idx) => {
+                    if (previousScore !== null && s.totalObt < previousScore) currentRank++;
+                    s.rank = currentRank;
+                    s.isTop3 = s.rank <= 3;
+                    previousScore = s.totalObt;
+                });
+
+                if (leaderboardData.length === 0) {
+                    container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest">No evaluated results available for this exam yet.</div>`;
+                    return;
+                }
+
+                let rowsHtml = '';
+                leaderboardData.forEach((s, idx) => {
+                    const isMe = s.rollNo === String(activeStudent.rollNo).toUpperCase();
+                    const rankColor = s.rank === 1 ? 'bg-amber-100 text-amber-800' : (s.rank === 2 ? 'bg-slate-200 text-slate-800' : (s.rank === 3 ? 'bg-orange-100 text-orange-800' : 'bg-slate-100 text-slate-500'));
+                    const rowBg = isMe ? 'bg-indigo-50/90 border-2 border-indigo-400 shadow-sm' : 'bg-white hover:bg-slate-50';
+
+                    rowsHtml += `
+                        <tr class="${rowBg} transition-colors border-b border-slate-100">
+                            <td class="p-3 text-center font-black"><span class="px-2.5 py-1 rounded-full text-xs ${rankColor}">#${s.rank}</span></td>
+                            <td class="p-3 font-mono font-black text-slate-600">#${s.rollNo}</td>
+                            <td class="p-3 font-black text-slate-900 uppercase">
+                                ${s.name} ${isMe ? '<span class="bg-indigo-600 text-white text-[8px] px-1.5 py-0.5 rounded ml-1">YOU</span>' : ''}
+                            </td>
+                            <td class="p-3 text-center text-xs uppercase font-bold text-slate-600">Class ${s.className} — Sec ${s.section}</td>
+                            <td class="p-3 text-center font-mono font-black text-indigo-700">${s.totalObt} <span class="text-[10px] text-slate-400">/ ${s.totalMax}</span></td>
+                            <td class="p-3 text-center font-mono font-black text-emerald-700">${s.percentage}%</td>
+                        </tr>
+                    `;
+                });
+
+                container.innerHTML = `
+                    <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                        <table class="w-full text-left border-collapse">
+                            <thead class="bg-slate-100 text-slate-700 text-[10px] uppercase font-black border-b border-slate-200">
+                                <tr>
+                                    <th class="p-3 text-center w-16">Rank</th>
+                                    <th class="p-3 w-28">Roll No</th>
+                                    <th class="p-3">Candidate Name</th>
+                                    <th class="p-3 text-center">Class / Section</th>
+                                    <th class="p-3 text-center">Score Obtained</th>
+                                    <th class="p-3 text-center">%age</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-100 text-xs font-bold text-slate-700">
+                                ${rowsHtml}
+                            </tbody>
+                        </table>
+                    </div>
+                `;
+
+            } catch (e) {
+                console.error("Leaderboard Error:", e);
+                container.innerHTML = `<div class="text-center py-20 text-rose-500 font-bold uppercase text-xs">Error loading leaderboard: ${e.message}</div>`;
+            }
+        }
     </script>
 </body>
 </html>
