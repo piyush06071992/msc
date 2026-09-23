@@ -4046,9 +4046,10 @@ async function loadLedger() {
                     getCollection("attendance_records").where("monthKey", "==", prevMonthKey).get()
                 ]);
 
-                let curRecords = {};
+           let curRecords = {};
                 let curStats = {};
                 let prevStats = {};
+                let prevRecords = {}; // FIX: Capture previous month day-to-day records
                 
                 let oldSectionRecords = {};
                 let oldSectionPrevStats = {};
@@ -4098,7 +4099,7 @@ async function loadLedger() {
                                         if (isOldSec && dKey >= stuObj.transferDate) return; 
                                     }
 
-                                if (!oldSectionRecords[stuId]) oldSectionRecords[stuId] = { P: 0, L: 0 };
+                                    if (!oldSectionRecords[stuId]) oldSectionRecords[stuId] = { P: 0, L: 0 };
                                     if (status === 'P' || status === 'A' || status === 'L') {
                                         oldSectionRecords[stuId][status === 'A' ? 'L' : status]++;
                                     }
@@ -4120,16 +4121,21 @@ async function loadLedger() {
                    }
                 });
 
-            prevQuerySnap.forEach(doc => {
+                prevQuerySnap.forEach(doc => {
                     const data = doc.data();
                     if (normMatch(data.subject) !== normMatch(currentReg.sub)) return;
 
                     if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                        if (data.records) {
+                            Object.keys(data.records).forEach(dKey => {
+                                prevRecords[dKey] = { ...(prevRecords[dKey] || {}), ...data.records[dKey] };
+                            });
+                        }
                         if (data.aggregatedStats) {
                             prevStats = { ...prevStats, ...data.aggregatedStats };
                         }
-                   } else {
-                      if (data.aggregatedStats && data.aggregatedStats.students) {
+                    } else {
+                       if (data.aggregatedStats && data.aggregatedStats.students) {
                             Object.entries(data.aggregatedStats.students).forEach(([sId, val]) => {
                                 if (!oldSectionPrevStats[sId]) oldSectionPrevStats[sId] = { att: 0, working: 0 };
                                 if (typeof val === 'object') {
@@ -4141,8 +4147,28 @@ async function loadLedger() {
                                 }
                             });
                         }
-                   }
+                    }
                 });
+
+                // FIX: Calculate working days in previous month if prevStats doesn't have globalTotalWorkingDays explicitly
+                let calcPrevWorkingDays = 0;
+                const daysInPrevMonth = new Date(prevY, prevM, 0).getDate();
+                for (let pd = 1; pd <= daysInPrevMonth; pd++) {
+                    const pDateStr = `${prevY}-${String(prevM).padStart(2,'0')}-${String(pd).padStart(2,'0')}`;
+                    const pStatus = checkDateStatus(pDateStr);
+                    const pRemKey = `${pDateStr}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}`;
+                    const isPRemedial = remedialDataMap[pRemKey] ? true : false;
+                    const hasPAttendance = prevRecords[pDateStr] && Object.keys(prevRecords[pDateStr]).length > 0;
+                    
+                    if (isPRemedial || (!pStatus.isExcluded) || hasPAttendance) {
+                        const [py, pmVal, pdVal] = pDateStr.split('-');
+                        const pDObj = new Date(parseInt(py), parseInt(pmVal)-1, parseInt(pdVal));
+                        if (pDObj.getDay() !== 0) {
+                            calcPrevWorkingDays++;
+                        }
+                    }
+                }
+                const fallbackPrevWorking = prevStats.globalTotalWorkingDays !== undefined ? prevStats.globalTotalWorkingDays : calcPrevWorkingDays;
 
                 // Cache current active ledger records for print validation
                 window.currentLedgerRecords = curRecords;
