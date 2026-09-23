@@ -3420,136 +3420,181 @@ function onResultSectionChange() {
             }
         }
 
- async function loadResultsForGroupAndSection(groupId, targetSectionKey, isFullExam = false) {
-            const tableContainer = document.getElementById('results-table-container');
-            const toggleContainer = document.getElementById('full-exam-view-toggle-container');
+async function loadResultsForGroupAndSection(groupId, targetSectionKey, isFullExam = false) {
+        const tableContainer = document.getElementById('results-table-container');
+        const toggleContainer = document.getElementById('full-exam-view-toggle-container');
 
-            tableContainer.innerHTML = `<div class="text-center py-20"><span class="loader"></span><p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-2">Computing student scores and evaluating keys...</p></div>`;
+        tableContainer.innerHTML = `<div class="text-center py-20"><span class="loader"></span><p class="text-xs font-bold text-slate-400 uppercase tracking-widest mt-2">Computing student scores and evaluating keys...</p></div>`;
 
-            try {
-                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                
-                let gData = currentMatchedPG;
-                let [gDoc, keyDoc] = await Promise.all([
-                    !gData ? db.collection(prefix + "exam_schedules").doc(groupId).get() : Promise.resolve(null),
-                    db.collection("exam_answer_keys").doc(groupId).get()
-                ]);
+        try {
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            
+            let gData = currentMatchedPG;
+            let [gDoc] = await Promise.all([
+                !gData ? db.collection(prefix + "exam_schedules").doc(groupId).get() : Promise.resolve(null)
+            ]);
 
-                if (!gData && gDoc && gDoc.exists) gData = gDoc.data();
-                if (!gData) return alert("Exam group not found.");
-                
-                const keyData = keyDoc && keyDoc.exists ? keyDoc.data() : { answers: {}, structure: [], bonusConfig: {} };
-                const answers = keyData.answers || {};
-                let structure = keyData.structure || [];
-                const directMaxMarks = keyData.directMaxMarks || {};
+            if (!gData && gDoc && gDoc.exists) gData = gDoc.data();
+            if (!gData) return alert("Exam group not found.");
 
-                // Generate virtual structure for Direct Imports if missing OMR structure
-                if (structure.length === 0 && Object.keys(directMaxMarks).length > 0) {
-                    structure = Object.keys(directMaxMarks).map(sub => ({
-                        subject: sub,
-                        isDirect: true,
-                        maxMarks: directMaxMarks[sub]
-                    }));
-                }
-
-                activeExamStructure = structure;
-                const bonuses = keyData.bonusConfig || {};
-
-                globalKeysCache[groupId] = { id: groupId, ...gData, answers, structure, bonusConfig: bonuses };
-
-                let attachedSecs = new Set();
-                const hasClubbedSections = currentMatchedPG && (
-                    (currentMatchedPG.sectionKeys && currentMatchedPG.sectionKeys.length > 1) || 
-                    currentMatchedPG.isCombined
-                );
-
-                if (isFullExam && currentMatchedPG) {
-                    (currentMatchedPG.sectionKeys || []).forEach(sk => {
-                        const parts = sk.split('|');
-                        attachedSecs.add(`${parts[1]}|${parts[2]}`.toUpperCase());
-                    });
-                } else if (targetSectionKey) {
-                    attachedSecs.add(targetSectionKey.toUpperCase());
-                } else {
-                    attachedSecs.add(`${String(gData.className).trim().toUpperCase()}|${String(gData.section).trim().toUpperCase()}`);
-                }
-
-                if (hasClubbedSections && toggleContainer) {
-                    const currentSec = document.getElementById('res-section-select').value;
-                    const codeLabel = currentMatchedPG.combinedCode || 'Clubbed';
-                    if (isFullExam) {
-                        toggleContainer.innerHTML = `
-                            <button onclick="toggleFullExamView()" class="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-md transition-all active:scale-95 flex items-center justify-center gap-2">
-                                <span>👁️</span> Show Sec ${currentSec} Only
-                            </button>
-                        `;
-                    } else {
-                        toggleContainer.innerHTML = `
-                            <button onclick="toggleFullExamView()" class="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-md transition-all active:scale-95 flex items-center justify-center gap-2">
-                                <span>🔗</span> View Combined (${codeLabel})
-                            </button>
-                        `;
+            // FIX: Gather all possible Group IDs (Paper Group ID + underlying Schedule IDs) to seamlessly fetch submissions & keys regardless of how they were saved
+            let queryGroupIds = [groupId];
+            const examDate = gData.date || document.getElementById('res-date-select').value;
+            
+            if (currentMatchedPG && currentMatchedPG.sectionKeys) {
+                const schMatchSnap = await db.collection(prefix + "exam_schedules").where("date", "==", examDate).get();
+                schMatchSnap.forEach(doc => {
+                    const sData = doc.data();
+                    const sKey = `${activeCenter}|${sData.className}|${sData.section}`.toUpperCase();
+                    if (currentMatchedPG.sectionKeys.includes(sKey)) {
+                        queryGroupIds.push(doc.id);
                     }
-                } else if (toggleContainer) {
-                    toggleContainer.innerHTML = '';
-                }
-
-             // Fetch Attendance for Results Badges
-                const date = gData.date;
-                const [y, m] = date.split('-');
-                const [gAtt, dAtt] = await Promise.all([
-                    db.collection("attendance_records").where("monthKey", "==", `${y}_${m}`).get(),
-                    db.collection("dharamshala_attendance_records").where("monthKey", "==", `${y}_${m}`).get()
-                ]);
-                
-                let resultsAttendanceMap = {};
-                const processResAttendance = (snap) => {
-                    snap.forEach(doc => {
-                        const data = doc.data();
-                        if (data.records && data.records[date]) {
-                            const cName = data.className;
-                            const sName = data.section;
-                            const sub = (data.subject || "").trim().toUpperCase();
-                            const inchargeSub = getInchargeSubject(cName, sName);
-
-                            // Before Sep 21, 2026: accept any register. On/After Sep 21, 2026: Class Incharge only.
-                            if (date < "2026-09-21" || (!inchargeSub || sub === inchargeSub)) {
-                                Object.entries(data.records[date]).forEach(([stuId, status]) => {
-                                    if (status === 'P' || !resultsAttendanceMap[stuId]) {
-                                        resultsAttendanceMap[stuId] = status;
-                                    }
-                                });
-                            }
-                        }
-                    });
-                };
-                processResAttendance(gAtt);
-                processResAttendance(dAtt);
-
-                let pooledStudents = globalStudentsData.filter(s => {
-                    const cNorm = String(s.className || '').trim().toUpperCase();
-                    const sNorm = String(s.section || '').trim().toUpperCase();
-                    const center = s.actualBranch || s.center || s.branch || activeCenter;
-                    const matchesCenter = center === activeCenter;
-                    return matchesCenter && attachedSecs.has(`${cNorm}|${sNorm}`);
                 });
+            } else {
+                // Also check if this schedule ID has a parent paper group
+                const pgSnap = await db.collection("admin_paper_groups").where("date", "==", examDate).get();
+                pgSnap.forEach(doc => {
+                    const pg = doc.data();
+                    const targetSecKeyCheck = `${activeCenter}|${gData.className}|${gData.section}`.toUpperCase();
+                    if ((pg.sectionKeys || []).includes(targetSecKeyCheck)) {
+                        queryGroupIds.push(doc.id);
+                    }
+                });
+            }
+            queryGroupIds = [...new Set(queryGroupIds)];
 
-                const subjects = [...new Set((structure || []).map(s => s.subject))];
-                const sortSelect = document.getElementById('res-sort-select');
-                if (sortSelect) {
-                    let sortOpts = `<option value="total">Total Score (Descending)</option>`;
-                    subjects.forEach(sub => {
-                        sortOpts += `<option value="sub_${sub}">${sub} Marks (Descending)</option>`;
-                    });
-                    sortSelect.innerHTML = sortOpts;
+            // Fetch Answer Keys across all possible group IDs
+            let keyData = { answers: {}, structure: [], bonusConfig: {}, directMaxMarks: {} };
+            for (const gId of queryGroupIds) {
+                const kDoc = await db.collection("exam_answer_keys").doc(gId).get();
+                if (kDoc.exists) {
+                    const kd = kDoc.data();
+                    if (kd.answers && Object.keys(kd.answers).length > 0) keyData.answers = kd.answers;
+                    if (kd.structure && kd.structure.length > 0) keyData.structure = kd.structure;
+                    if (kd.directMaxMarks && Object.keys(kd.directMaxMarks).length > 0) {
+                        keyData.directMaxMarks = { ...keyData.directMaxMarks, ...kd.directMaxMarks };
+                    }
+                    if (kd.bonusConfig && Object.keys(kd.bonusConfig).length > 0) {
+                        keyData.bonusConfig = { ...keyData.bonusConfig, ...kd.bonusConfig };
+                    }
                 }
+            }
 
-                const subSnap = await db.collection("omr_submissions").where("groupId", "==", groupId).get();
-                let submissionsMap = {}; 
+            const answers = keyData.answers || {};
+            let structure = keyData.structure || [];
+            const directMaxMarks = keyData.directMaxMarks || {};
+
+            // Generate virtual structure for Direct Imports if missing OMR structure
+            if (structure.length === 0 && Object.keys(directMaxMarks).length > 0) {
+                structure = Object.keys(directMaxMarks).map(sub => ({
+                    subject: sub,
+                    isDirect: true,
+                    maxMarks: directMaxMarks[sub]
+                }));
+            }
+
+            activeExamStructure = structure;
+            const bonuses = keyData.bonusConfig || {};
+
+            globalKeysCache[groupId] = { id: groupId, ...gData, answers, structure, bonusConfig: bonuses };
+
+            let attachedSecs = new Set();
+            const hasClubbedSections = currentMatchedPG && (
+                (currentMatchedPG.sectionKeys && currentMatchedPG.sectionKeys.length > 1) || 
+                currentMatchedPG.isCombined
+            );
+
+            if (isFullExam && currentMatchedPG) {
+                (currentMatchedPG.sectionKeys || []).forEach(sk => {
+                    const parts = sk.split('|');
+                    attachedSecs.add(`${parts[1]}|${parts[2]}`.toUpperCase());
+                });
+            } else if (targetSectionKey) {
+                attachedSecs.add(targetSectionKey.toUpperCase());
+            } else {
+                attachedSecs.add(`${String(gData.className).trim().toUpperCase()}|${String(gData.section).trim().toUpperCase()}`);
+            }
+
+            if (hasClubbedSections && toggleContainer) {
+                const currentSec = document.getElementById('res-section-select').value;
+                const codeLabel = currentMatchedPG.combinedCode || 'Clubbed';
+                if (isFullExam) {
+                    toggleContainer.innerHTML = `
+                        <button onclick="toggleFullExamView()" class="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-md transition-all active:scale-95 flex items-center justify-center gap-2">
+                            <span>👁️</span> Show Sec ${currentSec} Only
+                        </button>
+                    `;
+                } else {
+                    toggleContainer.innerHTML = `
+                        <button onclick="toggleFullExamView()" class="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-3 rounded-xl font-black text-xs uppercase tracking-wider shadow-md transition-all active:scale-95 flex items-center justify-center gap-2">
+                            <span>🔗</span> View Combined (${codeLabel})
+                        </button>
+                    `;
+                }
+            } else if (toggleContainer) {
+                toggleContainer.innerHTML = '';
+            }
+
+           // Fetch Attendance for Results Badges
+            const date = gData.date;
+            const [y, m] = date.split('-');
+            const [gAtt, dAtt] = await Promise.all([
+                db.collection("attendance_records").where("monthKey", "==", `${y}_${m}`).get(),
+                db.collection("dharamshala_attendance_records").where("monthKey", "==", `${y}_${m}`).get()
+            ]);
+            
+            let resultsAttendanceMap = {};
+            const processResAttendance = (snap) => {
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    if (data.records && data.records[date]) {
+                        const cName = data.className;
+                        const sName = data.section;
+                        const sub = (data.subject || "").trim().toUpperCase();
+                        const inchargeSub = getInchargeSubject(cName, sName);
+
+                        // Before Sep 21, 2026: accept any register. On/After Sep 21, 2026: Class Incharge only.
+                        if (date < "2026-09-21" || (!inchargeSub || sub === inchargeSub)) {
+                            Object.entries(data.records[date]).forEach(([stuId, status]) => {
+                                if (status === 'P' || !resultsAttendanceMap[stuId]) {
+                                    resultsAttendanceMap[stuId] = status;
+                                }
+                            });
+                        }
+                    }
+                });
+            };
+            processResAttendance(gAtt);
+            processResAttendance(dAtt);
+
+            let pooledStudents = globalStudentsData.filter(s => {
+                const cNorm = String(s.className || '').trim().toUpperCase();
+                const sNorm = String(s.section || '').trim().toUpperCase();
+                const center = s.actualBranch || s.center || s.branch || activeCenter;
+                const matchesCenter = center === activeCenter;
+                return matchesCenter && attachedSecs.has(`${cNorm}|${sNorm}`);
+            });
+
+            const subjects = [...new Set((structure || []).map(s => s.subject))];
+            const sortSelect = document.getElementById('res-sort-select');
+            if (sortSelect) {
+                let sortOpts = `<option value="total">Total Score (Descending)</option>`;
+                subjects.forEach(sub => {
+                    sortOpts += `<option value="sub_${sub}">${sub} Marks (Descending)</option>`;
+                });
+                sortSelect.innerHTML = sortOpts;
+            }
+
+            // FIX: Fetch submissions across all candidate Group IDs in chunks of 10
+            let submissionsMap = {}; 
+            for (let i = 0; i < queryGroupIds.length; i += 10) {
+                const chunk = queryGroupIds.slice(i, i + 10);
+                const subSnap = await db.collection("omr_submissions").where("groupId", "in", chunk).get();
                 subSnap.forEach(doc => {
                     const d = doc.data();
                     submissionsMap[String(d.rollNo).trim().toUpperCase()] = d;
                 });
+            }
 
                 currentExamResults = pooledStudents.map(stu => {
                     const roll = String(stu.rollNo || '').trim().toUpperCase();
