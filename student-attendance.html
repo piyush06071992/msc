@@ -4050,18 +4050,15 @@ async function loadLedger() {
                 let curStats = {};
                 let prevStats = {};
                 
-             let oldSectionRecords = {};
+          let oldSectionRecords = {};
                 let oldSectionPrevStats = {};
                 
-                let prevActualWorkingDays = 0;
-                let prevActualStudentAtt = {};
+                let anySubjectPresentStatus = {}; // For current month
+                let prevAnySubjectPresentStatus = {}; // For previous month
+                let prevUnifiedRecords = {}; // Deduplicated previous month records
                 
-                let anySubjectPresentStatus = {}; // Tracks { date: { stuId: 'P'/'L' } }
-
                 curQuerySnap.forEach(doc => {
                     const data = doc.data();
-                    
-                    // --- CAPTURE CROSS-SUBJECT DATA FOR INCHARGE FALLBACK ---
                     if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
                         if (data.records) {
                             Object.keys(data.records).forEach(dateStr => {
@@ -4077,9 +4074,7 @@ async function loadLedger() {
                             });
                         }
                     }
-                    
                     if (normMatch(data.subject) !== normMatch(currentReg.sub)) return;
-
                     if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
                         if (data.records) {
                             Object.keys(data.records).forEach(dKey => {
@@ -4090,18 +4085,15 @@ async function loadLedger() {
                             curStats = { ...curStats, ...data.aggregatedStats };
                         }
                     } else {
-                    if (data.records) {
+                        if (data.records) {
                             Object.keys(data.records).forEach(dKey => {
                                 Object.entries(data.records[dKey]).forEach(([stuId, status]) => {
-                                    
-                                    // STRICT CUTOFF: Ensure we do not aggregate stray attendance marked by the old teacher AFTER the transfer date
                                     const stuObj = studentsData.find(s => s.id === stuId);
                                     if (stuObj && stuObj.transferDate) {
                                         const isOldSec = normMatch(data.className) === normMatch(stuObj.prevClass) && normMatch(data.section) === normMatch(stuObj.prevSection);
                                         if (isOldSec && dKey >= stuObj.transferDate) return; 
                                     }
-
-                                if (!oldSectionRecords[stuId]) oldSectionRecords[stuId] = { P: 0, L: 0 };
+                                    if (!oldSectionRecords[stuId]) oldSectionRecords[stuId] = { P: 0, L: 0 };
                                     if (status === 'P' || status === 'A' || status === 'L') {
                                         oldSectionRecords[stuId][status === 'A' ? 'L' : status]++;
                                     }
@@ -4123,25 +4115,34 @@ async function loadLedger() {
                    }
                 });
 
-            prevQuerySnap.forEach(doc => {
+                prevQuerySnap.forEach(doc => {
                     const data = doc.data();
+                    
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                        if (data.records) {
+                            Object.keys(data.records).forEach(dateStr => {
+                                if (!prevAnySubjectPresentStatus[dateStr]) prevAnySubjectPresentStatus[dateStr] = {};
+                                Object.keys(data.records[dateStr]).forEach(stuId => {
+                                    const status = data.records[dateStr][stuId];
+                                    if (status === 'P') {
+                                        prevAnySubjectPresentStatus[dateStr][stuId] = 'P';
+                                    } else if ((status === 'L' || status === 'A') && prevAnySubjectPresentStatus[dateStr][stuId] !== 'P') {
+                                        prevAnySubjectPresentStatus[dateStr][stuId] = 'L';
+                                    }
+                                });
+                            });
+                        }
+                    }
+
                     if (normMatch(data.subject) !== normMatch(currentReg.sub)) return;
 
-              if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
                         if (data.aggregatedStats) {
                             prevStats = { ...prevStats, ...data.aggregatedStats };
                         }
                         if (data.records) {
-                            Object.keys(data.records).forEach(dateStr => {
-                                const dayRecords = data.records[dateStr];
-                                if (Object.keys(dayRecords).length > 0) {
-                                    prevActualWorkingDays++;
-                                    Object.keys(dayRecords).forEach(stuId => {
-                                        if (dayRecords[stuId] === 'P') {
-                                            prevActualStudentAtt[stuId] = (prevActualStudentAtt[stuId] || 0) + 1;
-                                        }
-                                    });
-                                }
+                            Object.keys(data.records).forEach(dKey => {
+                                prevUnifiedRecords[dKey] = { ...(prevUnifiedRecords[dKey] || {}), ...data.records[dKey] };
                             });
                         }
                    } else {
@@ -4159,6 +4160,50 @@ async function loadLedger() {
                         }
                    }
                 });
+
+                let prevActualWorkingDays = 0;
+                let prevActualStudentAtt = {};
+                const prevDaysInMonth = new Date(prevY, prevM, 0).getDate();
+                
+                // Recreate the exact ledger logic to find the true working days of the previous month
+                for (let d = 1; d <= prevDaysInMonth; d++) {
+                    const dateStr = `${prevY}-${String(prevM).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+                    const status = checkDateStatus(dateStr);
+                    let hasAttendanceMarked = prevUnifiedRecords[dateStr] && Object.keys(prevUnifiedRecords[dateStr]).length > 0;
+                    
+                    if (currentReg.sub === 'CLASS INCHARGE' && !hasAttendanceMarked && prevAnySubjectPresentStatus[dateStr]) {
+                        hasAttendanceMarked = Object.keys(prevAnySubjectPresentStatus[dateStr]).length > 0;
+                    }
+                    
+                    const remKey = `${dateStr}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}`;
+                    const isRemedialDay = remedialDataMap[remKey] ? true : false;
+                    
+                    let isWorkingDay = false;
+                    if (isRemedialDay) {
+                        isWorkingDay = false;
+                    } else if (hasAttendanceMarked) {
+                        isWorkingDay = true;
+                    } else if (status.isExcluded) {
+                        isWorkingDay = false;
+                    } else {
+                        isWorkingDay = true; // Unmarked past days that aren't excluded count as working days
+                    }
+                    
+                    if (isWorkingDay) {
+                        prevActualWorkingDays++;
+                        if (prevUnifiedRecords[dateStr]) {
+                            Object.keys(prevUnifiedRecords[dateStr]).forEach(stuId => {
+                                let val = prevUnifiedRecords[dateStr][stuId];
+                                if (!val && currentReg.sub === 'CLASS INCHARGE' && prevAnySubjectPresentStatus[dateStr]) {
+                                    val = prevAnySubjectPresentStatus[dateStr][stuId];
+                                }
+                                if (val === 'P') {
+                                    prevActualStudentAtt[stuId] = (prevActualStudentAtt[stuId] || 0) + 1;
+                                }
+                            });
+                        }
+                    }
+                }
 
                 // Cache current active ledger records for print validation
                 window.currentLedgerRecords = curRecords;
