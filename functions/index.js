@@ -510,7 +510,7 @@ exports.compileSingleRoomOnDemand = onRequest({
     timeoutSeconds: 300,
     cors: true
 }, async (req, res) => {
-    const { center, date, roomName, type, seatId } = req.body;
+    const { center, date, roomName, type, seatId, skipSeatIds } = req.body;
     if (!center || !date || !roomName) {
         res.status(400).send({ error: "Missing required parameters: center, date, roomName" });
         return;
@@ -554,7 +554,7 @@ exports.compileSingleRoomOnDemand = onRequest({
             }
         }
 
-        if (Object.keys(allocations).length === 0) {
+   if (Object.keys(allocations).length === 0) {
             res.status(404).send({ error: `Seating allocations not found for room: ${roomName} on ${date}.` });
             return;
         }
@@ -562,6 +562,14 @@ exports.compileSingleRoomOnDemand = onRequest({
         let filteredAllocations = allocations;
         if (seatId && allocations[seatId]) {
             filteredAllocations = { [seatId]: allocations[seatId] };
+        } else if (skipSeatIds && Array.isArray(skipSeatIds) && skipSeatIds.length > 0) {
+            filteredAllocations = {};
+            Object.keys(allocations).forEach(k => {
+                // Ignore the seats belonging to students taking Online exams
+                if (!skipSeatIds.includes(k)) {
+                    filteredAllocations[k] = allocations[k];
+                }
+            });
         }
 
         const docType = type === 'omr' ? 'omr' : 'qp';
