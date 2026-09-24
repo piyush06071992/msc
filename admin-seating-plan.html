@@ -386,6 +386,27 @@
 <!-- DEDICATED PRE-FILLED OMR PRINT CANVAS CONTAINER -->
     <div id="omr-print-target-area" class="hidden"></div>
 
+    <!-- ONLINE EXAM OMR PRINT MODAL -->
+    <div id="online-omr-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[600] hidden items-center justify-center p-4">
+        <div class="bg-white rounded-3xl p-6 w-full max-w-md shadow-2xl flex flex-col border-4 border-sky-100">
+            <div class="flex items-center gap-4 mb-4 border-b border-slate-100 pb-4">
+                <span class="text-4xl">💻</span>
+                <div>
+                    <h3 class="font-black text-slate-900 text-xl uppercase tracking-tighter">Online Exams Detected</h3>
+                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5"><span id="online-omr-count" class="text-sky-600 text-xs">0</span> students have online mode</p>
+                </div>
+            </div>
+            <div class="text-sm font-bold text-slate-600 mb-6">
+                Some students in this room are mapped to take an <strong class="text-sky-600">Online</strong> exam on their devices. Do you want to skip printing physical OMR sheets for them to save paper?
+            </div>
+            <div class="flex flex-col gap-3">
+                <button onclick="executeRoomOMRPrint(true)" class="w-full py-3.5 bg-sky-600 hover:bg-sky-500 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-lg transition-all active:scale-95">✅ Skip Online Students (Save Paper)</button>
+                <button onclick="executeRoomOMRPrint(false)" class="w-full py-3 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-black uppercase text-[10px] tracking-widest transition-colors">Print OMRs for Everyone Anyway</button>
+                <button onclick="document.getElementById('online-omr-modal').classList.replace('flex', 'hidden')" class="w-full py-2 text-rose-500 hover:text-rose-600 font-black uppercase text-[10px] tracking-widest transition-colors mt-2">Cancel</button>
+            </div>
+        </div>
+    </div>
+
    <!-- CLOUD PDF GENERATION LOADING MODAL -->
     <div id="cloud-loading-modal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md z-[500] hidden flex-col items-center justify-center p-4 text-white">
         <div class="bg-slate-900 border border-slate-800 p-8 rounded-3xl shadow-2xl flex flex-col items-center max-w-sm w-full text-center space-y-4">
@@ -921,12 +942,13 @@ window.onload = async () => {
                         if (parts.length < 3) return;
                         const key = `${norm(parts[1])}|${norm(parts[2])}`;
                         
-                        if (sectionPaperMap[key]) {
+                   if (sectionPaperMap[key]) {
                             (g.subjects||[]).forEach(sub => {
                                 const detail = (g.subExams && g.subExams[sub]) ? g.subExams[sub] : {};
                                 const code = detail.shortCode || 'UNMAPPED';
+                                const mode = detail.mode || g.mode || 'Offline';
                                 const entry = sectionPaperMap[key].find(e => e.subject === sub.toUpperCase());
-                                if (entry) entry.code = code;
+                                if (entry) { entry.code = code; entry.mode = mode; }
                             });
                         }
                     });
@@ -2887,16 +2909,30 @@ async function printSingleStudentOMR(seatId) {
     }
 }
 
+window._onlineSeatIdsCache = [];
+
 async function printRoomOMRsSeatWise() {
     const date = document.getElementById('seating-exam-date').value;
     const room = roomsDatabase.find(r => r.id === activeRoomId);
     if (!date || !room) return alert("Select an exam date and active room first.");
 
     let occupiedSeats = [];
+    window._onlineSeatIdsCache = [];
+
     Object.keys(currentAllocations).forEach(seatId => {
         if (seatId.startsWith(`${room.name}-`)) {
             const stu = currentAllocations[seatId];
-            if (stu) occupiedSeats.push({ seatId, stu });
+            if (stu) {
+                occupiedSeats.push({ seatId, stu });
+                
+                // Cross-reference with the Paper Map to see if they are taking an Online Exam
+                const secKey = `${norm(stu.className)}|${norm(stu.section)}`;
+                const papers = sectionPaperMap[secKey] || [];
+                const isOnline = papers.some(p => p.mode === 'Online');
+                if (isOnline) {
+                    window._onlineSeatIdsCache.push(seatId);
+                }
+            }
         }
     });
 
@@ -2904,14 +2940,37 @@ async function printRoomOMRsSeatWise() {
         return alert(`No allocated students found in Room ${room.name} to print OMRs.`);
     }
 
+    // Trigger confirmation modal if online exams are detected
+    if (window._onlineSeatIdsCache.length > 0) {
+        document.getElementById('online-omr-count').innerText = window._onlineSeatIdsCache.length;
+        document.getElementById('online-omr-modal').classList.replace('hidden', 'flex');
+    } else {
+        // No online exams detected, print all directly
+        executeRoomOMRPrint(false);
+    }
+}
+
+async function executeRoomOMRPrint(skipOnline) {
+    document.getElementById('online-omr-modal').classList.replace('flex', 'hidden');
+    
+    const date = document.getElementById('seating-exam-date').value;
+    const room = roomsDatabase.find(r => r.id === activeRoomId);
+
     const modal = document.getElementById('cloud-loading-modal');
     if (modal) modal.classList.replace('hidden', 'flex');
+
+    const payload = { center: activeCenter, date, roomName: room.name, type: 'omr' };
+    
+    // Pass the seats to skip securely to the cloud
+    if (skipOnline && window._onlineSeatIdsCache.length > 0) {
+        payload.skipSeatIds = window._onlineSeatIdsCache;
+    }
 
     try {
         const response = await fetch("https://asia-south1-shop-portal-bbbbb.cloudfunctions.net/compileSingleRoomOnDemand", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ center: activeCenter, date, roomName: room.name, type: 'omr' })
+            body: JSON.stringify(payload)
         });
         const result = await response.json();
 
