@@ -724,7 +724,7 @@
                         return !affectedSections.some(sec => norm(slot.className) === norm(sec.cName) && norm(slot.section) === norm(sec.sName));
                     });
                     
-                    affectedSections.forEach(sec => {
+                   affectedSections.forEach(sec => {
                         const masterClassSlots = masterSlots.filter(s => norm(s.className) === norm(sec.cName) && (norm(s.section) === norm(sec.sName) || norm(s.sectionName) === norm(sec.sName)));
                         remainingSchedule.push(...masterClassSlots);
                     });
@@ -732,8 +732,56 @@
                     await histRef.update({ schedule: remainingSchedule, lastUpdated: Date.now() });
                 }
                 
+                // --- NEW: AUTO-CLEANUP SEATING PLAN ---
+                const roomSnap = await db.collection("exam_seating_rooms").where("date", "==", examData.date).where("center", "==", activeCenter).get();
+                let seatingBatch = db.batch();
+                let seatingUpdated = false;
+                
+                roomSnap.forEach(roomDoc => {
+                    let roomData = roomDoc.data();
+                    let allocations = roomData.allocations || {};
+                    let modified = false;
+
+                    Object.keys(allocations).forEach(seatId => {
+                        let stu = allocations[seatId];
+                        if (stu && stu.className && stu.section) {
+                            const norm = str => (str||"").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                            const isAffected = affectedSections.some(sec => norm(sec.cName) === norm(stu.className) && norm(sec.sName) === norm(stu.section));
+                            
+                            // Evict student if their section exam was cancelled
+                            if (isAffected) {
+                                delete allocations[seatId];
+                                modified = true;
+                            }
+                        }
+                    });
+
+                    if (modified) {
+                        seatingBatch.update(roomDoc.ref, { 
+                            allocations: allocations, 
+                            totalAssigned: Object.keys(allocations).length,
+                            timestamp: Date.now()
+                        });
+                        seatingUpdated = true;
+                    }
+                });
+
+                if (seatingUpdated) {
+                    await seatingBatch.commit();
+                    
+                    // Recalculate Master Total for Dashboard tracking
+                    const newRoomSnap = await db.collection("exam_seating_rooms").where("date", "==", examData.date).where("center", "==", activeCenter).get();
+                    let newTotal = 0;
+                    newRoomSnap.forEach(r => newTotal += r.data().totalAssigned || 0);
+                    await db.collection("exam_seating_allocations").doc(`${activeCenter}_${examData.date}`).set({
+                        totalAssigned: newTotal,
+                        timestamp: Date.now()
+                    }, { merge: true });
+                }
+                // --------------------------------------
+                
                 await docRef.delete();
-                alert("✅ Exam block removed and timetable reverted successfully.");
+                alert("✅ Exam block removed, timetable reverted, and seating plan cleared successfully.");
             } catch(e) { alert("Error: "+e.message); }
         }
 
