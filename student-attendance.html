@@ -4016,17 +4016,36 @@ async function requestUnmarkAttendance() {
                 const snap = await docRef.get();
                 let data = snap.exists ? snap.data() : { className: currentReg.c, section: currentReg.s, subject: currentReg.sub, monthKey: monthVal, records: {} };
                 
-                let studentsMap = {};
+             let studentsMap = {};
                 const myStudents = getActiveStudentsForDate(currentReg.c, currentReg.s, todayISO);
                 
+              let hasValidationError = false;
               myStudents.forEach(stu => {
                     const attEl = document.getElementById(`base_att_${stu.id}`);
                     const workEl = document.getElementById(`base_work_${stu.id}`);
+                    
+                    const attVal = attEl ? (parseInt(attEl.value) || 0) : 0;
+                    const workVal = workEl ? (parseInt(workEl.value) || 0) : prevWorking;
+
+                    // Validate: Past Attendance cannot be greater than Working Days
+                    if (attVal > workVal) {
+                        hasValidationError = true;
+                        if(attEl) { attEl.classList.remove('border-slate-300'); attEl.classList.add('border-rose-500', 'bg-rose-100', 'text-rose-700'); }
+                        if(workEl) { workEl.classList.remove('border-slate-300'); workEl.classList.add('border-rose-500', 'bg-rose-100', 'text-rose-700'); }
+                    } else {
+                        if(attEl) { attEl.classList.remove('border-rose-500', 'bg-rose-100', 'text-rose-700'); attEl.classList.add('border-slate-300'); }
+                        if(workEl) { workEl.classList.remove('border-rose-500', 'bg-rose-100', 'text-rose-700'); workEl.classList.add('border-slate-300'); }
+                    }
+
                     studentsMap[stu.id] = {
-                        att: attEl ? (parseInt(attEl.value) || 0) : 0,
-                        working: workEl ? (parseInt(workEl.value) || 0) : prevWorking
+                        att: attVal,
+                        working: workVal
                     };
                 });
+
+                if (hasValidationError) {
+                    return alert("🚨 Validation Error: A student's Past Attendance cannot be greater than their Previous Working Days.\n\nPlease correct the highlighted fields (in red) before saving.");
+                }
 
                 data.aggregatedStats = {
                     globalTotalWorkingDays: prevWorking,
@@ -4529,11 +4548,20 @@ async function loadLedger() {
                         rowHtml += `<td class="border border-black" style="${inlineStyle}">${cellContent}</td>`;
                     });
 
-   const grandTotalAtt = stuPrevAtt + pCount;
+const grandTotalAtt = stuPrevAtt + pCount;
                     const stuGrandTotalWorking = stuPrevWork + totalWorkingDaysMonth;
                     let percentage = stuGrandTotalWorking > 0 ? Math.round((grandTotalAtt / stuGrandTotalWorking) * 100) : 0;
 
                     let remarks = "";
+                    let mathErrorStyle = "";
+                    let isError = false;
+                    
+                    if (grandTotalAtt > stuGrandTotalWorking || stuPrevAtt > stuPrevWork) {
+                        window.ledgerHasMathErrors = true;
+                        isError = true;
+                        mathErrorStyle = "background-color: #fee2e2 !important; color: #991b1b !important; border: 2px solid #ef4444 !important;";
+                        remarks += "⚠️ DATA ERROR: ATTENDANCE > WORKING DAYS. ";
+                    }
                     
                     if (stu.addDate) {
                         const [ay, am] = stu.addDate.split('-');
@@ -4587,7 +4615,7 @@ async function loadLedger() {
                         }
                     }
 
-                    tableHtml += `<tr>
+          tableHtml += `<tr>
                         <td class="bg-white font-mono text-[10px] border border-black font-black" style="color: #000080;">${rowIndex + 1}</td>
                         <td class="sticky-col-1 bg-white font-mono text-[10px] border border-black leading-tight" style="white-space: normal; word-wrap: break-word;">${stu.admNo || '-'}</td>
                         <td class="sticky-col-2 bg-white font-mono text-[11px] font-black border border-black">${stu.rollNo || 'N/A'}</td>
@@ -4595,10 +4623,10 @@ async function loadLedger() {
                         ${rowHtml}
                    <td class="font-black border border-black" style="color: #000080;">${lCount}</td>
                         <td class="font-black border border-black" style="color: #000080;">${pCount}</td>
-                        <td class="font-black border border-black" style="color: #000080;">${stuPrevAtt}</td>
-                        <td class="font-black border border-black" style="color: #000080;">${grandTotalAtt}</td>
-                        <td class="font-black border border-black" style="color: #000080;">${stuGrandTotalWorking}</td>
-                        <td class="border border-black font-bold text-[10px] text-rose-600 text-left px-2 leading-tight" style="white-space: normal; min-width: 120px; max-width: 160px; word-wrap: break-word;">${remarks}</td>
+                        <td class="font-black border border-black" style="color: #000080; ${stuPrevAtt > stuPrevWork ? mathErrorStyle : ''}">${stuPrevAtt}</td>
+                        <td class="font-black border border-black" style="color: #000080; ${grandTotalAtt > stuGrandTotalWorking ? mathErrorStyle : ''}">${grandTotalAtt}</td>
+                        <td class="font-black border border-black" style="color: #000080; ${grandTotalAtt > stuGrandTotalWorking ? mathErrorStyle : ''}">${stuGrandTotalWorking}</td>
+                        <td class="border border-black font-bold text-[10px] text-rose-600 text-left px-2 leading-tight" style="white-space: normal; min-width: 120px; max-width: 160px; word-wrap: break-word; ${isError ? 'background-color: #fee2e2 !important;' : ''}">${remarks}</td>
                     </tr>`;
                 });
 
@@ -5328,8 +5356,13 @@ async function printLedgerPDF() {
                 }
             }
 
-            if (unmarkedDates.length > 0) {
+        if (unmarkedDates.length > 0) {
                 alert(`🚨 Cannot Print Ledger!\n\nAttendance is missing/unmarked for the following date(s):\n• ${unmarkedDates.join('\n• ')}\n\nPlease mark attendance for all working days before printing.`);
+                return;
+            }
+
+            if (window.ledgerHasMathErrors) {
+                alert(`🚨 Cannot Print Ledger!\n\nData Error: One or more students currently have a Total Attendance that is greater than the Total Working Days.\nThis is mathematically impossible.\n\nPlease fix the data via the 'Baseline Setup' menu or Attendance Correction before printing.`);
                 return;
             }
 
