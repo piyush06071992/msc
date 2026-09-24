@@ -425,12 +425,12 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     const opacity = 0.8;
                     
                     const subLabel = (bulkData.matchedSubKey && bulkData.matchedSubKey !== "FULL PAPER" && bulkData.matchedSubKey !== "UNMAPPED EXAM") ? `[${bulkData.matchedSubKey}] ` : "";
-               const leftText = `ROOM: ${roomName}`;
+           const leftText = `ROOM: ${roomName}`;
                     const rightText = `${subLabel}COPY ${c+1}/${copiesNeeded}`;
                     
-                    // Header Stamp (Moved down to sit perfectly above the Minerva frame)
-                    page.drawText(leftText, { x: 36, y: height - 40, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 40, size, font, color, opacity });
+                    // Header Stamp (Moved slightly up to clear the top box frame)
+                    page.drawText(leftText, { x: 36, y: height - 28, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 28, size, font, color, opacity });
                     
                     // Footer Stamp (Extreme Bottom)
                     page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
@@ -472,8 +472,8 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
                 const rightText = `SEAT: ${task.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${task.assignedSeries}`;
                 
-                // Header Stamp (Moved down to sit perfectly above the Minerva frame)
-                const y = height - 40;
+                // Header Stamp (Moved slightly up to clear the top box frame)
+                const y = height - 28;
                 
                 page.drawText(leftText, { x: 36, y, size, font, color, opacity });
                 page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y, size, font, color, opacity });
