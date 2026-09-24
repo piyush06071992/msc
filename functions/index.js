@@ -425,12 +425,12 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     const opacity = 0.8;
                     
                     const subLabel = (bulkData.matchedSubKey && bulkData.matchedSubKey !== "FULL PAPER" && bulkData.matchedSubKey !== "UNMAPPED EXAM") ? `[${bulkData.matchedSubKey}] ` : "";
-                    const leftText = `ROOM: ${roomName}`;
+                 const leftText = `ROOM: ${roomName}`;
                     const rightText = `${subLabel}COPY ${c+1}/${copiesNeeded}`;
                     
-                    // Header Stamp (Extreme Top)
-                    page.drawText(leftText, { x: 36, y: height - 15, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 15, size, font, color, opacity });
+                    // Header Stamp (Moved down approx 1.5 inches / 108 points to clear printer margins)
+                    page.drawText(leftText, { x: 36, y: height - 108, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 108, size, font, color, opacity });
                     
                     // Footer Stamp (Extreme Bottom)
                     page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
@@ -469,9 +469,11 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
                 const stu = task.student;
                 const subLabel = (task.matchedSubKey && task.matchedSubKey !== "FULL PAPER" && task.matchedSubKey !== "UNMAPPED EXAM") ? `[${task.matchedSubKey}] ` : "";
-                const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
+       const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
                 const rightText = `SEAT: ${task.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${task.assignedSeries}`;
-                const y = height - 15;
+                
+                // Moved down approx 1.5 inches / 108 points to clear printer margins
+                const y = height - 108;
                 
                 page.drawText(leftText, { x: 36, y, size, font, color, opacity });
                 page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y, size, font, color, opacity });
