@@ -380,9 +380,10 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             }
             bulkSplitCounts[bufferKey].count++;
 
-        } else {
+       } else {
             // SEAT SPECIFIC MODE (Standard, Booklet, and all OMRs)
-            const trackerKey = `${secKey}_${matchedSubKey}`;
+            // Track by basePdfUrl so combined sections sharing the same paper alternate series correctly
+            const trackerKey = basePdfUrl;
             if (subjectCounters[trackerKey] === undefined) {
                 subjectCounters[trackerKey] = 0;
             }
