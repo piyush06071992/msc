@@ -3007,7 +3007,7 @@ async function loadManualGradingGrid() {
                     existingMax = keysDoc.data().directMaxMarks[sub];
                 }
                 document.getElementById('manual-max-marks').value = existingMax;
-                const subSnap = await db.collection("omr_submissions").where("groupId", "==", manualActiveGroup.id).get();
+             const subSnap = await db.collection("omr_submissions").where("groupId", "==", manualActiveGroup.id).get();
                 let existingScores = {};
                 subSnap.forEach(doc => {
                     const d = doc.data();
@@ -3016,10 +3016,28 @@ async function loadManualGradingGrid() {
                             score: d.directScores[sub],
                             updatedAt: d.updatedAt || 0,
                             unlockedAt: d.unlockedAt || 0,
-                            unlockRequested: d.unlockRequested || false
+                            unlockRequested: d.unlockRequested || false,
+                            isDraft: false
                         };
                     }
                 });
+
+                // Fetch pending drafts
+                const draftDoc = await db.collection("manual_grading_drafts").doc(`${manualActiveGroup.id}_${sub}`).get();
+                if (draftDoc.exists) {
+                    const draftData = draftDoc.data().scores || {};
+                    Object.keys(draftData).forEach(roll => {
+                        const rollUpper = String(roll).trim().toUpperCase();
+                        // Only apply draft if a finalized submission doesn't already exist
+                        if (!existingScores[rollUpper]) {
+                            existingScores[rollUpper] = {
+                                score: draftData[rollUpper],
+                                updatedAt: draftDoc.data().updatedAt || 0,
+                                isDraft: true
+                            };
+                        }
+                    });
+                }
 
                 if (manualActiveStudents.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 font-bold text-slate-400">No students found.</td></tr>`;
@@ -3090,10 +3108,21 @@ async function loadManualGradingGrid() {
                                 } else {
                                     actionHtml = `<button onclick="requestScoreUnlock('${roll}')" class="bg-amber-500 hover:bg-amber-400 text-white px-2 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest shadow-sm transition-all w-full border border-amber-600">Request Edit</button>`;
                                 }
-                          } else {
+                        } else {
                                     canSaveAny = true;
                                     inputHtml = `<input type="number" step="any" data-roll="${roll}" value="${existingVal}" oninput="validateManualScore(this)" class="manual-mark-input w-full min-w-[60px] py-1.5 px-2 text-sm bg-white border border-slate-300 rounded text-center font-black text-slate-800 outline-none focus:border-fuchsia-500 shadow-inner" placeholder="Score">`;
-                                    actionHtml = `<span class="text-[9px] font-bold text-emerald-600 uppercase">${existingVal !== '' ? 'Saved' : 'Edit'}</span>`;
+                                    
+                                    let statusText = 'Edit';
+                                    let statusColor = 'text-emerald-600';
+                                    if (existingVal !== '') {
+                                        if (exData && exData.isDraft) {
+                                            statusText = 'Draft';
+                                            statusColor = 'text-amber-500';
+                                        } else {
+                                            statusText = 'Saved';
+                                        }
+                                    }
+                                    actionHtml = `<span class="text-[9px] font-bold ${statusColor} uppercase">${statusText}</span>`;
                                 }
                         }
                     }
@@ -3181,9 +3210,11 @@ function closeManualGradingModal() {
             const allInputs = document.querySelectorAll('.manual-mark-input');
             const inputs = Array.from(allInputs).filter(inp => inp.offsetParent !== null);
             
-         let updates = [];
+   let updates = [];
+            let draftUpdates = {};
             let unsubmittedCount = 0;
             let unmarkedCount = 0;
+            let invalidMarksCount = 0;
             
             // Bypass strict attendance validation for older historical exams
             const requireAttendanceCheck = manualActiveGroup.date >= "2026-09-01";
@@ -3195,6 +3226,8 @@ function closeManualGradingModal() {
                 const isAbsent = row && row.innerText.includes('Absent');
                 const isUnmarked = row && row.innerHTML.includes('Unmarked');
 
+                inp.classList.remove('border-rose-500', 'bg-rose-50');
+
                 if (isUnmarked && requireAttendanceCheck) {
                     unmarkedCount++;
                     inp.classList.add('border-rose-500', 'bg-rose-50');
@@ -3203,11 +3236,12 @@ function closeManualGradingModal() {
                     inp.classList.add('border-rose-500', 'bg-rose-50');
                 } else if (val !== "") {
                     const numVal = parseFloat(val);
-                    if (numVal > maxMarks) {
+                    if (numVal > maxMarks || numVal < 0) {
+                        invalidMarksCount++;
                         inp.classList.add('border-rose-500', 'bg-rose-50');
                     } else {
-                        inp.classList.remove('border-rose-500', 'bg-rose-50');
                         updates.push({ rollNo: roll, score: numVal });
+                        draftUpdates[roll] = numVal;
                     }
                 }
             });
@@ -3216,23 +3250,28 @@ function closeManualGradingModal() {
                 return alert(`🚨 Action Blocked: ${unmarkedCount} student(s) have UNMARKED attendance.\n\nPlease go to the Attendance Hub and mark their attendance (Present or Absent) before entering scores.`);
             }
 
+            if (invalidMarksCount > 0) {
+                return alert("🚨 Some scores exceed the Maximum Marks or are invalid. Please correct the highlighted fields.");
+            }
+
+            let isDraftSave = false;
             if (unsubmittedCount > 0) {
-                return alert(`⚠️ Submission blocked! There are ${unsubmittedCount} student(s) with missing scores (who are not marked Absent/Leave). Please fill in all scores before saving.`);
+                const confirmDraft = confirm(`⚠️ Incomplete Roster: ${unsubmittedCount} score(s) missing.\n\nDo you want to save the ${updates.length} entered scores as a DRAFT?\n\n(Saved as draft only due to incomplete student marks and will save in maindatabase only once all marks are filled.)`);
+                if (!confirmDraft) return;
+                isDraftSave = true;
+            } else {
+                if (!confirm(`Save all ${updates.length} scores for ${manualActiveSubject}?`)) return;
             }
 
-            if (document.querySelectorAll('.manual-mark-input.border-rose-500').length > 0) {
-                return alert("Some scores exceed the Maximum Marks. Please correct the highlighted fields.");
-            }
-
-            if (updates.length === 0) return alert("No scores entered to save.");
-            if (!confirm(`Save ${updates.length} scores for ${manualActiveSubject}?`)) return;
+            if (updates.length === 0) return alert("No valid scores entered to save.");
 
             const btn = document.getElementById('btn-save-manual');
             const orig = btn.innerHTML;
-            btn.innerHTML = "⏳ Saving..."; btn.disabled = true;
+            btn.innerHTML = "⏳ Syncing with Cloud..."; btn.disabled = true;
 
             try {
                 const batch = db.batch();
+                const draftDocRef = db.collection("manual_grading_drafts").doc(`${manualActiveGroup.id}_${manualActiveSubject}`);
 
                 // 1. Save Max Marks
                 const keyRef = db.collection("exam_answer_keys").doc(manualActiveGroup.id);
@@ -3240,22 +3279,41 @@ function closeManualGradingModal() {
                     directMaxMarks: { [manualActiveSubject]: maxMarks }
                 }, { merge: true });
 
-                // 2. Save Scores
-                updates.forEach(u => {
-                    const docRef = db.collection("omr_submissions").doc(`${manualActiveGroup.id}_${u.rollNo}`);
-                    batch.set(docRef, {
+                if (isDraftSave) {
+                    // Save ONLY to drafts collection (Overwrite to remove deleted fields cleanly)
+                    batch.set(draftDocRef, {
                         groupId: manualActiveGroup.id,
-                        rollNo: u.rollNo,
-                        isDirectImport: true,
-                        updatedAt: Date.now(),
-                        directScores: { [manualActiveSubject]: u.score }
-                    }, { merge: true });
-                });
+                        subject: manualActiveSubject,
+                        scores: draftUpdates,
+                        updatedAt: Date.now()
+                    });
+                } else {
+                    // Final Save: Save to omr_submissions
+                    updates.forEach(u => {
+                        const docRef = db.collection("omr_submissions").doc(`${manualActiveGroup.id}_${u.rollNo}`);
+                        batch.set(docRef, {
+                            groupId: manualActiveGroup.id,
+                            rollNo: u.rollNo,
+                            isDirectImport: true,
+                            updatedAt: Date.now(),
+                            directScores: { [manualActiveSubject]: u.score }
+                        }, { merge: true });
+                    });
+                    
+                    // Clear the draft since it's fully submitted
+                    batch.delete(draftDocRef);
+                }
 
-               await batch.commit();
-             alert("✅ Scores saved successfully!");
+                // Wait for explicit cloud confirmation before alerting success
+                await batch.commit();
+
+                if (isDraftSave) {
+                    alert("📝 Saved as draft only due to incomplete student marks. \n\nWill save in main database only once all marks are filled.");
+                } else {
+                    alert("✅ All scores finalized and saved to the main database successfully!");
+                }
                 
-                loadManualGradingGrid(); // Refresh to lock inputs and reveal the WhatsApp Share button
+                loadManualGradingGrid(); // Refresh to lock inputs and update badges
 
             } catch (e) {
                 console.error(e);
