@@ -56,28 +56,153 @@ jobs:
 
     - name: Inject Android Kiosk Mode (Java Hook)
       run: |
-        # 1. Find the dynamically generated MainActivity.java file
+        # 1. Inject necessary permissions into AndroidManifest.xml
+        sed -i '/<application/i \    <uses-permission android:name="android.permission.REORDER_TASKS" />' android/app/src/main/AndroidManifest.xml
+        sed -i '/<application/i \    <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />' android/app/src/main/AndroidManifest.xml
+
+        # 2. Find the dynamically generated MainActivity.java file
         MAIN_ACTIVITY=$(find android/app/src/main/java -name "MainActivity.java")
         
-        # 2. Extract the dynamically generated package name
+        # 3. Extract the dynamically generated package name
         PACKAGE_LINE=$(grep "^package " $MAIN_ACTIVITY)
         
-        # 3. Overwrite the file with the native Kiosk Bridge
+        # 4. Overwrite MainActivity.java with the Secure Trap & Kiosk Bridge
         cat <<EOF > $MAIN_ACTIVITY
         $PACKAGE_LINE
 
         import android.os.Bundle;
+        import android.view.View;
+        import android.view.WindowManager;
+        import android.app.ActivityManager;
+        import android.content.Context;
         import android.webkit.JavascriptInterface;
         import com.getcapacitor.BridgeActivity;
 
         public class MainActivity extends BridgeActivity {
+            private boolean isArmed = false;
+            private boolean isTerminated = false;
+
             @Override
             public void onCreate(Bundle savedInstanceState) {
                 super.onCreate(savedInstanceState);
-                // Inject the native bridge into Capacitor's WebView
+                applyKioskFlags();
+
                 if (this.bridge != null && this.bridge.getWebView() != null) {
                     this.bridge.getWebView().addJavascriptInterface(new KioskBridge(), "AndroidKiosk");
                 }
+            }
+
+            @Override
+            protected void onResume() {
+                super.onResume();
+                applyKioskFlags();
+
+                if (isTerminated) {
+                    showViolationScreen("EXAM DISQUALIFIED", "You attempted to leave or unpin the exam.");
+                    return;
+                }
+
+                // Auto-prompt Screen Pinning
+                ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+                if (am.getLockTaskModeState() == ActivityManager.LOCK_TASK_MODE_NONE) {
+                    try {
+                        startLockTask();
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            @Override
+            public void onWindowFocusChanged(boolean hasFocus) {
+                super.onWindowFocusChanged(hasFocus);
+                if (hasFocus) {
+                    applyKioskFlags();
+                    ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+                    // Arm the trap only after the student confirms the system screen pinning dialog
+                    if (am.getLockTaskModeState() != ActivityManager.LOCK_TASK_MODE_NONE) {
+                        isArmed = true;
+                    }
+                } else {
+                    // Triggers if student pulls notification bar, summons Assistant via power button, or presses unpin combo
+                    if (isArmed && !isTerminated) {
+                        triggerViolation("FOCUS_LOST", "Notification pull, Assistant activation, or navigation escape detected.");
+                    }
+                }
+            }
+
+            @Override
+            protected void onPause() {
+                super.onPause();
+                if (isArmed && !isTerminated) {
+                    triggerViolation("APP_BACKGROUNDED", "App focus was lost or sent to background.");
+                }
+            }
+
+            private void applyKioskFlags() {
+                runOnUiThread(() -> {
+                    try {
+                        // Keep screen awake: prevents screen timeouts during physical paper solving
+                        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+                        // Immersive Sticky: hides status bar, navigation bar, clock, battery
+                        getWindow().getDecorView().setSystemUiVisibility(
+                            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        );
+                    } catch (Exception ignored) {}
+                });
+            }
+
+            private void triggerViolation(String code, String reason) {
+                isTerminated = true;
+                showViolationScreen("EXAM TERMINATED", reason + " (" + code + ")");
+            }
+
+            private void showViolationScreen(String title, String message) {
+                runOnUiThread(() -> {
+                    if (bridge != null && bridge.getWebView() != null) {
+                        String html = "<!DOCTYPE html><html><head>" +
+                            "<meta name='viewport' content='width=device-width, initial-scale=1.0'>" +
+                            "<style>" +
+                            "body { background-color: #dc2626; color: white; font-family: -apple-system, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; text-align: center; user-select: none; }" +
+                            "h1 { font-size: 32px; font-weight: 900; margin: 0 0 10px 0; text-transform: uppercase; cursor: pointer; }" +
+                            "p { font-size: 16px; margin: 8px 0; max-width: 480px; line-height: 1.4; opacity: 0.95; }" +
+                            ".box { background: rgba(0,0,0,0.25); padding: 12px 20px; border-radius: 8px; font-family: monospace; font-size: 13px; margin-top: 20px; }" +
+                            "#unlockForm { display: none; margin-top: 25px; }" +
+                            "input { padding: 10px 14px; border-radius: 8px; border: 1px solid white; font-size: 16px; width: 140px; text-align: center; outline: none; }" +
+                            "button { padding: 10px 18px; border-radius: 8px; border: none; background: white; color: #dc2626; font-weight: bold; font-size: 14px; margin-left: 8px; cursor: pointer; }" +
+                            "</style></head><body>" +
+                            "<h1 id='titleHeader' onclick='handleSecretTap()'>" + title + "</h1>" +
+                            "<p><b>Security Violation Detected</b></p>" +
+                            "<p>" + message + "</p>" +
+                            "<div class='box'>SHOW THIS SCREEN TO THE INVIGILATOR</div>" +
+                            "<div id='unlockForm'>" +
+                            "<input type='password' id='invPin' placeholder='Admin PIN' />" +
+                            "<button onclick='verifyUnlock()'>Unlock</button>" +
+                            "</div>" +
+                            "<script>" +
+                            "var tapCount = 0;" +
+                            "function handleSecretTap() {" +
+                            "  tapCount++;" +
+                            "  if (tapCount >= 5) {" +
+                            "    document.getElementById('unlockForm').style.display = 'block';" +
+                            "  }" +
+                            "}" +
+                            "function verifyUnlock() {" +
+                            "  var pin = document.getElementById('invPin').value;" +
+                            "  if (window.AndroidKiosk && window.AndroidKiosk.unlock) {" +
+                            "    window.AndroidKiosk.unlock(pin);" +
+                            "  }" +
+                            "}" +
+                            "</script>" +
+                            "</body></html>";
+
+                        bridge.getWebView().loadDataWithBaseURL(null, html, "text/html", "utf-8", null);
+                    }
+                });
             }
 
             public class KioskBridge {
@@ -86,9 +211,7 @@ jobs:
                     runOnUiThread(() -> {
                         try {
                             startLockTask();
-                        } catch (Exception e) {
-                            e.printStackTrace();
-                        }
+                        } catch (Exception ignored) {}
                     });
                 }
 
@@ -97,8 +220,20 @@ jobs:
                     runOnUiThread(() -> {
                         try {
                             stopLockTask();
-                        } catch (Exception e) {
-                            e.printStackTrace();
+                        } catch (Exception ignored) {}
+                    });
+                }
+
+                @JavascriptInterface
+                public void unlock(String enteredPin) {
+                    runOnUiThread(() -> {
+                        // Invigilator PIN is 9999
+                        if ("9999".equals(enteredPin)) {
+                            isTerminated = false;
+                            isArmed = false;
+                            if (bridge != null && bridge.getWebView() != null) {
+                                bridge.getWebView().loadUrl("https://minervaacademy.web.app");
+                            }
                         }
                     });
                 }
