@@ -71,6 +71,7 @@ jobs:
         $PACKAGE_LINE
 
         import android.os.Bundle;
+        import android.os.Handler;
         import android.view.View;
         import android.view.WindowManager;
         import android.app.ActivityManager;
@@ -82,6 +83,27 @@ jobs:
         public class MainActivity extends BridgeActivity {
             private boolean isArmed = false;
             private boolean isTerminated = false;
+            private Handler securityHandler = new Handler();
+
+            // The Watchdog: Checks every 1 second if the screen is actually pinned
+            private Runnable securityRunnable = new Runnable() {
+                @Override
+                public void run() {
+                    if (isTerminated) return;
+                    
+                    ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+                    if (am != null) {
+                        int lockState = am.getLockTaskModeState();
+                        if (lockState != ActivityManager.LOCK_TASK_MODE_NONE) {
+                            isArmed = true;
+                        } else if (isArmed) {
+                            triggerViolation("ERR_03", "Unauthorized system action detected.");
+                            return; // Halt the loop
+                        }
+                    }
+                    securityHandler.postDelayed(this, 1000);
+                }
+            };
 
             @Override
             public void onCreate(Bundle savedInstanceState) {
@@ -103,11 +125,24 @@ jobs:
                     return;
                 }
 
+                // Start the Watchdog Timer
+                securityHandler.removeCallbacks(securityRunnable);
+                securityHandler.postDelayed(securityRunnable, 1000);
+
                 ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-                if (am.getLockTaskModeState() == ActivityManager.LOCK_TASK_MODE_NONE) {
+                if (am != null && am.getLockTaskModeState() == ActivityManager.LOCK_TASK_MODE_NONE) {
                     try {
                         startLockTask();
                     } catch (Exception ignored) {}
+                }
+            }
+
+            @Override
+            public void onPause() {
+                super.onPause();
+                securityHandler.removeCallbacks(securityRunnable);
+                if (isArmed && !isTerminated) {
+                    triggerViolation("ERR_02", "App focus lost.");
                 }
             }
 
@@ -116,22 +151,10 @@ jobs:
                 super.onWindowFocusChanged(hasFocus);
                 if (hasFocus) {
                     applyKioskFlags();
-                    ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-                    if (am.getLockTaskModeState() != ActivityManager.LOCK_TASK_MODE_NONE) {
-                        isArmed = true;
-                    }
                 } else {
                     if (isArmed && !isTerminated) {
                         triggerViolation("ERR_01", "Unauthorized system action detected.");
                     }
-                }
-            }
-
-            @Override
-            public void onPause() {
-                super.onPause();
-                if (isArmed && !isTerminated) {
-                    triggerViolation("ERR_02", "App focus lost.");
                 }
             }
 
@@ -220,10 +243,14 @@ jobs:
                 public void unlock(String enteredPin) {
                     runOnUiThread(() -> {
                         if ("9999".equals(enteredPin)) {
-                            // Hard restart the entire app to bypass Android's unpin cooldown
-                            Intent intent = getIntent();
-                            finish();
-                            startActivity(intent);
+                            // Hard Process Kill: Wipes Android's memory of the app and forces a cold boot
+                            Context context = getApplicationContext();
+                            Intent intent = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+                            if (intent != null) {
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+                                startActivity(intent);
+                                Runtime.getRuntime().exit(0);
+                            }
                         }
                     });
                 }
