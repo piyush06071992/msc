@@ -75,6 +75,7 @@ jobs:
         import android.view.WindowManager;
         import android.app.ActivityManager;
         import android.content.Context;
+        import android.content.Intent;
         import android.webkit.JavascriptInterface;
         import com.getcapacitor.BridgeActivity;
 
@@ -98,11 +99,10 @@ jobs:
                 applyKioskFlags();
 
                 if (isTerminated) {
-                    showViolationScreen("EXAM DISQUALIFIED", "You attempted to leave or unpin the exam.");
+                    showViolationScreen("EXAM TERMINATED", "Unauthorized activity logged.");
                     return;
                 }
 
-                // Auto-prompt Screen Pinning
                 ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
                 if (am.getLockTaskModeState() == ActivityManager.LOCK_TASK_MODE_NONE) {
                     try {
@@ -117,14 +117,12 @@ jobs:
                 if (hasFocus) {
                     applyKioskFlags();
                     ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-                    // Arm the trap only after the student confirms the system screen pinning dialog
                     if (am.getLockTaskModeState() != ActivityManager.LOCK_TASK_MODE_NONE) {
                         isArmed = true;
                     }
                 } else {
-                    // Triggers if student pulls notification bar, summons Assistant via power button, or presses unpin combo
                     if (isArmed && !isTerminated) {
-                        triggerViolation("FOCUS_LOST", "Notification pull, Assistant activation, or navigation escape detected.");
+                        triggerViolation("ERR_01", "Unauthorized system action detected.");
                     }
                 }
             }
@@ -133,17 +131,14 @@ jobs:
             public void onPause() {
                 super.onPause();
                 if (isArmed && !isTerminated) {
-                    triggerViolation("APP_BACKGROUNDED", "App focus was lost or sent to background.");
+                    triggerViolation("ERR_02", "App focus lost.");
                 }
             }
 
             private void applyKioskFlags() {
                 runOnUiThread(() -> {
                     try {
-                        // Keep screen awake: prevents screen timeouts during physical paper solving
                         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-
-                        // Immersive Sticky: hides status bar, navigation bar, clock, battery
                         getWindow().getDecorView().setSystemUiVisibility(
                             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                             | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -158,6 +153,7 @@ jobs:
 
             private void triggerViolation(String code, String reason) {
                 isTerminated = true;
+                try { stopLockTask(); } catch (Exception ignored) {}
                 showViolationScreen("EXAM TERMINATED", reason + " (" + code + ")");
             }
 
@@ -172,13 +168,13 @@ jobs:
                             "p { font-size: 16px; margin: 8px 0; max-width: 480px; line-height: 1.4; opacity: 0.95; }" +
                             ".box { background: rgba(0,0,0,0.25); padding: 12px 20px; border-radius: 8px; font-family: monospace; font-size: 13px; margin-top: 20px; }" +
                             "#unlockForm { display: none; margin-top: 25px; }" +
-                            "input { padding: 10px 14px; border-radius: 8px; border: 1px solid white; font-size: 16px; width: 140px; text-align: center; outline: none; }" +
+                            "input { padding: 10px 14px; border-radius: 8px; border: 1px solid white; font-size: 16px; width: 140px; text-align: center; outline: none; color: black; }" +
                             "button { padding: 10px 18px; border-radius: 8px; border: none; background: white; color: #dc2626; font-weight: bold; font-size: 14px; margin-left: 8px; cursor: pointer; }" +
                             "</style></head><body>" +
                             "<h1 id='titleHeader' onclick='handleSecretTap()'>" + title + "</h1>" +
-                            "<p><b>Security Violation Detected</b></p>" +
+                            "<p><b>Security Violation</b></p>" +
                             "<p>" + message + "</p>" +
-                            "<div class='box'>SHOW THIS SCREEN TO THE INVIGILATOR</div>" +
+                            "<div class='box'>PLEASE CONTACT THE INVIGILATOR</div>" +
                             "<div id='unlockForm'>" +
                             "<input type='password' id='invPin' placeholder='Admin PIN' />" +
                             "<button onclick='verifyUnlock()'>Unlock</button>" +
@@ -209,31 +205,25 @@ jobs:
                 @JavascriptInterface
                 public void enableKiosk() {
                     runOnUiThread(() -> {
-                        try {
-                            startLockTask();
-                        } catch (Exception ignored) {}
+                        try { startLockTask(); } catch (Exception ignored) {}
                     });
                 }
 
                 @JavascriptInterface
                 public void disableKiosk() {
                     runOnUiThread(() -> {
-                        try {
-                            stopLockTask();
-                        } catch (Exception ignored) {}
+                        try { stopLockTask(); } catch (Exception ignored) {}
                     });
                 }
 
                 @JavascriptInterface
                 public void unlock(String enteredPin) {
                     runOnUiThread(() -> {
-                        // Invigilator PIN is 9999
                         if ("9999".equals(enteredPin)) {
-                            isTerminated = false;
-                            isArmed = false;
-                            if (bridge != null && bridge.getWebView() != null) {
-                                bridge.getWebView().loadUrl("https://minervaacademy.web.app");
-                            }
+                            // Hard restart the entire app to bypass Android's unpin cooldown
+                            Intent intent = getIntent();
+                            finish();
+                            startActivity(intent);
                         }
                     });
                 }
