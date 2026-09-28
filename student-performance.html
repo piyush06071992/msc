@@ -604,11 +604,11 @@
                 let requiresSebFile = false;
                 
                 const sebFileUrl = window.kioskConfig?.sebUrl || '#';
-                const playStoreUrl = 'https://play.google.com/store/apps/details?id=de.ozerov.fully';
+                const playStoreUrl = 'https://play.google.com/store/apps/details?id=com.fullykiosk.examkiosk';
 
                 // Desktop Android Chrome often claims to be Linux x86_64 but has touch points
                 const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-                const isAndroid = /android/i.test(ua) || (/linux/i.test(ua) && navigator.maxTouchPoints > 0);
+                const isAndroid = /android/i.test(ua) || (/linux/i.test(ua) && navigator.maxTouchPoints > 0) || (/linux/i.test(navigator.platform) && navigator.maxTouchPoints > 0);
 
                 if (isIOS) {
                     // iOS / iPad -> Needs SEB File
@@ -844,10 +844,23 @@
                 alert(`⚠️ ACCESS DENIED: This ${examType} is scheduled for ${examDate}. You can only start the exam on the scheduled date.`);
                 return;
             }
-            
-            // Redirect to the standalone secure kiosk file
-            alert(`🚀 Initializing secure environment...`);
-            window.location.replace(`exam-kiosk.html?date=${examDate}&type=${examType}`);
+
+            const ua = navigator.userAgent || navigator.vendor || window.opera;
+            const isAndroid = /android/i.test(ua) || (/linux/i.test(ua) && navigator.maxTouchPoints > 0) || (/linux/i.test(navigator.platform) && navigator.maxTouchPoints > 0);
+
+            if (isAndroid) {
+                const fekLink = window.kioskConfig?.kioskLink;
+                if (!fekLink) {
+                    alert("No Exam Link (.fek) has been configured by the admin yet.");
+                    return;
+                }
+                alert(`🚀 Initializing secure environment...`);
+                window.location.href = fekLink;
+            } else {
+                // Redirect to the standalone secure kiosk file
+                alert(`🚀 Initializing secure environment...`);
+                window.location.replace(`exam-kiosk.html?date=${examDate}&type=${examType}`);
+            }
         }
 
         function printAdmitCardPdf() {
@@ -1037,25 +1050,27 @@
             try {
                 const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
 
-                const schSnap = await db.collection(prefix + "exam_schedules")
-                    .where("date", "==", date)
-                    .where("className", "==", activeStudent.className)
-                    .where("section", "==", activeStudent.section)
-                    .get();
+                const pgDoc = await db.collection("admin_paper_groups").doc(adminGroupId).get();
+                let sectionKeys = [];
+                if (pgDoc.exists) {
+                    sectionKeys = pgDoc.data().sectionKeys || [];
+                }
+                if (sectionKeys.length === 0) {
+                    sectionKeys.push(`${activeCenter}|${activeStudent.className}|${activeStudent.section}`.toUpperCase());
+                }
+
+                const schSnap = await db.collection(prefix + "exam_schedules").where("date", "==", date).get();
 
                 let validGroupIds = [];
-                let groupMetaMap = {};
                 schSnap.forEach(doc => {
-                    validGroupIds.push(doc.id);
-                    groupMetaMap[doc.id] = doc.data();
+                    const d = doc.data();
+                    const sKey = `${activeCenter}|${d.className}|${d.section}`.toUpperCase();
+                    if (sectionKeys.includes(sKey) || doc.id === adminGroupId) {
+                        validGroupIds.push(doc.id);
+                    }
                 });
-                
-                if (adminGroupId) validGroupIds.push(adminGroupId);
-
-                if (validGroupIds.length === 0) {
-                    modal.classList.replace('flex', 'hidden');
-                    return alert("No exam schedules found matching your section for this date.");
-                }
+                validGroupIds = [...new Set(validGroupIds)];
+                if (validGroupIds.length === 0) validGroupIds.push(adminGroupId);
 
                 let allSubmissions = [];
                 let keysCache = {};
@@ -1069,25 +1084,31 @@
                     subSnap.forEach(d => allSubmissions.push(d.data()));
                 }
 
-             const stuSnap = await db.collection(prefix === "" ? "students" : "dharamshala_students")
-                    .where("className", "==", activeStudent.className)
-                    .where("section", "==", activeStudent.section)
-                    .get();
+                let targetClasses = new Set();
+                let targetSections = new Set();
+                sectionKeys.forEach(sk => {
+                    const parts = sk.split('|');
+                    if (parts.length >= 3) {
+                        targetClasses.add(parts[1].toUpperCase());
+                        targetSections.add(parts[2].toUpperCase());
+                    }
+                });
 
+                const stuSnap = await db.collection(activeCenter === "GHUMARWIN" ? "students" : "dharamshala_students").get();
                 let studentsMap = {};
                 stuSnap.forEach(doc => {
                     const s = doc.data();
-                    if (s.admissionStatus !== 'PENDING') {
-                        if (s.isActive === false && s.statusChangeDate && date > s.statusChangeDate) {
-                            return;
-                        }
+                    const cNorm = String(s.className || '').trim().toUpperCase();
+                    const sNorm = String(s.section || '').trim().toUpperCase();
+                    if (s.admissionStatus !== 'PENDING' && targetClasses.has(cNorm) && targetSections.has(sNorm)) {
+                        if (s.isActive === false && s.statusChangeDate && date > s.statusChangeDate) return;
                         studentsMap[String(s.rollNo).toUpperCase()] = {
                             id: doc.id,
                             rollNo: String(s.rollNo).toUpperCase(),
                             name: s.name,
                             className: s.className,
                             section: s.section,
-                            subjects: {}, totalObt: 0, totalMax: 0, examsAttended: 0
+                            subjects: {}, totalObt: 0, totalMax: 0, examsAttended: 0, hasSubmission: false
                         };
                     }
                 });
@@ -1220,7 +1241,7 @@
             }
         }
 
-  let activeLeaderboardRecords = [];
+        let activeLeaderboardRecords = [];
         let activeLeaderboardStructure = [];
 
         async function openSectionLeaderboard(date, adminGroupId) {
