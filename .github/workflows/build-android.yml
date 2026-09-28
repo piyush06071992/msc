@@ -47,7 +47,6 @@ jobs:
         npx cap add android || true
         cp google-services.json android/app/google-services.json
         
-        # Auto-generate native Android app icons
         mkdir -p assets
         cp logo.png assets/icon.png
         npx @capacitor/assets generate --android
@@ -89,25 +88,24 @@ jobs:
         import java.util.Locale;
 
         public class MainActivity extends BridgeActivity {
+            private boolean isExamActive = false; // Master switch: App is normal if false
             private boolean isArmed = false;
             private boolean isTerminated = false;
             private boolean isConfiguringWifi = false;
             private Handler securityHandler = new Handler();
             private static final String PREFS_NAME = "MinervaSecurityPrefs";
 
-            // Native Overlay Components
             private FrameLayout overlayLayout;
-            private TextView overlayTitle;
-            private TextView overlayTime;
-            private TextView overlayMessage;
+            private TextView overlayTitle, overlayTime, overlayMessage;
             private LinearLayout unlockForm;
             private EditText pinInput;
             private int secretTapCount = 0;
+            private View nativeWifiBtn;
 
             private Runnable securityRunnable = new Runnable() {
                 @Override
                 public void run() {
-                    if (isTerminated) return;
+                    if (!isExamActive || isTerminated) return;
                     
                     ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
                     if (am != null) {
@@ -126,7 +124,6 @@ jobs:
             @Override
             public void onCreate(Bundle savedInstanceState) {
                 super.onCreate(savedInstanceState);
-                applyKioskFlags();
 
                 if (this.bridge != null && this.bridge.getWebView() != null) {
                     this.bridge.getWebView().addJavascriptInterface(new KioskBridge(), "AndroidKiosk");
@@ -134,31 +131,40 @@ jobs:
                 
                 createViolationOverlay();
                 addNativeWifiButton();
-                checkPersistentViolation();
+                
+                // If app crashed during an active exam, restore lockdown state immediately
+                if (checkPersistentViolation()) {
+                    isExamActive = true;
+                }
             }
 
             @Override
             public void onResume() {
                 super.onResume();
-                applyKioskFlags();
-                isConfiguringWifi = false;
+                if (!isExamActive) return; // Do nothing if it's just the normal app
 
+                applyKioskFlags();
                 if (checkPersistentViolation()) return;
+
+                if (isConfiguringWifi) {
+                    isConfiguringWifi = false;
+                    try { startLockTask(); } catch (Exception ignored) {}
+                }
 
                 securityHandler.removeCallbacks(securityRunnable);
                 securityHandler.postDelayed(securityRunnable, 1000);
 
                 ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
                 if (am != null && am.getLockTaskModeState() == ActivityManager.LOCK_TASK_MODE_NONE) {
-                    try {
-                        startLockTask();
-                    } catch (Exception ignored) {}
+                    try { startLockTask(); } catch (Exception ignored) {}
                 }
             }
 
             @Override
             public void onPause() {
                 super.onPause();
+                if (!isExamActive) return;
+
                 securityHandler.removeCallbacks(securityRunnable);
                 if (isArmed && !isTerminated && !isConfiguringWifi) {
                     triggerViolation("ERR_02", "App focus lost.");
@@ -168,8 +174,13 @@ jobs:
             @Override
             public void onWindowFocusChanged(boolean hasFocus) {
                 super.onWindowFocusChanged(hasFocus);
+                if (!isExamActive) return;
+
                 if (hasFocus) {
-                    isConfiguringWifi = false;
+                    if (isConfiguringWifi) {
+                        isConfiguringWifi = false;
+                        try { startLockTask(); } catch (Exception ignored) {}
+                    }
                     applyKioskFlags();
                 } else {
                     if (isArmed && !isTerminated && !isConfiguringWifi) {
@@ -194,6 +205,54 @@ jobs:
                 });
             }
 
+            private void addNativeWifiButton() {
+                runOnUiThread(() -> {
+                    FrameLayout rootLayout = findViewById(android.R.id.content);
+                    if (rootLayout == null || rootLayout.findViewWithTag("wifi_btn") != null) return;
+                    
+                    TextView wifiBtn = new TextView(this);
+                    wifiBtn.setTag("wifi_btn");
+                    wifiBtn.setText("📶 Wi-Fi");
+                    wifiBtn.setTextSize(14f);
+                    wifiBtn.setTextColor(Color.WHITE);
+                    wifiBtn.setPadding(40, 20, 40, 20);
+                    
+                    GradientDrawable shape = new GradientDrawable();
+                    shape.setCornerRadius(50);
+                    shape.setColor(Color.parseColor("#B3000000"));
+                    wifiBtn.setBackground(shape);
+                    
+                    FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                        Gravity.BOTTOM | Gravity.START
+                    );
+                    params.setMargins(40, 0, 0, 40);
+                    wifiBtn.setLayoutParams(params);
+                    
+                    wifiBtn.setOnClickListener(v -> {
+                        isConfiguringWifi = true;
+                        try { stopLockTask(); } catch (Exception ignored) {} // Drop pin so settings can open
+                        
+                        try {
+                            Intent intent = new Intent(android.provider.Settings.Panel.ACTION_INTERNET_CONNECTIVITY);
+                            startActivity(intent);
+                        } catch (Exception e) {
+                            try {
+                                Intent intent = new Intent(android.provider.Settings.ACTION_WIFI_SETTINGS);
+                                startActivity(intent);
+                            } catch (Exception ex) {
+                                isConfiguringWifi = false;
+                                try { startLockTask(); } catch (Exception ignored) {}
+                            }
+                        }
+                    });
+                    
+                    wifiBtn.setVisibility(View.GONE); // Hidden when exam is not active
+                    nativeWifiBtn = wifiBtn;
+                    rootLayout.addView(wifiBtn);
+                });
+            }
+
             private void createViolationOverlay() {
                 runOnUiThread(() -> {
                     FrameLayout rootLayout = findViewById(android.R.id.content);
@@ -201,9 +260,7 @@ jobs:
 
                     overlayLayout = new FrameLayout(this);
                     overlayLayout.setLayoutParams(new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.MATCH_PARENT
-                    ));
+                        FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
                     overlayLayout.setBackgroundColor(Color.parseColor("#DC2626"));
                     overlayLayout.setClickable(true);
                     overlayLayout.setFocusable(true);
@@ -214,10 +271,7 @@ jobs:
                     container.setGravity(Gravity.CENTER);
                     container.setPadding(40, 40, 40, 40);
                     FrameLayout.LayoutParams cParams = new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                        Gravity.CENTER
-                    );
+                        FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER);
                     container.setLayoutParams(cParams);
 
                     overlayTitle = new TextView(this);
@@ -282,7 +336,6 @@ jobs:
                     pinInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER | android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
                     pinInput.setBackgroundColor(Color.WHITE);
                     pinInput.setTextColor(Color.BLACK);
-                    pinInput.setHintTextColor(Color.GRAY);
                     pinInput.setGravity(Gravity.CENTER);
                     pinInput.setPadding(30, 20, 30, 20);
                     LinearLayout.LayoutParams pinParams = new LinearLayout.LayoutParams(260, LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -301,50 +354,6 @@ jobs:
                     container.addView(unlockForm);
                     overlayLayout.addView(container);
                     rootLayout.addView(overlayLayout);
-                });
-            }
-
-            private void addNativeWifiButton() {
-                runOnUiThread(() -> {
-                    FrameLayout rootLayout = findViewById(android.R.id.content);
-                    if (rootLayout == null || rootLayout.findViewWithTag("wifi_btn") != null) return;
-                    
-                    TextView wifiBtn = new TextView(this);
-                    wifiBtn.setTag("wifi_btn");
-                    wifiBtn.setText("📶 Wi-Fi");
-                    wifiBtn.setTextSize(14f);
-                    wifiBtn.setTextColor(Color.WHITE);
-                    wifiBtn.setPadding(40, 20, 40, 20);
-                    
-                    GradientDrawable shape = new GradientDrawable();
-                    shape.setCornerRadius(50);
-                    shape.setColor(Color.parseColor("#B3000000"));
-                    wifiBtn.setBackground(shape);
-                    
-                    FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
-                        Gravity.BOTTOM | Gravity.START
-                    );
-                    params.setMargins(40, 0, 0, 40);
-                    wifiBtn.setLayoutParams(params);
-                    
-                    wifiBtn.setOnClickListener(v -> {
-                        isConfiguringWifi = true;
-                        try {
-                            Intent intent = new Intent(android.provider.Settings.Panel.ACTION_INTERNET_CONNECTIVITY);
-                            startActivity(intent);
-                        } catch (Exception e) {
-                            try {
-                                Intent intent = new Intent(android.provider.Settings.ACTION_WIFI_SETTINGS);
-                                startActivity(intent);
-                            } catch (Exception ex) {
-                                isConfiguringWifi = false;
-                            }
-                        }
-                    });
-                    
-                    rootLayout.addView(wifiBtn);
                 });
             }
 
@@ -369,23 +378,15 @@ jobs:
                 String timestamp = new SimpleDateFormat("MMM dd, yyyy - hh:mm:ss a", Locale.getDefault()).format(new Date());
                 
                 SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-                prefs.edit()
-                     .putBoolean("isTerminated", true)
-                     .putString("reason", reason)
-                     .putString("code", code)
-                     .putString("timestamp", timestamp)
-                     .commit(); // Synchronous write to disk
+                prefs.edit().putBoolean("isTerminated", true).putString("reason", reason)
+                     .putString("code", code).putString("timestamp", timestamp).commit();
                 
                 showViolationScreen("EXAM TERMINATED", reason + " (" + code + ")", timestamp);
             }
 
             private void showViolationScreen(String title, String message, String timestamp) {
                 runOnUiThread(() -> {
-                    FrameLayout rootLayout = findViewById(android.R.id.content);
-                    View wifiBtn = rootLayout != null ? rootLayout.findViewWithTag("wifi_btn") : null;
-                    if (wifiBtn != null) wifiBtn.setVisibility(View.GONE);
-
-                    if (overlayLayout == null) createViolationOverlay();
+                    if (nativeWifiBtn != null) nativeWifiBtn.setVisibility(View.GONE);
                     if (overlayLayout != null) {
                         if (overlayTitle != null) overlayTitle.setText(title);
                         if (overlayTime != null) overlayTime.setText("Time of violation: " + timestamp);
@@ -401,9 +402,9 @@ jobs:
 
             private void handleUnlock(String pin) {
                 if ("9999".equals(pin)) {
-                    // Resume Exam
+                    // RESUME EXAM
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-                    prefs.edit().clear().commit(); // Synchronously clear disk record
+                    prefs.edit().clear().commit(); 
 
                     isTerminated = false;
                     isArmed = false;
@@ -411,31 +412,40 @@ jobs:
                     if (pinInput != null) pinInput.setText("");
                     if (unlockForm != null) unlockForm.setVisibility(View.GONE);
                     if (overlayLayout != null) overlayLayout.setVisibility(View.GONE);
+                    if (nativeWifiBtn != null) nativeWifiBtn.setVisibility(View.VISIBLE);
 
-                    // Show Wi-Fi button
-                    FrameLayout rootLayout = findViewById(android.R.id.content);
-                    View wifiBtn = rootLayout != null ? rootLayout.findViewWithTag("wifi_btn") : null;
-                    if (wifiBtn != null) wifiBtn.setVisibility(View.VISIBLE);
-
-                    // Re-pin screen immediately
                     ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
                     if (am != null && am.getLockTaskModeState() == ActivityManager.LOCK_TASK_MODE_NONE) {
                         try { startLockTask(); } catch (Exception ignored) {}
                     }
-
-                    // Restart security watchdog
                     securityHandler.removeCallbacks(securityRunnable);
                     securityHandler.postDelayed(securityRunnable, 2000);
-
                     Toast.makeText(this, "Exam Resumed", Toast.LENGTH_SHORT).show();
+
                 } else if ("0000".equals(pin)) {
-                    // Completely exit app to home screen
+                    // TURN OFF EXAM MODE (Return to Normal App)
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
                     prefs.edit().clear().commit();
 
+                    isExamActive = false; // Turn off security trap
+                    isTerminated = false;
+                    isArmed = false;
+                    secretTapCount = 0;
+                    
                     try { stopLockTask(); } catch (Exception ignored) {}
-                    finishAffinity();
-                    System.exit(0);
+                    
+                    if (pinInput != null) pinInput.setText("");
+                    if (unlockForm != null) unlockForm.setVisibility(View.GONE);
+                    if (overlayLayout != null) overlayLayout.setVisibility(View.GONE);
+                    if (nativeWifiBtn != null) nativeWifiBtn.setVisibility(View.GONE);
+                    
+                    securityHandler.removeCallbacks(securityRunnable);
+                    
+                    // Reset UI to standard Android view
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+
+                    Toast.makeText(this, "Exam Mode Disabled", Toast.LENGTH_SHORT).show();
                 } else {
                     Toast.makeText(this, "Incorrect PIN", Toast.LENGTH_SHORT).show();
                     if (pinInput != null) pinInput.setText("");
@@ -445,12 +455,34 @@ jobs:
             public class KioskBridge {
                 @JavascriptInterface
                 public void enableKiosk() {
-                    runOnUiThread(() -> { try { startLockTask(); } catch (Exception ignored) {} });
+                    runOnUiThread(() -> { 
+                        isExamActive = true;
+                        isTerminated = false;
+                        isArmed = false;
+                        applyKioskFlags();
+                        
+                        if (nativeWifiBtn != null) nativeWifiBtn.setVisibility(View.VISIBLE);
+                        
+                        try { startLockTask(); } catch (Exception ignored) {}
+                        securityHandler.removeCallbacks(securityRunnable);
+                        securityHandler.postDelayed(securityRunnable, 1000);
+                    });
                 }
 
                 @JavascriptInterface
                 public void disableKiosk() {
-                    runOnUiThread(() -> { try { stopLockTask(); } catch (Exception ignored) {} });
+                    runOnUiThread(() -> { 
+                        isExamActive = false;
+                        isTerminated = false;
+                        isArmed = false;
+                        
+                        try { stopLockTask(); } catch (Exception ignored) {}
+                        if (nativeWifiBtn != null) nativeWifiBtn.setVisibility(View.GONE);
+                        securityHandler.removeCallbacks(securityRunnable);
+                        
+                        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+                    });
                 }
             }
         }
