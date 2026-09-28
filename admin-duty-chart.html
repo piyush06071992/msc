@@ -802,8 +802,45 @@ async function renderRoomSelectors() {
         window.renderedActiveRooms = activeRooms.map(r => r.name);
     }
 
+ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins, targetDateStr) {
+        if (!targetDateStr || !holidaysData || holidaysData.length === 0) return false;
+        const [cy, cm, cd] = targetDateStr.split('-').map(Number);
+        const ctxDate = new Date(cy, cm - 1, cd);
+        const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+        const targetCls = `${norm(className)}|${norm(sectionName)}`;
+
+        for (let h of holidaysData) {
+            if (h.suspendClasses === false || !h.startDate) continue;
+            const [sy, sm_h, sd] = h.startDate.split('-').map(Number);
+            const hStart = new Date(sy, sm_h - 1, sd);
+            const [ey, em_h, ed] = (h.endDate || h.startDate).split('-').map(Number);
+            const hEnd = new Date(ey, em_h - 1, ed, 23, 59, 59);
+
+            if (ctxDate >= hStart && ctxDate <= hEnd) {
+                const matchesClass = (h.targetClasses || []).some(tc => {
+                    if (tc === 'ALL') return true;
+                    const parts = tc.split('|');
+                    const tcNorm = norm(parts[0]) + (parts[1] ? '|' + norm(parts[1]) : '');
+                    return tcNorm === targetCls || norm(parts[0]) === norm(className);
+                });
+
+                if (matchesClass) {
+                    if (h.isFullDay) return true;
+                    if (h.startTime && h.endTime && sMins > 0) {
+                        const [hsh, hsm] = h.startTime.split(':').map(Number);
+                        const [heh, hem] = h.endTime.split(':').map(Number);
+                        const hStartMins = hsh * 60 + hsm;
+                        const hEndMins = heh * 60 + hem;
+                        if (sMins < hEndMins && eMins > hStartMins) return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     function getStaffLeaveStatus(email, dateStr) {
-            if (!dateStr) return null;
+        if (!dateStr) return null;
             const targetLeave = leavesData.find(l => {
                 const matchesEmail = (l.teacherEmail || "").trim().toLowerCase() === (email || "").trim().toLowerCase();
                 if (!matchesEmail) return false;
@@ -1087,10 +1124,14 @@ async function renderRoomSelectors() {
             Object.keys(sectionSlotsMap).forEach(key => {
                 const slots = sectionSlotsMap[key];
                 
-                // PRIORITY: Look directly at the subjects you manually typed in the Timetable
-                const examSlot = slots.find(s => ['EXAM', 'UT', 'OT'].includes((s.subject || '').toUpperCase()));
+           // PRIORITY: Look directly at the subjects you manually typed in the Timetable
+            const examSlot = slots.find(s => {
+                const sub = (s.subject || '').toUpperCase();
+                return ['EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM'].includes(sub) || sub.includes('EXAM');
+            });
 
-                if (examSlot) {
+            if (examSlot) {
+            if (examSlot) {
                     let sM = 0, eM = 0;
                     if (examSlot.start24 && examSlot.end24) {
                         const [sh, sm] = examSlot.start24.split(':').map(Number);
@@ -1111,19 +1152,22 @@ async function renderRoomSelectors() {
                     }
                 }
 
-                // FALLBACK: Span the earliest to latest normal class
-                let minS = 24 * 60, maxE = 0;
-                slots.forEach(s => {
-                    if (['BREAK', 'LUNCH BREAK'].includes((s.subject || '').toUpperCase())) return;
-                    let sM = 0, eM = 0;
-                    if (s.start24 && s.end24) {
-                        const [sh, sm] = s.start24.split(':').map(Number);
-                        const [eh, em] = s.end24.split(':').map(Number);
-                        sM = sh * 60 + sm; eM = eh * 60 + em;
-                    } else if (s.sMins !== undefined) {
-                        sM = s.sMins; eM = s.eMins;
-                    }
-                    if (sM > 0 && eM > sM) {
+             // FALLBACK: If no UT/OT is found, span the earliest to latest normal class
+            let minS = 24 * 60, maxE = 0;
+            slots.forEach(s => {
+                if (['BREAK', 'LUNCH BREAK'].includes((s.subject || '').toUpperCase())) return;
+                let sM = 0, eM = 0;
+                if (s.start24 && s.end24) {
+                    const [sh, sm] = s.start24.split(':').map(Number);
+                    const [eh, em] = s.end24.split(':').map(Number);
+                    sM = sh * 60 + sm; eM = eh * 60 + em;
+                } else if (s.sMins !== undefined) {
+                    sM = s.sMins; eM = s.eMins;
+                }
+                
+                if (isBlockSuspendedByHoliday(s.className, s.section, sM, eM, dateStr)) return;
+
+                if (sM > 0 && eM > sM) {
                         if (sM < minS) minS = sM;
                         if (eM > maxE) maxE = eM;
                     }
