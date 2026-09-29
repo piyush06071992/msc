@@ -2116,11 +2116,34 @@ function updateAuditSectionFilter() {
                     }
                 }
 
-            seatedStudents.forEach((stu, index) => {
+      seatedStudents.forEach((stu, index) => {
                  let status = currentMonthDoc[dateStr][stu.id] || "";
                     let effectiveVal = status === 'A' ? 'L' : status;
 
-                    const specialLeave = isStudentOnSpecialLeave(stu.id, dateStr, "23:59", "00:00");
+                    let stuExamStart = "00:00";
+                    let stuExamEnd = "23:59";
+                    
+                    const dObjDetect = new Date(dateStr);
+                    const dayNameDetect = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dObjDetect.getDay()];
+                    const overrideDetect = timetableHistoryData.find(o => o.date === dateStr && o.type !== "FUTURE_MASTER");
+                    let scheduleDetect = [];
+                    if (overrideDetect && overrideDetect.schedule) {
+                        scheduleDetect = overrideDetect.schedule.filter(s => normMatch(s.className) === normMatch(stu.className) && normMatch(s.section) === normMatch(stu.section));
+                    } else {
+                        scheduleDetect = timetableData.filter(t => t.day === dayNameDetect && normMatch(t.className) === normMatch(stu.className) && (normMatch(t.section || t.sectionName) === normMatch(stu.section)));
+                    }
+                    
+                    const examSlot = scheduleDetect.find(slot => {
+                        const tSub = (slot.subject || slot.title || "").toUpperCase();
+                        return tSub.includes('EXAM') || tSub.includes('UT') || tSub.includes('OT') || tSub.includes('PREBOARD') || tSub.includes('TERMINAL');
+                    });
+                    
+                    if (examSlot) {
+                        if (examSlot.start24) stuExamStart = examSlot.start24;
+                        if (examSlot.end24) stuExamEnd = examSlot.end24;
+                    }
+
+                    const specialLeave = isStudentOnSpecialLeave(stu.id, dateStr, stuExamEnd, stuExamStart);
 
                     let attControls = "";
                     if (specialLeave) {
@@ -2733,21 +2756,39 @@ async function loadStudentPersonalView() {
                         `;
                     }
 
-         // If Incharge Register is unmarked, auto-suggest 'P' or 'L' based on other subjects
+       // --- NEW FIX: Evaluate if student has a Partial Leave after school start ---
+                let hasLatePartialLeave = false;
+                let activeLeaveData = specialLeavesData.find(s => s.studentId === stu.id && s.date === dateStr && s.status === 'ACTIVE');
+                if (activeLeaveData && activeLeaveData.type === 'PARTIAL' && activeLeaveData.startTime && activeLeaveData.startTime > "08:40") {
+                    hasLatePartialLeave = true;
+                }
+
+                // If Incharge Register is unmarked, auto-suggest 'P' or 'L' based on other subjects or late partial leaves
                 let val = todaysData[stu.id] || "";
-                if (currentReg.sub === "CLASS INCHARGE" && val === "" && anySubjectPresentStatus[stu.id]) {
-                    val = anySubjectPresentStatus[stu.id];
+                if (currentReg.sub === "CLASS INCHARGE" && val === "") {
+                    if (anySubjectPresentStatus[stu.id]) {
+                        val = anySubjectPresentStatus[stu.id];
+                    } else if (hasLatePartialLeave) {
+                        val = "P"; // Force 'P' since they were in school until at least 08:40 AM
+                    }
                 }
                     
-                    const dDate = new Date(dateStr);
-                   const dayName = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dDate.getDay()];
-                    const slotMatch = timetableData.find(t => t.day === dayName && normMatch(t.className) === normMatch(currentReg.c) && normMatch(t.section || t.sectionName) === normMatch(currentReg.s) && normMatch(t.subject || t.title) === normMatch(currentReg.sub));
-                    const classEndTimeStr = slotMatch ? slotMatch.end24 : null;
-                    const classStartTimeStr = slotMatch ? slotMatch.start24 : null;
-   const specialLeave = isStudentOnSpecialLeave(stu.id, dateStr, classEndTimeStr, classStartTimeStr);
-        let isInchargeReg = isRegisterSubjectIncharge(currentReg.c, currentReg.s, currentReg.sub);
-        let isProtectedIncharge = isInchargeReg; // <-- FIX: Incharge bypasses Special Leaves on ALL days
-        let effectiveVal = val === 'A' ? 'L' : val;
+                const dDate = new Date(dateStr);
+                const dayName = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dDate.getDay()];
+                const slotMatch = timetableData.find(t => t.day === dayName && normMatch(t.className) === normMatch(currentReg.c) && normMatch(t.section || t.sectionName) === normMatch(currentReg.s) && normMatch(t.subject || t.title) === normMatch(currentReg.sub));
+                const classEndTimeStr = slotMatch ? slotMatch.end24 : null;
+                const classStartTimeStr = slotMatch ? slotMatch.start24 : null;
+                
+                let specialLeave = isStudentOnSpecialLeave(stu.id, dateStr, classEndTimeStr, classStartTimeStr);
+                
+                // If it's an Incharge register, we still want to show the Auth Leave tag visually even if class timings don't explicitly overlap
+                if (currentReg.sub === "CLASS INCHARGE" && !specialLeave && activeLeaveData) {
+                    specialLeave = activeLeaveData; 
+                }
+
+                let isInchargeReg = isRegisterSubjectIncharge(currentReg.c, currentReg.s, currentReg.sub);
+                let isProtectedIncharge = isInchargeReg; // <-- FIX: Incharge bypasses Special Leaves on ALL days
+                let effectiveVal = val === 'A' ? 'L' : val;
 
         let attControls = "";
         if (specialLeave && !isProtectedIncharge) {
