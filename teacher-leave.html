@@ -290,14 +290,25 @@
 
             db.collection(prefix + "leave_transactions").where("staffEmail", "==", myEmail)
               .onSnapshot(snap => {
-                  myTransactions = snap.docs.map(d => d.data());
-                  myTransactions.sort((a, b) => b.timestamp - a.timestamp);
+        myTransactions = snap.docs.map(d => d.data());
+                  myTransactions.sort((a, b) => b.timestamp - a.timestamp); // Descending (Newest first)
                   
                   let base = 0, earned = 0, consumed = 0;
+                  let baselineTimestamp = 0;
+                  
+                  // Because the array is newest-first, the very first BASELINE we find is the latest one!
+                  const latestBaseline = myTransactions.find(t => t.type === 'BASELINE');
+                  if (latestBaseline) {
+                      base = latestBaseline.amount;
+                      baselineTimestamp = latestBaseline.timestamp;
+                  }
+
                   myTransactions.forEach(t => {
-                      if (t.type === 'BASELINE') base = t.amount;
-                      else if (t.amount > 0) earned += t.amount;
-                      else consumed += Math.abs(t.amount);
+                      // Clean Cutover Math: Only count transactions strictly AFTER the latest baseline
+                      if (t.type !== 'BASELINE' && t.timestamp > baselineTimestamp) {
+                          if (t.amount > 0) earned += t.amount;
+                          else consumed += Math.abs(t.amount);
+                      }
                   });
                   
                   let bal = base + earned - consumed;
@@ -320,12 +331,20 @@
             const container = document.getElementById('my-ledger-list');
             if (myTransactions.length === 0) return container.innerHTML = `<p class="text-xs font-bold text-slate-400 p-4 text-center bg-slate-50 rounded-xl border border-slate-200">No transactions found.</p>`;
             
-            container.innerHTML = myTransactions.map(t => {
+     container.innerHTML = myTransactions.map(t => {
+                // Find baseline threshold for UI fading
+                let baselineTimestamp = 0;
+                const latestBaseline = myTransactions.find(bt => bt.type === 'BASELINE');
+                if (latestBaseline) baselineTimestamp = latestBaseline.timestamp;
+
+                const isIgnored = t.type !== 'BASELINE' && t.timestamp <= baselineTimestamp;
                 const sign = t.amount > 0 ? '+' : '';
-                const color = t.amount > 0 ? 'emerald' : 'rose';
+                const color = isIgnored ? 'slate' : (t.amount > 0 ? 'emerald' : 'rose');
+                const opacityClass = isIgnored ? 'opacity-50' : '';
                 const dateGB = new Date(t.timestamp).toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
+                
                 return `
-                    <div class="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100 shadow-sm">
+                    <div class="flex justify-between items-center p-3 bg-slate-50 rounded-xl border border-slate-100 shadow-sm ${opacityClass}" ${isIgnored ? 'title="This record predates your current Baseline and does not affect your active balance."' : ''}>
                         <div class="flex items-center gap-3">
                             <div class="bg-${color}-50 text-${color}-600 font-black text-sm px-2 py-2 rounded-lg w-12 text-center border border-${color}-100">${sign}${t.amount}</div>
                             <div>
