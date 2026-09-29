@@ -1061,6 +1061,10 @@ window.onload = async () => {
 
              let studentsMap = {};
                 globalStudentsData.forEach(s => {
+                    if (s.isActive === false) {
+                        // If they left before or ON the report card start date, exclude them completely
+                        if (!s.statusChangeDate || s.statusChangeDate <= startD) return; 
+                    }
                     if (s.actualBranch === center && String(s.className).toUpperCase() === cls && (sec === "ALL" || String(s.section).toUpperCase() === sec)) {
                         studentsMap[String(s.rollNo).toUpperCase()] = {
                             id: s.id, rollNo: String(s.rollNo).toUpperCase(), name: s.name, className: s.className, section: s.section,
@@ -1141,9 +1145,10 @@ window.onload = async () => {
                     const groupMeta = groupMetaMap[gId];
                     const examDate = groupMeta ? groupMeta.date : '';
 
-                    const stuObj = studentsMap[roll];
-                    if (stuObj.isActive === false && stuObj.statusChangeDate && examDate > stuObj.statusChangeDate) {
-                        return;
+                  const stuObj = studentsMap[roll];
+                    if (stuObj.isActive === false) {
+                        if (stuObj.statusChangeDate && examDate >= stuObj.statusChangeDate) return;
+                        if (!stuObj.statusChangeDate) return;
                     }
 
                     const keyMeta = keysCache[gId] || {};
@@ -1208,14 +1213,15 @@ window.onload = async () => {
                     }
                 });
 
-                // --- TAG ABSENT STUDENTS ---
+          // --- TAG ABSENT STUDENTS ---
               Object.values(studentsMap).forEach(stu => {
                     globalSubjectsSet.forEach(sub => {
                         if (!stu.subjects[sub]) {
                             const examDate = reportCardSubjectDates[sub];
                             if (examDate && attRecordsMap[examDate]) {
-                                if (stu.isActive === false && stu.statusChangeDate && examDate > stu.statusChangeDate) {
-                                    return;
+                                if (stu.isActive === false) {
+                                    if (stu.statusChangeDate && examDate >= stu.statusChangeDate) return;
+                                    if (!stu.statusChangeDate) return;
                                 }
                                 const status = attRecordsMap[examDate][stu.id];
                                 if (status === 'A' || status === 'L') {
@@ -2589,13 +2595,19 @@ function getGroupForStudent(stu, dateStr) {
                 
                 const rollNo = String(rollNoRaw).trim().toUpperCase();
                 
-                // Strictly look up roll numbers only within the selected Center, Classes, and Sections
-                const stu = globalStudentsData.find(s => 
-                    String(s.rollNo).trim().toUpperCase() === rollNo && 
-                    s.actualBranch === targetCenter &&
-                    selectedClasses.includes(String(s.className || '').trim().toUpperCase()) &&
-                    selectedSections.includes(String(s.section || '').trim().toUpperCase())
-                );
+          // Strictly look up roll numbers only within the selected Center, Classes, and Sections
+                const stu = globalStudentsData.find(s => {
+                    if (!(String(s.rollNo).trim().toUpperCase() === rollNo && 
+                        s.actualBranch === targetCenter &&
+                        selectedClasses.includes(String(s.className || '').trim().toUpperCase()) &&
+                        selectedSections.includes(String(s.section || '').trim().toUpperCase()))) return false;
+                        
+                    if (s.isActive === false) {
+                        if (s.statusChangeDate && dateStr >= s.statusChangeDate) return false;
+                        if (!s.statusChangeDate) return false;
+                    }
+                    return true;
+                });
                 
                 let scores = {};
                 let hasMarks = false;
@@ -3019,13 +3031,20 @@ async function loadManualGradingGrid() {
 
             try {
                 const normMatchLoc = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                const cNorm = normMatchLoc(manualActiveGroup.className);
+            const cNorm = normMatchLoc(manualActiveGroup.className);
                 const sNorm = normMatchLoc(manualActiveSection);
+                const examDate = manualActiveGroup.date;
                 
                 manualActiveStudents = globalStudentsData.filter(s => {
                     const center = s.actualBranch || s.center || s.branch || activeCenter;
                     const matchesCenter = !manualActiveGroup.branches || manualActiveGroup.branches.length === 0 || manualActiveGroup.branches.includes(center);
-                    return matchesCenter && normMatchLoc(s.className) === cNorm && normMatchLoc(s.section) === sNorm;
+                    if (!(matchesCenter && normMatchLoc(s.className) === cNorm && normMatchLoc(s.section) === sNorm)) return false;
+                    
+                    if (s.isActive === false) {
+                        if (s.statusChangeDate && examDate >= s.statusChangeDate) return false;
+                        if (!s.statusChangeDate) return false; // Exclude entirely if inactive with no date
+                    }
+                    return true;
                 }).sort((a,b) => String(a.name).localeCompare(String(b.name)));
 
                 const dateStr = manualActiveGroup.date;
@@ -3757,16 +3776,17 @@ async function loadResultsForGroupAndSection(groupId, targetSectionKey, isFullEx
             processResAttendance(gAtt);
             processResAttendance(dAtt);
 
-          let pooledStudents = globalStudentsData.filter(s => {
+      let pooledStudents = globalStudentsData.filter(s => {
             const cNorm = String(s.className || '').trim().toUpperCase();
             const sNorm = String(s.section || '').trim().toUpperCase();
             const center = s.actualBranch || s.center || s.branch || activeCenter;
             const matchesCenter = center === activeCenter;
             if (!matchesCenter || !attachedSecs.has(`${cNorm}|${sNorm}`)) return false;
 
-            const examDate = gData.date;
-            if (s.isActive === false && s.statusChangeDate && examDate > s.statusChangeDate) {
-                return false;
+            const examDate = gData.date || document.getElementById('res-date-select').value;
+            if (s.isActive === false) {
+                if (s.statusChangeDate && examDate >= s.statusChangeDate) return false;
+                if (!s.statusChangeDate) return false;
             }
             return true;
         });
