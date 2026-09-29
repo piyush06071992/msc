@@ -746,9 +746,7 @@ async function loadDatabases() {
                 
                 if(dayName === 'Sunday') continue;
 
-                // Skip processing class adjustments if the date is a school holiday
-                const isHoliday = holidaysData.some(h => h.date === tDate || (h.startDate <= tDate && h.endDate >= tDate));
-                if (isHoliday) continue;
+               // (Broad holiday check removed. We now evaluate suspensions per individual class slot below.)
 
                 const override = historyData.find(o => o.date === tDate);
                 let activeSchedule = (override && override.schedule) 
@@ -783,6 +781,45 @@ async function loadDatabases() {
                 const meInDb = staffData.find(s => s.email.toLowerCase() === myEmail);
                 const myRealName = meInDb ? norm(meInDb.name) : norm(activeStaff.name || "");
 
+             // Helper to check if a specific slot is suspended by a holiday or event
+                const isSlotSuspended = (dateStr, className, sectionName, sMins, eMins) => {
+                    if (!holidaysData || holidaysData.length === 0) return false;
+                    const [cy, cm, cd] = dateStr.split('-').map(Number);
+                    const ctxDate = new Date(cy, cm - 1, cd);
+                    const normCls = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                    const targetCls = `${normCls(className)}|${normCls(sectionName)}`;
+                    
+                    for (let h of holidaysData) {
+                        if (h.suspendClasses === false || !h.startDate) continue;
+                        const [sy, sm_h, sd] = h.startDate.split('-').map(Number);
+                        const hStart = new Date(sy, sm_h - 1, sd);
+                        const [ey, em_h, ed] = (h.endDate || h.startDate).split('-').map(Number);
+                        const hEnd = new Date(ey, em_h - 1, ed, 23, 59, 59);
+                        
+                        if (ctxDate >= hStart && ctxDate <= hEnd) {
+                            const matchesClass = (h.targetClasses || []).some(tc => {
+                                if (tc === 'ALL') return true;
+                                const parts = tc.split('|');
+                                const tcNorm = normCls(parts[0]) + (parts[1] ? '|' + normCls(parts[1]) : '');
+                                return tcNorm === targetCls || normCls(parts[0]) === normCls(className);
+                            });
+                            
+                            if (matchesClass) {
+                                if (h.isFullDay) return true;
+                                if (h.startTime && h.endTime && sMins > 0) {
+                                    const [hsh, hsm] = h.startTime.split(':').map(Number);
+                                    const [heh, hem] = h.endTime.split(':').map(Number);
+                                    const hStartMins = hsh * 60 + hsm;
+                                    const hEndMins = heh * 60 + hem;
+                                    // If event overlaps class time, class is suspended
+                                    if (sMins < hEndMins && eMins > hStartMins) return true;
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                };
+
                 // 1. Check Classes & Substitutions
                 virtualSchedule.forEach(slot => {
                     const slotT = norm(slot.teacherName || slot.teacher || "");
@@ -794,6 +831,9 @@ async function loadDatabases() {
                         
                         const s = timeToMins(sStr);
                         const e = timeToMins(eStr);
+                        
+                        // Smart Check: Ignore this slot if it is officially suspended by a holiday or event!
+                        if (isSlotSuspended(tDate, slot.className, slot.section, s, e)) return;
                         
                         if (leaveStart < e && leaveEnd > s) {
                             const cleanSec = (slot.section || '').replace(/[^a-zA-Z0-9]/g, '');
