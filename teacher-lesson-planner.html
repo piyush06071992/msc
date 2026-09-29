@@ -257,7 +257,7 @@
                 const offset = todayDateObj.getTimezoneOffset() * 60000;
                 const todayIsoStr = (new Date(todayDateObj - offset)).toISOString().split('T')[0];
                 
-                const todayDocsRaw = getScheduleSnapshotForDate(todayIsoStr, todayName);
+               const todayDocsRaw = getScheduleSnapshotForDate(todayIsoStr, todayName);
                 
                 let todayDocs = todayDocsRaw.filter(s => {
                     const nameMatch = (s.teacherName && s.teacherName.trim().toLowerCase() === mySafeNameMatch) || 
@@ -266,7 +266,11 @@
                     return nameMatch && dayMatch;
                 });
                 
-                if (todayDocs.length === 0 && window.teacherTimetable.some(t => t.day === todayName)) {
+                // --- NEW FIX: Prevent Zombie Classes ---
+                // Only fall back to the normal timetable if today is NOT an override day!
+                const hasActiveOverride = window.historyOverrides && window.historyOverrides.some(h => h.date === todayIsoStr && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE"));
+                
+                if (todayDocs.length === 0 && !hasActiveOverride && window.teacherTimetable.some(t => t.day === todayName)) {
                     todayDocs = window.teacherTimetable.filter(t => t.day === todayName);
                 }
 
@@ -397,32 +401,19 @@
             todayDate.setHours(0,0,0,0);
 
             try {
-                mySessions.forEach(sess => {
-                    let isHoliday = false; let holReason = "";
-                    for (let h of holidaysData) {
-                        if (!h.startDate) continue; 
-                        const hStart = new Date(h.startDate); hStart.setHours(0,0,0,0);
-                        const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23,59,59,999);
-                        
-                        if (todayDate >= hStart && todayDate <= hEnd) {
-                            const targetCls = `${sess.className}|${sess.section}`;
-                            const tClasses = h.targetClasses || []; 
-                            
-                            if (tClasses.includes('ALL') || tClasses.includes(targetCls)) {
-                                if (h.isFullDay) { isHoliday = true; holReason = h.reason; break; }
-                                else if (h.startTime && h.endTime && sess.start) { 
-                                    const [sh, sm] = sess.start.split(' ')[0].split(':').map(Number);
-                                    const sMins = (sess.start.includes('PM') && sh !== 12 ? sh+12 : (sh===12 && sess.start.includes('AM') ? 0 : sh))*60 + sm;
-                                    const eMins = sMins + (parseInt(sess.duration) || 0);
-                                    const [hsh, hsm] = h.startTime.split(':').map(Number); const [heh, hem] = h.endTime.split(':').map(Number);
-                                    const hStartMins = hsh*60+hsm; const hEndMins = heh*60+hem;
-                                    if (sMins < hEndMins && eMins > hStartMins) { isHoliday = true; holReason = h.reason; break; }
-                                }
-                            }
-                        }
+              mySessions.forEach(sess => {
+                    // --- NEW FIX: Unified Dashboard Exclusion Engine ---
+                    const exclusionInfo = checkDateExclusion(todayDate, sess.className, sess.section, sess.subject);
+                    let isHoliday = exclusionInfo.isExcluded;
+                    let holReason = exclusionInfo.reason || "";
+                    
+                    let isDoubtSession = sess.remark && sess.remark.toLowerCase().includes('doubt session');
+                    
+                    // If the exclusion reason is a doubt session, route it to the amber Doubt Session UI, not the red Suspension UI
+                    if (isHoliday && holReason.toLowerCase().includes('doubt session')) {
+                        isHoliday = false;
+                        isDoubtSession = true;
                     }
-
-                   let isDoubtSession = sess.remark && sess.remark.toLowerCase().includes('doubt session');
 
                 if (isHoliday) {
                         grid.innerHTML += `
