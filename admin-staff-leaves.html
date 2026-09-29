@@ -693,15 +693,29 @@
             const filter = document.getElementById('staff-search').value.toLowerCase();
             let compTotal = 0;
 
-            const balances = allStaff.map(staff => {
-                const trs = allTransactions.filter(t => t.staffEmail === staff.email);
+          const balances = allStaff.map(staff => {
+                // Sort ascending by timestamp to accurately find the latest baseline
+                const trs = allTransactions.filter(t => t.staffEmail === staff.email).sort((a,b) => a.timestamp - b.timestamp);
                 let base = 0, earned = 0, consumed = 0;
+                let baselineTimestamp = 0;
+                
+                // Find the absolute most recent baseline
+                const baselines = trs.filter(t => t.type === 'BASELINE');
+                if (baselines.length > 0) {
+                    const latestBase = baselines[baselines.length - 1];
+                    base = latestBase.amount;
+                    baselineTimestamp = latestBase.timestamp;
+                }
+
                 trs.forEach(t => {
-                    if(t.type === 'BASELINE') base = t.amount;
-                    else if(t.amount > 0) earned += t.amount;
-                    else consumed += Math.abs(t.amount);
-                    
+                    // Global metric (dashboard) calculates regardless of baseline
                     if(t.type === 'COMPENSATORY_GRANT' && t.date.substring(0,7) === new Date().toISOString().substring(0,7)) compTotal += t.amount;
+                    
+                    // Clean Cutover Math: Only count transactions strictly AFTER the latest baseline
+                    if (t.type !== 'BASELINE' && t.timestamp > baselineTimestamp) {
+                        if(t.amount > 0) earned += t.amount;
+                        else consumed += Math.abs(t.amount);
+                    }
                 });
                 return { ...staff, base, earned, consumed, current: base + earned - consumed };
             });
@@ -1049,13 +1063,23 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
 
         function getCollection(name) { return db.collection(collPrefix + name); }
 
-        function getStaffBalance(email) {
-            const trs = allTransactions.filter(t => t.staffEmail === email);
+   function getStaffBalance(email) {
+            const trs = allTransactions.filter(t => t.staffEmail === email).sort((a,b) => a.timestamp - b.timestamp);
             let base = 0, earned = 0, consumed = 0;
+            let baselineTimestamp = 0;
+            
+            const baselines = trs.filter(t => t.type === 'BASELINE');
+            if (baselines.length > 0) {
+                const latestBase = baselines[baselines.length - 1];
+                base = latestBase.amount;
+                baselineTimestamp = latestBase.timestamp;
+            }
+            
             trs.forEach(t => {
-                if(t.type === 'BASELINE') base = t.amount;
-                else if(t.amount > 0) earned += t.amount;
-                else consumed += Math.abs(t.amount);
+                if (t.type !== 'BASELINE' && t.timestamp > baselineTimestamp) {
+                    if(t.amount > 0) earned += t.amount;
+                    else consumed += Math.abs(t.amount);
+                }
             });
             return base + earned - consumed;
         }
