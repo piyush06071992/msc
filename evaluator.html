@@ -1213,9 +1213,18 @@ window.onload = async () => {
                     }
                 });
 
-          // --- TAG ABSENT STUDENTS ---
+       // --- TAG ABSENT STUDENTS & UNASSIGNED OPTIONALS ---
               Object.values(studentsMap).forEach(stu => {
+                    const secStruct = globalInstituteStructure.find(st => String(st.className).trim().toUpperCase() === String(stu.className).trim().toUpperCase() && String(st.sectionName || st.section).trim().toUpperCase() === String(stu.section).trim().toUpperCase());
+                    const optSubs = (secStruct && secStruct.optionalSubjects) ? secStruct.optionalSubjects.map(s => s.trim().toUpperCase()) : [];
+                    const stuOpt = stu.optionalSubject ? String(stu.optionalSubject).trim().toUpperCase() : "";
+
                     globalSubjectsSet.forEach(sub => {
+                        if (optSubs.includes(sub) && stuOpt !== sub) {
+                            stu.subjects[sub] = { obt: '—', max: 0, isUnassignedOpt: true };
+                            return;
+                        }
+
                         if (!stu.subjects[sub]) {
                             const examDate = reportCardSubjectDates[sub];
                             if (examDate && attRecordsMap[examDate]) {
@@ -1510,7 +1519,20 @@ let subHtml = reportCardSubjects.map(sub => {
                 const dateRaw = reportCardSubjectDates[sub];
                 const dateStr = dateRaw ? new Date(dateRaw).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'}) : '';
 
-                if (!sd) {
+               if (sd && sd.isUnassignedOpt) {
+                    return `
+                        <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col opacity-50">
+                            <div class="bg-slate-50 px-4 py-2 border-b border-slate-200 font-black text-slate-400 uppercase tracking-widest text-xs flex justify-between items-center">
+                                <div>${sub} <span class="block text-[8px] text-slate-400 mt-0.5 normal-case tracking-normal">${dateStr}</span></div>
+                                <span class="text-[9px] bg-slate-100 text-slate-400 px-2 py-0.5 rounded border border-slate-200 shadow-sm uppercase tracking-widest">N/A</span>
+                            </div>
+                            <div class="p-4 flex justify-center items-center bg-white flex-1">
+                                <span class="text-[10px] font-black text-slate-400 uppercase tracking-widest">—</span>
+                            </div>
+                            <div class="bg-slate-100 h-1.5 w-full"></div>
+                        </div>
+                    `;
+                } else if (!sd) {
                     return `
                         <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col opacity-70">
                             <div class="bg-slate-100 px-4 py-2 border-b border-slate-200 font-black text-slate-700 uppercase tracking-widest text-xs flex justify-between items-center">
@@ -1595,8 +1617,10 @@ let subHtml = reportCardSubjects.map(sub => {
                 const dateRaw = reportCardSubjectDates[sub];
                 const dateStr = dateRaw ? new Date(dateRaw).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'}) : '-';
                 
-                if (sd) {
-                    if (sd.isAbsent) {
+             if (sd) {
+                    if (sd.isUnassignedOpt) {
+                        tableHtml += `<tr><td style="font-size:11px; text-align:center;">${dateStr}</td><td style="font-weight: bold; color:#94a3b8;">${sub}</td><td style="color:#94a3b8; font-weight:bold;">—</td><td style="color:#94a3b8;">—</td><td style="color:#94a3b8;">—</td></tr>`;
+                    } else if (sd.isAbsent) {
                         tableHtml += `<tr><td style="font-size:11px; text-align:center;">${dateStr}</td><td style="font-weight: bold;">${sub}</td><td style="color:#ef4444; font-weight:bold;">Absent</td><td>-</td><td>-</td></tr>`;
                     } else {
                         const pct = sd.max > 0 ? ((sd.obt / sd.max) * 100).toFixed(2) : 0;
@@ -3031,9 +3055,14 @@ async function loadManualGradingGrid() {
 
             try {
                 const normMatchLoc = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-            const cNorm = normMatchLoc(manualActiveGroup.className);
+         const cNorm = normMatchLoc(manualActiveGroup.className);
                 const sNorm = normMatchLoc(manualActiveSection);
                 const examDate = manualActiveGroup.date;
+                
+                // Identify if the active subject is an optional subject for this class
+                const secStruct = globalInstituteStructure.find(st => normMatchLoc(st.className) === cNorm && normMatchLoc(st.sectionName || st.section) === sNorm);
+                const optionalSubs = (secStruct && secStruct.optionalSubjects) ? secStruct.optionalSubjects.map(sub => normMatchLoc(sub)) : [];
+                const isCurrentSubOptional = optionalSubs.includes(normMatchLoc(manualActiveSubject));
                 
                 manualActiveStudents = globalStudentsData.filter(s => {
                     const center = s.actualBranch || s.center || s.branch || activeCenter;
@@ -3044,6 +3073,13 @@ async function loadManualGradingGrid() {
                         if (s.statusChangeDate && examDate >= s.statusChangeDate) return false;
                         if (!s.statusChangeDate) return false; // Exclude entirely if inactive with no date
                     }
+
+                    // Optional Subject Check: Exclude student if this subject is optional and they haven't opted for it
+                    if (isCurrentSubOptional) {
+                        const stuOpt = normMatchLoc(s.optionalSubject || "");
+                        if (stuOpt !== normMatchLoc(manualActiveSubject)) return false;
+                    }
+
                     return true;
                 }).sort((a,b) => String(a.name).localeCompare(String(b.name)));
 
@@ -3816,7 +3852,7 @@ async function loadResultsForGroupAndSection(groupId, targetSectionKey, isFullEx
                     const roll = String(stu.rollNo || '').trim().toUpperCase();
                     const submissionData = submissionsMap[roll] || {};
                     const isDirectImport = submissionData.isDirectImport === true;
-                    const isCancelled = submissionData.isCancelled === true;
+             const isCancelled = submissionData.isCancelled === true;
                     const studentResponses = submissionData.responses || {};
                     const directScores = submissionData.directScores || {};
                     
@@ -3826,10 +3862,21 @@ async function loadResultsForGroupAndSection(groupId, targetSectionKey, isFullEx
                     let totalMax = 0;
                     let bonusMarksAwarded = 0;
 
+                    // Identify unassigned optional subjects for this student
+                    const secStruct = globalInstituteStructure.find(st => String(st.className).trim().toUpperCase() === String(stu.className).trim().toUpperCase() && String(st.sectionName || st.section).trim().toUpperCase() === String(stu.section).trim().toUpperCase());
+                    const optSubs = (secStruct && secStruct.optionalSubjects) ? secStruct.optionalSubjects.map(s => s.trim().toUpperCase()) : [];
+                    const stuOpt = String(stu.optionalSubject || "").trim().toUpperCase();
+
                     if (isCancelled) {
                         // Skip adding to class-wide analytics if cancelled
-                    } else if (isDirectImport) {
+                } else if (isDirectImport) {
                         structure.forEach(sec => {
+                            const upperSub = (sec.subject || "").toUpperCase();
+                            if (optSubs.includes(upperSub) && stuOpt !== upperSub) {
+                                subjectScores[sec.subject] = '—';
+                                return; // Skip calculation for unassigned optional subject
+                            }
+                            
                             const actualMax = sec.isDirect ? sec.maxMarks : ((sec.correctMarks !== undefined ? sec.correctMarks : 4) * (sec.end - sec.start + 1));
                             totalMax += actualMax;
                             
@@ -3839,6 +3886,12 @@ async function loadResultsForGroupAndSection(groupId, targetSectionKey, isFullEx
                         });
                     } else {
                         structure.forEach(sec => {
+                            const upperSub = (sec.subject || "UNKNOWN").toUpperCase();
+                            if (optSubs.includes(upperSub) && stuOpt !== upperSub) {
+                                subjectScores[sec.subject] = '—';
+                                return; // Skip calculation for unassigned optional subject
+                            }
+                            
                             let secScore = 0;
                             let attempted = 0;
                             let correct = 0;
@@ -4788,13 +4841,16 @@ const promises = subSnap.docs.map(async (doc) => {
                     }
 
                     let kData = kDoc && kDoc.exists ? kDoc.data() : { answers: {}, structure: [], bonusConfig: {}, directMaxMarks: {} };
-                    structure = kData.structure || [];
                     const directMax = kData.directMaxMarks || {};
                     const answers = kData.answers || {};
                     const bonuses = kData.bonusConfig || {};
                     const responses = subData.responses || {};
                     const directScores = subData.directScores || {};
                     const isDirect = subData.isDirectImport === true;
+
+                    const secStruct = globalInstituteStructure.find(st => String(st.className).trim().toUpperCase() === String(stu.className).trim().toUpperCase() && String(st.sectionName || st.section).trim().toUpperCase() === String(stu.section).trim().toUpperCase());
+                    const optSubs = (secStruct && secStruct.optionalSubjects) ? secStruct.optionalSubjects.map(s => s.trim().toUpperCase()) : [];
+                    const stuOpt = String(stu.optionalSubject || "").trim().toUpperCase();
 
                     if (structure.length === 0 && Object.keys(directMax).length > 0) {
                         structure = Object.keys(directMax).map(sub => ({ subject: sub, isDirect: true, maxMarks: directMax[sub] }));
@@ -4804,9 +4860,10 @@ const promises = subSnap.docs.map(async (doc) => {
                     let examMax = 0;
                     let subjectBreakdown = {};
 
-                    if (isDirect) {
+                 if (isDirect) {
                         Object.entries(directScores).forEach(([sub, score]) => {
                             const upperSub = sub.toUpperCase();
+                            if (optSubs.includes(upperSub) && stuOpt !== upperSub) return; // Skip unassigned optional
                             const max = directMax[sub] || 100;
                             examObt += Number(score);
                             examMax += Number(max);
@@ -4820,6 +4877,8 @@ const promises = subSnap.docs.map(async (doc) => {
                     } else {
                         structure.forEach(st => {
                             const upperSub = (st.subject || "UNKNOWN").toUpperCase();
+                            if (optSubs.includes(upperSub) && stuOpt !== upperSub) return; // Skip unassigned optional
+                            
                             let secScore = 0;
                             let secMax = 0;
 
