@@ -758,10 +758,10 @@ const offset = new Date().getTimezoneOffset() * 60000;
             } catch(e) { console.error(e); }
         }
 
-    // --- 🕰️ TIME MACHINE ENGINE ---
+// --- 🕰️ SMART TIME MACHINE ENGINE ---
         function getScheduleSnapshotForDate(dateIso) {
             if (!window.historyOverrides || window.historyOverrides.length === 0) {
-                return window.fullTimetable || window.teacherTimetable || [];
+                return typeof timetableData !== 'undefined' ? timetableData : (window.fullTimetable || window.teacherTimetable || []);
             }
             
             const exactOverride = window.historyOverrides.find(h => h.date === dateIso && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE"));
@@ -773,52 +773,46 @@ const offset = new Date().getTimezoneOffset() * 60000;
             const validMaster = sortedMasters.find(h => h.date <= dateIso);
             if (validMaster && validMaster.schedule) return validMaster.schedule;
             
-            return window.fullTimetable || window.teacherTimetable || [];
+            return typeof timetableData !== 'undefined' ? timetableData : (window.fullTimetable || window.teacherTimetable || []);
         }
 
-      // --- SMART EXCLUSION ENGINE (Holidays + OT Exams) ---
+      // --- SMART EXCLUSION ENGINE (Holidays, OTs, & Unscheduled Days) ---
         function checkDateExclusion(dateObj, className, sectionName, subjectName) {
-            if (dateObj.getDay() === 0) return { isExcluded: true, reason: "Sunday" };
+            if (dateObj.getDay() === 0) return { isExcluded: true, reason: "Sunday (Weekly Off)" };
 
             const offset = dateObj.getTimezoneOffset() * 60000;
             const curStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
             const checkDate = new Date(curStr); checkDate.setHours(0,0,0,0);
             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
             
-           for (let h of holidaysData) {
-                if (!h.startDate) continue;
-                if (h.suspendClasses === false) continue; // Bypass if classes are still running
+            for (let h of holidaysData) {
+                if (!h.startDate || h.suspendClasses === false) continue;
                 const hStart = new Date(h.startDate); hStart.setHours(0,0,0,0);
                 const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23,59,59,999);
                 
                 if (checkDate >= hStart && checkDate <= hEnd) {
                     const targetCls = `${className}|${sectionName}`;
-                    const tClasses = h.targetClasses || []; 
+                    const tClasses = h.targetClasses || [];
                     
                     if (tClasses.includes('ALL') || tClasses.includes(targetCls)) {
                         if (h.isFullDay) {
                             return { isExcluded: true, reason: h.reason };
                         } else if (h.startTime && h.endTime) {
-                       const scheduleToCheck = getScheduleSnapshotForDate(curStr);
+                            const scheduleToCheck = getScheduleSnapshotForDate(curStr);
                             const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                             const dayName = daysArr[dateObj.getDay()];
-
+                            
                             let classSlots = scheduleToCheck.filter(t => 
-                                t.day === dayName && 
-                                norm(t.className) === norm(className) && 
-                                norm(t.section) === norm(sectionName) && 
-                                norm(t.subject) === norm(subjectName)
+                                t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName)
                             );
                             
                             if (classSlots.length === 0) {
-                                classSlots = (window.fullTimetable || []).filter(t => 
-                                    t.day === dayName && 
-                                    norm(t.className) === norm(className) && 
-                                    norm(t.section) === norm(sectionName) && 
-                                    norm(t.subject) === norm(subjectName)
+                                const masterArray = typeof timetableData !== 'undefined' ? timetableData : (window.fullTimetable || window.teacherTimetable || []);
+                                classSlots = masterArray.filter(t => 
+                                    t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName)
                                 );
                             }
-
+                            
                             if (classSlots.length > 0) {
                                 const [hsh, hsm] = h.startTime.split(':').map(Number);
                                 const [heh, hem] = h.endTime.split(':').map(Number);
@@ -836,43 +830,24 @@ const offset = new Date().getTimezoneOffset() * 60000;
                                     return false;
                                 });
                                 
-                                if (isOverlapping) {
-                                    return { isExcluded: true, reason: h.reason + " (Half Day)" };
-                                }
+                                if (isOverlapping) return { isExcluded: true, reason: h.reason + " (Half Day)" };
                             }
                         }
                     }
                 }
             }
-            
-            if (window.historyOverrides) {
-                const override = window.historyOverrides.find(o => o.date === curStr);
-                if (override && override.schedule) {
-                    const classSlots = override.schedule.filter(s => norm(s.className) === norm(className) && norm(s.section) === norm(sectionName));
-                    if (classSlots.length > 0) {
-                        const subSlot = classSlots.find(s => norm(s.subject) === norm(subjectName));
-                        if (!subSlot || (subSlot.remark && subSlot.remark.toLowerCase().includes("doubt session"))) {
-                            return { isExcluded: true, reason: subSlot ? "Doubt Session" : "Exam Day (No Class)" };
-                        }
-                    } else {
-                        return { isExcluded: true, reason: "Class Not Scheduled" };
-                    }
-                }
-            }
 
-       const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const dayName = daysArr[checkDate.getDay()];
             const scheduleToCheck = getScheduleSnapshotForDate(curStr);
+            
             const masterSlot = scheduleToCheck.find(t => 
                 t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName)
             );
             
-            if (!masterSlot) {
-                return { isExcluded: true, reason: "Class Not Scheduled" };
-            }
-            if (masterSlot && masterSlot.remark && masterSlot.remark.toLowerCase().includes("doubt session")) {
-                return { isExcluded: true, reason: "Doubt Session" };
-            }
+            if (!masterSlot) return { isExcluded: true, reason: "Class Not Scheduled" };
+            if (masterSlot.remark && masterSlot.remark.toLowerCase().includes("doubt session")) return { isExcluded: true, reason: "Doubt Session" };
+            
             return { isExcluded: false, reason: "" };
         }
 
