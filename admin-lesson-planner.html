@@ -717,29 +717,35 @@
 
         // --- DASHBOARD SUMMARY (Deep Accordion Hierarchy) ---
         function toggleDemoMode(val) { isDemoMode = val; document.getElementById('demo-mode-indicator').classList.toggle('hidden', !val); renderSummary(); }
-// --- 🕰️ TIME MACHINE ENGINE ---
+// --- 🕰️ SMART TIME MACHINE ENGINE ---
         function getScheduleSnapshotForDate(dateIso) {
-            if (!window.historyOverrides || window.historyOverrides.length === 0) return window.fullTimetable || window.teacherTimetable || [];
-            const sortedHistory = [...window.historyOverrides].sort((a, b) => b.date.localeCompare(a.date));
-            const snapshot = sortedHistory.find(h => h.date <= dateIso);
-            return (snapshot && snapshot.schedule) ? snapshot.schedule : (window.fullTimetable || window.teacherTimetable || []);
+            if (!window.historyOverrides || window.historyOverrides.length === 0) {
+                return typeof timetableData !== 'undefined' ? timetableData : (window.fullTimetable || window.teacherTimetable || []);
+            }
+            
+            const exactOverride = window.historyOverrides.find(h => h.date === dateIso && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE"));
+            if (exactOverride && exactOverride.schedule) return exactOverride.schedule;
+            
+            const masterSnapshots = window.historyOverrides.filter(h => h.type === "LIVE_MASTER_UPDATE" || h.type === "APPLIED_MASTER" || h.type === "FUTURE_MASTER");
+            const sortedMasters = masterSnapshots.sort((a, b) => b.date.localeCompare(a.date));
+            
+            const validMaster = sortedMasters.find(h => h.date <= dateIso);
+            if (validMaster && validMaster.schedule) return validMaster.schedule;
+            
+            return typeof timetableData !== 'undefined' ? timetableData : (window.fullTimetable || window.teacherTimetable || []);
         }
 
-      // --- SMART EXCLUSION ENGINE (Holidays + OT Exams) ---
+      // --- SMART EXCLUSION ENGINE (Holidays, OTs, & Unscheduled Days) ---
         function checkDateExclusion(dateObj, className, sectionName, subjectName) {
-            // --- STRICT SUNDAY EXCLUSION ---
             if (dateObj.getDay() === 0) return { isExcluded: true, reason: "Sunday (Weekly Off)" };
 
-            // Precise timezone fixing (Fixes the date shifting bug!)
             const offset = dateObj.getTimezoneOffset() * 60000;
             const curStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
             const checkDate = new Date(curStr); checkDate.setHours(0,0,0,0);
             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
             
-         // 1. Check Standard Holidays
             for (let h of holidaysData) {
-                if (!h.startDate) continue;
-                if (h.suspendClasses === false) continue; // Bypass if classes are still running
+                if (!h.startDate || h.suspendClasses === false) continue;
                 const hStart = new Date(h.startDate); hStart.setHours(0,0,0,0);
                 const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23,59,59,999);
                 
@@ -751,24 +757,18 @@
                         if (h.isFullDay) {
                             return { isExcluded: true, reason: h.reason };
                         } else if (h.startTime && h.endTime) {
-                            // Half-Day Logic: Look into the timetable to see if THIS subject overlaps with the holiday times
-                         const scheduleToCheck = getScheduleSnapshotForDate(curStr);
+                            const scheduleToCheck = getScheduleSnapshotForDate(curStr);
                             const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                             const dayName = daysArr[dateObj.getDay()];
                             
                             let classSlots = scheduleToCheck.filter(t => 
-                                t.day === dayName && 
-                                norm(t.className) === norm(className) && 
-                                norm(t.section) === norm(sectionName) && 
-                                norm(t.subject) === norm(subjectName)
+                                t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName)
                             );
                             
                             if (classSlots.length === 0) {
-                                classSlots = (window.fullTimetable || []).filter(t => 
-                                    t.day === dayName && 
-                                    norm(t.className) === norm(className) && 
-                                    norm(t.section) === norm(sectionName) && 
-                                    norm(t.subject) === norm(subjectName)
+                                const masterArray = typeof timetableData !== 'undefined' ? timetableData : (window.fullTimetable || window.teacherTimetable || []);
+                                classSlots = masterArray.filter(t => 
+                                    t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName)
                                 );
                             }
                             
@@ -784,52 +784,29 @@
                                         const [eh, em] = slot.end24.split(':').map(Number);
                                         const cStartMins = sh * 60 + sm;
                                         const cEndMins = eh * 60 + em;
-                                        
-                                        // Overlap Logic: Class starts before holiday ends AND Class ends after holiday starts
                                         return (cStartMins < hEndMins && cEndMins > hStartMins);
                                     }
                                     return false;
                                 });
                                 
-                                if (isOverlapping) {
-                                    return { isExcluded: true, reason: h.reason + " (Half Day)" };
-                                }
+                                if (isOverlapping) return { isExcluded: true, reason: h.reason + " (Half Day)" };
                             }
                         }
                     }
                 }
             }
-            
-            // 2. Check Timetable History (Exams / OT Doubt Sessions)
-            if (window.historyOverrides) {
-                const override = window.historyOverrides.find(o => o.date === curStr);
-                if (override && override.schedule) {
-                    const classSlots = override.schedule.filter(s => norm(s.className) === norm(className) && norm(s.section) === norm(sectionName));
-                    if (classSlots.length > 0) {
-                        const subSlot = classSlots.find(s => norm(s.subject) === norm(subjectName));
-                        if (!subSlot || (subSlot.remark && subSlot.remark.toLowerCase().includes("doubt session"))) {
-                            return { isExcluded: true, reason: subSlot ? "Doubt Session" : "Exam Day (No Class)" };
-                        }
-                    } else {
-                        return { isExcluded: true, reason: "Class Not Scheduled" };
-                    }
-                }
-            }
 
-            // 3. Check Live Master (If no override exists, maybe the normal day has a Doubt Session!)
-        const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const dayName = daysArr[checkDate.getDay()];
             const scheduleToCheck = getScheduleSnapshotForDate(curStr);
+            
             const masterSlot = scheduleToCheck.find(t => 
                 t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName)
             );
             
-            if (!masterSlot) {
-                return { isExcluded: true, reason: "Class Not Scheduled" };
-            }
-            if (masterSlot && masterSlot.remark && masterSlot.remark.toLowerCase().includes("doubt session")) {
-                return { isExcluded: true, reason: "Doubt Session" };
-            }
+            if (!masterSlot) return { isExcluded: true, reason: "Class Not Scheduled" };
+            if (masterSlot.remark && masterSlot.remark.toLowerCase().includes("doubt session")) return { isExcluded: true, reason: "Doubt Session" };
+            
             return { isExcluded: false, reason: "" };
         }
      // --- 🕰️ SMART TIME MACHINE ENGINE ---
