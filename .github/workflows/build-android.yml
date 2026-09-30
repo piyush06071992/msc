@@ -24,7 +24,7 @@ jobs:
     - name: Prepare Web Assets and Capacitor
       run: |
         mkdir -p www
-        find . -maxdepth 1 -not -name '.' -not -name '..' -not -name '.git' -not -name 'android' -not -name '.github' -not -name 'functions' -not -name 'capacitor.config.json' -not -name 'www' -exec cp -r {} www/ \;
+        find . -maxdepth 1 -not -name '.' -not -name '..' -not -name '.git' -not -name 'android' -not -name '.github' -not -name 'functions' -not -name 'capacitor.config.json' -not -name 'www' -exec cp -r {} \;
 
         if [ ! -f package.json ]; then
           npm init -y
@@ -88,7 +88,7 @@ jobs:
         import java.util.Locale;
 
         public class MainActivity extends BridgeActivity {
-            private boolean isExamActive = false; // Master switch: App is normal if false
+            private boolean isExamActive = false; 
             private boolean isArmed = false;
             private boolean isTerminated = false;
             private boolean isConfiguringWifi = false;
@@ -111,7 +111,7 @@ jobs:
                     if (am != null) {
                         int lockState = am.getLockTaskModeState();
                         if (lockState != ActivityManager.LOCK_TASK_MODE_NONE) {
-                            isArmed = true;
+                            isArmed = true; 
                         } else if (isArmed && !isConfiguringWifi) {
                             triggerViolation("ERR_03", "Unauthorized system action detected.");
                             return;
@@ -132,16 +132,39 @@ jobs:
                 createViolationOverlay();
                 addNativeWifiButton();
                 
-                // If app crashed during an active exam, restore lockdown state immediately
                 if (checkPersistentViolation()) {
                     isExamActive = true;
                 }
             }
 
             @Override
+            public void onBackPressed() {
+                if (isTerminated) {
+                    return; 
+                }
+                
+                if (this.bridge != null && this.bridge.getWebView() != null) {
+                    // Prevent student from backing out of mp.minerva.academy into the main app during an exam
+                    String currentUrl = this.bridge.getWebView().getUrl();
+                    if (isExamActive && currentUrl != null && currentUrl.equals("https://mp.minerva.academy/")) {
+                        return; 
+                    }
+
+                    if (this.bridge.getWebView().canGoBack()) {
+                        this.bridge.getWebView().goBack();
+                        return;
+                    }
+                }
+                
+                if (!isExamActive) {
+                    super.onBackPressed();
+                }
+            }
+
+            @Override
             public void onResume() {
                 super.onResume();
-                if (!isExamActive) return; // Do nothing if it's just the normal app
+                if (!isExamActive) return;
 
                 applyKioskFlags();
                 if (checkPersistentViolation()) return;
@@ -231,7 +254,8 @@ jobs:
                     
                     wifiBtn.setOnClickListener(v -> {
                         isConfiguringWifi = true;
-                        try { stopLockTask(); } catch (Exception ignored) {} // Drop pin so settings can open
+                        isArmed = false; 
+                        try { stopLockTask(); } catch (Exception ignored) {} 
                         
                         try {
                             Intent intent = new Intent(android.provider.Settings.Panel.ACTION_INTERNET_CONNECTIVITY);
@@ -247,7 +271,7 @@ jobs:
                         }
                     });
                     
-                    wifiBtn.setVisibility(View.GONE); // Hidden when exam is not active
+                    wifiBtn.setVisibility(View.GONE); 
                     nativeWifiBtn = wifiBtn;
                     rootLayout.addView(wifiBtn);
                 });
@@ -402,7 +426,6 @@ jobs:
 
             private void handleUnlock(String pin) {
                 if ("9999".equals(pin)) {
-                    // RESUME EXAM
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
                     prefs.edit().clear().commit(); 
 
@@ -414,6 +437,14 @@ jobs:
                     if (overlayLayout != null) overlayLayout.setVisibility(View.GONE);
                     if (nativeWifiBtn != null) nativeWifiBtn.setVisibility(View.VISIBLE);
 
+                    // Restore Exam URL if App was closed during the violation
+                    if (bridge != null && bridge.getWebView() != null) {
+                        String currentUrl = bridge.getWebView().getUrl();
+                        if (currentUrl == null || !currentUrl.contains("mp.minerva.academy")) {
+                            bridge.getWebView().loadUrl("https://mp.minerva.academy");
+                        }
+                    }
+
                     ActivityManager am = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
                     if (am != null && am.getLockTaskModeState() == ActivityManager.LOCK_TASK_MODE_NONE) {
                         try { startLockTask(); } catch (Exception ignored) {}
@@ -423,11 +454,10 @@ jobs:
                     Toast.makeText(this, "Exam Resumed", Toast.LENGTH_SHORT).show();
 
                 } else if ("0000".equals(pin)) {
-                    // TURN OFF EXAM MODE (Return to Normal App)
                     SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
                     prefs.edit().clear().commit();
 
-                    isExamActive = false; // Turn off security trap
+                    isExamActive = false; 
                     isTerminated = false;
                     isArmed = false;
                     secretTapCount = 0;
@@ -441,9 +471,12 @@ jobs:
                     
                     securityHandler.removeCallbacks(securityRunnable);
                     
-                    // Reset UI to standard Android view
                     getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                     getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+                    
+                    if (bridge != null && bridge.getWebView() != null) {
+                        bridge.getWebView().loadUrl("https://minervaacademy.web.app");
+                    }
 
                     Toast.makeText(this, "Exam Mode Disabled", Toast.LENGTH_SHORT).show();
                 } else {
