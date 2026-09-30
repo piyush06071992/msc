@@ -4230,9 +4230,15 @@ async function requestUnmarkAttendance() {
                 let data = snap.exists ? snap.data() : {};
                 let stats = data.aggregatedStats || { globalTotalWorkingDays: 0, students: {} };
                 
-                prevWorkingInput.value = stats.globalTotalWorkingDays || 0;
+           prevWorkingInput.value = stats.globalTotalWorkingDays || 0;
                 
-                const myStudents = getActiveStudentsForDate(currentReg.c, currentReg.s, todayISO);
+                const monthStart = `${y}-${m}-01`;
+                const myStudents = studentsData.filter(stu => {
+                    if (normMatch(stu.className) !== normMatch(currentReg.c) || normMatch(stu.section) !== normMatch(currentReg.s)) return false;
+                    // Keep students who left DURING or AFTER this month, but hide those who left BEFORE this month
+                    if (stu.isActive === false && stu.statusChangeDate && stu.statusChangeDate < monthStart) return false;
+                    return true;
+                }).sort((a,b) => String(a.name).localeCompare(String(b.name)));
                 
               let html = '<div class="space-y-2">';
                 myStudents.forEach(stu => {
@@ -4277,12 +4283,18 @@ async function requestUnmarkAttendance() {
             const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthVal}`;
             const docRef = getCollection("attendance_records").doc(docId);
 
-            try {
+           try {
                 const snap = await docRef.get();
                 let data = snap.exists ? snap.data() : { className: currentReg.c, section: currentReg.s, subject: currentReg.sub, monthKey: monthVal, records: {} };
                 
              let studentsMap = {};
-                const myStudents = getActiveStudentsForDate(currentReg.c, currentReg.s, todayISO);
+                const [y, m] = monthVal.split('_');
+                const monthStart = `${y}-${m}-01`;
+                const myStudents = studentsData.filter(stu => {
+                    if (normMatch(stu.className) !== normMatch(currentReg.c) || normMatch(stu.section) !== normMatch(currentReg.s)) return false;
+                    if (stu.isActive === false && stu.statusChangeDate && stu.statusChangeDate < monthStart) return false;
+                    return true;
+                });
                 
               let hasValidationError = false;
               myStudents.forEach(stu => {
@@ -4622,12 +4634,13 @@ async function loadLedger() {
                     }
                     if(isWorkingDay) totalWorkingDaysMonth++;
 
-                    dayStatuses.push({ 
+                   dayStatuses.push({ 
                         date: dateStr, 
                         isFuture: isFuture, 
                         verticalReason,
                         isRemedial: isRemedialDay,
-                        isExcluded: status.isExcluded && !hasAttendanceMarked // Allow future columns to grey out
+                        isExcluded: status.isExcluded && !hasAttendanceMarked, // Allow future columns to grey out
+                        isWorkingDay: isWorkingDay
                     });
                     
                    let bg = (status.isExcluded && !hasAttendanceMarked) ? "bg-slate-200 text-slate-400" : (isRemedialDay ? "bg-indigo-100 text-indigo-800 font-black" : "bg-white");
@@ -4756,7 +4769,8 @@ async function loadLedger() {
                         stuPrevWork = prevBaseStats.working + prevActualWorkingDays;
                     }
 
-                    let pCount = 0; let lCount = 0; let aCount = 0; let rowHtml = "";
+                let pCount = 0; let lCount = 0; let aCount = 0; let rowHtml = "";
+                    let stuWorkingDaysMonth = 0;
 
                     if (isCurrentClass && stu.transferDate && oldSectionRecords[stu.id]) {
                         pCount += oldSectionRecords[stu.id].P || 0;
@@ -4796,7 +4810,7 @@ async function loadLedger() {
                                 effectiveRecStatus = anySubjectPresentStatus[ds.date][stu.id];
                             }
 
-                            if (effectiveRecStatus) {
+                          if (effectiveRecStatus) {
                                 const val = effectiveRecStatus;
                                 if (val === 'P') { 
                                     cellContent = "P"; 
@@ -4810,11 +4824,15 @@ async function loadLedger() {
                             }
                         }
                         
+                        if (ds.isWorkingDay && !shouldGreyOut) {
+                            stuWorkingDaysMonth++;
+                        }
+                        
                         rowHtml += `<td class="border border-black" style="${inlineStyle}">${cellContent}</td>`;
                     });
 
-const grandTotalAtt = stuPrevAtt + pCount;
-                    const stuGrandTotalWorking = stuPrevWork + totalWorkingDaysMonth;
+                    const grandTotalAtt = stuPrevAtt + pCount;
+                    const stuGrandTotalWorking = stuPrevWork + stuWorkingDaysMonth;
                     let percentage = stuGrandTotalWorking > 0 ? Math.round((grandTotalAtt / stuGrandTotalWorking) * 100) : 0;
 
                     let remarks = "";
