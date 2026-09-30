@@ -2610,16 +2610,24 @@ async function loadStudentPersonalView() {
         try {
                 // Robust Fetch: Get everything matching this class+section+month
                 const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).where("className", "==", currentReg.c).get();
-                let mergedRecords = {};
+              let mergedRecords = {};
                 let anySubjectPresentStatus = {}; // Tracks if student was present in ANY subject
+                let allSubjectsAttendance = {}; // NEW: Tracks the exact status for every individual subject
 
                 querySnap.forEach(doc => {
                     const data = doc.data();
                     if (normMatch(data.section) === normMatch(currentReg.s)) {
                        // Gather Cross-Subject Present Data for Incharge Auto-Present Logic
                         if (data.records && data.records[dateStr]) {
+                            const subName = (data.subject || "UNKNOWN").toUpperCase();
                             Object.keys(data.records[dateStr]).forEach(stuId => {
                                 const status = data.records[dateStr][stuId];
+                                
+                                // Record the exact status for this specific subject
+                                if (!allSubjectsAttendance[stuId]) allSubjectsAttendance[stuId] = {};
+                                allSubjectsAttendance[stuId][subName] = status;
+
+                                // Build the global Daily Aggregate
                                 if (status === 'P') {
                                     anySubjectPresentStatus[stuId] = 'P';
                                 } else if ((status === 'L' || status === 'A') && anySubjectPresentStatus[stuId] !== 'P') {
@@ -2627,7 +2635,6 @@ async function loadStudentPersonalView() {
                                 }
                             });
                         }
-
                         // Extract actual records for the currently viewed subject
                         if (normMatch(data.subject) === normMatch(currentReg.sub)) {
                             if (data.records) {
@@ -2769,7 +2776,7 @@ async function loadStudentPersonalView() {
                 // -----------------------------------------------------------------
 
    let lastSec = "";
-                myStudents.forEach((stu, index) => {
+              myStudents.forEach((stu, index) => {
                     if (stu.section !== lastSec) {
                         lastSec = stu.section;
                         html += `
@@ -2777,6 +2784,51 @@ async function loadStudentPersonalView() {
                                 <span>📁 Section ${lastSec} Group</span>
                             </div>
                         `;
+                    }
+
+                    // --- GENERATE DETAILED TIMELINE FOR INCHARGE REGISTER ---
+                    let timelineHtml = "";
+                    if (currentReg.sub === 'CLASS INCHARGE') {
+                        const sortedSched = [...scheduleDetect].sort((a,b) => (a.start24||"00:00").localeCompare(b.start24||"00:00"));
+                        let badges = [];
+                        
+                        sortedSched.forEach(slot => {
+                            const subUpper = (slot.subject || slot.title || "UNKNOWN").toUpperCase();
+                            if (subUpper.includes('BREAK') || subUpper.includes('LUNCH')) return;
+                            
+                            // Skip optional subjects if the student didn't opt for them
+                            const secStruct = window.instituteStructures && window.instituteStructures.find(st => normMatch(st.className) === normMatch(currentReg.c) && normMatch(st.sectionName || st.section) === normMatch(currentReg.s));
+                            const isOpt = secStruct && secStruct.optionalSubjects && secStruct.optionalSubjects.map(o=>o.toUpperCase()).includes(subUpper);
+                            if (isOpt && normMatch(stu.optionalSubject) !== normMatch(subUpper)) return;
+                            
+                            const stat = (allSubjectsAttendance[stu.id] && allSubjectsAttendance[stu.id][subUpper]) ? allSubjectsAttendance[stu.id][subUpper] : 'U';
+                            
+                            let sColor = stat === 'P' ? 'text-emerald-700 bg-emerald-100 border-emerald-200' : 
+                                         (stat === 'L' || stat === 'A' ? 'text-rose-700 bg-rose-100 border-rose-200' : 'text-slate-500 bg-slate-100 border-slate-200');
+                            
+                            let timeLabel = "";
+                            if (slot.start24 && slot.end24) {
+                                const formatShortTime = (t24) => {
+                                    if(!t24) return "";
+                                    let [h, m] = t24.split(':');
+                                    let hNum = parseInt(h);
+                                    let ampm = hNum >= 12 ? 'PM' : 'AM';
+                                    hNum = hNum % 12 || 12;
+                                    return `${hNum}:${m} ${ampm}`;
+                                };
+                                timeLabel = `${formatShortTime(slot.start24)} - ${formatShortTime(slot.end24)}`;
+                            } else if (slot.timeRange) {
+                                timeLabel = slot.timeRange;
+                            }
+                            
+                            badges.push(`<div class="flex items-center gap-1.5 border ${sColor} px-2 py-0.5 rounded text-[9px] font-black uppercase whitespace-nowrap shadow-sm"><span class="opacity-70 font-bold">${timeLabel}</span> <span class="pl-1.5 border-l border-current">${subUpper}: ${stat}</span></div>`);
+                        });
+                        
+                        if (badges.length > 0) {
+                            timelineHtml = `<div class="mt-2.5 flex flex-wrap gap-1.5 w-full">${badges.join('')}</div>`;
+                        } else {
+                            timelineHtml = `<div class="mt-2 text-[9px] font-bold text-slate-400 uppercase tracking-widest">No scheduled classes found</div>`;
+                        }
                     }
 
        // --- NEW FIX: Evaluate if student has a Partial Leave after school start ---
@@ -2854,15 +2906,16 @@ async function loadStudentPersonalView() {
         
                     html += `
 <div id="row_${stu.id}" class="student-row bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center transition-all duration-300">
-                            <div class="flex items-center gap-2 sm:gap-3">
+                          <div class="flex items-center gap-2 sm:gap-3">
                                 <span class="bg-indigo-50 text-indigo-700 font-mono text-[9px] sm:text-[10px] font-black px-2 py-1 rounded border border-indigo-100">S.No ${index + 1}</span>
                                 <span class="bg-purple-100 text-purple-700 font-mono text-[9px] sm:text-[10px] font-black px-2 py-1 rounded border border-purple-200 uppercase">Sec ${stu.section}</span>
                                 <span class="bg-slate-100 text-slate-500 font-mono text-[10px] sm:text-xs font-black px-2 py-1 rounded border border-slate-200" title="Roll No">#${stu.rollNo || 'N/A'}</span>
-                              <div>
+                              <div class="flex flex-col">
                                     <div class="flex items-center gap-2">
                                         <h4 class="student-name font-black text-slate-800 text-xs sm:text-sm uppercase tracking-tight" data-name="${stu.name}">${stu.name}</h4>
                                         <button onclick="openReportModal('${stu.id}', '${stu.name.replace(/'/g, "\\'")}', '${stu.rollNo || ''}', '${stu.className}', '${stu.section}')" class="bg-rose-50 hover:bg-rose-600 text-rose-600 hover:text-white px-2 py-1 rounded text-[8px] font-black uppercase tracking-widest transition-colors shadow-sm border border-rose-200">🚩 Report</button>
                                     </div>
+                                    ${timelineHtml}
                                 </div>
                             </div>
                             <div class="flex shrink-0 pointer-events-auto">
