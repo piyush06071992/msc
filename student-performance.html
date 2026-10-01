@@ -544,13 +544,19 @@
             const todayIso = (new Date(Date.now() - offset)).toISOString().split('T')[0];
 
       try {
-            const [snap, pgSnap] = await Promise.all([
-                getCollection("exam_schedules")
-                    .where("className", "==", activeStudent.className)
-                    .where("section", "==", activeStudent.section)
-                    .get(),
-                db.collection("admin_paper_groups").where("date", ">=", todayIso).get().catch(() => ({ forEach: () => {} }))
-            ]);
+                // Fetch schedules for Primary Section AND all Additional Sections
+                let targetSections = [activeStudent.section];
+                if (activeStudent.additionalSections && activeStudent.additionalSections.length > 0) {
+                    targetSections = targetSections.concat(activeStudent.additionalSections);
+                }
+
+                const [snap, pgSnap] = await Promise.all([
+                    getCollection("exam_schedules")
+                        .where("className", "==", activeStudent.className)
+                        .where("section", "in", targetSections)
+                        .get(),
+                    db.collection("admin_paper_groups").where("date", ">=", todayIso).get().catch(() => ({ forEach: () => {} }))
+                ]);
             
             let paperGroupsMap = {};
             pgSnap.forEach(doc => {
@@ -566,11 +572,19 @@
                 }
             });
 
-            let upcoming = [];
-            snap.forEach(doc => {
-                const data = doc.data();
-                if (data.date >= todayIso) upcoming.push(data);
-            });
+      let upcoming = [];
+                let seenExams = new Set(); // Prevent duplicates if same exam applies to multiple of their sections
+                
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    if (data.date >= todayIso) {
+                        const uniqueKey = data.date + '_' + (data.subjects || []).sort().join('_');
+                        if (!seenExams.has(uniqueKey)) {
+                            upcoming.push(data);
+                            seenExams.add(uniqueKey);
+                        }
+                    }
+                });
 
                 upcoming.sort((a,b) => a.date.localeCompare(b.date));
 
@@ -978,21 +992,32 @@ function startExam(examDate, examType) {
             const offset = (new Date()).getTimezoneOffset() * 60000;
             const todayIso = (new Date(Date.now() - offset)).toISOString().split('T')[0];
 
-            try {
+          try {
+                // Fetch past schedules for Primary Section AND all Additional Sections
+                let targetSections = [activeStudent.section];
+                if (activeStudent.additionalSections && activeStudent.additionalSections.length > 0) {
+                    targetSections = targetSections.concat(activeStudent.additionalSections);
+                }
+
                 const [pgSnap, schSnap] = await Promise.all([
                     db.collection("admin_paper_groups").get(),
-                    getCollection("exam_schedules").where("className", "==", activeStudent.className).where("section", "==", activeStudent.section).get()
+                    getCollection("exam_schedules")
+                        .where("className", "==", activeStudent.className)
+                        .where("section", "in", targetSections)
+                        .get()
                 ]);
 
                 let pastExamsMap = {};
-                const targetSecKey = `${activeCenter}|${activeStudent.className}|${activeStudent.section}`.toUpperCase();
+                
+                // Build an array of valid target section keys to match against admin paper groups
+                const targetSecKeys = targetSections.map(s => `${activeCenter}|${activeStudent.className}|${s}`.toUpperCase());
 
-                pgSnap.forEach(doc => {
+              pgSnap.forEach(doc => {
                     const data = doc.data();
                     if (data.date < todayIso) {
-                        const matchesSec = (data.sectionKeys || []).some(k => k.trim().toUpperCase() === targetSecKey) ||
+                        const matchesSec = (data.sectionKeys || []).some(k => targetSecKeys.includes(k.trim().toUpperCase())) ||
                                            (String(data.className || '').toUpperCase() === activeStudent.className.toUpperCase() && 
-                                            (data.sections || []).some(s => String(s).toUpperCase() === activeStudent.section.toUpperCase()));
+                                            (data.sections || []).some(s => targetSections.map(ts => ts.toUpperCase()).includes(String(s).toUpperCase())));
                         if (matchesSec) {
                             pastExamsMap[data.date + '_' + (data.subjects || []).sort().join('_')] = { id: doc.id, ...data };
                         }
