@@ -1072,15 +1072,13 @@ window.onload = async () => {
        let globalSubjectsSet = new Set();
                 reportCardSubjectDates = {}; // Reset the map
                 
-              // Pre-populate global subjects from scheduled exams so pending/ungraded exams always show up as columns
+             // Pre-populate global subjects from scheduled exams so pending/ungraded exams always show up as columns
                 Object.values(groupMetaMap).forEach(g => {
                     (g.subjects || []).forEach(sub => {
                         const upperSub = sub.toUpperCase();
-                        globalSubjectsSet.add(upperSub);
-                        // Only assign the scheduled date if an active submission date hasn't already claimed it
-                        if (!reportCardSubjectDates[upperSub]) {
-                            reportCardSubjectDates[upperSub] = g.date; 
-                        }
+                        const compositeKey = `${upperSub}|${g.date}`;
+                        globalSubjectsSet.add(compositeKey);
+                        reportCardSubjectDates[compositeKey] = g.date; 
                     });
                 });
 
@@ -1152,19 +1150,19 @@ window.onload = async () => {
                     let examTotalObt = 0;
                     let examTotalMax = 0;
 
-                if (isDirect) {
+             if (isDirect) {
                         const directMax = keyMeta.directMaxMarks || {};
                         Object.entries(sub.directScores || {}).forEach(([subj, score]) => {
                             const upperSub = subj.toUpperCase();
+                            const compositeKey = `${upperSub}|${examDate}`;
                             const max = directMax[subj] || 100;
-                            globalSubjectsSet.add(upperSub);
+                            globalSubjectsSet.add(compositeKey);
                             
-                            // Force-bind the date from the actual graded submission's schedule date
-                            if (examDate) reportCardSubjectDates[upperSub] = examDate;
+                            if (examDate) reportCardSubjectDates[compositeKey] = examDate;
                             
-                            if (!studentsMap[roll].subjects[upperSub]) studentsMap[roll].subjects[upperSub] = { obt: 0, max: 0 };
-                            studentsMap[roll].subjects[upperSub].obt += score;
-                            studentsMap[roll].subjects[upperSub].max += max;
+                            if (!studentsMap[roll].subjects[compositeKey]) studentsMap[roll].subjects[compositeKey] = { obt: 0, max: 0, subjectName: upperSub };
+                            studentsMap[roll].subjects[compositeKey].obt += score;
+                            studentsMap[roll].subjects[compositeKey].max += max;
                             
                             examTotalObt += score;
                             examTotalMax += max;
@@ -1179,8 +1177,12 @@ window.onload = async () => {
                             const upperSub = (st.subject || "UNKNOWN").toUpperCase();
                             globalSubjectsSet.add(upperSub);
                             
-                            // Force-bind the date from the actual graded submission's schedule date
-                            if (examDate) reportCardSubjectDates[upperSub] = examDate;
+                         structure.forEach(st => {
+                            const upperSub = (st.subject || "UNKNOWN").toUpperCase();
+                            const compositeKey = `${upperSub}|${examDate}`;
+                            globalSubjectsSet.add(compositeKey);
+                            
+                            if (examDate) reportCardSubjectDates[compositeKey] = examDate;
                             
                             let secScore = 0; let secMax = 0;
                             for (let q = st.start; q <= st.end; q++) {
@@ -1198,9 +1200,9 @@ window.onload = async () => {
                                 else { if(!isAttempted) secScore += unatt; else if(isCorrect) secScore += pos; else secScore += neg; }
                             }
 
-                            if (!studentsMap[roll].subjects[upperSub]) studentsMap[roll].subjects[upperSub] = { obt: 0, max: 0 };
-                            studentsMap[roll].subjects[upperSub].obt += secScore;
-                            studentsMap[roll].subjects[upperSub].max += secMax;
+                            if (!studentsMap[roll].subjects[compositeKey]) studentsMap[roll].subjects[compositeKey] = { obt: 0, max: 0, subjectName: upperSub };
+                            studentsMap[roll].subjects[compositeKey].obt += secScore;
+                            studentsMap[roll].subjects[compositeKey].max += secMax;
                             
                             examTotalObt += secScore;
                             examTotalMax += secMax;
@@ -1220,14 +1222,15 @@ window.onload = async () => {
                     const optSubs = (secStruct && secStruct.optionalSubjects) ? secStruct.optionalSubjects.map(s => s.trim().toUpperCase()) : [];
                     const stuOpt = stu.optionalSubject ? String(stu.optionalSubject).trim().toUpperCase() : "";
 
-                    globalSubjectsSet.forEach(sub => {
+             globalSubjectsSet.forEach(compositeKey => {
+                        const [sub, examDate] = compositeKey.split('|');
+                        
                         if (optSubs.includes(sub) && stuOpt !== sub) {
-                            stu.subjects[sub] = { obt: '—', max: 0, isUnassignedOpt: true };
+                            stu.subjects[compositeKey] = { obt: '—', max: 0, isUnassignedOpt: true, subjectName: sub };
                             return;
                         }
 
-                        if (!stu.subjects[sub]) {
-                            const examDate = reportCardSubjectDates[sub];
+                        if (!stu.subjects[compositeKey]) {
                             if (examDate && attRecordsMap[examDate]) {
                                 if (stu.isActive === false) {
                                     if (stu.statusChangeDate && examDate >= stu.statusChangeDate) return;
@@ -1235,7 +1238,7 @@ window.onload = async () => {
                                 }
                                 const status = attRecordsMap[examDate][stu.id];
                                 if (status === 'A' || status === 'L') {
-                                    stu.subjects[sub] = { obt: 'ABSENT', max: 0, isAbsent: true };
+                                    stu.subjects[compositeKey] = { obt: 'ABSENT', max: 0, isAbsent: true, subjectName: sub };
                                 }
                             }
                         }
@@ -1263,12 +1266,17 @@ window.onload = async () => {
                     previousScore = s.totalObt;
                 });
 
-reportCardSubjects = Array.from(globalSubjectsSet).sort();
+reportCardSubjects = Array.from(globalSubjectsSet).sort((a,b) => {
+                    const [subA, dateA] = a.split('|');
+                    const [subB, dateB] = b.split('|');
+                    if (dateA !== dateB) return dateA.localeCompare(dateB);
+                    return subA.localeCompare(subB);
+                });
 
                 subjectMaxMarks = {};
-                reportCardSubjects.forEach(sub => {
-                    const studentWithSub = reportCardData.find(s => s.subjects[sub]);
-                    subjectMaxMarks[sub] = studentWithSub ? studentWithSub.subjects[sub].max : 0;
+                reportCardSubjects.forEach(compositeKey => {
+                    const studentWithSub = reportCardData.find(s => s.subjects[compositeKey]);
+                    subjectMaxMarks[compositeKey] = studentWithSub ? studentWithSub.subjects[compositeKey].max : 0;
                 });
 
                 if (reportCardData.length === 0) {
@@ -1284,8 +1292,10 @@ reportCardSubjects = Array.from(globalSubjectsSet).sort();
                         <option value="name_asc">Name (A-Z)</option>
                         <option value="pct_desc">Percentage (High-Low)</option>
                     `;
-                    reportCardSubjects.forEach(sub => {
-                        sortHtml += `<option value="sub_${sub}_desc">${sub} Score (High-Low)</option>`;
+                    reportCardSubjects.forEach(compositeKey => {
+                        const [sub, dateRaw] = compositeKey.split('|');
+                        const dateStr = dateRaw ? new Date(dateRaw).toLocaleDateString('en-GB', {day:'numeric', month:'short'}) : '';
+                        sortHtml += `<option value="sub_${compositeKey}_desc">${sub} (${dateStr}) Score (High-Low)</option>`;
                     });
                     sortSelect.innerHTML = sortHtml;
                 }
@@ -1310,10 +1320,10 @@ reportCardSubjects = Array.from(globalSubjectsSet).sort();
                 if (sortBy === 'total_desc') return b.totalObt - a.totalObt || a.name.localeCompare(b.name);
                 if (sortBy === 'pct_desc') return parseFloat(b.percentage) - parseFloat(a.percentage) || a.name.localeCompare(b.name);
                 
-                if (sortBy.startsWith('sub_')) {
-                    const subName = sortBy.replace('sub_', '').replace('_desc', '');
-                    const scoreA = a.subjects[subName] ? a.subjects[subName].obt : -999;
-                    const scoreB = b.subjects[subName] ? b.subjects[subName].obt : -999;
+            if (sortBy.startsWith('sub_')) {
+                    const compositeKey = sortBy.substring(4, sortBy.length - 5);
+                    const scoreA = a.subjects[compositeKey] ? a.subjects[compositeKey].obt : -999;
+                    const scoreB = b.subjects[compositeKey] ? b.subjects[compositeKey].obt : -999;
                     return scoreB - scoreA || a.name.localeCompare(b.name);
                 }
                 
@@ -1333,15 +1343,15 @@ reportCardSubjects = Array.from(globalSubjectsSet).sort();
                     <th onclick="sortReportCardData('name_asc')" class="p-3 sticky left-[144px] bg-slate-100 z-20 border-r border-slate-200 min-w-[150px] cursor-pointer hover:bg-slate-200 transition-colors ${sortBy === 'name_asc' ? 'border-b-4 border-slate-400' : 'border-b'}">
                         Student Name ${sortBy === 'name_asc' ? '↓' : ''}
                     </th>`;
-           reportCardSubjects.forEach(sub => {
-                const isSorted = sortBy === `sub_${sub}_desc`;
+    reportCardSubjects.forEach(compositeKey => {
+                const [sub, dateRaw] = compositeKey.split('|');
+                const isSorted = sortBy === `sub_${compositeKey}_desc`;
                 const thClass = isSorted ? 'bg-fuchsia-50 border-b-4 border-fuchsia-500' : 'bg-white hover:bg-slate-50 border-b border-slate-200';
-                const dateRaw = reportCardSubjectDates[sub];
                 const dateStr = dateRaw ? new Date(dateRaw).toLocaleDateString('en-GB', {day:'numeric', month:'short'}) : '';
-                const subMax = subjectMaxMarks[sub] || 0;
+                const subMax = subjectMaxMarks[compositeKey] || 0;
                 
                 theadHtml += `
-                    <th onclick="sortReportCardData('sub_${sub}_desc')" class="p-3 text-center ${thClass} cursor-pointer transition-all whitespace-nowrap">
+                    <th onclick="sortReportCardData('sub_${compositeKey}_desc')" class="p-3 text-center ${thClass} cursor-pointer transition-all whitespace-nowrap">
                         <div class="text-[10px] ${isSorted ? 'text-fuchsia-800 font-black' : 'text-fuchsia-600'} mb-0.5">${sub} ${isSorted ? '↓' : ''}</div>
                         <div class="text-[8px] text-slate-500 font-bold mb-0.5">${dateStr}</div>
                         <div class="text-[9px] text-slate-400 font-bold mt-1">Max: ${subMax}</div>
@@ -1374,8 +1384,8 @@ reportCardSubjects = Array.from(globalSubjectsSet).sort();
                         </td>
                 `;
                     
-reportCardSubjects.forEach(sub => {
-                const sd = s.subjects[sub];
+reportCardSubjects.forEach(compositeKey => {
+                const sd = s.subjects[compositeKey];
                 if (s.isCancelled) {
                     rowHtml += `<td class="p-3 text-center font-black text-rose-600 text-[9px] uppercase tracking-widest border-b border-slate-100 bg-rose-50/30">CANCELLED</td>`;
                 } else if (sd && sd.isUnassignedOpt) {
@@ -1459,10 +1469,10 @@ reportCardSubjects.forEach(sub => {
                     <th class="header-sub">Section</th>
             `;
             
-            reportCardSubjects.forEach(sub => {
-                const dateRaw = reportCardSubjectDates[sub];
+            reportCardSubjects.forEach(compositeKey => {
+                const [sub, dateRaw] = compositeKey.split('|');
                 const dateStr = dateRaw ? new Date(dateRaw).toLocaleDateString('en-GB', {day:'numeric', month:'short'}) : '';
-                const subMax = subjectMaxMarks[sub] || 0;
+                const subMax = subjectMaxMarks[compositeKey] || 0;
                 tableHtml += `<th class="bg-blue">${sub}<br><span style="font-size:10px; color:#1e3a8a;">${dateStr}</span><br>Max: ${subMax}</th>`;
             });
             tableHtml += `<th class="bg-amber">Grand Total<br>Obt / Max</th><th class="bg-green">Percentage<br>(%)</th><th class="bg-amber">Rank</th></tr>`;
@@ -1474,8 +1484,8 @@ reportCardSubjects.forEach(sub => {
                     <td>${s.rollNo}</td>
                     <td style="text-align: left; font-weight: bold;">${s.name}${starMark}</td>
                     <td>${s.section}</td>`;
-            reportCardSubjects.forEach(sub => {
-                const sd = s.subjects[sub];
+          reportCardSubjects.forEach(compositeKey => {
+                const sd = s.subjects[compositeKey];
                 if (s.isCancelled) {
                     tableHtml += `<td style="color:#ef4444; font-weight:bold;">CANCELLED</td>`;
                 } else if (sd) {
@@ -1516,10 +1526,9 @@ reportCardSubjects.forEach(sub => {
             document.getElementById('ind-max').innerText = stu.totalMax;
             document.getElementById('ind-obt').innerText = stu.totalObt;
             document.getElementById('ind-pct').innerText = `${stu.percentage}%`;
-
-let subHtml = reportCardSubjects.map(sub => {
-                const sd = stu.subjects[sub];
-                const dateRaw = reportCardSubjectDates[sub];
+let subHtml = reportCardSubjects.map(compositeKey => {
+                const [sub, dateRaw] = compositeKey.split('|');
+                const sd = stu.subjects[compositeKey];
                 const dateStr = dateRaw ? new Date(dateRaw).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'}) : '';
 
                if (sd && sd.isUnassignedOpt) {
@@ -1615,9 +1624,9 @@ let subHtml = reportCardSubjects.map(sub => {
                 </tr>
             `;
             
-          reportCardSubjects.forEach(sub => {
-                const sd = stu.subjects[sub];
-                const dateRaw = reportCardSubjectDates[sub];
+         reportCardSubjects.forEach(compositeKey => {
+                const [sub, dateRaw] = compositeKey.split('|');
+                const sd = stu.subjects[compositeKey];
                 const dateStr = dateRaw ? new Date(dateRaw).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'}) : '-';
                 
              if (sd) {
