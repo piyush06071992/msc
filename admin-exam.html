@@ -403,20 +403,58 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        const authStatus = sessionStorage.getItem('minervaAdminAuth');
-        const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
-        if (authStatus !== 'true' && (!activeStaff || !activeStaff.canManageExams)) {
-            window.location.replace('index.html');
-        }
+       const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+        let activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+        let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
 
         function handleBack() {
             window.location.href = activeStaff && activeStaff.uid ? 'teacher-exam.html' : 'admin.html';
         }
 
+        async function checkPermission() {
+            if (isAdmin) {
+                document.getElementById('global-center-switch').value = activeCenter;
+                return; 
+            }
+            if (!activeStaff) return window.location.replace('index.html');
+            
+            try {
+                const snap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                if (snap.empty) throw new Error("No profile");
+                
+                const staffData = snap.docs[0].data();
+                const authLevel = staffData.canManageExams || false; 
+                
+                if (!authLevel) {
+                    alert("Unauthorized Access. Redirecting...");
+                    return window.location.replace('index.html');
+                }
+
+                // Extract center safely from their staff application details
+                const det = staffData.details || {};
+                const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
+                const staffCenter = centerKey ? String(det[centerKey]).toUpperCase() : "GHUMARWIN";
+
+                if (activeCenter !== staffCenter) {
+                    sessionStorage.setItem('minervaAdminCenter', staffCenter);
+                    window.location.reload(); 
+                    return; 
+                }
+
+                const dropdown = document.getElementById('global-center-switch');
+                if (dropdown) {
+                    dropdown.disabled = true;
+                    dropdown.className = "text-[10px] sm:text-xs font-black text-slate-400 bg-slate-100 border border-slate-200 outline-none rounded px-3 py-1 cursor-not-allowed uppercase tracking-widest shadow-sm";
+                    dropdown.title = "Restricted to your authorized branch";
+                }
+                document.getElementById('global-center-switch').value = activeCenter;
+            } catch (e) {
+                window.location.replace('index.html');
+            }
+        }
+
     // --- MULTI-CENTER DYNAMIC DB ROUTER ---
-        let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
         sessionStorage.setItem('minervaAdminCenter', activeCenter);
-        document.getElementById('global-center-switch').value = activeCenter;
 
         function switchAdminCenter(v) { sessionStorage.setItem('minervaAdminCenter', v); window.location.reload(); }
 
@@ -429,7 +467,8 @@
         let structureData = [], allTeachers = [], availableDepartments = [];
         const SPECIAL_SUBJECTS = ['BREAK','LUNCH BREAK','FRUIT BREAK','ASSEMBLY','EXAM','UT','OT','TERMINAL EXAMS','PREBOARD','BOARD EXAM','EVENT'];
 
-        window.onload = async () => {
+       window.onload = async () => {
+            await checkPermission();
             const today = new Date();
             const offset = today.getTimezoneOffset() * 60000;
             const localISO = (new Date(today - offset)).toISOString().slice(0,10);
