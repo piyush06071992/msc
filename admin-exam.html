@@ -4,10 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva | Exam Manager</title>
-    <script src="tailwind-engine.js"></script>
+ <script src="tailwind-engine.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
+    <!-- PDF-LIB FOR CLIENT-SIDE IMPOSITION -->
+    <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
@@ -359,11 +361,19 @@
                 <button onclick="closePaperUploadModal()" class="bg-blue-700 text-blue-200 hover:bg-rose-500 hover:text-white w-10 h-10 rounded-full font-black text-xl transition-colors flex items-center justify-center">✕</button>
             </div>
             
-            <div class="p-6 bg-slate-50 border-b border-slate-200 shrink-0 flex flex-col gap-4">
+      <div class="p-6 bg-slate-50 border-b border-slate-200 shrink-0 flex flex-col gap-4">
                 <input type="hidden" id="paper-upload-date">
                 <input type="hidden" id="paper-upload-class">
                 <input type="hidden" id="paper-upload-sec">
-   <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+   <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                    <div>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Print Layout</label>
+                        <select id="paper-upload-layout" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-700 outline-none focus:border-blue-500 cursor-pointer">
+                            <option value="A4_STANDARD">Standard A4 (Odd/Even)</option>
+                            <option value="A3_BOOKLET">A3 Booklet (Mult of 4)</option>
+                            <option value="A4_HALF_SPLIT">A4 Half-Split</option>
+                        </select>
+                    </div>
                     <div>
                         <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Series / Set (Optional)</label>
                         <input type="text" id="paper-upload-series" placeholder="e.g., Series A" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-700 outline-none focus:border-blue-500 uppercase">
@@ -1506,6 +1516,7 @@ async function uploadQuestionPaper() {
             const cls = document.getElementById('paper-upload-class').value;
             const sec = document.getElementById('paper-upload-sec').value;
             const series = document.getElementById('paper-upload-series').value.trim().toUpperCase() || "DEFAULT";
+            const layout = document.getElementById('paper-upload-layout').value;
             
             const qpFile = document.getElementById('paper-upload-file').files[0];
             const omrFile = document.getElementById('omr-upload-file').files[0];
@@ -1517,7 +1528,7 @@ async function uploadQuestionPaper() {
             
             const btn = document.getElementById('btn-upload-paper');
             const orig = btn.innerHTML;
-            btn.innerHTML = "⏳ Uploading...";
+            btn.innerHTML = "⏳ Formatting Layout & Uploading...";
             btn.disabled = true;
             
             try {
@@ -1528,7 +1539,67 @@ async function uploadQuestionPaper() {
                 if (qpFile) {
                     const safeQpName = qpFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
                     const qpRef = storageRef.child(`question_papers/${activeCenter}/${date}/${cls}/${sec}/FULL_PAPER_${series}_${Date.now()}_${safeQpName}`);
-                    await qpRef.put(qpFile);
+                    
+                    // --- CLIENT-SIDE IMPOSITION ENGINE ---
+                    const arrayBuffer = await qpFile.arrayBuffer();
+                    const { PDFDocument } = window.PDFLib;
+                    const pdfDoc = await PDFDocument.load(arrayBuffer);
+                    const mergedPdf = await PDFDocument.create();
+                    
+                    const pages = pdfDoc.getPages();
+                    let sourceWidth = 595.28, sourceHeight = 841.89; 
+                    
+                    pages.forEach(p => {
+                        p.setRotation({ type: 'degrees', angle: 0 });
+                        const { width, height } = p.getSize();
+                        sourceWidth = width; sourceHeight = height; 
+                    });
+
+                    let uploadBytes = null;
+
+                    if (layout === 'A3_BOOKLET') {
+                        const currentCount = pdfDoc.getPageCount();
+                        const remainder = currentCount % 4;
+                        if (remainder !== 0) {
+                            for (let p = 0; p < (4 - remainder); p++) pdfDoc.addPage([sourceWidth, sourceHeight]);
+                        }
+
+                        const paddedCount = pdfDoc.getPageCount();
+                        const embeddedPages = await mergedPdf.embedPdf(await pdfDoc.save());
+                        
+                        const doubleWidth = sourceWidth * 2;
+                        const doubleHeight = sourceHeight;
+                        const totalSides = paddedCount / 2;
+                        
+                        for (let i = 0; i < totalSides; i++) {
+                            const bookletPage = mergedPdf.addPage([doubleWidth, doubleHeight]);
+                            let leftIndex, rightIndex;
+                            if (i % 2 === 0) {
+                                leftIndex = paddedCount - 1 - i;
+                                rightIndex = i;
+                            } else {
+                                leftIndex = i;
+                                rightIndex = paddedCount - 1 - i;
+                            }
+                            bookletPage.drawPage(embeddedPages[leftIndex], { x: 0, y: 0 });
+                            bookletPage.drawPage(embeddedPages[rightIndex], { x: sourceWidth, y: 0 });
+                        }
+                        uploadBytes = await mergedPdf.save();
+                    } else if (layout === 'A4_STANDARD') {
+                        const remainder = pdfDoc.getPageCount() % 2;
+                        if (remainder !== 0) pdfDoc.addPage([sourceWidth, sourceHeight]); 
+                        const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+                        copiedPages.forEach(p => mergedPdf.addPage(p));
+                        uploadBytes = await mergedPdf.save();
+                    } else {
+                        // A4 Half Split -> Keep Original
+                        uploadBytes = new Uint8Array(arrayBuffer);
+                    }
+
+                    const blob = new Blob([uploadBytes], { type: 'application/pdf' });
+                    await qpRef.put(blob);
+                    // ------------------------------------
+
                     qpUrl = await qpRef.getDownloadURL();
                     qpStoragePath = qpRef.fullPath;
                     qpFileName = qpFile.name;
