@@ -411,41 +411,31 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 pdfBytesCache[bulkData.pdfUrl] = await loadPdfBytes(bulkData.pdfUrl);
             }
             const originalBytes = pdfBytesCache[bulkData.pdfUrl];
+            const pdfDoc = await PDFDocument.load(originalBytes);
             
             for (let c = 0; c < copiesNeeded; c++) {
-                const pdfDoc = await PDFDocument.load(originalBytes);
-                
-             // Copy pages FIRST to preserve all pages and fix font mapping
                 const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
                 
                 copiedPages.forEach(p => {
                     const page = mergedPdf.addPage(p);
-                    page.setRotation({ type: 'degrees', angle: 0 }); // Fix upside-down PageMaker exports
                     const { width, height } = page.getSize();
                     const size = 10;
                     const color = rgb(0.2, 0.2, 0.2);
                     const opacity = 0.8;
                     
                     const subLabel = (bulkData.matchedSubKey && bulkData.matchedSubKey !== "FULL PAPER" && bulkData.matchedSubKey !== "UNMAPPED EXAM") ? `[${bulkData.matchedSubKey}] ` : "";
-           const leftText = `ROOM: ${roomName}`;
+                    const leftText = `ROOM: ${roomName}`;
                     const rightText = `${subLabel}COPY ${c+1}/${copiesNeeded}`;
                     
-                    // Header Stamp (Moved slightly up to clear the top box frame)
+                    // Simple admin stamps for the halves
                     page.drawText(leftText, { x: 36, y: height - 28, size, font, color, opacity });
                     page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 28, size, font, color, opacity });
                     
-                    // Footer Stamp (Extreme Bottom)
                     page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
                     page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
                 });
                 
-                // DUPLEX PADDING: If the PDF is an odd number of pages (like 1 or 3),
-                // we MUST add a blank page at the end of each copy. Otherwise, Copy 2 
-                // will print on the back of Copy 1, ruining the cut!
-                if (copiedPages.length % 2 !== 0) {
-                    const { width, height } = copiedPages[copiedPages.length - 1].getSize();
-                    mergedPdf.addPage([width, height]); // Force exact dimensions to prevent printer spooler reset
-                }
+                // NO PADDING NECESSARY. The frontend upload engine already handled it!
             }
         } catch (err) {
             console.error(`[PDF Engine] Error processing bulk task for ${bulkData.pdfUrl}:`, err);
@@ -465,38 +455,37 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             
             copiedPages.forEach(p => {
                 const page = mergedPdf.addPage(p);
-                page.setRotation({ type: 'degrees', angle: 0 }); // Fix upside-down PageMaker exports
                 const { width, height } = page.getSize();
-                const size = 8.5;
+                const size = 10;
                 const color = rgb(0.2, 0.2, 0.2);
-                const opacity = 0.8;
+                const opacity = 0.9; // High contrast to prevent cheating
 
                 const stu = task.student;
                 const subLabel = (task.matchedSubKey && task.matchedSubKey !== "FULL PAPER" && task.matchedSubKey !== "UNMAPPED EXAM") ? `[${task.matchedSubKey}] ` : "";
-const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
+                const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
                 const rightText = `SEAT: ${task.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${task.assignedSeries}`;
                 
-                // Header Stamp (Moved slightly up to clear the top box frame)
-                const y = height - 28;
-                
-                page.drawText(leftText, { x: 36, y, size, font, color, opacity });
-                page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y, size, font, color, opacity });
+                // --- UNIVERSAL STAMPING ENGINE (Top & Bottom of Every Page) ---
+                if (task.layout === 'A3_BOOKLET') {
+                    // Because it's an imposed Landscape A3, we stamp the Left Half AND Right Half to ensure visibility
+                    // Top Left & Top Right
+                    page.drawText(leftText, { x: 36, y: height - 28, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 28, size, font, color, opacity });
+                    // Bottom Left & Bottom Right
+                    page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
+                } else {
+                    // Standard Portrait Layouts
+                    // Top
+                    page.drawText(leftText, { x: 36, y: height - 28, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 28, size, font, color, opacity });
+                    // Bottom
+                    page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
+                }
             });
 
-            if (docType !== 'omr') {
-                const currentPagesCount = copiedPages.length;
-                const { width, height } = copiedPages[currentPagesCount - 1].getSize();
-                
-                if (task.layout === 'A3_BOOKLET') {
-                    const remainder = currentPagesCount % 4;
-                    if (remainder !== 0) {
-                        for (let p = 0; p < (4 - remainder); p++) mergedPdf.addPage([width, height]); // Match exact dimensions
-                    }
-                } else if (task.layout === 'A4_STANDARD') {
-                    const remainder = currentPagesCount % 2;
-                    if (remainder !== 0) mergedPdf.addPage([width, height]); // Match exact dimensions
-                }
-            }
+            // NO IMPOSITION LOGIC NECESSARY. The frontend upload engine already handled it!
         } catch (err) {
             console.error(`[PDF Engine] Error processing specific task for ${task.pdfUrl}:`, err);
         }
