@@ -2233,14 +2233,74 @@ async function saveMasterPdfUpload() {
     btn.innerHTML = "⏳ Uploading & Broadcasting...";
     btn.disabled = true;
 
-    try {
+   try {
         const storageRef = firebase.storage().ref();
         
         let qpUrl = null, qpStoragePath = null, qpFileName = null;
         if (qpFile) {
             const safeQpName = qpFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
             const qpRef = storageRef.child(`question_papers/${activeCenter}/${date}/MASTER_${series}_${Date.now()}_${safeQpName}`);
-            await qpRef.put(qpFile);
+            
+            // --- CLIENT-SIDE IMPOSITION ENGINE ---
+            const arrayBuffer = await qpFile.arrayBuffer();
+            const { PDFDocument } = window.PDFLib;
+            const pdfDoc = await PDFDocument.load(arrayBuffer);
+            const mergedPdf = await PDFDocument.create();
+            
+            const pages = pdfDoc.getPages();
+            let sourceWidth = 595.28, sourceHeight = 841.89; 
+            
+            pages.forEach(p => {
+                p.setRotation({ type: 'degrees', angle: 0 });
+                const { width, height } = p.getSize();
+                sourceWidth = width; sourceHeight = height; 
+            });
+
+            let uploadBytes = null;
+
+            if (layout === 'A3_BOOKLET') {
+                const currentCount = pdfDoc.getPageCount();
+                const remainder = currentCount % 4;
+                if (remainder !== 0) {
+                    for (let p = 0; p < (4 - remainder); p++) pdfDoc.addPage([sourceWidth, sourceHeight]);
+                }
+
+                const paddedCount = pdfDoc.getPageCount();
+                const embeddedPages = await mergedPdf.embedPdf(await pdfDoc.save());
+                
+                const doubleWidth = sourceWidth * 2;
+                const doubleHeight = sourceHeight;
+                const totalSides = paddedCount / 2;
+                
+                for (let i = 0; i < totalSides; i++) {
+                    const bookletPage = mergedPdf.addPage([doubleWidth, doubleHeight]);
+                    let leftIndex, rightIndex;
+                    if (i % 2 === 0) {
+                        leftIndex = paddedCount - 1 - i;
+                        rightIndex = i;
+                    } else {
+                        leftIndex = i;
+                        rightIndex = paddedCount - 1 - i;
+                    }
+                    bookletPage.drawPage(embeddedPages[leftIndex], { x: 0, y: 0 });
+                    bookletPage.drawPage(embeddedPages[rightIndex], { x: sourceWidth, y: 0 });
+                }
+                uploadBytes = await mergedPdf.save();
+            } else if (layout === 'A4_STANDARD') {
+                const remainder = pdfDoc.getPageCount() % 2;
+                if (remainder !== 0) pdfDoc.addPage([sourceWidth, sourceHeight]); 
+                const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+                copiedPages.forEach(p => mergedPdf.addPage(p));
+                uploadBytes = await mergedPdf.save();
+            } else {
+                // A4 Half Split -> Keep Original
+                uploadBytes = new Uint8Array(arrayBuffer);
+            }
+
+            const blob = new Blob([uploadBytes], { type: 'application/pdf' });
+            await qpRef.put(blob);
+            // ------------------------------------
+
             qpUrl = await qpRef.getDownloadURL();
             qpStoragePath = qpRef.fullPath;
             qpFileName = qpFile.name;
