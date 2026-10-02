@@ -89,7 +89,22 @@
             </div>
         </div>
 
-    </main>
+   </main>
+
+    <!-- MASTER CHART VIEWER MODAL -->
+    <div id="master-chart-modal" class="fixed inset-0 bg-slate-900/90 backdrop-blur-sm z-[200] hidden items-center justify-center p-2 sm:p-4">
+        <div class="bg-white rounded-[2rem] w-full max-w-7xl h-[95vh] shadow-2xl overflow-hidden flex flex-col transition-all">
+            <div class="p-6 bg-gradient-to-r from-indigo-800 to-slate-900 text-white flex justify-between items-center shrink-0">
+                <div>
+                    <h3 id="master-chart-modal-title" class="font-black text-xl sm:text-2xl uppercase tracking-tight">Master Duty Chart</h3>
+                    <p id="master-chart-modal-subtitle" class="text-[10px] font-bold text-indigo-200 uppercase tracking-widest mt-1">Loading...</p>
+                </div>
+                <button onclick="closeMasterChartModal()" class="w-10 h-10 bg-white/10 hover:bg-rose-600 rounded-full font-black text-lg transition-colors flex items-center justify-center">✕</button>
+            </div>
+            <div id="master-chart-modal-content" class="flex-1 overflow-y-auto overflow-x-auto p-4 sm:p-6 bg-slate-50 custom-scroll">
+            </div>
+        </div>
+    </div>
 
     <script>
         const firebaseConfig = { apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", authDomain: "shop-portal-bbbbb.firebaseapp.com", projectId: "shop-portal-bbbbb", storageBucket: "shop-portal-bbbbb.firebasestorage.app", messagingSenderId: "701377739976", appId: "1:701377739976:web:99998220272090e56e79fd" };
@@ -278,10 +293,115 @@
             }
         }
 
-        function openSelectedMasterChart() {
+      function openSelectedMasterChart() {
             const selectedDoc = document.getElementById('universal-date-select').value;
             if (!selectedDoc) return alert("Please select a chart from the dropdown first.");
-            window.location.href = `admin-duty-chart.html?viewDoc=${selectedDoc}`;
+            viewMasterChart(selectedDoc);
+        }
+
+        async function viewMasterChart(docId) {
+            document.getElementById('master-chart-modal').classList.replace('hidden', 'flex');
+            const contentDiv = document.getElementById('master-chart-modal-content');
+            const titleEl = document.getElementById('master-chart-modal-title');
+            const subTitleEl = document.getElementById('master-chart-modal-subtitle');
+            
+            contentDiv.innerHTML = '<div class="text-center py-20"><div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto mb-4"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-widest">Fetching Master Chart...</p></div>';
+            
+            try {
+                const snap = await getCollection("duty_rosters").doc(docId).get();
+                if (!snap.exists) {
+                    contentDiv.innerHTML = '<div class="text-rose-500 font-black text-center py-10 uppercase">Chart not found or has been deleted.</div>';
+                    return;
+                }
+                
+                const data = snap.data();
+                const rosterData = data.rosterData || {};
+                const instructions = data.instructions || [];
+                
+                let mainTitle = "Duty Chart";
+                let subTitle = "";
+                
+                if (data.type === 'EXAM') {
+                    mainTitle = "Exam Duty Chart";
+                    const dateStr = docId.replace('exam_duty_', '');
+                    const dObj = new Date(dateStr);
+                    const dayName = DAYS_OF_WEEK[dObj.getDay()];
+                    const prettyDate = dObj.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+                    subTitle = `${dayName} ${prettyDate}`;
+                } else if (data.type === 'LUNCH') {
+                    mainTitle = "Lunch Duty Chart";
+                    const dateStr = docId.replace('lunch_duty_', '');
+                    const dObj = new Date(dateStr);
+                    const prettyDate = dObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+                    subTitle = `Week starting ${prettyDate}`;
+                }
+                
+                titleEl.innerText = mainTitle;
+                subTitleEl.innerText = subTitle;
+                
+                const rooms = Object.keys(rosterData).sort((a,b) => a.localeCompare(b, undefined, {numeric: true}));
+                let allShiftKeys = new Set();
+                rooms.forEach(r => Object.keys(rosterData[r].columns).forEach(k => allShiftKeys.add(k)));
+                
+                let cols = Array.from(allShiftKeys).sort((a, b) => {
+                    const numA = parseInt(a.replace(/\D/g, '')) || 0;
+                    const numB = parseInt(b.replace(/\D/g, '')) || 0;
+                    return numA - numB;
+                });
+
+                const totalCols = cols.length + 1;
+                
+                const styles = `
+                    <style>
+                        .master-tt-table { border-collapse: collapse; font-family: 'Plus Jakarta Sans', sans-serif; width: 100%; min-width: 800px; }
+                        .master-tt-table td, .master-tt-table th { border: 1px solid #cbd5e1; padding: 12px; text-align: center; vertical-align: middle; }
+                        .master-tt-table .col-label { background-color: #f8fafc; color: #475569; font-weight: 900; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em; }
+                        .master-tt-table .room-name { background-color: #ffffff; font-weight: 900; color: #0f172a; text-align: left; border-right: 2px solid #94a3b8; }
+                        .master-tt-table .assigned { background-color: #dcfce7; color: #166534; font-weight: 800; text-transform: uppercase; font-size: 11px; }
+                        .master-tt-table .unstaffed { background-color: #ffe4e6; color: #991b1b; font-weight: 800; text-transform: uppercase; font-size: 11px; }
+                        .master-tt-table .timing { font-size: 9px; color: #64748b; font-weight: 700; margin-top: 4px; display: block; }
+                        .master-tt-table .inst-head { background-color: #1e1b4b; color: white; font-weight: 900; text-align: left; padding: 12px; font-size: 12px; }
+                        .master-tt-table .inst-row { text-align: left; font-weight: 700; font-size: 12px; padding: 8px 12px; }
+                    </style>`;
+
+                let html = `${styles}<table class="master-tt-table bg-white shadow-sm rounded-xl overflow-hidden">`;
+                html += `<tr><th class="col-label" style="width: 150px; position: sticky; left: 0; z-index: 10;">Room Location</th>${cols.map(c => `<th class="col-label">${c}</th>`).join('')}</tr>`;
+
+                rooms.forEach(roomName => {
+                    const row = rosterData[roomName];
+                    html += `<tr><td class="room-name" style="position: sticky; left: 0; z-index: 10;">${roomName}</td>`;
+                    cols.forEach(colKey => {
+                        const data = row.columns[colKey];
+                        if (data) {
+                            if (data.status === 'ASSIGNED' && data.staff) {
+                                const deptSnippet = data.staff.rawDept ? `<br><span style="font-size: 8px; color: #64748b; font-weight: 700; text-transform: none;">${data.staff.rawDept.split(',')[0]}</span>` : '';
+                                html += `<td class="assigned">${data.staff.name}${deptSnippet}<br><span class="timing">${data.timing}</span></td>`;
+                            } else {
+                                html += `<td class="unstaffed">⚠️ UNSTAFFED<br><span class="timing">${data.timing}</span></td>`;
+                            }
+                        } else { html += `<td style="background-color: #f8fafc; color: #cbd5e1;">-</td>`; }
+                    });
+                    html += `</tr>`;
+                });
+
+                if (instructions.length > 0) {
+                    html += `<tr><td colspan="${totalCols}" class="inst-head">IMPORTANT INSTRUCTIONS:</td></tr>`;
+                    instructions.forEach((inst, idx) => {
+                        const color = (idx % 2 === 0) ? '#4338ca' : '#991b1b';
+                        html += `<tr><td colspan="${totalCols}" class="inst-row" style="color: ${color};">${idx + 1}. ${inst}</td></tr>`;
+                    });
+                }
+                html += `</table>`;
+                
+                contentDiv.innerHTML = html;
+            } catch (e) {
+                console.error(e);
+                contentDiv.innerHTML = '<div class="text-rose-500 font-black text-center py-10 uppercase">Error loading chart data.</div>';
+            }
+        }
+
+        function closeMasterChartModal() {
+            document.getElementById('master-chart-modal').classList.replace('flex', 'hidden');
         }
 
         function renderTodayDuties(duties, isHoliday) {
@@ -313,8 +433,8 @@
                             <span class="block text-[8px] font-black text-slate-400 uppercase">Timing</span>
                             <span class="font-black text-slate-800 text-xs">${d.timing}</span>
                         </div>
-                    </div>
-                    <button onclick="window.location.href='admin-duty-chart.html?viewDoc=${d.rosterId}'" class="w-full mt-2 py-3 bg-${accentColor}-600 hover:bg-${accentColor}-700 text-white font-black text-[10px] uppercase tracking-widest rounded-xl transition-colors shadow-md">📊 View Master Chart for Today</button>
+                 </div>
+                    <button onclick="viewMasterChart('${d.rosterId}')" class="w-full mt-2 py-3 bg-${accentColor}-600 hover:bg-${accentColor}-700 text-white font-black text-[10px] uppercase tracking-widest rounded-xl transition-colors shadow-md">📊 View Master Chart for Today</button>
                 </div>`;
             }).join('');
         }
@@ -342,8 +462,8 @@
                     <div class="flex items-center gap-2 self-end sm:self-auto">
                         <div class="text-[9px] font-black text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg border border-indigo-100 whitespace-nowrap">
                             ${d.timing}
-                        </div>
-                        <button onclick="window.location.href='admin-duty-chart.html?viewDoc=${d.rosterId}'" class="text-[9px] font-black text-white bg-indigo-500 hover:bg-indigo-600 px-4 py-1.5 rounded-lg shadow-sm whitespace-nowrap transition-colors">📊 Chart</button>
+                    </div>
+                        <button onclick="viewMasterChart('${d.rosterId}')" class="text-[9px] font-black text-white bg-indigo-500 hover:bg-indigo-600 px-4 py-1.5 rounded-lg shadow-sm whitespace-nowrap transition-colors">📊 Chart</button>
                     </div>
                 </div>
             `).join('');
