@@ -465,21 +465,26 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
                 const rightText = `SEAT: ${task.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${task.assignedSeries}`;
                 
-                // --- UNIVERSAL STAMPING ENGINE (Top & Bottom of Every Page) ---
-                if (task.layout === 'A3_BOOKLET') {
-                    // Because it's an imposed Landscape A3, we stamp the Left Half AND Right Half to ensure visibility
-                    // Top Left & Top Right
-                    page.drawText(leftText, { x: 36, y: height - 28, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 28, size, font, color, opacity });
-                    // Bottom Left & Bottom Right
-                    page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
+               // --- UNIVERSAL STAMPING ENGINE (Top & Bottom of Every Page) ---
+                if (task.layout === 'A3_BOOKLET' || task.layout === 'A5_BOOKLET') {
+                    // Because it's an imposed Booklet, we stamp the Left Page AND Right Page independently!
+                    const halfWidth = width / 2;
+                    
+                    // -- LEFT PAGE STAMPS --
+                    page.drawText(leftText, { x: 30, y: height - 28, size, font, color, opacity });
+                    page.drawText(rightText, { x: halfWidth - font.widthOfTextAtSize(rightText, size) - 30, y: height - 28, size, font, color, opacity });
+                    page.drawText(leftText, { x: 30, y: 20, size, font, color, opacity });
+                    page.drawText(rightText, { x: halfWidth - font.widthOfTextAtSize(rightText, size) - 30, y: 20, size, font, color, opacity });
+
+                    // -- RIGHT PAGE STAMPS --
+                    page.drawText(leftText, { x: halfWidth + 30, y: height - 28, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 30, y: height - 28, size, font, color, opacity });
+                    page.drawText(leftText, { x: halfWidth + 30, y: 20, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 30, y: 20, size, font, color, opacity });
                 } else {
                     // Standard Portrait Layouts
-                    // Top
                     page.drawText(leftText, { x: 36, y: height - 28, size, font, color, opacity });
                     page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 28, size, font, color, opacity });
-                    // Bottom
                     page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
                     page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
                 }
