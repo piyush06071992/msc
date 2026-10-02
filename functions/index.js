@@ -465,6 +465,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             
             copiedPages.forEach(p => {
                 const page = mergedPdf.addPage(p);
+                page.setRotation({ type: 'degrees', angle: 0 }); // Fix upside-down PageMaker exports
                 const { width, height } = page.getSize();
                 const size = 8.5;
                 const color = rgb(0.2, 0.2, 0.2);
@@ -484,14 +485,16 @@ const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
 
             if (docType !== 'omr') {
                 const currentPagesCount = copiedPages.length;
+                const { width, height } = copiedPages[currentPagesCount - 1].getSize();
+                
                 if (task.layout === 'A3_BOOKLET') {
                     const remainder = currentPagesCount % 4;
                     if (remainder !== 0) {
-                        for (let p = 0; p < (4 - remainder); p++) mergedPdf.addPage();
+                        for (let p = 0; p < (4 - remainder); p++) mergedPdf.addPage([width, height]); // Match exact dimensions
                     }
                 } else if (task.layout === 'A4_STANDARD') {
                     const remainder = currentPagesCount % 2;
-                    if (remainder !== 0) mergedPdf.addPage();
+                    if (remainder !== 0) mergedPdf.addPage([width, height]); // Match exact dimensions
                 }
             }
         } catch (err) {
