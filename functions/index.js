@@ -415,11 +415,12 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             for (let c = 0; c < copiesNeeded; c++) {
                 const pdfDoc = await PDFDocument.load(originalBytes);
                 
-                // Copy pages FIRST to preserve all pages and fix font mapping
+             // Copy pages FIRST to preserve all pages and fix font mapping
                 const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
                 
                 copiedPages.forEach(p => {
                     const page = mergedPdf.addPage(p);
+                    page.setRotation({ type: 'degrees', angle: 0 }); // Fix upside-down PageMaker exports
                     const { width, height } = page.getSize();
                     const size = 10;
                     const color = rgb(0.2, 0.2, 0.2);
@@ -442,7 +443,8 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 // we MUST add a blank page at the end of each copy. Otherwise, Copy 2 
                 // will print on the back of Copy 1, ruining the cut!
                 if (copiedPages.length % 2 !== 0) {
-                    mergedPdf.addPage();
+                    const { width, height } = copiedPages[copiedPages.length - 1].getSize();
+                    mergedPdf.addPage([width, height]); // Force exact dimensions to prevent printer spooler reset
                 }
             }
         } catch (err) {
