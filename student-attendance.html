@@ -1371,9 +1371,10 @@ function switchMainTab(tab) {
                     const rostersSnap = await getCollection("duty_rosters").get();
                     let dutyMap = {};
                     
-                    rostersSnap.forEach(doc => {
+                 rostersSnap.forEach(doc => {
                         if (doc.id.startsWith("exam_duty_")) {
-                            const dateStr = doc.id.replace("exam_duty_", "");
+                            const rawId = doc.id.replace("exam_duty_", "");
+                            const dateStr = rawId.split('_')[0]; // Extract pure YYYY-MM-DD
                             const rosterData = doc.data().rosterData || {};
                             Object.keys(rosterData).forEach(roomName => {
                                 const cols = rosterData[roomName].columns || {};
@@ -2054,9 +2055,10 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             const listContainer = document.getElementById('daily-students-list');
             listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
 
-            try {
+       try {
                 // Fetch the specific partitioned room document
-                const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+                const baseRoomName = roomName.split(' [')[0]; // Strip shift tags like "[09001100]"
+                const safeRoomName = baseRoomName.replace(/[^a-zA-Z0-9]/g, '_');
                 const docId = `${activeCenter}_${dateStr}_${safeRoomName}`;
                 
                 const roomDocRef = db.collection("exam_seating_rooms").doc(docId);
@@ -2076,7 +2078,7 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
                     if (allocSnap.exists) {
                         const allocs = allocSnap.data().allocations || {};
                         Object.keys(allocs).forEach(seatId => {
-                            if (seatId.startsWith(`${roomName}-`)) {
+                            if (seatId.startsWith(`${baseRoomName}-`)) {
                                 const stu = allocs[seatId];
                                 if (stu) seatedStudents.push({ seatId, ...stu });
                             }
@@ -3792,11 +3794,21 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
         btn.disabled = true;
 
         try {
-            const batch = db.batch();
+         const batch = db.batch();
             for (const [docId, regData] of Object.entries(sectionUpdates)) {
                 const docRef = getCollection("attendance_records").doc(docId);
                 
-                // Pure Merge Object (No offline-blocking GET requests)
+                let existingRecordsForDate = {};
+                try {
+                    // Prevent different exam shifts from wiping each other out
+                    const snap = await docRef.get();
+                    if (snap.exists && snap.data().records && snap.data().records[dateStr]) {
+                        existingRecordsForDate = snap.data().records[dateStr];
+                    }
+                } catch(e) { console.warn("Could not fetch prior incharge records, merging locally only"); }
+
+                const mergedDailyRecords = { ...existingRecordsForDate, ...regData.records };
+
                 let mergeData = {
                     className: regData.className,
                     section: regData.section,
@@ -3804,7 +3816,7 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
                     monthKey: monthKey,
                     lastUpdated: Date.now(),
                     records: {
-                        [dateStr]: regData.records
+                        [dateStr]: mergedDailyRecords
                     }
                 };
                 batch.set(docRef, mergeData, { merge: true });
