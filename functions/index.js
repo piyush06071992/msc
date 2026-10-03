@@ -2,7 +2,7 @@ const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
-const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
+const { PDFDocument, rgb, StandardFonts, degrees } = require("pdf-lib");
 const crypto = require("crypto");
 
 if (!admin.apps.length) {
@@ -465,28 +465,25 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
                 const rightText = `SEAT: ${task.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${task.assignedSeries}`;
                 
-               // --- UNIVERSAL STAMPING ENGINE (Top & Bottom of Every Page) ---
+           // --- UNIVERSAL STAMPING ENGINE (Vertical Spine Method) ---
+                const angle = degrees(90);
+                const bottomY = 100; // Starts text 100 points from the bottom edge so it fits nicely
+
                 if (task.layout === 'A3_BOOKLET' || task.layout === 'A5_BOOKLET') {
                     // Because it's an imposed Booklet, we stamp the Left Page AND Right Page independently!
                     const halfWidth = width / 2;
                     
-                    // -- LEFT PAGE STAMPS --
-                    page.drawText(leftText, { x: 30, y: height - 28, size, font, color, opacity });
-                    page.drawText(rightText, { x: halfWidth - font.widthOfTextAtSize(rightText, size) - 30, y: height - 28, size, font, color, opacity });
-                    page.drawText(leftText, { x: 30, y: 20, size, font, color, opacity });
-                    page.drawText(rightText, { x: halfWidth - font.widthOfTextAtSize(rightText, size) - 30, y: 20, size, font, color, opacity });
+                    // -- LEFT PAGE STAMPS (Vertical) --
+                    page.drawText(leftText, { x: 24, y: bottomY, size, font, color, opacity, rotate: angle });
+                    page.drawText(rightText, { x: halfWidth - 24, y: bottomY, size, font, color, opacity, rotate: angle });
 
-                    // -- RIGHT PAGE STAMPS --
-                    page.drawText(leftText, { x: halfWidth + 30, y: height - 28, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 30, y: height - 28, size, font, color, opacity });
-                    page.drawText(leftText, { x: halfWidth + 30, y: 20, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 30, y: 20, size, font, color, opacity });
+                    // -- RIGHT PAGE STAMPS (Vertical) --
+                    page.drawText(leftText, { x: halfWidth + 24, y: bottomY, size, font, color, opacity, rotate: angle });
+                    page.drawText(rightText, { x: width - 24, y: bottomY, size, font, color, opacity, rotate: angle });
                 } else {
-                    // Standard Portrait Layouts
-                    page.drawText(leftText, { x: 36, y: height - 28, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 28, size, font, color, opacity });
-                    page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
+                    // Standard Portrait Layouts (Vertical)
+                    page.drawText(leftText, { x: 24, y: bottomY, size, font, color, opacity, rotate: angle });
+                    page.drawText(rightText, { x: width - 24, y: bottomY, size, font, color, opacity, rotate: angle });
                 }
             });
 
