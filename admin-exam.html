@@ -1513,172 +1513,172 @@
         }
         
 async function uploadQuestionPaper() {
-            const date = document.getElementById('paper-upload-date').value;
-            const cls = document.getElementById('paper-upload-class').value;
-            const sec = document.getElementById('paper-upload-sec').value;
-            const series = document.getElementById('paper-upload-series').value.trim().toUpperCase() || "DEFAULT";
-            const layout = document.getElementById('paper-upload-layout').value;
+    const date = document.getElementById('paper-upload-date').value;
+    const cls = document.getElementById('paper-upload-class').value;
+    const sec = document.getElementById('paper-upload-sec').value;
+    const series = document.getElementById('paper-upload-series').value.trim().toUpperCase() || "DEFAULT";
+    const layout = document.getElementById('paper-upload-layout').value;
+    
+    const qpFile = document.getElementById('paper-upload-file').files[0];
+    const omrFile = document.getElementById('omr-upload-file').files[0];
+    
+    if (!qpFile && !omrFile) return alert("Please select at least one file (Question Paper or OMR) to upload.");
+    if ((qpFile && qpFile.type !== "application/pdf") || (omrFile && omrFile.type !== "application/pdf")) {
+        return alert("Only PDF files are allowed.");
+    }
+    
+    const btn = document.getElementById('btn-upload-paper');
+    const orig = btn.innerHTML;
+    btn.innerHTML = "⏳ Formatting Layout & Uploading...";
+    btn.disabled = true;
+    
+    try {
+        const storageRef = firebase.storage().ref();
+        
+        // 1. Upload Question Paper (If Provided)
+        let qpUrl = null, qpStoragePath = null, qpFileName = null;
+        if (qpFile) {
+            const safeQpName = qpFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
+            const qpRef = storageRef.child(`question_papers/${activeCenter}/${date}/${cls}/${sec}/FULL_PAPER_${series}_${Date.now()}_${safeQpName}`);
             
-            const qpFile = document.getElementById('paper-upload-file').files[0];
-            const omrFile = document.getElementById('omr-upload-file').files[0];
+            // --- CLIENT-SIDE IMPOSITION ENGINE ---
+            const arrayBuffer = await qpFile.arrayBuffer();
+            const { PDFDocument, degrees } = window.PDFLib;
+            const pdfDoc = await PDFDocument.load(arrayBuffer);
+            const mergedPdf = await PDFDocument.create();
             
-            if (!qpFile && !omrFile) return alert("Please select at least one file (Question Paper or OMR) to upload.");
-            if ((qpFile && qpFile.type !== "application/pdf") || (omrFile && omrFile.type !== "application/pdf")) {
-                return alert("Only PDF files are allowed.");
-            }
+            const pages = pdfDoc.getPages();
+            let sourceWidth = 595.28, sourceHeight = 841.89; 
             
-            const btn = document.getElementById('btn-upload-paper');
-            const orig = btn.innerHTML;
-            btn.innerHTML = "⏳ Formatting Layout & Uploading...";
-            btn.disabled = true;
-            
-            try {
-                const storageRef = firebase.storage().ref();
-                
-                // 1. Upload Question Paper (If Provided)
-                let qpUrl = null, qpStoragePath = null, qpFileName = null;
-                if (qpFile) {
-                    const safeQpName = qpFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
-                    const qpRef = storageRef.child(`question_papers/${activeCenter}/${date}/${cls}/${sec}/FULL_PAPER_${series}_${Date.now()}_${safeQpName}`);
-                    
-                    // --- CLIENT-SIDE IMPOSITION ENGINE ---
-                    const arrayBuffer = await qpFile.arrayBuffer();
-                    const { PDFDocument } = window.PDFLib;
-                    const pdfDoc = await PDFDocument.load(arrayBuffer);
-                    const mergedPdf = await PDFDocument.create();
-                    
-                    const pages = pdfDoc.getPages();
-                    let sourceWidth = 595.28, sourceHeight = 841.89; 
-                    
-                    pages.forEach(p => {
-                        p.setRotation({ type: 'degrees', angle: 0 });
-                        const { width, height } = p.getSize();
-                        sourceWidth = width; sourceHeight = height; 
-                    });
+            pages.forEach(p => {
+                p.setRotation({ type: 'degrees', angle: 0 });
+                const { width, height } = p.getSize();
+                sourceWidth = width; sourceHeight = height; 
+            });
 
-                    let uploadBytes = null;
+            let uploadBytes = null;
 
-                    if (layout === 'A3_BOOKLET') {
-                        const currentCount = pdfDoc.getPageCount();
-                      const remainder = currentCount % 4;
-                        if (remainder !== 0) {
-                            for (let p = 0; p < (4 - remainder); p++) {
-                                const blankPage = pdfDoc.addPage([sourceWidth, sourceHeight]);
-                                blankPage.drawText('');
-                            }
-                        }
-
-                        const paddedCount = pdfDoc.getPageCount();
-                        const embeddedPages = await mergedPdf.embedPdf(await pdfDoc.save());
-                        
-                        const doubleWidth = sourceWidth * 2;
-                        const doubleHeight = sourceHeight;
-                        const totalSides = paddedCount / 2;
-                        
-                      const { degrees } = window.PDFLib;
-                        for (let i = 0; i < totalSides; i++) {
-                            const bookletPage = mergedPdf.addPage([doubleWidth, doubleHeight]);
-                            let leftIndex, rightIndex;
-                            if (i % 2 === 0) {
-                                // Front Side: Draw upright
-                                leftIndex = paddedCount - 1 - i;
-                                rightIndex = i;
-                                bookletPage.drawPage(embeddedPages[leftIndex], { x: 0, y: 0 });
-                                bookletPage.drawPage(embeddedPages[rightIndex], { x: sourceWidth, y: 0 });
-                            } else {
-                                // Back Side: Rotate 180 degrees for "Flip on Long Edge"
-                                leftIndex = i;
-                                rightIndex = paddedCount - 1 - i;
-                                bookletPage.drawPage(embeddedPages[leftIndex], { 
-                                    x: sourceWidth, y: doubleHeight, 
-                                    rotate: degrees(180) 
-                                });
-                                bookletPage.drawPage(embeddedPages[rightIndex], { 
-                                    x: sourceWidth * 2, y: doubleHeight, 
-                                    rotate: degrees(180) 
-                                });
-                            }
-                        }
-                        uploadBytes = await mergedPdf.save();
-                  } else if (layout === 'A4_STANDARD') {
-                        const remainder = pdfDoc.getPageCount() % 2;
-                        if (remainder !== 0) {
-                            const blankPage = pdfDoc.addPage([sourceWidth, sourceHeight]);
-                            blankPage.drawText('');
-                        }
-                        const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
-                        copiedPages.forEach(p => mergedPdf.addPage(p));
-                        uploadBytes = await mergedPdf.save();
-                    } else {
-                        // A4 Half Split -> Keep Original
-                        uploadBytes = new Uint8Array(arrayBuffer);
+            if (layout === 'A3_BOOKLET') {
+                const currentCount = pdfDoc.getPageCount();
+                const remainder = currentCount % 4;
+                if (remainder !== 0) {
+                    for (let p = 0; p < (4 - remainder); p++) {
+                        const blankPage = pdfDoc.addPage([sourceWidth, sourceHeight]);
+                        blankPage.drawText('');
                     }
-
-                    const blob = new Blob([uploadBytes], { type: 'application/pdf' });
-                    await qpRef.put(blob);
-                    // ------------------------------------
-
-                    qpUrl = await qpRef.getDownloadURL();
-                    qpStoragePath = qpRef.fullPath;
-                    qpFileName = qpFile.name;
                 }
+
+                const paddedCount = pdfDoc.getPageCount();
+                const embeddedPages = await mergedPdf.embedPdf(await pdfDoc.save());
                 
-                // 2. Upload OMR (If Provided)
-                let omrUrl = null, omrStoragePath = null, omrFileName = null;
-                if (omrFile) {
-                    const safeOmrName = omrFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
-                    const omrRef = storageRef.child(`question_papers/${activeCenter}/${date}/${cls}/${sec}/OMR_${series}_${Date.now()}_${safeOmrName}`);
-                    await omrRef.put(omrFile);
-                    omrUrl = await omrRef.getDownloadURL();
-                    omrStoragePath = omrRef.fullPath;
-                    omrFileName = omrFile.name;
-                }
+                const doubleWidth = sourceWidth * 2;
+                const doubleHeight = sourceHeight;
+                const totalSides = paddedCount / 2;
                 
-              const expiresAt = Date.now() + (30 * 24 * 60 * 60 * 1000);
-                const uploaderName = (typeof activeStaff !== 'undefined' && activeStaff) ? (activeStaff.name || activeStaff.email || "Admin") : "Admin";
-
-                const norm = (str) => (str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-                const docId = `${date}_${norm(cls)}_${norm(sec)}_${norm(series)}`;
-
-                let payload = {
-                    center: activeCenter,
-                    date: date,
-                    className: cls,
-                    section: sec,
-                    subject: "FULL PAPER",
-                    series: series,
-                    uploadedAt: Date.now(),
-                    expiresAt: expiresAt,
-                    uploadedBy: uploaderName
-                };
-
-                if (qpUrl) {
-                    payload.fileName = qpFileName;
-                    payload.url = qpUrl;
-                    payload.storagePath = qpStoragePath;
+                for (let i = 0; i < totalSides; i++) {
+                    const bookletPage = mergedPdf.addPage([doubleWidth, doubleHeight]);
+                    let leftIndex, rightIndex;
+                    if (i % 2 === 0) {
+                        // Front Side: Draw upright
+                        leftIndex = paddedCount - 1 - i;
+                        rightIndex = i;
+                        bookletPage.drawPage(embeddedPages[leftIndex], { x: 0, y: 0 });
+                        bookletPage.drawPage(embeddedPages[rightIndex], { x: sourceWidth, y: 0 });
+                    } else {
+                        // Back Side: Rotate 180 degrees for "Flip on Long Edge"
+                        leftIndex = i;
+                        rightIndex = paddedCount - 1 - i;
+                        bookletPage.drawPage(embeddedPages[leftIndex], { 
+                            x: sourceWidth, y: doubleHeight, 
+                            rotate: degrees(180) 
+                        });
+                        bookletPage.drawPage(embeddedPages[rightIndex], { 
+                            x: sourceWidth * 2, y: doubleHeight, 
+                            rotate: degrees(180) 
+                        });
+                    }
                 }
-
-                if (omrUrl) {
-                    payload.omrFileName = omrFileName;
-                    payload.omrUrl = omrUrl;
-                    payload.omrStoragePath = omrStoragePath;
+                uploadBytes = await mergedPdf.save();
+            } else if (layout === 'A4_STANDARD') {
+                const remainder = pdfDoc.getPageCount() % 2;
+                if (remainder !== 0) {
+                    const blankPage = pdfDoc.addPage([sourceWidth, sourceHeight]);
+                    blankPage.drawText('');
                 }
-
-                await getCollection("question_papers").doc(docId).set(payload, { merge: true });
-                
-                alert("✅ Uploaded successfully! Files will be auto-deleted after 30 days.");
-                document.getElementById('paper-upload-file').value = "";
-                document.getElementById('omr-upload-file').value = "";
-                document.getElementById('paper-upload-series').value = "Series A";
-                loadUploadedPapers(date, cls, sec);
-            } catch (e) {
-                console.error(e);
-                alert("Upload failed: " + e.message);
-            } finally {
-                btn.innerHTML = orig;
-                btn.disabled = false;
+                const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+                copiedPages.forEach(p => mergedPdf.addPage(p));
+                uploadBytes = await mergedPdf.save();
+            } else {
+                // A4 Half Split -> Keep Original
+                uploadBytes = new Uint8Array(arrayBuffer);
             }
+
+            const blob = new Blob([uploadBytes], { type: 'application/pdf' });
+            await qpRef.put(blob);
+            // ------------------------------------
+
+            qpUrl = await qpRef.getDownloadURL();
+            qpStoragePath = qpRef.fullPath;
+            qpFileName = qpFile.name;
         }
+        
+        // 2. Upload OMR (If Provided)
+        let omrUrl = null, omrStoragePath = null, omrFileName = null;
+        if (omrFile) {
+            const safeOmrName = omrFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
+            const omrRef = storageRef.child(`question_papers/${activeCenter}/${date}/MASTER_OMR_${series}_${Date.now()}_${safeOmrName}`);
+            await omrRef.put(omrFile);
+            omrUrl = await omrRef.getDownloadURL();
+            omrStoragePath = omrRef.fullPath;
+            omrFileName = omrFile.name;
+        }
+        
+        const expiresAt = Date.now() + (30 * 24 * 60 * 60 * 1000);
+        const uploaderName = (typeof activeStaff !== 'undefined' && activeStaff) ? (activeStaff.name || activeStaff.email || "Admin") : "Admin";
+
+        const norm = (str) => (str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+        const docId = `${date}_${norm(cls)}_${norm(sec)}_${norm(series)}`;
+
+        let payload = {
+            center: activeCenter,
+            date: date,
+            className: cls,
+            section: sec,
+            subject: "FULL PAPER",
+            series: series,
+            layout: layout,
+            uploadedAt: Date.now(),
+            expiresAt: expiresAt,
+            uploadedBy: uploaderName
+        };
+
+        if (qpUrl) {
+            payload.fileName = qpFileName;
+            payload.url = qpUrl;
+            payload.storagePath = qpStoragePath;
+        }
+
+        if (omrUrl) {
+            payload.omrFileName = omrFileName;
+            payload.omrUrl = omrUrl;
+            payload.omrStoragePath = omrStoragePath;
+        }
+
+        await getCollection("question_papers").doc(docId).set(payload, { merge: true });
+        
+        alert("✅ Uploaded successfully! Files will be auto-deleted after 30 days.");
+        document.getElementById('paper-upload-file').value = "";
+        document.getElementById('omr-upload-file').value = "";
+        document.getElementById('paper-upload-series').value = "Series A";
+        loadUploadedPapers(date, cls, sec);
+    } catch (e) {
+        console.error(e);
+        alert("Upload failed: " + e.message);
+    } finally {
+        btn.innerHTML = orig;
+        btn.disabled = false;
+    }
+}
         
    async function loadUploadedPapers(date, cls, sec) {
             const listDiv = document.getElementById('uploaded-papers-list');
@@ -2274,7 +2274,7 @@ async function saveMasterPdfUpload() {
             
             // --- CLIENT-SIDE IMPOSITION ENGINE ---
             const arrayBuffer = await qpFile.arrayBuffer();
-            const { PDFDocument } = window.PDFLib;
+            const { PDFDocument, degrees } = window.PDFLib;
             const pdfDoc = await PDFDocument.load(arrayBuffer);
             const mergedPdf = await PDFDocument.create();
             
@@ -2289,134 +2289,146 @@ async function saveMasterPdfUpload() {
 
        let uploadBytes = null;
 
-  if (layout === 'A3_BOOKLET' || layout === 'A5_BOOKLET') {
-                const currentCount = pdfDoc.getPageCount();
+       if (layout === 'A3_BOOKLET' || layout === 'A5_BOOKLET') {
+            const currentCount = pdfDoc.getPageCount();
             const remainder = currentCount % 4;
-                if (remainder !== 0) {
-                    for (let p = 0; p < (4 - remainder); p++) {
-                        const blankPage = pdfDoc.addPage([sourceWidth, sourceHeight]);
-                        blankPage.drawText('');
-                    }
-                }
-
-                const paddedCount = pdfDoc.getPageCount();
-                // Explicitly tell pdf-lib to embed ALL pages, not just the first one!
-                const embeddedPages = await mergedPdf.embedPdf(await pdfDoc.save(), pdfDoc.getPageIndices());
-                
-                let canvasWidth, canvasHeight, printWidth, printHeight;
-                
-                if (layout === 'A3_BOOKLET') {
-                    // A3 Landscape = Two A4s side-by-side (100% Scale)
-                    canvasWidth = sourceWidth * 2;
-                    canvasHeight = sourceHeight;
-                    printWidth = sourceWidth;
-                    printHeight = sourceHeight;
-                } else {
-                    // A5 Booklet = Two A5s side-by-side on an A4 Landscape Sheet (Auto-Scaled to ~70%)
-                    canvasWidth = sourceHeight; 
-                    canvasHeight = sourceWidth; 
-                    printWidth = canvasWidth / 2; 
-                    printHeight = canvasHeight; 
-                }
-                
-                const totalSides = paddedCount / 2;
-                
-                for (let i = 0; i < totalSides; i++) {
-                    const bookletPage = mergedPdf.addPage([canvasWidth, canvasHeight]);
-                    let leftIndex, rightIndex;
-                    if (i % 2 === 0) {
-                        leftIndex = paddedCount - 1 - i;
-                        rightIndex = i;
-                    } else {
-                        leftIndex = i;
-                        rightIndex = paddedCount - 1 - i;
-                    }
-                    bookletPage.drawPage(embeddedPages[leftIndex], { x: 0, y: 0, width: printWidth, height: printHeight });
-                    bookletPage.drawPage(embeddedPages[rightIndex], { x: printWidth, y: 0, width: printWidth, height: printHeight });
-                }
-                uploadBytes = await mergedPdf.save();
-          } else if (layout === 'A4_STANDARD') {
-                const remainder = pdfDoc.getPageCount() % 2;
-                if (remainder !== 0) {
+            if (remainder !== 0) {
+                for (let p = 0; p < (4 - remainder); p++) {
                     const blankPage = pdfDoc.addPage([sourceWidth, sourceHeight]);
                     blankPage.drawText('');
                 }
-                const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
-                copiedPages.forEach(p => mergedPdf.addPage(p));
-                uploadBytes = await mergedPdf.save();
-            } else {
-                // A4 Half Split -> Keep Original
-                uploadBytes = new Uint8Array(arrayBuffer);
             }
 
-            const blob = new Blob([uploadBytes], { type: 'application/pdf' });
-            await qpRef.put(blob);
-            // ------------------------------------
-
-            qpUrl = await qpRef.getDownloadURL();
-            qpStoragePath = qpRef.fullPath;
-            qpFileName = qpFile.name;
+            const paddedCount = pdfDoc.getPageCount();
+            // Explicitly tell pdf-lib to embed ALL pages, not just the first one!
+            const embeddedPages = await mergedPdf.embedPdf(await pdfDoc.save(), pdfDoc.getPageIndices());
+            
+            let canvasWidth, canvasHeight, printWidth, printHeight;
+            
+            if (layout === 'A3_BOOKLET') {
+                // A3 Landscape = Two A4s side-by-side (100% Scale)
+                canvasWidth = sourceWidth * 2;
+                canvasHeight = sourceHeight;
+                printWidth = sourceWidth;
+                printHeight = sourceHeight;
+            } else {
+                // A5 Booklet = Two A5s side-by-side on an A4 Landscape Sheet (Auto-Scaled to ~70%)
+                canvasWidth = sourceHeight; 
+                canvasHeight = sourceWidth; 
+                printWidth = canvasWidth / 2; 
+                printHeight = canvasHeight; 
+            }
+            
+            const totalSides = paddedCount / 2;
+            
+            for (let i = 0; i < totalSides; i++) {
+                const bookletPage = mergedPdf.addPage([canvasWidth, canvasHeight]);
+                let leftIndex, rightIndex;
+                if (i % 2 === 0) {
+                    // Front Side: Draw upright
+                    leftIndex = paddedCount - 1 - i;
+                    rightIndex = i;
+                    bookletPage.drawPage(embeddedPages[leftIndex], { x: 0, y: 0, width: printWidth, height: printHeight });
+                    bookletPage.drawPage(embeddedPages[rightIndex], { x: printWidth, y: 0, width: printWidth, height: printHeight });
+                } else {
+                    // Back Side: Rotate 180 degrees for "Flip on Long Edge"
+                    leftIndex = i;
+                    rightIndex = paddedCount - 1 - i;
+                    bookletPage.drawPage(embeddedPages[leftIndex], { 
+                        x: printWidth, y: printHeight, 
+                        width: printWidth, height: printHeight, 
+                        rotate: degrees(180) 
+                    });
+                    bookletPage.drawPage(embeddedPages[rightIndex], { 
+                        x: printWidth * 2, y: printHeight, 
+                        width: printWidth, height: printHeight, 
+                        rotate: degrees(180) 
+                    });
+                }
+            }
+            uploadBytes = await mergedPdf.save();
+        } else if (layout === 'A4_STANDARD') {
+            const remainder = pdfDoc.getPageCount() % 2;
+            if (remainder !== 0) {
+                const blankPage = pdfDoc.addPage([sourceWidth, sourceHeight]);
+                blankPage.drawText('');
+            }
+            const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
+            copiedPages.forEach(p => mergedPdf.addPage(p));
+            uploadBytes = await mergedPdf.save();
+        } else {
+            // A4 Half Split -> Keep Original
+            uploadBytes = new Uint8Array(arrayBuffer);
         }
 
-        let omrUrl = null, omrStoragePath = null, omrFileName = null;
-        if (omrFile) {
-            const safeOmrName = omrFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
-            const omrRef = storageRef.child(`question_papers/${activeCenter}/${date}/MASTER_OMR_${series}_${Date.now()}_${safeOmrName}`);
-            await omrRef.put(omrFile);
-            omrUrl = await omrRef.getDownloadURL();
-            omrStoragePath = omrRef.fullPath;
-            omrFileName = omrFile.name;
-        }
+        const blob = new Blob([uploadBytes], { type: 'application/pdf' });
+        await qpRef.put(blob);
+        // ------------------------------------
 
-        const expiresAt = Date.now() + (30 * 24 * 60 * 60 * 1000);
-        const uploaderName = (typeof activeStaff !== 'undefined' && activeStaff) ? (activeStaff.name || activeStaff.email || "Admin") : "Admin";
-        const norm = (str) => (str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-
-        const batch = db.batch();
-
-        batchPayloads.forEach(target => {
-            target.subjects.forEach(sub => {
-                const docId = `${date}_${norm(target.cls)}_${norm(target.sec)}_${norm(sub)}_${norm(series)}`;
-                const ref = getCollection("question_papers").doc(docId);
-
-                let payload = {
-                    center: activeCenter,
-                    date: date,
-                    className: target.cls,
-                    section: target.sec,
-                    subject: sub,
-                    series: series,
-                    layout: layout,
-                    uploadedAt: Date.now(),
-                    expiresAt: expiresAt,
-                    uploadedBy: uploaderName
-                };
-
-                if (qpUrl) {
-                    payload.fileName = qpFileName;
-                    payload.url = qpUrl;
-                    payload.storagePath = qpStoragePath;
-                }
-                if (omrUrl) {
-                    payload.omrFileName = omrFileName;
-                    payload.omrUrl = omrUrl;
-                    payload.omrStoragePath = omrStoragePath;
-                }
-
-                batch.set(ref, payload, { merge: true });
-            });
-        });
-
-        await batch.commit();
-        alert("✅ Master PDF successfully uploaded and broadcasted to all checked subjects and sections!");
-        closeMasterUploadModal();
-    } catch (e) {
-        console.error(e);
-        alert("Upload failed: " + e.message);
-    } finally {
-      btn.innerHTML = orig;
-        btn.disabled = false;
+        qpUrl = await qpRef.getDownloadURL();
+        qpStoragePath = qpRef.fullPath;
+        qpFileName = qpFile.name;
     }
+
+    let omrUrl = null, omrStoragePath = null, omrFileName = null;
+    if (omrFile) {
+        const safeOmrName = omrFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
+        const omrRef = storageRef.child(`question_papers/${activeCenter}/${date}/MASTER_OMR_${series}_${Date.now()}_${safeOmrName}`);
+        await omrRef.put(omrFile);
+        omrUrl = await omrRef.getDownloadURL();
+        omrStoragePath = omrRef.fullPath;
+        omrFileName = omrFile.name;
+    }
+
+    const expiresAt = Date.now() + (30 * 24 * 60 * 60 * 1000);
+    const uploaderName = (typeof activeStaff !== 'undefined' && activeStaff) ? (activeStaff.name || activeStaff.email || "Admin") : "Admin";
+    const norm = (str) => (str || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+    const batch = db.batch();
+
+    batchPayloads.forEach(target => {
+        target.subjects.forEach(sub => {
+            const docId = `${date}_${norm(target.cls)}_${norm(target.sec)}_${norm(sub)}_${norm(series)}`;
+            const ref = getCollection("question_papers").doc(docId);
+
+            let payload = {
+                center: activeCenter,
+                date: date,
+                className: target.cls,
+                section: target.sec,
+                subject: sub,
+                series: series,
+                layout: layout,
+                uploadedAt: Date.now(),
+                expiresAt: expiresAt,
+                uploadedBy: uploaderName
+            };
+
+            if (qpUrl) {
+                payload.fileName = qpFileName;
+                payload.url = qpUrl;
+                payload.storagePath = qpStoragePath;
+            }
+            if (omrUrl) {
+                payload.omrFileName = omrFileName;
+                payload.omrUrl = omrUrl;
+                payload.omrStoragePath = omrStoragePath;
+            }
+
+            batch.set(ref, payload, { merge: true });
+        });
+    });
+
+    await batch.commit();
+    alert("✅ Master PDF successfully uploaded and broadcasted to all checked subjects and sections!");
+    closeMasterUploadModal();
+} catch (e) {
+    console.error(e);
+    alert("Upload failed: " + e.message);
+} finally {
+  btn.innerHTML = orig;
+    btn.disabled = false;
+}
 }
 
 // ── UPLOADS MANAGER LOGIC ───────────────────────────────────────────
