@@ -442,48 +442,83 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         }
     }
 
-    // PASS 3: Render Seat Specific Tasks
+ // PASS 3: Render Seat Specific Tasks
     for (const task of seatSpecificTasks) {
         try {
             if (!pdfBytesCache[task.pdfUrl]) {
                 pdfBytesCache[task.pdfUrl] = await loadPdfBytes(task.pdfUrl);
             }
             const pdfBytes = pdfBytesCache[task.pdfUrl];
-            const studentPdf = await PDFDocument.load(pdfBytes);
             
-            const copiedPages = await mergedPdf.copyPages(studentPdf, studentPdf.getPageIndices());
+            // Shrink & Frame Method: Embed pages instead of copying them
+            const embeddedPages = await mergedPdf.embedPdf(pdfBytes);
             
-            copiedPages.forEach(p => {
-                const page = mergedPdf.addPage(p);
-                const { width, height } = page.getSize();
-                const size = 10;
+            embeddedPages.forEach(embeddedPage => {
+                const sourceWidth = embeddedPage.width;
+                const sourceHeight = embeddedPage.height;
+                
+                // Create a new blank page matching the original dimensions
+                const page = mergedPdf.addPage([sourceWidth, sourceHeight]);
+                
+                // Scale down to 94% to create a safe white margin at top and bottom
+                const scale = 0.94;
+                const scaledWidth = sourceWidth * scale;
+                const scaledHeight = sourceHeight * scale;
+                
+                // Center the embedded page within the new blank frame
+                const xOffset = (sourceWidth - scaledWidth) / 2;
+                const yOffset = (sourceHeight - scaledHeight) / 2;
+                
+                page.drawPage(embeddedPage, {
+                    x: xOffset,
+                    y: yOffset,
+                    width: scaledWidth,
+                    height: scaledHeight
+                });
+
+                const size = 9; // Slightly smaller font to prevent collision
                 const color = rgb(0.2, 0.2, 0.2);
-                const opacity = 0.9; // High contrast to prevent cheating
+                const opacity = 0.9;
 
                 const stu = task.student;
                 const subLabel = (task.matchedSubKey && task.matchedSubKey !== "FULL PAPER" && task.matchedSubKey !== "UNMAPPED EXAM") ? `[${task.matchedSubKey}] ` : "";
-                const leftText = `${stu.name.toUpperCase()}  (ROLL: #${stu.rollNo || "—"})`;
-                const rightText = `SEAT: ${task.seatId}    |    SEC: ${stu.section}    |    ${subLabel}${task.assignedSeries}`;
                 
-           // --- UNIVERSAL STAMPING ENGINE (Vertical Spine Method) ---
-                const angle = degrees(90);
-                const bottomY = 100; // Starts text 100 points from the bottom edge so it fits nicely
+                // Split text into Top/Bottom and Left/Right to avoid horizontal collisions
+                const topLeftText = `SEAT: ${task.seatId}`;
+                const topRightText = `${subLabel}${task.assignedSeries}`;
+                
+                const bottomLeftText = `${stu.name.toUpperCase()}`;
+                const bottomRightText = `ROLL: #${stu.rollNo || "—"}  |  SEC: ${stu.section}`;
+                
+                // Y coordinates safely nestled inside the newly created blank margins
+                const topY = sourceHeight - 16;
+                const bottomY = 16;
 
+                // --- UNIVERSAL STAMPING ENGINE (Shrink & Frame Method) ---
                 if (task.layout === 'A3_BOOKLET' || task.layout === 'A5_BOOKLET') {
-                    // Because it's an imposed Booklet, we stamp the Left Page AND Right Page independently!
-                    const halfWidth = width / 2;
+                    // Stamp Left Page AND Right Page independently
+                    const halfWidth = sourceWidth / 2;
                     
-                    // -- LEFT PAGE STAMPS (Vertical) --
-                    page.drawText(leftText, { x: 24, y: bottomY, size, font, color, opacity, rotate: angle });
-                    page.drawText(rightText, { x: halfWidth - 24, y: bottomY, size, font, color, opacity, rotate: angle });
+                    // -- LEFT PAGE STAMPS --
+                    page.drawText(topLeftText, { x: 30, y: topY, size, font, color, opacity });
+                    page.drawText(topRightText, { x: halfWidth - font.widthOfTextAtSize(topRightText, size) - 30, y: topY, size, font, color, opacity });
+                    
+                    page.drawText(bottomLeftText, { x: 30, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomRightText, { x: halfWidth - font.widthOfTextAtSize(bottomRightText, size) - 30, y: bottomY, size, font, color, opacity });
 
-                    // -- RIGHT PAGE STAMPS (Vertical) --
-                    page.drawText(leftText, { x: halfWidth + 24, y: bottomY, size, font, color, opacity, rotate: angle });
-                    page.drawText(rightText, { x: width - 24, y: bottomY, size, font, color, opacity, rotate: angle });
+                    // -- RIGHT PAGE STAMPS --
+                    page.drawText(topLeftText, { x: halfWidth + 30, y: topY, size, font, color, opacity });
+                    page.drawText(topRightText, { x: sourceWidth - font.widthOfTextAtSize(topRightText, size) - 30, y: topY, size, font, color, opacity });
+                    
+                    page.drawText(bottomLeftText, { x: halfWidth + 30, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomRightText, { x: sourceWidth - font.widthOfTextAtSize(bottomRightText, size) - 30, y: bottomY, size, font, color, opacity });
                 } else {
-                    // Standard Portrait Layouts (Vertical)
-                    page.drawText(leftText, { x: 24, y: bottomY, size, font, color, opacity, rotate: angle });
-                    page.drawText(rightText, { x: width - 24, y: bottomY, size, font, color, opacity, rotate: angle });
+                    // Standard Portrait Layouts
+                    page.drawText(topLeftText, { x: 36, y: topY, size, font, color, opacity });
+                    page.drawText(topRightText, { x: sourceWidth - font.widthOfTextAtSize(topRightText, size) - 36, y: topY, size, font, color, opacity });
+                    
+                    page.drawText(bottomLeftText, { x: 36, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomRightText, { x: sourceWidth - font.widthOfTextAtSize(bottomRightText, size) - 36, y: bottomY, size, font, color, opacity });
                 }
             });
 
