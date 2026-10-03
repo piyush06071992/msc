@@ -88,11 +88,15 @@
                 🖨️ Notice Board Excel
             </button>
 
-            <!-- Auto-Generate Seating Button -->
+       <!-- Auto-Generate Seating Button -->
             <button onclick="openAutoGenerateModal()" class="bg-amber-600 hover:bg-amber-500 text-white px-4 py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-widest shadow-md flex items-center gap-2 transition-all active:scale-95">
                 ⚡ Auto Generate
             </button>
 
+            <!-- NEW: Clone Plan Button -->
+            <button onclick="openClonePlanModal()" class="bg-fuchsia-600 hover:bg-fuchsia-500 text-white px-4 py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-widest shadow-md flex items-center gap-2 transition-all active:scale-95">
+                🔄 Clone Plan
+            </button>
            
             <!-- NEW: Excel Bulk Upload Tools -->
             <button onclick="downloadSeatingTemplate()" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-widest shadow-md flex items-center gap-2 transition-all active:scale-95">
@@ -408,6 +412,44 @@
                 <button onclick="executeRoomOMRPrint(true)" class="w-full py-3.5 bg-sky-600 hover:bg-sky-500 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-lg transition-all active:scale-95">✅ Skip Online Students (Save Paper)</button>
                 <button onclick="executeRoomOMRPrint(false)" class="w-full py-3 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-black uppercase text-[10px] tracking-widest transition-colors">Print OMRs for Everyone Anyway</button>
                 <button onclick="document.getElementById('online-omr-modal').classList.replace('flex', 'hidden')" class="w-full py-2 text-rose-500 hover:text-rose-600 font-black uppercase text-[10px] tracking-widest transition-colors mt-2">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+<!-- CLONE PLAN MODAL -->
+    <div id="clone-plan-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[350] hidden items-center justify-center p-4 no-print">
+        <div class="bg-white rounded-[2.5rem] w-full max-w-md shadow-2xl overflow-hidden flex flex-col">
+            <div class="p-6 bg-gradient-to-r from-fuchsia-600 to-purple-700 text-white flex justify-between items-center shrink-0">
+                <div>
+                    <h3 class="font-black text-xl uppercase tracking-tight">Clone Seating Plan</h3>
+                    <p class="text-[10px] font-bold text-fuchsia-200 uppercase tracking-widest mt-0.5">Copy from a previous date/shift</p>
+                </div>
+                <button onclick="closeClonePlanModal()" class="w-10 h-10 bg-white/10 hover:bg-rose-600 rounded-full font-black text-lg transition-colors flex items-center justify-center">✕</button>
+            </div>
+
+            <div class="p-6 space-y-4 bg-slate-50 flex-1">
+                <div>
+                    <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">1. Select Source Date</label>
+                    <select id="clone-source-date" onchange="onCloneSourceDateChange()" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-700 outline-none focus:border-fuchsia-500 shadow-sm cursor-pointer">
+                        <option value="">-- Select Date --</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">2. Select Source Shift</label>
+                    <select id="clone-source-shift" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-700 outline-none focus:border-fuchsia-500 shadow-sm cursor-pointer" disabled>
+                        <option value="">-- Waiting for Date --</option>
+                    </select>
+                </div>
+                <div class="bg-amber-50 border border-amber-200 p-3 rounded-xl mt-2">
+                    <p class="text-[9px] font-bold text-amber-800 uppercase tracking-widest leading-relaxed">
+                        ⚠️ This will overwrite the matrix for the currently active date (<span id="clone-target-date-label" class="font-black text-amber-900"></span>) and shift (<span id="clone-target-shift-label" class="font-black text-amber-900"></span>).
+                    </p>
+                </div>
+            </div>
+
+            <div class="p-4 bg-white border-t border-slate-200 flex gap-3 shrink-0">
+                <button onclick="closeClonePlanModal()" class="flex-1 py-3.5 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-black uppercase text-xs tracking-widest transition-colors">Cancel</button>
+                <button onclick="executeClonePlan()" id="btn-execute-clone" class="flex-1 py-3.5 bg-fuchsia-600 hover:bg-fuchsia-500 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-lg transition-all active:scale-95 disabled:opacity-50">🔄 Clone Now</button>
             </div>
         </div>
     </div>
@@ -3479,11 +3521,187 @@ async function downloadRoomPrintPackage() {
             const resDiv = document.getElementById('global-search-results');
             const searchInput = document.getElementById('global-student-search');
             if (resDiv && !resDiv.classList.contains('hidden')) {
-                if (!resDiv.contains(event.target) && event.target !== searchInput) {
+        if (!resDiv.contains(event.target) && event.target !== searchInput) {
                     resDiv.classList.add('hidden');
                 }
             }
         });
+
+        // --- CLONE PLAN ENGINE ---
+        let cloneSourceAllocations = {}; 
+
+        function openClonePlanModal() {
+            const targetDate = document.getElementById('seating-exam-date').value;
+            if (!targetDate) return alert("Please select an Exam Date from the top header first.");
+
+            document.getElementById('clone-target-date-label').innerText = targetDate;
+            document.getElementById('clone-target-shift-label').innerText = currentShift || 'STANDARD';
+
+            // Populate source dates (we grab the options from the main date dropdown)
+            const mainDateSelect = document.getElementById('seating-exam-date');
+            const cloneDateSelect = document.getElementById('clone-source-date');
+            
+            cloneDateSelect.innerHTML = '<option value="">-- Select Source Date --</option>';
+            Array.from(mainDateSelect.options).forEach(opt => {
+                // Ignore the empty placeholder option
+                if (opt.value) { 
+                    cloneDateSelect.innerHTML += `<option value="${opt.value}">${opt.text}</option>`;
+                }
+            });
+
+            document.getElementById('clone-source-shift').innerHTML = '<option value="">-- Waiting for Date --</option>';
+            document.getElementById('clone-source-shift').disabled = true;
+
+            document.getElementById('clone-plan-modal').classList.replace('hidden', 'flex');
+        }
+
+        function closeClonePlanModal() {
+            document.getElementById('clone-plan-modal').classList.replace('flex', 'hidden');
+            cloneSourceAllocations = {};
+        }
+
+        async function onCloneSourceDateChange() {
+            const sourceDate = document.getElementById('clone-source-date').value;
+            const shiftSelect = document.getElementById('clone-source-shift');
+            
+            if (!sourceDate) {
+                shiftSelect.innerHTML = '<option value="">-- Waiting for Date --</option>';
+                shiftSelect.disabled = true;
+                return;
+            }
+
+            shiftSelect.innerHTML = '<option value="">Scanning previous plan...</option>';
+            shiftSelect.disabled = true;
+            cloneSourceAllocations = {};
+
+            try {
+                // Fetch the seating plan for the selected source date directly from Firebase
+                const roomSnap = await db.collection("exam_seating_rooms")
+                    .where("date", "==", sourceDate)
+                    .where("center", "==", activeCenter)
+                    .get();
+
+                if (!roomSnap.empty) {
+                    roomSnap.forEach(doc => {
+                        Object.assign(cloneSourceAllocations, doc.data().allocations || {});
+                    });
+                } else {
+                    const oldDoc = await db.collection("exam_seating_allocations").doc(`${activeCenter}_${sourceDate}`).get();
+                    if (oldDoc.exists) {
+                        const data = oldDoc.data();
+                        cloneSourceAllocations = (typeof data.allocations === 'string') ? JSON.parse(data.allocations) : (data.allocations || {});
+                    }
+                }
+
+                // Extract unique shifts from the fetched allocations
+                let foundShifts = new Set();
+                let hasStandard = false;
+
+                Object.keys(cloneSourceAllocations).forEach(seatId => {
+                    const roomName = seatId.split('-R')[0];
+                    const shiftMatch = roomName.match(/\[(.*?)\]/);
+                    if (shiftMatch) {
+                        foundShifts.add(shiftMatch[1]);
+                    } else {
+                        hasStandard = true;
+                    }
+                });
+
+                shiftSelect.innerHTML = '';
+                if (hasStandard || foundShifts.size === 0) {
+                    shiftSelect.innerHTML += '<option value="STANDARD">Standard Shift (Legacy)</option>';
+                }
+                
+                Array.from(foundShifts).sort().forEach(tag => {
+                    shiftSelect.innerHTML += `<option value="${tag}">${tag}</option>`;
+                });
+
+                if (shiftSelect.options.length === 0) {
+                    shiftSelect.innerHTML = '<option value="">No allocations found on this date</option>';
+                } else {
+                    shiftSelect.disabled = false;
+                }
+
+            } catch (error) {
+                console.error("Error fetching clone source:", error);
+                shiftSelect.innerHTML = '<option value="">Error loading data</option>';
+            }
+        }
+
+        async function executeClonePlan() {
+            const targetDate = document.getElementById('seating-exam-date').value;
+            const sourceShiftTag = document.getElementById('clone-source-shift').value;
+            
+            if (!targetDate || !sourceShiftTag) return alert("Missing target date or source shift.");
+
+            const targetShiftTag = currentShift !== "STANDARD" ? currentShift.replace(/ AM| PM/g, '') : "";
+
+            if (!confirm(`Are you sure you want to overwrite the current plan for ${targetDate} (${currentShift}) with the cloned data?`)) return;
+
+            const btn = document.getElementById('btn-execute-clone');
+            btn.innerHTML = "⏳ Cloning...";
+            btn.disabled = true;
+
+            try {
+                // 1. Clear target shift seats from currentAllocations (Preserve other shifts)
+                Object.keys(currentAllocations).forEach(seatId => {
+                    const roomName = seatId.split('-R')[0];
+                    const isCurrentShiftSeat = targetShiftTag ? roomName.endsWith(`[${targetShiftTag}]`) : !roomName.includes('[');
+                    if (isCurrentShiftSeat) delete currentAllocations[seatId];
+                });
+
+                // 2. Map source shift seats to perfectly match the target shift
+                let cloneCount = 0;
+                Object.keys(cloneSourceAllocations).forEach(seatId => {
+                    const roomName = seatId.split('-R')[0];
+                    const isSourceShiftSeat = sourceShiftTag !== "STANDARD" ? roomName.endsWith(`[${sourceShiftTag}]`) : !roomName.includes('[');
+                    
+                    if (isSourceShiftSeat) {
+                        const baseRoomStr = roomName.split(' [')[0];
+                        const restOfKey = seatId.substring(seatId.indexOf('-R'));
+                        const newKey = targetShiftTag ? `${baseRoomStr} [${targetShiftTag}]${restOfKey}` : `${baseRoomStr}${restOfKey}`;
+                        
+                        // Deep copy the student object and clear cheat risk flags so they re-evaluate freshly
+                        const clonedStu = { ...cloneSourceAllocations[seatId] };
+                        delete clonedStu.cheatRisk;
+                        delete clonedStu.cheatRiskDetails;
+                        
+                        currentAllocations[newKey] = clonedStu;
+                        cloneCount++;
+                    }
+                });
+
+                if (cloneCount === 0) {
+                    alert("No students found in the selected source shift to clone.");
+                    btn.innerHTML = "🔄 Clone Now";
+                    btn.disabled = false;
+                    return;
+                }
+
+                // 3. Evaluate cheat risks for all rooms based on the new date's paper map
+                roomsDatabase.forEach(room => {
+                    evaluateCheatRisks(currentAllocations, room);
+                });
+
+                // 4. Save to Firebase
+                await commitMasterSeatingPlanToCloud(targetDate);
+
+                alert(`✅ Successfully cloned ${cloneCount} student(s) to the current plan!`);
+                closeClonePlanModal();
+                
+                // Refresh UI
+                populateSidebarFilters();
+                renderRoomSidebarList();
+                if (activeRoomId) selectRoom(activeRoomId, false);
+
+            } catch (error) {
+                console.error("Clone error:", error);
+                alert("Error executing clone: " + error.message);
+            } finally {
+                btn.innerHTML = "🔄 Clone Now";
+                btn.disabled = false;
+            }
+        }
 
     </script>
 </body>
