@@ -106,12 +106,17 @@
                 </button>
             </div>
 
-            <div class="h-8 w-px bg-white/20 mx-2 hidden sm:block"></div>
+       <div class="h-8 w-px bg-white/20 mx-2 hidden sm:block"></div>
 
             <div class="bg-white/10 px-4 py-2 rounded-xl border border-white/20 flex items-center gap-3">
-                <label class="text-[10px] font-black uppercase tracking-widest text-amber-300">Exam Date:</label>
-                <select id="seating-exam-date" onchange="onExamDateChange()" class="bg-slate-900 text-white text-xs font-black px-3 py-1.5 rounded-lg outline-none cursor-pointer border border-slate-700 shadow-inner uppercase">
-                    <option value="">-- Loading Exam Dates --</option>
+                <label class="text-[10px] font-black uppercase tracking-widest text-amber-300">Date:</label>
+                <select id="seating-exam-date" onchange="onExamDateChange()" class="bg-slate-900 text-white text-xs font-black px-2 py-1.5 rounded-lg outline-none cursor-pointer border border-slate-700 shadow-inner uppercase">
+                    <option value="">-- Loading --</option>
+                </select>
+                
+                <label class="text-[10px] font-black uppercase tracking-widest text-sky-300 border-l border-white/20 pl-3">Shift:</label>
+                <select id="seating-exam-shift" onchange="onExamShiftChange()" class="bg-slate-900 text-white text-xs font-black px-2 py-1.5 rounded-lg outline-none cursor-pointer border border-slate-700 shadow-inner uppercase w-32">
+                    <option value="">--</option>
                 </select>
             </div>
             <div id="total-seating-badge" class="bg-emerald-600 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md">
@@ -856,8 +861,18 @@
      let allApprovedStudents = [];
         let activeRowContext = null;
         let autogenRules = [];
-        let globalStructureData = [];
+     let globalStructureData = [];
         let holidaysData = []; // NEW: Added globally
+        
+        let activeShifts = [];
+        let currentShift = "STANDARD";
+
+        // Shift Helper: Isolates room IDs by the active time shift so a room can be used twice a day
+        function getShiftedRoomName(baseName) {
+            if (!currentShift || currentShift === "STANDARD") return baseName;
+            const shortShift = currentShift.replace(/ AM| PM/g, '').replace(/\s+/g, '').replace(/:/g, ''); 
+            return `${baseName} [${shortShift}]`;
+        }
 
         // Global normalizer: preserves spaces, standardizes case and whitespace
         const norm = (str) => (str || "").replace(/\s+/g, " ").trim().toUpperCase();
@@ -938,22 +953,49 @@ window.onload = async () => {
                 console.error("Error fetching students:", e);
             }
         }
-        async function onExamDateChange() {
+async function onExamDateChange() {
             const date = document.getElementById('seating-exam-date').value;
             if (date) {
                 await buildPaperMap(date); 
                 await auditExamSectionsForDate(date);
                 await loadSectionTimingsCache(date); 
-                await auditBusyRoomsForDate(date);
-                await loadSeatingAllocations(date);
+                populateShiftDropdown(); // This will automatically trigger onExamShiftChange()
             } else {
-                examSectionsMap = {};
-                sectionPaperMap = {};
-                sectionTimingsCache = {};
-                currentAllocations = {};
-                busyRoomsMap = {};
+                examSectionsMap = {}; sectionPaperMap = {}; sectionTimingsCache = {};
+                currentAllocations = {}; busyRoomsMap = {};
+                document.getElementById('seating-exam-shift').innerHTML = '<option value="">--</option>';
                 renderRoomSidebarList();
                 if (activeRoomId) selectRoom(activeRoomId, false);
+            }
+        }
+
+        function populateShiftDropdown() {
+            let shiftSet = new Set();
+            Object.keys(examSectionsMap).forEach(secKey => {
+                const t = sectionTimingsCache[secKey];
+                if (t && t.startStr && t.endStr) shiftSet.add(`${t.startStr} - ${t.endStr}`);
+            });
+            activeShifts = Array.from(shiftSet).sort();
+            const shiftSel = document.getElementById('seating-exam-shift');
+            
+            if (activeShifts.length === 0) {
+                shiftSel.innerHTML = '<option value="STANDARD">Standard</option>';
+                currentShift = "STANDARD";
+            } else {
+                shiftSel.innerHTML = activeShifts.map(s => `<option value="${s}">${s}</option>`).join('');
+                currentShift = activeShifts[0];
+            }
+            onExamShiftChange();
+        }
+
+        async function onExamShiftChange() {
+            const date = document.getElementById('seating-exam-date').value;
+            const shiftSel = document.getElementById('seating-exam-shift');
+            currentShift = shiftSel ? shiftSel.value : "STANDARD";
+            
+            if (date) {
+                await auditBusyRoomsForDateAndShift(date, currentShift);
+                await loadSeatingAllocations(date); // Firebase handles filtering natively now!
             }
         }
 
@@ -1092,8 +1134,8 @@ window.onload = async () => {
             }
         }
 
-  // --- TIMETABLE CONFLICT AUDITOR FOR ROOMS ---
-    async function auditBusyRoomsForDate(dateStr) {
+// --- TIMETABLE CONFLICT AUDITOR FOR ROOMS ---
+    async function auditBusyRoomsForDateAndShift(dateStr, shiftStr) {
         busyRoomsMap = {};
         try {
             const dateObj = new Date(dateStr + 'T00:00:00');
@@ -1119,38 +1161,28 @@ window.onload = async () => {
                 }
             }
 
-            // 2. Identify Exam Window and Exam Sections directly from Timetable
-            let examSections = new Set();
-            let examStartMin = 24 * 60, examEndMin = 0;
+        // 2. Set the Exact Exam Window based on the currently selected Shift!
+            let examStartMin = 9 * 60, examEndMin = 12 * 60;
+            if (shiftStr !== "STANDARD") {
+                const parts = shiftStr.split(' - ');
+                const parseMins = (tStr) => {
+                    const [time, modifier] = tStr.split(' ');
+                    let [h, m] = time.split(':').map(Number);
+                    if (h === 12) h = 0;
+                    if (modifier === 'PM') h += 12;
+                    return h * 60 + m;
+                };
+                examStartMin = parseMins(parts[0]);
+                examEndMin = parseMins(parts[1]);
+            }
 
+            let examSections = new Set();
             daySlots.forEach(slot => {
                 const subUpper = (slot.subject || '').toUpperCase();
-                
-              // If it's an explicitly defined Exam block, use it to frame our global Exam Window
                 if (['EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM'].includes(subUpper) || subUpper.includes('EXAM')) {
                     examSections.add(`${norm(slot.className)}|${norm(slot.section)}`);
-                    
-                    let sM = 0, eM = 0;
-                    if (slot.start24 && slot.end24) {
-                        const [sh, sm] = slot.start24.split(':').map(Number);
-                        const [eh, em] = slot.end24.split(':').map(Number);
-                        sM = sh * 60 + sm; eM = eh * 60 + em;
-                    } else if (slot.sMins !== undefined && slot.eMins !== undefined) {
-                        sM = slot.sMins; eM = slot.eMins;
-                    }
-
-                    if (sM > 0 && eM > sM) {
-                        if (sM < examStartMin) examStartMin = sM;
-                        if (eM > examEndMin) examEndMin = eM;
-                    }
                 }
             });
-
-            // Fallback if no explicit exams were found but admin is trying to seat students anyway
-            if (examEndMin <= examStartMin) {
-                examStartMin = 9 * 60;
-                examEndMin = 12 * 60; 
-            }
 
   // 3. Mark busy rooms based on timetable overlaps
             daySlots.forEach(slot => {
@@ -1634,9 +1666,10 @@ function renderRoomSidebarList() {
       const resolvedTiming = resolveRoomTimings(room.name);
             document.getElementById('active-room-timing').innerText = resolvedTiming.text;
 
-            const matrixArea = document.getElementById('active-room-matrix');
+    const matrixArea = document.getElementById('active-room-matrix');
             const rows = room.rows || [];
             const extra = room.extraSeats || 0;
+            const shiftedRoomName = getShiftedRoomName(room.name); // Virtualize Room by Shift
 
             let rowsHtml = "";
 
@@ -1652,7 +1685,7 @@ function renderRoomSidebarList() {
                     
                     for (let sIdx = 0; sIdx < row.seats; sIdx++) {
                         const seatNum = String(sIdx + 1).padStart(2, '0');
-                        const seatId = `${room.name}-R${rowNum}-S${seatNum}`;
+                        const seatId = `${shiftedRoomName}-R${rowNum}-S${seatNum}`; // Use shifted name!
                         const assignedStu = currentAllocations[seatId];
 
          if (assignedStu) {
@@ -1763,12 +1796,17 @@ seatsHtml += `
             document.getElementById('modal-row-title').innerText = `${roomName} — Row ${rowNum}`;
             document.getElementById('modal-vacant-count').innerText = vacantCount;
 
-            // Group all active sections by class for easy multi-selection
+       // Group active sections by class, strictly isolating by current shift!
             let classGroups = {};
             Object.keys(examSectionsMap).forEach(key => {
-                const [cls, sec] = key.split('|');
-                if (!classGroups[cls]) classGroups[cls] = new Set();
-                classGroups[cls].add(sec);
+                const t = sectionTimingsCache[key];
+                const secShiftStr = t ? `${t.startStr} - ${t.endStr}` : "STANDARD";
+                
+                if (secShiftStr === currentShift || currentShift === "STANDARD") {
+                    const [cls, sec] = key.split('|');
+                    if (!classGroups[cls]) classGroups[cls] = new Set();
+                    classGroups[cls].add(sec);
+                }
             });
 
             const secContainer = document.getElementById('modal-sec-checkboxes');
@@ -2469,9 +2507,14 @@ async function executeAutoGenerate() {
             const selectedRoomNames = Array.from(document.querySelectorAll('.autogen-room-cb:checked')).map(cb => cb.value);
             if (selectedRoomNames.length === 0) return alert("Please select at least one global room preference.");
 
-            let targetStudents = allApprovedStudents.filter(stu => {
+      let targetStudents = allApprovedStudents.filter(stu => {
                 const key = `${norm(stu.className)}|${norm(stu.section)}`;
-                return examSectionsMap[key];
+                if (!examSectionsMap[key]) return false;
+                
+                // Block students whose exam shift doesn't match the active UI shift
+                const t = sectionTimingsCache[key];
+                const secShiftStr = t ? `${t.startStr} - ${t.endStr}` : "STANDARD";
+                return secShiftStr === currentShift || currentShift === "STANDARD";
             });
 
             // Parse specific rules mapping: sectionKey -> Set of preferred room names
@@ -3123,13 +3166,12 @@ async function downloadRoomPrintPackage() {
     }
 }
 
-      async function commitMasterSeatingPlanToCloud(date) {
+     async function commitMasterSeatingPlanToCloud(date) {
             // 1. Group the massive allocation object by Room Name
             let roomGroups = {};
             
-            // Pre-fill empty objects for all rooms so cleared rooms update properly
-            roomsDatabase.forEach(r => { roomGroups[r.name] = {}; });
-
+            // Pre-fill empty objects for all shifted rooms so cleared rooms update properly
+            roomsDatabase.forEach(r => { roomGroups[getShiftedRoomName(r.name)] = {}; });
             Object.keys(currentAllocations).forEach(seatId => {
                 const roomName = seatId.split('-R')[0];
                 if (!roomGroups[roomName]) roomGroups[roomName] = {};
