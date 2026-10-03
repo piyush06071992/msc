@@ -637,8 +637,9 @@
             // --- TRUE MULTI-SHEET EXCEL WORKBOOK GENERATOR ---
             const wb = XLSX.utils.book_new();
             
-         // 1. Gather all active sections directly from allApprovedStudents + currentAllocations
+     // 1. Gather all active sections directly from allApprovedStudents + currentAllocations
             let classesMap = {};
+            const shiftTag = currentShift !== "STANDARD" ? currentShift.replace(/ AM| PM/g, '').replace(/\s+/g, '').replace(/:/g, '') : "";
             
             allApprovedStudents.forEach(s => {
                 if (s.className && s.section && s.admissionStatus === "APPROVED" && s.isActive !== false) {
@@ -646,24 +647,20 @@
                     const sNorm = String(s.section).toUpperCase();
                     const secKey = `${norm(s.className)}|${norm(s.section)}`;
                     
-                    // Only include sections that actually have an exam scheduled
+                    // Only include sections that actually have an exam scheduled IN THE CURRENT SHIFT
                     if (examSectionsMap[secKey]) {
-                        if (!classesMap[cNorm]) classesMap[cNorm] = new Set();
-                        classesMap[cNorm].add(sNorm);
+                        const t = sectionTimingsCache[secKey];
+                        const secShiftStr = t ? `${t.startStr} - ${t.endStr}` : "STANDARD";
+                        
+                        if (secShiftStr === currentShift || currentShift === "STANDARD") {
+                            if (!classesMap[cNorm]) classesMap[cNorm] = new Set();
+                            classesMap[cNorm].add(sNorm);
+                        }
                     }
                 }
             });
-            Object.values(currentAllocations).forEach(s => {
-                if (s && s.className && s.section) {
-                    const cNorm = String(s.className).toUpperCase();
-                    const sNorm = String(s.section).toUpperCase();
-                    if (!classesMap[cNorm]) classesMap[cNorm] = new Set();
-                    classesMap[cNorm].add(sNorm);
-                }
-            });
 
-let assignedBySec = {};
-            const shiftTag = currentShift !== "STANDARD" ? currentShift.replace(/ AM| PM/g, '').replace(/\s+/g, '').replace(/:/g, '') : "";
+            let assignedBySec = {};
 
             Object.keys(currentAllocations).forEach(seatId => {
                 const roomName = seatId.split('-R')[0];
@@ -673,7 +670,14 @@ let assignedBySec = {};
 
                 const stu = currentAllocations[seatId];
                 if (stu && stu.className && stu.section) {
-                    const secKey = `${String(stu.className).toUpperCase()}|${String(stu.section).toUpperCase()}`;
+                    const cNorm = String(stu.className).toUpperCase();
+                    const sNorm = String(stu.section).toUpperCase();
+                    const secKey = `${cNorm}|${sNorm}`;
+                    
+                    // Ensure sections with allocated students in THIS shift are included
+                    if (!classesMap[cNorm]) classesMap[cNorm] = new Set();
+                    classesMap[cNorm].add(sNorm);
+                    
                     if (!assignedBySec[secKey]) assignedBySec[secKey] = [];
                     assignedBySec[secKey].push({ seatId, stu });
                 }
@@ -2192,12 +2196,28 @@ seatsHtml += `
             const wb = XLSX.utils.book_new();
             let hasRooms = false;
 
-         roomsDatabase.forEach(room => {
+       roomsDatabase.forEach(room => {
                 // Skip rooms that are BUSY or have ZERO rows mapped
                 if (busyRoomsMap[cleanRoom(room.name)] || !room.rows || room.rows.length === 0) return; 
                 
-                hasRooms = true;
                 const shiftedRoomName = getShiftedRoomName(room.name);
+                
+                // ONLY include rooms that actually have at least one student allocated in THIS specific shift
+                let isAllocatedInThisShift = false;
+                for (let rIdx = 0; rIdx < (room.rows || []).length; rIdx++) {
+                    const row = room.rows[rIdx];
+                    for (let sIdx = 0; sIdx < row.seats; sIdx++) {
+                        if (currentAllocations[`${shiftedRoomName}-R${rIdx+1}-S${String(sIdx+1).padStart(2, '0')}`]) {
+                            isAllocatedInThisShift = true;
+                            break;
+                        }
+                    }
+                    if (isAllocatedInThisShift) break;
+                }
+
+                if (!isAllocatedInThisShift) return; // Skips rooms that are not involved in this shift
+                
+                hasRooms = true;
                 
                 let wsData = [
                     [`ROOM SEATING PLAN: ${shiftedRoomName}`],
@@ -2228,7 +2248,7 @@ seatsHtml += `
                 XLSX.utils.book_append_sheet(wb, ws, room.name.substring(0, 31)); // Sheet name max 31 chars
             });
 
-            if (!hasRooms) return alert("No available rooms for this date. All rooms are busy.");
+           if (!hasRooms) return alert("No rooms are currently allocated in this shift. Please assign at least one student or run Auto Generate before downloading the template.");
             XLSX.writeFile(wb, `Seating_Template_${date}.xlsx`);
         }
 
