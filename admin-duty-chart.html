@@ -102,16 +102,23 @@
                 
                 <div id="config-sidebar" class="xl:col-span-1 space-y-6 no-print transition-all duration-300">
                     <div id="exam-controls" class="hidden bg-indigo-50 p-5 sm:p-6 rounded-[2rem] shadow-sm border border-indigo-200 h-fit">
-                        <h3 class="font-black text-indigo-800 uppercase text-xs tracking-widest mb-4">Exam Parameters</h3>
-                        <div class="space-y-4">
+                     <div class="space-y-4">
                           <div>
                              <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Target Date</label>
                                 <select id="dutyTargetDate" onchange="onExamDateSelected()" class="w-full p-3 bg-white border border-indigo-200 rounded-xl text-sm font-black text-indigo-800 outline-none focus:border-indigo-500 cursor-pointer shadow-sm uppercase">
                                     <option value="">-- Loading Exam Dates --</option>
                                 </select>
                             </div>
+                            <!-- NEW SHIFT DROPDOWN -->
+                            <div id="duty-shift-container" class="hidden">
+                                <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Exam Shift</label>
+                                <select id="duty-shift-select" onchange="onDutyShiftChange()" class="w-full p-3 bg-white border border-indigo-200 rounded-xl text-sm font-black text-indigo-800 outline-none focus:border-indigo-500 cursor-pointer shadow-sm uppercase">
+                                    <option value="">--</option>
+                                </select>
+                            </div>
                          <!-- Global Timings Auto-Fetched from Timetable Engine -->
                            <div>
+                                <label class="block text-xs font-black text-slate-500 uppercase mb-1">Total Staff Per Room</label>
                                 <label class="block text-xs font-black text-slate-500 uppercase mb-1">Total Shifts Per Room</label>
                                 <input type="number" id="exam-num-shifts" min="1" max="5" value="2" class="w-full p-3 bg-white border border-indigo-200 rounded-xl text-sm font-bold outline-none focus:border-indigo-500 shadow-sm text-center" onchange="updateGlobalShiftsUI()">
                             </div>
@@ -395,10 +402,15 @@
         let rawExamHistoryData = [];
         let examTemplates = []; 
         let isReadOnly = false; 
-        let lastExamStaffSet = new Set(); 
+     let lastExamStaffSet = new Set(); 
         let lastExamDateLabel = ""; 
         let customInstructions = []; 
         let currentAllocations = {};
+        
+        // --- VIRTUAL SHIFT STATE ---
+        let activeShifts = [];
+        let currentShift = "STANDARD";
+        let shortShiftCode = "";
 
         const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         const DAY_SHORTS = { 'Monday':'MON', 'Tuesday':'TUE', 'Wednesday':'WED', 'Thursday':'THU', 'Friday':'FRI', 'Saturday':'SAT', 'Sunday':'SUN' };
@@ -473,16 +485,62 @@
         };
 
 async function onExamDateSelected() {
-            renderRoomSelectors();
-            renderStaffSelectors();
-            
             const eDate = document.getElementById('dutyTargetDate')?.value;
-            if (!eDate) return;
+            if (!eDate) {
+                document.getElementById('duty-shift-container').classList.add('hidden');
+                return;
+            }
 
-            // Automatically check if a saved roster already exists for this date in the database
+            await buildPaperMap(eDate); 
+            await auditExamSectionsForDate(eDate);
+            await loadSectionTimingsCache(eDate); 
+            
+            // Populate shifts which will automatically trigger loading the roster and rooms
+            populateDutyShiftDropdown();
+        }
+
+        function populateDutyShiftDropdown() {
+            let shiftSet = new Set();
+            Object.keys(examSectionsMap).forEach(secKey => {
+                const t = sectionTimingsCache[secKey];
+                if (t && t.startStr && t.endStr) shiftSet.add(`${t.startStr} - ${t.endStr}`);
+            });
+            activeShifts = Array.from(shiftSet).sort();
+            const shiftSel = document.getElementById('duty-shift-select');
+            const shiftCont = document.getElementById('duty-shift-container');
+            
+            if (activeShifts.length === 0) {
+                shiftSel.innerHTML = '<option value="STANDARD">Standard</option>';
+                currentShift = "STANDARD";
+                shortShiftCode = "";
+                shiftCont.classList.add('hidden');
+            } else {
+                shiftSel.innerHTML = activeShifts.map(s => `<option value="${s}">${s}</option>`).join('');
+                currentShift = activeShifts[0];
+                shiftCont.classList.remove('hidden');
+            }
+            onDutyShiftChange();
+        }
+
+        async function onDutyShiftChange() {
+            const shiftSel = document.getElementById('duty-shift-select');
+            currentShift = shiftSel ? shiftSel.value : "STANDARD";
+            shortShiftCode = currentShift !== "STANDARD" ? currentShift.replace(/ AM| PM/g, '').replace(/\s+/g, '').replace(/:/g, '') : "";
+            
+            const eDate = document.getElementById('dutyTargetDate').value;
+            if (eDate) {
+                await checkSavedRoster(eDate, shortShiftCode);
+                await renderRoomSelectors();
+                renderStaffSelectors();
+            }
+        }
+
+        async function checkSavedRoster(eDate, shiftCode) {
             try {
-                const docId = "exam_duty_" + eDate;
+                const docSuffix = shiftCode ? `_${shiftCode}` : "";
+                const docId = "exam_duty_" + eDate + docSuffix;
                 const snap = await getCollection("duty_rosters").doc(docId).get();
+                
                 if (snap.exists) {
                     const data = snap.data();
                     generatedRoster = data.rosterData || {};
@@ -492,17 +550,18 @@ async function onExamDateSelected() {
                     const dObj = new Date(eDate);
                     const dayName = DAYS_OF_WEEK[dObj.getDay()];
                     const prettyExamDate = dObj.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
-                    document.getElementById('chart-sub-title').innerText = `${dayName} ${prettyExamDate}`;
+                    const shiftLabel = currentShift !== "STANDARD" ? ` | Shift: ${currentShift}` : "";
+                    
+                    document.getElementById('chart-sub-title').innerText = `${dayName} ${prettyExamDate}${shiftLabel}`;
                     document.getElementById('print-main-title').innerText = "Exam Duty Chart";
-                    document.getElementById('print-sub-title').innerText = `${dayName} ${prettyExamDate}`;
+                    document.getElementById('print-sub-title').innerText = `${dayName} ${prettyExamDate}${shiftLabel}`;
 
                     renderGeneratedGrid();
                     renderInstructions();
                 } else {
-                    // Hide existing grid if no saved chart exists for this date yet
                     document.getElementById('results-area').classList.add('hidden');
                     document.getElementById('results-placeholder').classList.remove('hidden');
-                    document.getElementById('results-placeholder').innerHTML = `<div class="text-6xl sm:text-7xl mb-4">🤖</div><p class="font-bold uppercase tracking-widest text-sm leading-relaxed">No saved chart found for this date.<br>Configure parameters and click generate.</p>`;
+                    document.getElementById('results-placeholder').innerHTML = `<div class="text-6xl sm:text-7xl mb-4">🤖</div><p class="font-bold uppercase tracking-widest text-sm leading-relaxed">No saved chart found for this shift.<br>Configure parameters and click generate.</p>`;
                 }
             } catch(e) {
                 console.error("Error checking saved roster:", e);
@@ -713,8 +772,7 @@ async function renderRoomSelectors() {
         let activeRooms = roomsData;
         const eDate = document.getElementById('dutyTargetDate')?.value;
 
- if (currentMode === 'EXAM' && eDate) {
-        await loadSectionTimingsCache(eDate);
+if (currentMode === 'EXAM' && eDate) {
         try {
             // Fetch all partitioned room documents for this center and date
             const roomSnap = await db.collection("exam_seating_rooms")
@@ -728,10 +786,19 @@ async function renderRoomSelectors() {
             if (!roomSnap.empty) {
                 roomSnap.forEach(doc => {
                     const roomData = doc.data();
+                    let rName = roomData.roomName || "";
+                    
+                    // Filter out rooms that don't belong to the active shift
+                    if (shortShiftCode) {
+                        if (!rName.endsWith(`[${shortShiftCode}]`)) return;
+                    } else {
+                        if (rName.includes('[')) return;
+                    }
+
                     const roomAllocs = roomData.allocations || {};
                     Object.assign(currentAllocations, roomAllocs);
-                    if (roomData.roomName && Object.keys(roomAllocs).length > 0) {
-                        seatedRoomNames.add(roomData.roomName.toUpperCase());
+                    if (rName && Object.keys(roomAllocs).length > 0) {
+                        seatedRoomNames.add(rName); // Exact matched name including virtual shift tag
                     }
                 });
             } else {
@@ -747,7 +814,12 @@ async function renderRoomSelectors() {
                 }
             }
 
-            activeRooms = roomsData.filter(r => seatedRoomNames.has(r.name.toUpperCase()));
+            // Map base rooms to their virtualized names so the UI understands them
+            activeRooms = Array.from(seatedRoomNames).map(srn => {
+                const baseName = srn.split(' [')[0];
+                const baseRoom = roomsData.find(r => r.name.toUpperCase() === baseName.toUpperCase()) || {};
+                return { ...baseRoom, name: srn };
+            });
         } catch (e) {
             console.error("Error filtering rooms by allocation:", e);
             currentAllocations = {};
@@ -1043,15 +1115,18 @@ async function renderRoomSelectors() {
                 options.sort((a,b) => b.date.localeCompare(a.date));
 
                 const select = document.getElementById('viewer-chart-select');
-                if (options.length === 0) {
+            if (options.length === 0) {
                     select.innerHTML = '<option value="">No charts published yet.</option>';
                     select.disabled = true;
                 } else {
                     select.innerHTML = '<option value="">-- Select Date --</option>' + options.map(o => {
-                        const dObj = new Date(o.date);
                         if(type === 'EXAM') {
-                            return `<option value="${o.id}">${dObj.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' })}</option>`;
+                            const parts = o.date.split('_'); 
+                            const dObj = new Date(parts[0]);
+                            const shiftLbl = parts.length > 1 ? ` (Shift: ${parts[1]})` : "";
+                            return `<option value="${o.id}">${dObj.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' })}${shiftLbl}</option>`;
                         } else {
+                            const dObj = new Date(o.date);
                             return `<option value="${o.id}">Week starting ${dObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</option>`;
                         }
                     }).join('');
@@ -2333,10 +2408,12 @@ async function populateEditStaff() {
                 let docId = "duty_roster_" + Date.now();
                 let dutyLabel = "Duty Schedule Update";
                 
-                if(currentMode === 'EXAM') {
+      if(currentMode === 'EXAM') {
                     const eDate = document.getElementById('dutyTargetDate').value;
-                    docId = "exam_duty_" + eDate;
-                    dutyLabel = `Exam Duty for ${eDate}`;
+                    const docSuffix = shortShiftCode ? `_${shortShiftCode}` : "";
+                    docId = "exam_duty_" + eDate + docSuffix;
+                    const shiftLabel = currentShift !== "STANDARD" ? ` (${currentShift})` : "";
+                    dutyLabel = `Exam Duty for ${eDate}${shiftLabel}`;
                 } else {
                     const today = new Date();
                     const day = today.getDay();
