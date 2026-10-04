@@ -627,7 +627,7 @@ let examSectionsMap = {};
             }
         }
 
-   async function checkSavedRoster(eDate, shiftCode) {
+async function checkSavedRoster(eDate, shiftCode) {
             try {
                 const docSuffix = shiftCode ? `_${shiftCode}` : "";
                 const docId = "exam_duty_" + eDate + docSuffix;
@@ -639,7 +639,7 @@ let examSectionsMap = {};
                     snap = await getCollection("duty_rosters").doc("exam_duty_" + eDate + "_" + legacyTag).get();
                 }
 
-         // Fallback 2: Check the absolute original legacy format (NO shift tag at all)
+                // Fallback 2: Check the absolute original legacy format (NO shift tag at all)
                 if (!snap.exists && shiftCode) {
                     snap = await getCollection("duty_rosters").doc("exam_duty_" + eDate).get();
                 }
@@ -652,8 +652,15 @@ let examSectionsMap = {};
                     if (shiftCode) {
                         generatedRoster = {};
                         Object.keys(rawRoster).forEach(roomKey => {
-                            // Keep rooms that explicitly have the exact shift code bracket
-                            if (roomKey.includes(`[${shiftCode}]`)) {
+                            const isLegacyRoom = !roomKey.includes('[');
+                            
+                            if (isLegacyRoom) {
+                                // Check if a tagged version of this exact legacy room exists in the raw data
+                                const hasTaggedVersion = Object.keys(rawRoster).some(k => k === `${roomKey} [${shiftCode}]`);
+                                if (!hasTaggedVersion) {
+                                    generatedRoster[roomKey] = rawRoster[roomKey];
+                                }
+                            } else if (roomKey.includes(`[${shiftCode}]`)) {
                                 generatedRoster[roomKey] = rawRoster[roomKey];
                             }
                         });
@@ -905,13 +912,23 @@ if (currentMode === 'EXAM' && eDate) {
                     const roomData = doc.data();
                     let rName = roomData.roomName || "";
                     
-               // Filter out rooms that don't belong to the active shift
+         // Filter out rooms that don't belong to the active shift
                     if (shortShiftCode) {
                         const legacyTag = shortShiftCode.replace(/\s+/g, '').replace(/:/g, '');
-                        const hasAnyTag = rName.includes('[');
+                        const isLegacyRoom = !rName.includes('[');
                         
-                        // If it has a tag, it MUST match the correct shift. If it has NO tag, we safely accept it as a legacy room from yesterday!
-                        if (hasAnyTag) {
+                        if (isLegacyRoom) {
+                            // Only accept a legacy room if a tagged version does NOT exist in the current snapshot
+                            let hasTaggedVersion = false;
+                            roomSnap.forEach(d => {
+                                const checkName = d.data().roomName || "";
+                                if (checkName === `${rName} [${shortShiftCode}]` || checkName === `${rName} [${legacyTag}]`) {
+                                    hasTaggedVersion = true;
+                                }
+                            });
+                            if (hasTaggedVersion) return; // Skip this legacy room
+                        } else {
+                            // If it has a tag, it MUST match the correct shift
                             if (!rName.endsWith(`[${shortShiftCode}]`) && !rName.endsWith(`[${legacyTag}]`)) return;
                         }
                     } else {
