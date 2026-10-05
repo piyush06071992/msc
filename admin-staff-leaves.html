@@ -293,8 +293,12 @@
                         <select id="base-staff" class="w-full bg-white border border-slate-200 rounded-xl p-3 text-xs font-bold outline-none shadow-sm cursor-pointer"></select>
                     </div>
                 </div>
+             <div>
+                    <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Baseline Date (Cut-off)</label>
+                    <input type="date" id="base-date" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm font-bold outline-none mb-4 cursor-pointer">
+                </div>
                 <div>
-                    <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Current Leave Balance (As of Today)</label>
+                    <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Leave Balance as of this Date</label>
                     <input type="number" id="base-amount" step="0.25" placeholder="e.g. 5.5" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm font-bold outline-none">
                 </div>
             </div>
@@ -552,10 +556,11 @@
             checkboxes.forEach(cb => cb.checked = masterCheckbox.checked);
         }
 
-        async function logTransaction(email, amount, type, reason) {
+      async function logTransaction(email, amount, type, reason, explicitDate = null) {
+            const txDate = explicitDate || new Date().toISOString().split('T')[0];
             await db.collection(collPrefix + "leave_transactions").add({
                 staffEmail: email, amount: parseFloat(amount), type: type, reason: reason, managedBy: activeAdminName,
-                timestamp: Date.now(), date: new Date().toISOString().split('T')[0]
+                timestamp: Date.now(), date: txDate
             });
         }
 
@@ -699,22 +704,32 @@
                 let base = 0, earned = 0, consumed = 0;
                 let baselineTimestamp = 0;
                 
-                // Find the absolute most recent baseline
+          // Find the absolute most recent baseline
                 const baselines = trs.filter(t => t.type === 'BASELINE');
+                let baselineDate = "1970-01-01";
                 if (baselines.length > 0) {
                     const latestBase = baselines[baselines.length - 1];
                     base = latestBase.amount;
                     baselineTimestamp = latestBase.timestamp;
+                    baselineDate = latestBase.date || "1970-01-01";
                 }
 
                 trs.forEach(t => {
                     // Global metric (dashboard) calculates regardless of baseline
                     if(t.type === 'COMPENSATORY_GRANT' && t.date.substring(0,7) === new Date().toISOString().substring(0,7)) compTotal += t.amount;
                     
-                    // Clean Cutover Math: Only count transactions strictly AFTER the latest baseline
-                    if (t.type !== 'BASELINE' && t.timestamp > baselineTimestamp) {
-                        if(t.amount > 0) earned += t.amount;
-                        else consumed += Math.abs(t.amount);
+                    // Clean Cutover Math: Only count transactions that occurred strictly AFTER the Baseline Date
+                    // We use t.date for LEAVE_TAKEN and COMPENSATORY to ensure dates map cleanly
+                    if (t.type !== 'BASELINE') {
+                        // Check if the transaction date is strictly after the baseline date string
+                        if (t.date > baselineDate) {
+                            if(t.amount > 0) earned += t.amount;
+                            else consumed += Math.abs(t.amount);
+                        } else if (t.date === baselineDate && t.timestamp > baselineTimestamp) {
+                            // If it happened on the EXACT SAME DAY as the baseline, fall back to exact timestamp
+                            if(t.amount > 0) earned += t.amount;
+                            else consumed += Math.abs(t.amount);
+                        }
                     }
                 });
                 return { ...staff, base, earned, consumed, current: base + earned - consumed };
@@ -1052,11 +1067,15 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
             closeModal('comp-modal');
         }
 
-        async function executeBaseline() {
+       async function executeBaseline() {
             const email = document.getElementById('base-staff').value;
             const amt = document.getElementById('base-amount').value;
+            const bDate = document.getElementById('base-date').value;
+            
+            if(!bDate) return alert("Please select the baseline cut-off date.");
             if(!amt) return alert("Enter starting balance.");
-            await logTransaction(email, amt, 'BASELINE', 'Mid-session Initialization');
+            
+            await logTransaction(email, amt, 'BASELINE', `Mid-session Initialization as of ${bDate}`, bDate);
             alert("Baseline set successfully!");
             closeModal('baseline-modal');
         }
