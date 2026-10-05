@@ -1541,11 +1541,12 @@ async function uploadQuestionPaper() {
                     const safeQpName = qpFile.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
                     const qpRef = storageRef.child(`question_papers/${activeCenter}/${date}/${cls}/${sec}/FULL_PAPER_${series}_${Date.now()}_${safeQpName}`);
                     
-                    // --- CLIENT-SIDE IMPOSITION ENGINE ---
+                 // --- CLIENT-SIDE IMPOSITION ENGINE ---
                     const arrayBuffer = await qpFile.arrayBuffer();
-                    const { PDFDocument } = window.PDFLib;
+                    const { PDFDocument, StandardFonts, rgb, degrees } = window.PDFLib;
                     const pdfDoc = await PDFDocument.load(arrayBuffer);
                     const mergedPdf = await PDFDocument.create();
+                    const font = await mergedPdf.embedFont(StandardFonts.HelveticaBold);
                     
                     const pages = pdfDoc.getPages();
                     let sourceWidth = 595.28, sourceHeight = 841.89; 
@@ -1558,49 +1559,72 @@ async function uploadQuestionPaper() {
 
                     let uploadBytes = null;
 
-                    if (layout === 'A3_BOOKLET') {
+                    if (layout === 'A3_BOOKLET' || layout === 'A5_BOOKLET') {
                         const currentCount = pdfDoc.getPageCount();
-                      const remainder = currentCount % 4;
+                        const remainder = currentCount % 4;
                         if (remainder !== 0) {
                             for (let p = 0; p < (4 - remainder); p++) {
-                                const blankPage = pdfDoc.addPage([sourceWidth, sourceHeight]);
-                                blankPage.drawText('');
+                                pdfDoc.addPage([sourceWidth, sourceHeight]);
                             }
                         }
 
                         const paddedCount = pdfDoc.getPageCount();
-                        const embeddedPages = await mergedPdf.embedPdf(await pdfDoc.save());
+                        const embeddedPages = await mergedPdf.embedPdf(await pdfDoc.save(), pdfDoc.getPageIndices());
                         
-                        const doubleWidth = sourceWidth * 2;
-                        const doubleHeight = sourceHeight;
+                        let canvasWidth, canvasHeight, printWidth, printHeight;
+                        if (layout === 'A3_BOOKLET') {
+                            canvasWidth = sourceWidth * 2; canvasHeight = sourceHeight;
+                            printWidth = sourceWidth; printHeight = sourceHeight;
+                        } else {
+                            canvasWidth = sourceHeight; canvasHeight = sourceWidth; 
+                            printWidth = canvasWidth / 2; printHeight = canvasHeight; 
+                        }
+                        
+                        // Hardware Margin & Scaling Math
+                        const margin = 20; // ~7mm safe hardware grip margin
+                        const scale = Math.min((printWidth - 2 * margin) / sourceWidth, (printHeight - 2 * margin) / sourceHeight);
+                        const scaledW = sourceWidth * scale;
+                        const scaledH = sourceHeight * scale;
+                        const offsetX = (printWidth - scaledW) / 2;
+                        const offsetY = (printHeight - scaledH) / 2;
+
                         const totalSides = paddedCount / 2;
                         
-                      const { degrees } = window.PDFLib;
                         for (let i = 0; i < totalSides; i++) {
-                            const bookletPage = mergedPdf.addPage([doubleWidth, doubleHeight]);
-                            let leftIndex, rightIndex;
+                            const bookletPage = mergedPdf.addPage([canvasWidth, canvasHeight]);
+                            
+                            // CORE FIX: The index sequence stays exactly the same on both front and back!
+                            // Only the drawing orientation changes to fix the duplex flip.
+                            const leftIndex = paddedCount - 1 - i;
+                            const rightIndex = i;
+
+                            const leftLabel = leftIndex < currentCount ? `Page ${leftIndex + 1}` : '';
+                            const rightLabel = rightIndex < currentCount ? `Page ${rightIndex + 1}` : '';
+
                             if (i % 2 === 0) {
-                                // Front Side: Draw upright
-                                leftIndex = paddedCount - 1 - i;
-                                rightIndex = i;
-                                bookletPage.drawPage(embeddedPages[leftIndex], { x: 0, y: 0 });
-                                bookletPage.drawPage(embeddedPages[rightIndex], { x: sourceWidth, y: 0 });
+                                // FRONT SIDE: Upright
+                                bookletPage.drawPage(embeddedPages[leftIndex], { x: offsetX, y: offsetY, width: scaledW, height: scaledH });
+                                bookletPage.drawPage(embeddedPages[rightIndex], { x: printWidth + offsetX, y: offsetY, width: scaledW, height: scaledH });
+
+                                if (leftLabel) bookletPage.drawText(leftLabel, { x: (printWidth / 2) - 20, y: margin / 2, size: 10, font: font, color: rgb(0.3, 0.3, 0.3) });
+                                if (rightLabel) bookletPage.drawText(rightLabel, { x: printWidth + (printWidth / 2) - 20, y: margin / 2, size: 10, font: font, color: rgb(0.3, 0.3, 0.3) });
                             } else {
-                                // Back Side: Rotate 180 degrees for "Flip on Long Edge"
-                                leftIndex = i;
-                                rightIndex = paddedCount - 1 - i;
+                                // BACK SIDE: Rotated 180 degrees (anchored at top-right of its designated half)
                                 bookletPage.drawPage(embeddedPages[leftIndex], { 
-                                    x: sourceWidth, y: doubleHeight, 
-                                    rotate: degrees(180) 
+                                    x: printWidth - offsetX, y: canvasHeight - offsetY, 
+                                    width: scaledW, height: scaledH, rotate: degrees(180) 
                                 });
                                 bookletPage.drawPage(embeddedPages[rightIndex], { 
-                                    x: sourceWidth * 2, y: doubleHeight, 
-                                    rotate: degrees(180) 
+                                    x: canvasWidth - offsetX, y: canvasHeight - offsetY, 
+                                    width: scaledW, height: scaledH, rotate: degrees(180) 
                                 });
+
+                                if (leftLabel) bookletPage.drawText(leftLabel, { x: (printWidth / 2) + 20, y: canvasHeight - (margin / 2), size: 10, font: font, color: rgb(0.3, 0.3, 0.3), rotate: degrees(180) });
+                                if (rightLabel) bookletPage.drawText(rightLabel, { x: printWidth + (printWidth / 2) + 20, y: canvasHeight - (margin / 2), size: 10, font: font, color: rgb(0.3, 0.3, 0.3), rotate: degrees(180) });
                             }
                         }
                         uploadBytes = await mergedPdf.save();
-                  } else if (layout === 'A4_STANDARD') {
+                    } else if (layout === 'A4_STANDARD') {
                         const remainder = pdfDoc.getPageCount() % 2;
                         if (remainder !== 0) {
                             const blankPage = pdfDoc.addPage([sourceWidth, sourceHeight]);
