@@ -401,7 +401,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         }
     }
 
-    // PASS 2: Render Bulk Split Tasks First
+ // PASS 2: Render Bulk Split Tasks First
     for (const key in bulkSplitCounts) {
         const bulkData = bulkSplitCounts[key];
         const copiesNeeded = Math.ceil(bulkData.count / 2); // 1 copy = 2 halves = 2 students
@@ -419,110 +419,86 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 copiedPages.forEach(p => {
                     const page = mergedPdf.addPage(p);
                     const { width, height } = page.getSize();
-                    const size = 10;
+                    const size = 9;
                     const color = rgb(0.2, 0.2, 0.2);
-                    const opacity = 0.8;
+                    const opacity = 0.9;
                     
                     const subLabel = (bulkData.matchedSubKey && bulkData.matchedSubKey !== "FULL PAPER" && bulkData.matchedSubKey !== "UNMAPPED EXAM") ? `[${bulkData.matchedSubKey}] ` : "";
                     const leftText = `ROOM: ${roomName}`;
                     const rightText = `${subLabel}COPY ${c+1}/${copiesNeeded}`;
                     
-                    // Simple admin stamps for the halves
-                    page.drawText(leftText, { x: 36, y: height - 28, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: height - 28, size, font, color, opacity });
+                    const topY = height - 12;
+                    const bottomY = 6;
+
+                    // Simple admin stamps nestled neatly into the frontend margins
+                    page.drawText(leftText, { x: 20, y: topY, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 20, y: topY, size, font, color, opacity });
                     
-                    page.drawText(leftText, { x: 36, y: 20, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 36, y: 20, size, font, color, opacity });
+                    page.drawText(leftText, { x: 20, y: bottomY, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 20, y: bottomY, size, font, color, opacity });
                 });
-                
-                // NO PADDING NECESSARY. The frontend upload engine already handled it!
             }
         } catch (err) {
             console.error(`[PDF Engine] Error processing bulk task for ${bulkData.pdfUrl}:`, err);
         }
     }
 
- // PASS 3: Render Seat Specific Tasks
+// PASS 3: Render Seat Specific Tasks
     for (const task of seatSpecificTasks) {
         try {
             if (!pdfBytesCache[task.pdfUrl]) {
                 pdfBytesCache[task.pdfUrl] = await loadPdfBytes(task.pdfUrl);
             }
-            const pdfBytes = pdfBytesCache[task.pdfUrl];
+            const originalBytes = pdfBytesCache[task.pdfUrl];
+            const pdfDoc = await PDFDocument.load(originalBytes);
             
-            // Shrink & Frame Method: Embed pages instead of copying them
-            const embeddedPages = await mergedPdf.embedPdf(pdfBytes);
+            const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
             
-            embeddedPages.forEach(embeddedPage => {
-                const sourceWidth = embeddedPage.width;
-                const sourceHeight = embeddedPage.height;
+            copiedPages.forEach(page => {
+                mergedPdf.addPage(page);
                 
-                // Create a new blank page matching the original dimensions
-                const page = mergedPdf.addPage([sourceWidth, sourceHeight]);
-                
-                // Scale down to 94% to create a safe white margin at top and bottom
-                const scale = 0.94;
-                const scaledWidth = sourceWidth * scale;
-                const scaledHeight = sourceHeight * scale;
-                
-                // Center the embedded page within the new blank frame
-                const xOffset = (sourceWidth - scaledWidth) / 2;
-                const yOffset = (sourceHeight - scaledHeight) / 2;
-                
-                page.drawPage(embeddedPage, {
-                    x: xOffset,
-                    y: yOffset,
-                    width: scaledWidth,
-                    height: scaledHeight
-                });
-
-                const size = 9; // Slightly smaller font to prevent collision
+                const { width, height } = page.getSize();
+                const size = 9;
                 const color = rgb(0.2, 0.2, 0.2);
                 const opacity = 0.9;
 
                 const stu = task.student;
-                const subLabel = (task.matchedSubKey && task.matchedSubKey !== "FULL PAPER" && task.matchedSubKey !== "UNMAPPED EXAM") ? `[${task.matchedSubKey}] ` : "";
                 
-                // Split text into Top/Bottom and Left/Right to avoid horizontal collisions
+                // Formatted exactly to your new requirements
                 const topLeftText = `SEAT: ${task.seatId}`;
-                const topRightText = `${subLabel}${task.assignedSeries}`;
-                
+                const topRightText = `ROLL: ${stu.rollNo || "—"}`;
                 const bottomLeftText = `${stu.name.toUpperCase()}`;
-                const bottomRightText = `ROLL: #${stu.rollNo || "—"}  |  SEC: ${stu.section}`;
+                const bottomRightText = `CLASS ${stu.className} - SEC ${stu.section}`;
                 
-                // Y coordinates safely nestled inside the newly created blank margins
-                const topY = sourceHeight - 16;
-                const bottomY = 16;
+                // Coordinates precisely touch the 20pt margins created by the frontend
+                const topY = height - 12;
+                const bottomY = 6;
 
-                // --- UNIVERSAL STAMPING ENGINE (Shrink & Frame Method) ---
                 if (task.layout === 'A3_BOOKLET' || task.layout === 'A5_BOOKLET') {
-                    // Stamp Left Page AND Right Page independently
-                    const halfWidth = sourceWidth / 2;
+                    const halfWidth = width / 2;
                     
                     // -- LEFT PAGE STAMPS --
-                    page.drawText(topLeftText, { x: 30, y: topY, size, font, color, opacity });
-                    page.drawText(topRightText, { x: halfWidth - font.widthOfTextAtSize(topRightText, size) - 30, y: topY, size, font, color, opacity });
+                    page.drawText(topLeftText, { x: 20, y: topY, size, font, color, opacity });
+                    page.drawText(topRightText, { x: halfWidth - font.widthOfTextAtSize(topRightText, size) - 20, y: topY, size, font, color, opacity });
                     
-                    page.drawText(bottomLeftText, { x: 30, y: bottomY, size, font, color, opacity });
-                    page.drawText(bottomRightText, { x: halfWidth - font.widthOfTextAtSize(bottomRightText, size) - 30, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomLeftText, { x: 20, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomRightText, { x: halfWidth - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
 
                     // -- RIGHT PAGE STAMPS --
-                    page.drawText(topLeftText, { x: halfWidth + 30, y: topY, size, font, color, opacity });
-                    page.drawText(topRightText, { x: sourceWidth - font.widthOfTextAtSize(topRightText, size) - 30, y: topY, size, font, color, opacity });
+                    page.drawText(topLeftText, { x: halfWidth + 20, y: topY, size, font, color, opacity });
+                    page.drawText(topRightText, { x: width - font.widthOfTextAtSize(topRightText, size) - 20, y: topY, size, font, color, opacity });
                     
-                    page.drawText(bottomLeftText, { x: halfWidth + 30, y: bottomY, size, font, color, opacity });
-                    page.drawText(bottomRightText, { x: sourceWidth - font.widthOfTextAtSize(bottomRightText, size) - 30, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomLeftText, { x: halfWidth + 20, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomRightText, { x: width - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
                 } else {
                     // Standard Portrait Layouts
-                    page.drawText(topLeftText, { x: 36, y: topY, size, font, color, opacity });
-                    page.drawText(topRightText, { x: sourceWidth - font.widthOfTextAtSize(topRightText, size) - 36, y: topY, size, font, color, opacity });
+                    page.drawText(topLeftText, { x: 20, y: topY, size, font, color, opacity });
+                    page.drawText(topRightText, { x: width - font.widthOfTextAtSize(topRightText, size) - 20, y: topY, size, font, color, opacity });
                     
-                    page.drawText(bottomLeftText, { x: 36, y: bottomY, size, font, color, opacity });
-                    page.drawText(bottomRightText, { x: sourceWidth - font.widthOfTextAtSize(bottomRightText, size) - 36, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomLeftText, { x: 20, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomRightText, { x: width - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
                 }
             });
-
-            // NO IMPOSITION LOGIC NECESSARY. The frontend upload engine already handled it!
         } catch (err) {
             console.error(`[PDF Engine] Error processing specific task for ${task.pdfUrl}:`, err);
         }
