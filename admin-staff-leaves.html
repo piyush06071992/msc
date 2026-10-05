@@ -249,9 +249,9 @@
                         <div id="comp-staff" class="w-full h-32 sm:h-40 bg-white border border-slate-200 rounded-xl p-2 text-xs font-bold overflow-y-auto custom-scroll shadow-inner space-y-0.5"></div>
                     </div>
                 </div>
-                <div class="grid grid-cols-2 gap-4">
+             <div class="grid grid-cols-2 gap-4">
                     <div>
-                        <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Amount (+)</label>
+                        <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Amount</label>
                         <select id="comp-amount" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm font-bold outline-none cursor-pointer">
                             <option value="1">1.0 (Full Day)</option>
                             <option value="0.5">0.5 (Half Day)</option>
@@ -261,7 +261,10 @@
                     </div>
                     <div>
                         <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Action Type</label>
-                        <input type="text" value="COMPENSATORY_GRANT" disabled class="w-full bg-slate-100 border border-slate-200 rounded-xl p-3 text-xs font-black text-slate-400 outline-none">
+                        <select id="comp-action" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold outline-none cursor-pointer text-emerald-700" onchange="this.className = this.value === 'COMPENSATORY_GRANT' ? 'w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold outline-none cursor-pointer text-emerald-700' : 'w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold outline-none cursor-pointer text-rose-700'">
+                            <option value="COMPENSATORY_GRANT">Grant (+) Add Leave</option>
+                            <option value="COMPENSATORY_REVOKE">Revoke (-) Remove Leave</option>
+                        </select>
                     </div>
                 </div>
                 <div>
@@ -269,9 +272,9 @@
                     <input type="text" id="comp-reason" placeholder="e.g. Sunday Exam Invigilation..." class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm font-bold outline-none focus:border-emerald-500">
                 </div>
             </div>
-            <div class="flex gap-4 mt-8">
+           <div class="flex gap-4 mt-8">
                 <button onclick="closeModal('comp-modal')" class="flex-1 py-3 font-black uppercase text-xs text-slate-500 border border-slate-200 rounded-xl hover:bg-slate-50">Cancel</button>
-                <button onclick="executeCompensatory()" class="flex-[2] py-3 font-black uppercase text-xs text-white bg-emerald-600 shadow-md rounded-xl hover:bg-emerald-700">Grant to Ledger</button>
+                <button onclick="executeCompensatory()" class="flex-[2] py-3 font-black uppercase text-xs text-white bg-slate-900 shadow-md rounded-xl hover:bg-slate-800">Apply to Ledger</button>
             </div>
         </div>
     </div>
@@ -717,7 +720,7 @@
 
                 trs.forEach(t => {
                     // Global metric (dashboard) calculates regardless of baseline
-                    if(t.type === 'COMPENSATORY_GRANT' && t.date.substring(0,7) === new Date().toISOString().substring(0,7)) compTotal += t.amount;
+                    if((t.type === 'COMPENSATORY_GRANT' || t.type === 'COMPENSATORY_REVOKE') && t.date.substring(0,7) === new Date().toISOString().substring(0,7)) compTotal += t.amount;
                     
                     // Clean Cutover Math: Only count transactions that occurred strictly AFTER the Baseline Date
                     // We use t.date for LEAVE_TAKEN and COMPENSATORY to ensure dates map cleanly
@@ -818,7 +821,7 @@
                 }).join('') || '<p class="text-xs font-bold text-slate-400 p-4 text-center bg-slate-50 rounded-xl border border-slate-200">No transactions found.</p>';
             }
 
-            document.getElementById('comp-log').innerHTML = genLogHtml(allTransactions.filter(t => t.type === 'COMPENSATORY_GRANT'));
+            document.getElementById('comp-log').innerHTML = genLogHtml(allTransactions.filter(t => t.type === 'COMPENSATORY_GRANT' || t.type === 'COMPENSATORY_REVOKE'));
             document.getElementById('baseline-log').innerHTML = genLogHtml(allTransactions.filter(t => t.type === 'BASELINE'));
         }
 
@@ -1052,19 +1055,31 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
             alert("Modification rejected and returned to normal status.");
         }
 
-        async function executeCompensatory() {
+   async function executeCompensatory() {
             const staffList = Array.from(document.querySelectorAll('.comp-staff-cb:checked')).map(cb => cb.value);
-            const amt = document.getElementById('comp-amount').value;
+            let amt = parseFloat(document.getElementById('comp-amount').value);
+            const actionType = document.getElementById('comp-action').value;
             const reason = document.getElementById('comp-reason').value.trim();
             if(staffList.length === 0 || !reason) return alert("Select staff and provide a reason.");
             
+            // Apply mathematically negative logic for revokes
+            if (actionType === 'COMPENSATORY_REVOKE') {
+                amt = -Math.abs(amt);
+            } else {
+                amt = Math.abs(amt);
+            }
+
             const batch = db.batch();
             staffList.forEach(email => {
                 const ref = getCollection("leave_transactions").doc();
-                batch.set(ref, { staffEmail: email, amount: parseFloat(amt), type: 'COMPENSATORY_GRANT', reason: reason, managedBy: activeAdminName, timestamp: Date.now(), date: new Date().toISOString().split('T')[0] });
+                batch.set(ref, { staffEmail: email, amount: amt, type: actionType, reason: reason, managedBy: activeAdminName, timestamp: Date.now(), date: new Date().toISOString().split('T')[0] });
             });
             await batch.commit();
-            alert(`Granted +${amt} comp leave to ${staffList.length} staff!`);
+            
+            const actionWord = actionType === 'COMPENSATORY_GRANT' ? 'Granted' : 'Revoked';
+            const sign = actionType === 'COMPENSATORY_GRANT' ? '+' : '';
+            alert(`${actionWord} ${sign}${amt} comp leave for ${staffList.length} staff!`);
+            
             closeModal('comp-modal');
         }
 
