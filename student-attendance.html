@@ -495,10 +495,14 @@
                         <select id="spl-student-select" class="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none"><option value="">-- Search or Select Class First --</option></select>
                     </div>
                 </div>
-                <div class="border-t border-slate-100 pt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+             <div class="border-t border-slate-100 pt-4 grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-6 gap-4">
                     <div>
-                        <label class="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">Date</label>
+                        <label class="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">Start Date</label>
                         <input type="date" id="spl-date" class="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">End Date (Opt.)</label>
+                        <input type="date" id="spl-end-date" class="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none">
                     </div>
                     <div>
                         <label class="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">Leave Type</label>
@@ -507,7 +511,7 @@
                             <option value="PARTIAL">Partial Day (Time Based)</option>
                         </select>
                     </div>
-                    <div id="spl-time-container" style="display: none;" class="col-span-1 lg:col-span-2 flex gap-2">
+                    <div id="spl-time-container" style="display: none;" class="col-span-1 sm:col-span-3 lg:col-span-3 flex gap-2">
                         <div class="flex-1">
                             <label class="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">Start Time</label>
                             <input type="time" id="spl-start" class="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none">
@@ -517,12 +521,12 @@
                             <input type="time" id="spl-end" class="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none">
                         </div>
                     </div>
-                    <div class="lg:col-span-3">
+                    <div class="sm:col-span-2 lg:col-span-4">
                         <label class="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">Reason / Remarks</label>
                         <input type="text" id="spl-reason" placeholder="e.g. Medical emergency, early pickup..." class="w-full border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none">
                     </div>
-                    <div class="flex items-end lg:col-span-2">
-                        <button onclick="submitSpecialLeave()" class="w-full bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all h-[38px]">Mark Authorized Leave</button>
+                    <div class="flex items-end sm:col-span-1 lg:col-span-2">
+                        <button onclick="submitSpecialLeave(this)" class="w-full bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all h-[38px]">Mark Leave</button>
                     </div>
                 </div>
             </div>
@@ -5973,15 +5977,17 @@ async function printLedgerPDF() {
             select.innerHTML = opts;
         }
 
-        async function submitSpecialLeave() {
+   async function submitSpecialLeave(btnContext) {
             const stuId = document.getElementById('spl-student-select').value;
-            const date = document.getElementById('spl-date').value;
+            const startDateStr = document.getElementById('spl-date').value;
+            const endDateStr = document.getElementById('spl-end-date').value || startDateStr; // Defaults to single day
             const type = document.getElementById('spl-type').value;
             const start = document.getElementById('spl-start').value;
             const end = document.getElementById('spl-end').value;
             const reason = document.getElementById('spl-reason').value.trim();
 
-            if (!stuId || !date || !reason) return alert("Please select student, date, and enter a reason.");
+            if (!stuId || !startDateStr || !reason) return alert("Please select student, start date, and enter a reason.");
+            if (startDateStr > endDateStr) return alert("Start date cannot be after end date.");
             if (type === 'PARTIAL' && !start) return alert("Partial leaves must have a Start Time.");
 
             const stu = studentsData.find(s => s.id === stuId);
@@ -5997,23 +6003,57 @@ async function printLedgerPDF() {
                 }
             }
 
+            const btn = btnContext || event.target;
+            const origText = btn.innerText;
+            btn.innerText = "⏳ Saving...";
+            btn.disabled = true;
+
             try {
-                await getCollection("special_leaves").add({
-                    studentId: stu.id,
-                    className: stu.className,
-                    section: stu.section,
-                    date: date,
-                    type: type,
-                    startTime: type === 'PARTIAL' ? start : "",
-                    endTime: type === 'PARTIAL' ? end : "",
-                    reason: reason,
-                    authorizerName: authName,
-                    authorizerDept: deptName,
-                    authorizerEmail: activeStaff ? activeStaff.email : 'admin',
-                    status: "ACTIVE",
-                    timestamp: Date.now()
-                });
-                alert("✅ Special Leave Authorized & Locked successfully.");
+                const batch = db.batch();
+                let dCur = new Date(startDateStr + "T00:00:00");
+                const dEnd = new Date(endDateStr + "T00:00:00");
+                const offset = dCur.getTimezoneOffset() * 60000;
+
+                let addedCount = 0;
+
+                while (dCur <= dEnd) {
+                    const currentDateStr = new Date(dCur.getTime() - offset).toISOString().split('T')[0];
+                    
+                    // Skip Sundays automatically
+                    if (dCur.getDay() !== 0) {
+                        const docRef = getCollection("special_leaves").doc();
+                        batch.set(docRef, {
+                            studentId: stu.id,
+                            className: stu.className,
+                            section: stu.section,
+                            date: currentDateStr,
+                            type: type,
+                            startTime: type === 'PARTIAL' ? start : "",
+                            endTime: type === 'PARTIAL' ? end : "",
+                            reason: reason,
+                            authorizerName: authName,
+                            authorizerDept: deptName,
+                            authorizerEmail: activeStaff ? activeStaff.email : 'admin',
+                            status: "ACTIVE",
+                            timestamp: Date.now()
+                        });
+                        addedCount++;
+                    }
+                    dCur.setDate(dCur.getDate() + 1);
+                }
+
+                if (addedCount === 0) {
+                    btn.innerText = origText; btn.disabled = false;
+                    return alert("No valid working days selected (e.g., only Sunday was selected).");
+                }
+
+                await batch.commit();
+
+                alert(`✅ Special Leave Authorized & Locked successfully for ${addedCount} day(s).`);
+                
+                // Reset optional fields
+                document.getElementById('spl-end-date').value = "";
+                document.getElementById('spl-reason').value = "";
                 
                 const splSnap = await getCollection("special_leaves").where("status", "==", "ACTIVE").get();
                 specialLeavesData = [];
@@ -6022,6 +6062,8 @@ async function printLedgerPDF() {
             } catch(e) {
                 console.error(e);
                 alert("Failed to save special leave.");
+            } finally {
+                if(btn) { btn.innerText = origText; btn.disabled = false; }
             }
         }
 
