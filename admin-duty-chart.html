@@ -648,30 +648,8 @@ async function checkSavedRoster(eDate, shiftCode) {
                         const data = snap.data();
                         let rawRoster = data.rosterData || {};
                         
-                        // IF we are loading a specific shift, actively purge any rooms that don't match this shift's expected format
-                        if (shiftCode) {
-                            // Generate the stripped legacy tag (e.g., "0850-1200") to match older database saves
-                            const legacyTag = shiftCode.replace(/\s+/g, '').replace(/:/g, ''); 
-                            
-                            generatedRoster = {};
-                            Object.keys(rawRoster).forEach(roomKey => {
-                                const isLegacyRoom = !roomKey.includes('[');
-
-                                if (isLegacyRoom) {
-                                    // Check if a tagged version of this exact legacy room exists in the raw data
-                                    const hasTaggedVersion = Object.keys(rawRoster).some(k => k === `${roomKey} [${shiftCode}]` || k === `${roomKey} [${legacyTag}]`);
-                                    if (!hasTaggedVersion) {
-                                        generatedRoster[roomKey] = rawRoster[roomKey];
-                                    }
-                                } else if (roomKey.includes(`[${shiftCode}]`) || roomKey.includes(`[${legacyTag}]`)) {
-                                    generatedRoster[roomKey] = rawRoster[roomKey];
-                                }
-                            });
-                        } else {
-                            // Standard load (No shift code selected)
-                            generatedRoster = rawRoster;
-                        }
-                        
+                    // Deep clone to prevent mutating the Firestore cache when switching shifts
+                        generatedRoster = JSON.parse(JSON.stringify(rawRoster));
                         customInstructions = data.instructions || [];
                     
                     document.getElementById('chart-main-title').innerText = "Exam Duty Chart";
@@ -914,30 +892,10 @@ if (currentMode === 'EXAM' && eDate) {
             if (!roomSnap.empty) {
                 roomSnap.forEach(doc => {
                     const roomData = doc.data();
-                    let rName = roomData.roomName || "";
+let rName = roomData.roomName || "";
                     
-         // Filter out rooms that don't belong to the active shift
-                    if (shortShiftCode) {
-                        const legacyTag = shortShiftCode.replace(/\s+/g, '').replace(/:/g, '');
-                        const isLegacyRoom = !rName.includes('[');
-                        
-                        if (isLegacyRoom) {
-                            // Only accept a legacy room if a tagged version does NOT exist in the current snapshot
-                            let hasTaggedVersion = false;
-                            roomSnap.forEach(d => {
-                                const checkName = d.data().roomName || "";
-                                if (checkName === `${rName} [${shortShiftCode}]` || checkName === `${rName} [${legacyTag}]`) {
-                                    hasTaggedVersion = true;
-                                }
-                            });
-                            if (hasTaggedVersion) return; // Skip this legacy room
-                        } else {
-                            // If it has a tag, it MUST match the correct shift
-                            if (!rName.endsWith(`[${shortShiftCode}]`) && !rName.endsWith(`[${legacyTag}]`)) return;
-                        }
-                    } else {
-                        if (rName.includes('[')) return;
-                    }
+                    // Allow all rooms from the seating plan regardless of their exact tag.
+                    // The UI will deduplicate them down to their base room names automatically.
 
                     const roomAllocs = roomData.allocations || {};
                     Object.assign(currentAllocations, roomAllocs);
@@ -1815,12 +1773,9 @@ if (currentMode === 'EXAM' && eDate) {
                     ? window.renderedActiveRooms.some(active => active.split(' [')[0].toUpperCase() === baseName) 
                     : true;
                 
-                if (isActiveForShift && !uniqueRoomNames.has(baseName)) {
+           if (isActiveForShift && !uniqueRoomNames.has(baseName)) {
                     uniqueRoomNames.add(baseName);
                     safeRoomsToRender.push(r);
-                } else {
-                    // It's a duplicate legacy room or an inactive room from another shift. Clean it out!
-                    delete generatedRoster[r]; 
                 }
             });
 
