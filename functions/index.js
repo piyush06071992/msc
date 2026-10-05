@@ -530,36 +530,59 @@ exports.compileSingleRoomOnDemand = onRequest({
         let allocDoc = await admin.firestore().collection(`exam_seating_rooms`).doc(docId).get();
         let allocations = {};
         
-        if (allocDoc.exists) {
-            allocations = allocDoc.data().allocations || {};
-        } else {
-            // Case-Insensitive Fallback Lookup
-            const snap = await admin.firestore().collection(`exam_seating_rooms`)
-                .where("date", "==", date)
-                .where("center", "==", center)
-                .get();
-            
-            const match = snap.docs.find(d => (d.data().roomName || "").toUpperCase() === roomName.toUpperCase());
-            
-            if (match) {
-                allocations = match.data().allocations || {};
-            } else {
-                // Legacy Monolithic Fallback
-                const oldDocId = `${center}_${date}`;
-                const oldDoc = await admin.firestore().collection(`exam_seating_allocations`).doc(oldDocId).get();
-                
-                if (oldDoc.exists) {
-                    const data = oldDoc.data();
-                    const allAllocations = (typeof data.allocations === 'string') ? JSON.parse(data.allocations) : (data.allocations || {});
+      if (allocDoc.exists) {
+                    allocations = allocDoc.data().allocations || {};
+                } else {
+                    // Case-Insensitive & Base Name Fallback Lookup
+                    const snap = await admin.firestore().collection(`exam_seating_rooms`)
+                        .where("date", "==", date)
+                        .where("center", "==", center)
+                        .get();
                     
-                    Object.keys(allAllocations).forEach(key => {
-                        if (key.toUpperCase().startsWith(`${roomName}-`.toUpperCase())) {
-                            allocations[key] = allAllocations[key];
-                        }
+                    const baseRoomName = roomName.split(' [')[0].toUpperCase();
+                    
+                    const match = snap.docs.find(d => {
+                        const dbRoom = (d.data().roomName || "").toUpperCase();
+                        return dbRoom === roomName.toUpperCase() || dbRoom === baseRoomName;
                     });
+                    
+                    if (match) {
+                        const dbAllocations = match.data().allocations || {};
+                        const dbRoom = match.data().roomName || "";
+                        
+                        // Auto-migrate keys if matched on base name (un-shifted legacy format)
+                        if (dbRoom.toUpperCase() !== roomName.toUpperCase() && roomName.includes('[')) {
+                            Object.keys(dbAllocations).forEach(k => {
+                                if (k.includes('-R')) {
+                                    const rest = k.substring(k.indexOf('-R'));
+                                    allocations[`${roomName}${rest}`] = dbAllocations[k];
+                                }
+                            });
+                        } else {
+                            allocations = dbAllocations;
+                        }
+                    } else {
+                        // Legacy Monolithic Fallback
+                        const oldDocId = `${center}_${date}`;
+                        const oldDoc = await admin.firestore().collection(`exam_seating_allocations`).doc(oldDocId).get();
+                        
+                        if (oldDoc.exists) {
+                            const data = oldDoc.data();
+                            const allAllocations = (typeof data.allocations === 'string') ? JSON.parse(data.allocations) : (data.allocations || {});
+                            
+                            Object.keys(allAllocations).forEach(key => {
+                                if (key.toUpperCase().startsWith(`${roomName}-`.toUpperCase())) {
+                                    allocations[key] = allAllocations[key];
+                                } else if (roomName.includes('[') && key.toUpperCase().startsWith(`${baseRoomName}-`.toUpperCase())) {
+                                    if (key.includes('-R')) {
+                                        const rest = key.substring(key.indexOf('-R'));
+                                        allocations[`${roomName}${rest}`] = allAllocations[key];
+                                    }
+                                }
+                            });
+                        }
+                    }
                 }
-            }
-        }
 
    if (Object.keys(allocations).length === 0) {
             res.status(404).send({ error: `Seating allocations not found for room: ${roomName} on ${date}.` });
