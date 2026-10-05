@@ -1372,21 +1372,21 @@ function switchMainTab(tab) {
                     let dutyMap = {};
                     
                  rostersSnap.forEach(doc => {
-                        if (doc.id.startsWith("exam_duty_")) {
+             if (doc.id.startsWith("exam_duty_")) {
                             const rawId = doc.id.replace("exam_duty_", "");
                             const dateStr = rawId.split('_')[0]; // Extract pure YYYY-MM-DD
                             const rosterData = doc.data().rosterData || {};
                             Object.keys(rosterData).forEach(roomName => {
                                 const cols = rosterData[roomName].columns || {};
-                                Object.values(cols).forEach(col => {
+                                Object.entries(cols).forEach(([colKey, col]) => {
                                     if (col.status === 'ASSIGNED' && col.staff && normMatch(col.staff.name) === mySafeName) {
-                                        const key = `${dateStr}_${roomName}`;
+                                        // Use timing (or colKey) to separate shifts in the same room
+                                        const timeOnly = col.timing ? col.timing.split(' (')[0].trim() : colKey;
+                                        const key = `${dateStr}_${roomName}_${timeOnly}`;
                                         if (!dutyMap[key]) {
                                             dutyMap[key] = { date: dateStr, room: roomName, timings: [] };
                                         }
-                                        if (col.timing) {
-                                            // Extract just the time part, removing the duration e.g., "(60m)"
-                                            const timeOnly = col.timing.split(' (')[0].trim();
+                                        if (!dutyMap[key].timings.includes(timeOnly)) {
                                             dutyMap[key].timings.push(timeOnly);
                                         }
                                     }
@@ -2056,23 +2056,28 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
 
        try {
-                // Fetch the specific partitioned room document
-                const baseRoomName = roomName.split(' [')[0]; // Strip shift tags like "[09001100]"
-                const safeRoomName = baseRoomName.replace(/[^a-zA-Z0-9]/g, '_');
-                const docId = `${activeCenter}_${dateStr}_${safeRoomName}`;
+              // 1. Try fetching the exact room name (including tags if they came from seating plan)
+                const exactSafeName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+                const exactDocId = `${activeCenter}_${dateStr}_${exactSafeName}`;
+                let roomSnap = await db.collection("exam_seating_rooms").doc(exactDocId).get();
                 
-                const roomDocRef = db.collection("exam_seating_rooms").doc(docId);
-                const roomSnap = await roomDocRef.get();
-                
+                // 2. If exact match is missing or empty, fallback to the stripped base room name
+                const baseRoomName = roomName.split(' [')[0]; 
+                if (!roomSnap.exists || Object.keys(roomSnap.data()?.allocations || {}).length === 0) {
+                    const baseSafeName = baseRoomName.replace(/[^a-zA-Z0-9]/g, '_');
+                    const baseDocId = `${activeCenter}_${dateStr}_${baseSafeName}`;
+                    roomSnap = await db.collection("exam_seating_rooms").doc(baseDocId).get();
+                }
+
                 let seatedStudents = [];
-                if (roomSnap.exists) {
+                if (roomSnap.exists && Object.keys(roomSnap.data()?.allocations || {}).length > 0) {
                     const allocs = roomSnap.data().allocations || {};
                     Object.keys(allocs).forEach(seatId => {
                         const stu = allocs[seatId];
                         if (stu) seatedStudents.push({ seatId, ...stu });
                     });
                 } else {
-                    // Legacy Fallback
+                    // 3. Legacy Fallback to exam_seating_allocations
                     const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
                     const allocSnap = await allocDocRef.get();
                     if (allocSnap.exists) {
