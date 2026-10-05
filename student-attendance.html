@@ -1108,8 +1108,10 @@ function switchMainTab(tab) {
             if(document.getElementById('btn-tab-spl')) document.getElementById('btn-tab-spl').className = tab === 'specialleaves' ? activeClass : inactiveClass;
             if(document.getElementById('btn-tab-exam')) document.getElementById('btn-tab-exam').className = tab === 'examrooms' ? activeClass : inactiveClass;
 
-            if (tab === 'examrooms') {
+           if (tab === 'examrooms') {
+                document.getElementById('exam-room-date-filter').value = todayISO;
                 populateExamRoomDates();
+                loadExamRoomsForDate();
             }
 
             if (tab === 'specialleaves') {
@@ -3804,17 +3806,42 @@ async function saveDailyAttendance() {
         }
 
 const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.email) : "");
-        let teacherInchargeRegisters = [];
+        let targetRegistersToSync = [];
+        
+        // --- SMART EXAM SYNC: Fetch today's schedule to find the exact Exam Subject ---
+        const dObjDetect = new Date(dateStr);
+        const dayNameDetect = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dObjDetect.getDay()];
+        const overrideDetect = timetableHistoryData.find(o => o.date === dateStr && o.type !== "FUTURE_MASTER");
+        const activeSched = (overrideDetect && overrideDetect.schedule) ? overrideDetect.schedule : timetableData.filter(t => t.day === dayNameDetect);
+
         if (window.instituteStructures) {
             window.instituteStructures.forEach(st => {
                 const inchargeName = normMatch(st.secInchargeName || st.classInchargeName || "");
-                // FIX: If it's an Exam Room, the invigilator MUST route attendance to ALL respective incharge registers!
+                
                 if (currentReg.isExamRoom || inchargeName === mySafeName || isAdmin) {
-                    teacherInchargeRegisters.push({
+                    // 1. Always sync to Class Incharge (For Daily School Roll)
+                    targetRegistersToSync.push({
                         className: st.className,
                         section: st.sectionName || st.section,
                         subject: "CLASS INCHARGE"
                     });
+                    
+                    // 2. If it's an Exam Room, ALSO sync to an isolated Exam Register (For True Evaluation Math)
+                    if (currentReg.isExamRoom) {
+                        const examSlot = activeSched.find(slot => 
+                            normMatch(slot.className) === normMatch(st.className) && 
+                            normMatch(slot.section || slot.sectionName) === normMatch(st.sectionName || st.section) &&
+                            (slot.subject || slot.title || "").toUpperCase().match(/EXAM|UT|OT|PREBOARD|TERMINAL/)
+                        );
+                        
+                        if (examSlot) {
+                            targetRegistersToSync.push({
+                                className: st.className,
+                                section: st.sectionName || st.section,
+                                subject: examSlot.subject || examSlot.title
+                            });
+                        }
+                    }
                 }
             });
         }
@@ -3841,12 +3868,13 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
                     absentWhatsAppList.push({ name: stuName, roll: stuRoll, id: stuId, status: 'L', section: sName });
                 }
 
-                const matchingReg = teacherInchargeRegisters.find(r => 
+                // Push status to ALL matched registers (Incharge + Dedicated Exam Subject)
+                const matchingRegs = targetRegistersToSync.filter(r => 
                     normMatch(r.className) === normMatch(cName) && 
                     normMatch(r.section) === normMatch(sName)
                 );
 
-                if (matchingReg) {
+                matchingRegs.forEach(matchingReg => {
                     const docId = `att_${activeCenter}_${normDoc(matchingReg.className)}_${normDoc(matchingReg.section)}_${normDoc(matchingReg.subject)}_${monthKey}`;
                     if (!sectionUpdates[docId]) {
                         sectionUpdates[docId] = {
@@ -3857,7 +3885,7 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
                         };
                     }
                     sectionUpdates[docId].records[stuId] = status;
-                }
+                });
             }
         });
 
