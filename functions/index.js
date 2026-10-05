@@ -454,13 +454,14 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             
             const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
             
-            copiedPages.forEach(page => {
+            copiedPages.forEach((page, pageIdx) => {
                 mergedPdf.addPage(page);
                 
                 const { width, height } = page.getSize();
                 const size = 9;
                 const color = rgb(0.2, 0.2, 0.2);
                 const opacity = 0.9;
+                const { degrees } = require("pdf-lib");
 
                 const stu = task.student;
                 
@@ -477,19 +478,48 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 if (task.layout === 'A3_BOOKLET' || task.layout === 'A5_BOOKLET') {
                     const halfWidth = width / 2;
                     
-                    // -- LEFT PAGE STAMPS --
-                    page.drawText(topLeftText, { x: 20, y: topY, size, font, color, opacity });
-                    page.drawText(topRightText, { x: halfWidth - font.widthOfTextAtSize(topRightText, size) - 20, y: topY, size, font, color, opacity });
-                    
-                    page.drawText(bottomLeftText, { x: 20, y: bottomY, size, font, color, opacity });
-                    page.drawText(bottomRightText, { x: halfWidth - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
+                    if (pageIdx % 2 === 0) {
+                        // FRONT PAGE (Upright)
+                        // -- LEFT PAGE STAMPS --
+                        page.drawText(topLeftText, { x: 20, y: topY, size, font, color, opacity });
+                        page.drawText(topRightText, { x: halfWidth - font.widthOfTextAtSize(topRightText, size) - 20, y: topY, size, font, color, opacity });
+                        
+                        page.drawText(bottomLeftText, { x: 20, y: bottomY, size, font, color, opacity });
+                        page.drawText(bottomRightText, { x: halfWidth - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
 
-                    // -- RIGHT PAGE STAMPS --
-                    page.drawText(topLeftText, { x: halfWidth + 20, y: topY, size, font, color, opacity });
-                    page.drawText(topRightText, { x: width - font.widthOfTextAtSize(topRightText, size) - 20, y: topY, size, font, color, opacity });
-                    
-                    page.drawText(bottomLeftText, { x: halfWidth + 20, y: bottomY, size, font, color, opacity });
-                    page.drawText(bottomRightText, { x: width - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
+                        // -- RIGHT PAGE STAMPS --
+                        page.drawText(topLeftText, { x: halfWidth + 20, y: topY, size, font, color, opacity });
+                        page.drawText(topRightText, { x: width - font.widthOfTextAtSize(topRightText, size) - 20, y: topY, size, font, color, opacity });
+                        
+                        page.drawText(bottomLeftText, { x: halfWidth + 20, y: bottomY, size, font, color, opacity });
+                        page.drawText(bottomRightText, { x: width - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
+                    } else {
+                        // BACK PAGE (Inverted / Rotated 180 degrees)
+                        const invTopY = 12; // Physical bottom edge becomes logical top
+                        const invBottomY = height - 6; // Physical top edge becomes logical bottom
+                        
+                        // -- LEFT PAGE STAMPS (Physical left half) --
+                        // Logical Top-Left (SEAT): Placed at physical bottom-right
+                        page.drawText(topLeftText, { x: halfWidth - 20, y: invTopY, size, font, color, opacity, rotate: degrees(180) });
+                        // Logical Top-Right (ROLL): Placed at physical bottom-left
+                        page.drawText(topRightText, { x: 20 + font.widthOfTextAtSize(topRightText, size), y: invTopY, size, font, color, opacity, rotate: degrees(180) });
+                        
+                        // Logical Bottom-Left (NAME): Placed at physical top-right
+                        page.drawText(bottomLeftText, { x: halfWidth - 20, y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
+                        // Logical Bottom-Right (CLASS): Placed at physical top-left
+                        page.drawText(bottomRightText, { x: 20 + font.widthOfTextAtSize(bottomRightText, size), y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
+
+                        // -- RIGHT PAGE STAMPS (Physical right half) --
+                        // Logical Top-Left (SEAT): Placed at physical bottom-right
+                        page.drawText(topLeftText, { x: width - 20, y: invTopY, size, font, color, opacity, rotate: degrees(180) });
+                        // Logical Top-Right (ROLL): Placed at physical bottom-left
+                        page.drawText(topRightText, { x: halfWidth + 20 + font.widthOfTextAtSize(topRightText, size), y: invTopY, size, font, color, opacity, rotate: degrees(180) });
+                        
+                        // Logical Bottom-Left (NAME): Placed at physical top-right
+                        page.drawText(bottomLeftText, { x: width - 20, y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
+                        // Logical Bottom-Right (CLASS): Placed at physical top-left
+                        page.drawText(bottomRightText, { x: halfWidth + 20 + font.widthOfTextAtSize(bottomRightText, size), y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
+                    }
                 } else {
                     // Standard Portrait Layouts
                     page.drawText(topLeftText, { x: 20, y: topY, size, font, color, opacity });
