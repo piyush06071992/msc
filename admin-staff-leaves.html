@@ -540,13 +540,14 @@
         let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
         const collPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
 
-        let allLeaves = [], allTransactions = [], allStaff = [], activeAdminName = "Admin";
+ let allLeaves = [], allTransactions = [], allStaff = [], activeAdminName = "Admin";
         let timetableData = [], historyData = []; // NEW: Memory for the Coordination Engine
         
-    // BUG FIX: Added CANCEL: 0 to mathematically handle full refunds without throwing NaN
+       // BUG FIX: Added CANCEL: 0 to mathematically handle full refunds without throwing NaN
         let leaveValues = { 'CANCEL': 0 };
         let leavePolicies = [];
         let routingNumbers = {}; // NEW: Store WhatsApp Routing
+        let holidaysData = []; // NEW: Memory for Holiday Overlaps
 
         window.onload = async () => {
             const authStatus = sessionStorage.getItem('minervaAdminAuth');
@@ -677,8 +678,14 @@
                 renderPending(); // Re-render math in case ratios changed
             });
 
-            db.collection(collPrefix + "timetable").get().then(snap => timetableData = snap.docs.map(d => d.data()));
+        db.collection(collPrefix + "timetable").get().then(snap => timetableData = snap.docs.map(d => d.data()));
             db.collection(collPrefix + "timetable_history").get().then(snap => historyData = snap.docs.map(d => d.data()));
+            
+            // Listen for Calendar Holidays & Events
+            db.collection("school_holidays").onSnapshot(snap => {
+                holidaysData = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                if(allLeaves.length > 0) renderPending(); // Re-render if new holidays are added
+            });
 
             db.collection("staff_applications").where("status", "==", "approved").get().then(snap => {
                 let tempStaff = [];
@@ -787,18 +794,48 @@
             document.getElementById('metric-mods').innerText = mods.length;
 
             if(reqs.length === 0) pendingList.innerHTML = `<p class="text-xs font-bold text-slate-400 p-4 text-center bg-slate-50 rounded-xl">No pending leave requests.</p>`;
-            else {
+           else {
               pendingList.innerHTML = reqs.map(req => {
                     let calcAmt = leaveValues[req.type] || 0;
+                    let sd = new Date(req.startDate); 
+                    let ed = new Date(req.endDate || req.startDate);
+                    let leaveDates = [];
+
                     if (req.type === 'FULL') {
-                        let sd = new Date(req.startDate); let ed = new Date(req.endDate || req.startDate);
                         let validDays = 0; let curr = new Date(sd);
                         while (curr <= ed) {
+                            let yyyy = curr.getFullYear(); let mm = String(curr.getMonth() + 1).padStart(2, '0'); let dd = String(curr.getDate()).padStart(2, '0');
+                            leaveDates.push(`${yyyy}-${mm}-${dd}`);
                             if (curr.getDay() !== 0) validDays++; // Skip Sundays
                             curr.setDate(curr.getDate() + 1);
                         }
                         calcAmt = validDays * -1;
+                    } else {
+                        // For partial leaves
+                        let yyyy = sd.getFullYear(); let mm = String(sd.getMonth() + 1).padStart(2, '0'); let dd = String(sd.getDate()).padStart(2, '0');
+                        leaveDates.push(`${yyyy}-${mm}-${dd}`);
                     }
+
+                    // -- NEW: CHECK HOLIDAYS OVERLAP --
+                    let holidayNotices = [];
+                    leaveDates.forEach(tDate => {
+                        const hol = holidaysData.find(h => h.date === tDate || (h.startDate <= tDate && (h.endDate || h.startDate) >= tDate));
+                        if (hol) {
+                            let timeStr = hol.isFullDay ? "Full Day" : `${hol.startTime} - ${hol.endTime}`;
+                            let staffStr = hol.staffStatus === 'OFF' ? 'Staff Off' : (hol.staffStatus === 'FULL' ? 'Full Staff' : 'Custom Staff');
+                            holidayNotices.push(`📅 ${tDate}: ${hol.reason || hol.type} (${timeStr} | ${staffStr})`);
+                        }
+                    });
+                    
+                    let holidayHtml = "";
+                    if (holidayNotices.length > 0) {
+                        holidayHtml = `<div class="bg-indigo-50 border border-indigo-200 p-3 rounded-xl mb-3 text-xs font-bold text-indigo-800 uppercase tracking-widest shadow-sm">
+                            <p class="font-black mb-1 text-[10px] text-indigo-600">⚠️ Calendar Overlap Detected:</p>
+                            <ul class="list-disc pl-5 space-y-0.5 text-[9px]">${holidayNotices.map(n => `<li>${n}</li>`).join('')}</ul>
+                            <p class="text-[8px] text-indigo-500 mt-1 italic">Note: Review staff status and modify deduction amount below if necessary.</p>
+                        </div>`;
+                    }
+                    // ----------------------------------
                     
                    let adjHtml = (req.adjustments || []).map((adj, i) => {
                         let subState = "";
@@ -817,10 +854,11 @@
 
                     return `
                     <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                        <div class="flex justify-between items-start mb-2">
+                       <div class="flex justify-between items-start mb-2">
                             <div><h4 class="font-black text-sm uppercase flex items-center">${req.teacherName} ${deptBadge}</h4><p class="text-[10px] font-bold text-slate-500 uppercase mt-0.5">${new Date(req.startDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short'})} to ${req.endDate ? new Date(req.endDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short'}) : new Date(req.startDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short'})}</p></div>
                             <span class="text-[10px] font-black px-3 py-1 rounded bg-slate-200 uppercase">${req.type} LEAVE</span>
                         </div>
+                        ${holidayHtml}
                         <p class="text-xs text-slate-600 font-bold mb-3 bg-white p-2.5 rounded-lg border border-slate-100 shadow-sm">${req.reason}</p>
                         ${adjHtml ? `<div class="bg-white p-3 rounded-xl border border-slate-100 mb-2 shadow-sm">${adjHtml}</div>` : ''}
                         <div class="mb-3 text-right border-t border-slate-100 pt-3">
@@ -845,13 +883,44 @@
                     
                     const isPending = req.status === "PENDING";
                     
+                    let sd = new Date(req.startDate); 
+                    let ed = new Date(req.endDate || req.startDate);
+                    let leaveDates = [];
+
                 let origAmt = leaveValues[req.type] || 0;
                     if (req.type === 'FULL') {
-                        let sd = new Date(req.startDate); let ed = new Date(req.endDate || req.startDate);
                         let validDays = 0; let curr = new Date(sd);
-                        while (curr <= ed) { if (curr.getDay() !== 0) validDays++; curr.setDate(curr.getDate() + 1); }
+                        while (curr <= ed) { 
+                            let yyyy = curr.getFullYear(); let mm = String(curr.getMonth() + 1).padStart(2, '0'); let dd = String(curr.getDate()).padStart(2, '0');
+                            leaveDates.push(`${yyyy}-${mm}-${dd}`);
+                            if (curr.getDay() !== 0) validDays++; 
+                            curr.setDate(curr.getDate() + 1); 
+                        }
                         origAmt = validDays * -1;
+                    } else {
+                        let yyyy = sd.getFullYear(); let mm = String(sd.getMonth() + 1).padStart(2, '0'); let dd = String(sd.getDate()).padStart(2, '0');
+                        leaveDates.push(`${yyyy}-${mm}-${dd}`);
                     }
+
+                    // -- NEW: CHECK HOLIDAYS OVERLAP FOR MODS --
+                    let holidayNotices = [];
+                    leaveDates.forEach(tDate => {
+                        const hol = holidaysData.find(h => h.date === tDate || (h.startDate <= tDate && (h.endDate || h.startDate) >= tDate));
+                        if (hol) {
+                            let timeStr = hol.isFullDay ? "Full Day" : `${hol.startTime} - ${hol.endTime}`;
+                            let staffStr = hol.staffStatus === 'OFF' ? 'Staff Off' : (hol.staffStatus === 'FULL' ? 'Full Staff' : 'Custom Staff');
+                            holidayNotices.push(`📅 ${tDate}: ${hol.reason || hol.type} (${timeStr} | ${staffStr})`);
+                        }
+                    });
+                    
+                    let holidayHtml = "";
+                    if (holidayNotices.length > 0) {
+                        holidayHtml = `<div class="bg-indigo-50 border border-indigo-200 p-3 rounded-xl mb-3 text-xs font-bold text-indigo-800 uppercase tracking-widest shadow-sm mt-2">
+                            <p class="font-black mb-1 text-[10px] text-indigo-600">⚠️ Calendar Overlap Detected:</p>
+                            <ul class="list-disc pl-5 space-y-0.5 text-[9px]">${holidayNotices.map(n => `<li>${n}</li>`).join('')}</ul>
+                        </div>`;
+                    }
+                    // ------------------------------------------
                     
                     // NEW: Automatically calculate the cost of the NEW date range if they return early
                     let newAmt = 0;
@@ -876,13 +945,14 @@
 
                     return `
                     <div class="bg-amber-50 p-4 rounded-xl border border-amber-200 shadow-sm">
-                        <div class="flex justify-between items-start mb-2">
+                      <div class="flex justify-between items-start mb-2">
                             <div><h4 class="font-black text-amber-900 text-sm uppercase flex items-center">${req.teacherName} ${deptBadge}</h4><p class="text-[10px] font-bold text-amber-700 uppercase mt-0.5">${new Date(req.startDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short'})} <span class="text-slate-400 ml-1">(${req.status})</span></p></div>
                             <div class="text-right">
                                 <span class="text-[10px] font-black line-through text-slate-400 block">${req.type}</span>
                                 <span class="text-[10px] font-black text-amber-600 bg-white px-2 py-0.5 rounded shadow-sm border border-amber-100">➔ ${mod.newType}</span>
                             </div>
                         </div>
+                        ${holidayHtml}
                         <p class="text-xs text-amber-800 font-bold mb-3 bg-white p-2.5 rounded-lg border border-amber-100 shadow-sm">Reason: ${mod.reason}</p>
                        <div class="flex flex-col sm:flex-row gap-2">
                             <button onclick="approveMod('${req.id}', '${mod.newType}', ${refundAmt}, '${mod.newEndDate || ''}')" class="flex-1 bg-amber-600 text-white font-black text-[10px] py-3 rounded-lg shadow-sm hover:bg-amber-700 uppercase tracking-widest">${btnLabel}</button>
