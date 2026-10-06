@@ -232,7 +232,7 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-       let activeStaff = null, leaveType = null;
+    let activeStaff = null, leaveType = null;
         let timetableData = [], dutyData = [], staffData = [], historyData = [], holidaysData = [];
         let selectedAdjustments = {};
         let assignedExtraDuties = []; 
@@ -240,13 +240,25 @@
         let myTransactions = [];
         let myLeaveRecords = [];
         let allLeaves = [];
+        
+        // --- NEW: DYNAMIC POLICY & SHIFT MEMORY ---
+        let leavePolicies = [];
+        let leaveValues = { 'CANCEL': 0 };
+        let myDutyStart = "08:00";
+        let myDutyEnd = "17:00";
 
         window.onload = async () => {
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
             if (!activeStaff) return window.location.replace('staff-login.html');
             
             const staffDoc = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
-            if(!staffDoc.empty) activeStaff.isLeaveIncharge = staffDoc.docs[0].data().isLeaveIncharge === true;
+            if(!staffDoc.empty) {
+                const sData = staffDoc.docs[0].data();
+                activeStaff.isLeaveIncharge = sData.isLeaveIncharge === true;
+                // Grab the custom shift times, fallback to 8-5
+                if (sData.dutyStartTime) myDutyStart = sData.dutyStartTime;
+                if (sData.dutyEndTime) myDutyEnd = sData.dutyEndTime;
+            }
 
           if(activeStaff.isLeaveIncharge) {
                 document.getElementById('tab-incharge').classList.replace('hidden', 'flex');
@@ -553,14 +565,29 @@
 async function loadDatabases() {
             const center = activeStaff.center || "GHUMARWIN";
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
-            const [tt, staff, hist, rosters, leavesSnap, holSnap] = await Promise.all([
+            const [tt, staff, hist, rosters, leavesSnap, holSnap, policySnap] = await Promise.all([
                 db.collection(prefix + "timetable").get(),
                 db.collection("staff_applications").where("status", "==", "approved").get(),
                 db.collection(prefix + "timetable_history").get(),
                 db.collection(prefix + "duty_rosters").get(),
                 db.collection(prefix + "leave_requests").get(),
-                db.collection("school_holidays").get()
+                db.collection("school_holidays").get(),
+                db.collection("configs").doc("leave_policies").get()
             ]);
+            
+            // Populate Dynamic Leave Policies
+            if (policySnap.exists) {
+                leavePolicies = policySnap.data().leaveTypes || [];
+            } else {
+                leavePolicies = [
+                    { id: 'FULL', label: 'Full Day', deduction: 1.0, isTimeBased: false, duration: 1, durationUnit: 'days', isSystem: false },
+                    { id: 'THREE_QUARTER', label: '3/4 Day', deduction: 0.75, isTimeBased: true, duration: 240, durationUnit: 'mins', isSystem: false },
+                    { id: 'HALF', label: 'Half Day', deduction: 0.5, isTimeBased: true, duration: 180, durationUnit: 'mins', isSystem: false },
+                    { id: 'SHORT', label: 'Short Leave', deduction: 0.25, isTimeBased: true, duration: 60, durationUnit: 'mins', isSystem: false }
+                ];
+            }
+            leavePolicies.forEach(p => leaveValues[p.id] = -Math.abs(p.deduction));
+
             timetableData = tt.docs.map(d => d.data());
             historyData = hist.docs.map(d => d.data());
             dutyData = rosters.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -599,28 +626,30 @@ async function loadDatabases() {
             runAnalysis();
         }
 
-        function enforceTimeRules() {
+   function enforceTimeRules() {
             const startInput = document.getElementById('l-time');
             const endInput = document.getElementById('l-end-time');
             
-            // 1. Force Absolute Bounds on Start Time (8:00 AM to 5:00 PM)
-            startInput.min = "08:00";
-            startInput.max = "17:00";
+            // 1. Force Absolute Bounds based on the Staff's Dynamic Shift
+            startInput.min = myDutyStart;
+            startInput.max = myDutyEnd;
 
             if (startInput.value) {
                 // 2. The End Time clock visually locks out any time before the Start Time
                 endInput.min = startInput.value;
-                endInput.max = "17:00";
+                endInput.max = myDutyEnd;
                 
                 let startMins = timeToMins(startInput.value);
+                let maxMins = timeToMins(myDutyEnd);
+                
                 if (endInput.value) {
                     let endMins = timeToMins(endInput.value);
                     if (endMins < startMins) endInput.value = startInput.value; 
-                    if (endMins > 1020) endInput.value = "17:00"; 
+                    if (endMins > maxMins) endInput.value = myDutyEnd; 
                 }
             } else {
-                endInput.min = "08:00";
-                endInput.max = "17:00";
+                endInput.min = myDutyStart;
+                endInput.max = myDutyEnd;
             }
         }
 
@@ -701,17 +730,20 @@ async function loadDatabases() {
             const myName = norm(activeStaff.name);
             const myEmail = activeStaff.email.toLowerCase();
 
-            let leaveStart = 0, leaveEnd = 1440;
+    let leaveStart = 0, leaveEnd = 1440;
             if (leaveType === 'PARTIAL') {
                 if(!startTime || !endTime) return;
                 leaveStart = timeToMins(startTime); leaveEnd = timeToMins(endTime);
                 
-                // Hard validation failsafe
-                if (leaveStart < 480 || leaveEnd > 1020) {
+                let dutyStartMins = timeToMins(myDutyStart);
+                let dutyEndMins = timeToMins(myDutyEnd);
+
+                // Hard validation failsafe using dynamic shift bounds
+                if (leaveStart < dutyStartMins || leaveEnd > dutyEndMins) {
                     const err = document.getElementById('time-error');
                     err.classList.remove('hidden');
                     err.className = "text-[10px] font-black uppercase bg-rose-50 text-rose-600 p-2 rounded-lg border border-rose-100 text-center animate-pulse";
-                    err.innerText = "TIMINGS MUST BE STRICTLY BETWEEN 08:00 AM AND 05:00 PM";
+                    err.innerText = `TIMINGS MUST BE STRICTLY BETWEEN ${minsTo12H(dutyStartMins).toUpperCase()} AND ${minsTo12H(dutyEndMins).toUpperCase()}`;
                     document.getElementById('analysis-section').classList.add('hidden');
                     return;
                 }
@@ -726,15 +758,39 @@ async function loadDatabases() {
                     return;
                 }
                 
-                let calcType = diff <= 60 ? "SHORT" : diff <= 240 ? "HALF" : "THREE_QUARTER";
-                let calcAmt = diff <= 60 ? "-0.25" : diff <= 240 ? "-0.50" : "-0.75";
+                // --- DYNAMIC AUTO-DETECTION ENGINE ---
+                let timePolicies = leavePolicies.filter(p => p.isTimeBased).sort((a,b) => a.duration - b.duration);
+                let matchedPolicy = null;
+                
+                // Iterate through durations to find the smallest bucket it fits into
+                for (let p of timePolicies) {
+                    let durMins = p.durationUnit === 'days' ? p.duration * 1440 : p.duration;
+                    if (diff <= durMins) {
+                        matchedPolicy = p;
+                        break;
+                    }
+                }
+                
+                // If it exceeded all defined durations, fall back to the maximum available time-based policy
+                if (!matchedPolicy && timePolicies.length > 0) {
+                    matchedPolicy = timePolicies[timePolicies.length - 1];
+                }
+                
+                // Failsafe if absolutely no policies exist
+                let calcType = matchedPolicy ? matchedPolicy.id : "PARTIAL";
+                let calcLabel = matchedPolicy ? matchedPolicy.label : "Partial Leave";
+                let calcAmt = matchedPolicy ? `-${Math.abs(matchedPolicy.deduction)}` : "-0.00";
                 
                 const err = document.getElementById('time-error');
                 err.classList.remove('hidden');
                 err.className = "text-[10px] font-black uppercase bg-indigo-50 text-indigo-700 p-2 rounded-lg border border-indigo-200 text-center shadow-sm";
-                err.innerText = `System Auto-Selected: ${calcType.replace('_', ' ')} LEAVE (${diff} mins | ${calcAmt})`;
+                err.innerText = `System Auto-Selected: ${calcLabel} (${diff} mins | ${calcAmt})`;
+                
+                // Embed the dynamic type so submitLeave() can grab it instantly
+                err.dataset.dynamicType = calcType;
             } else {
                 document.getElementById('time-error').classList.add('hidden');
+                document.getElementById('time-error').dataset.dynamicType = "";
             }
 
             document.getElementById('analysis-section').classList.remove('hidden');
@@ -1213,7 +1269,7 @@ async function loadDatabases() {
                 let rawStartDate = document.getElementById('l-date').value;
                 let rawEndDate = leaveType === 'FULL' ? (document.getElementById('l-end-date').value || rawStartDate) : rawStartDate;
 
-                let finalSaveType = leaveType || "FULL";
+             let finalSaveType = leaveType || "FULL";
                 let finalStart = null;
                 let finalEnd = null;
 
@@ -1226,10 +1282,10 @@ async function loadDatabases() {
                         return alert("⚠️ Please select the exact 'From Time' and 'Until Time' for your partial leave.");
                     }
 
-                    let sMins = timeToMins(finalStart);
-                    let eMins = timeToMins(finalEnd);
-                    let diff = eMins - sMins;
-                    finalSaveType = diff <= 60 ? "SHORT" : diff <= 240 ? "HALF" : "THREE_QUARTER";
+                    const errBox = document.getElementById('time-error');
+                    if (errBox && errBox.dataset.dynamicType) {
+                        finalSaveType = errBox.dataset.dynamicType;
+                    }
                 }
                 
              await db.collection(prefix + "leave_requests").add({
