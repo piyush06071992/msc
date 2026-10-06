@@ -3743,19 +3743,40 @@ async function backgroundSyncClassIncharge(dateStr, monthKey, className, section
             .get();
         
         let aggregated = {};
+        let existingInchargeStatus = {}; // <--- NEW: Memory to protect Incharge's manual marks
+
         snap.forEach(doc => {
             const data = doc.data();
-            if (normMatch(data.section) === normMatch(sectionName) && normMatch(data.subject) !== "classincharge") {
-                if (data.records && data.records[dateStr]) {
-                    Object.keys(data.records[dateStr]).forEach(stuId => {
-                        const status = data.records[dateStr][stuId];
-                        if (status === 'P') {
-                            aggregated[stuId] = 'P';
-                        } else if ((status === 'L' || status === 'A') && aggregated[stuId] !== 'P') {
-                            aggregated[stuId] = 'L';
-                        }
-                    });
+            if (normMatch(data.section) === normMatch(sectionName)) {
+                
+                // 1. Capture the existing Incharge record so we don't wipe it out
+                if (normMatch(data.subject) === "classincharge") {
+                    if (data.records && data.records[dateStr]) {
+                        existingInchargeStatus = data.records[dateStr];
+                    }
+                } 
+                // 2. Aggregate all other normal subjects
+                else if (normMatch(data.subject) !== "classincharge") {
+                    if (data.records && data.records[dateStr]) {
+                        Object.keys(data.records[dateStr]).forEach(stuId => {
+                            const status = data.records[dateStr][stuId];
+                            if (status === 'P') {
+                                aggregated[stuId] = 'P';
+                            } else if ((status === 'L' || status === 'A') && aggregated[stuId] !== 'P') {
+                                aggregated[stuId] = 'L';
+                            }
+                        });
+                    }
                 }
+            }
+        });
+
+        // --- NEW: THE IRONCLAD INCHARGE RULE ---
+        // If the student was ALREADY marked 'P' in the Incharge register (e.g., via Correction tool, Exam Room, or manual Incharge save), 
+        // NEVER let the background sync downgrade them to an 'L', even if all other subject teachers marked them 'L'.
+        Object.keys(existingInchargeStatus).forEach(stuId => {
+            if (existingInchargeStatus[stuId] === 'P') {
+                aggregated[stuId] = 'P'; 
             }
         });
 
