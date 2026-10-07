@@ -68,26 +68,8 @@
             <div class="absolute bottom-[-10%] left-[-10%] w-72 sm:w-96 h-72 sm:h-96 bg-violet-200 rounded-full mix-blend-multiply filter blur-3xl opacity-40"></div>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-4xl relative z-10">
-            <button onclick="switchView('delegation')" class="bg-white/70 backdrop-blur-xl border border-white rounded-[2.5rem] p-8 shadow-xl hover:shadow-2xl hover:-translate-y-2 transition-all duration-300 flex flex-col items-center justify-center gap-6 h-64 group">
-                <div class="bg-gradient-to-br from-indigo-500 to-blue-600 w-20 h-20 rounded-[1.5rem] flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform">
-                    <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-                </div>
-                <div class="text-center">
-                    <h2 class="text-2xl font-black text-slate-800 uppercase tracking-tight">Mentorship Delegation</h2>
-                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-2">Authorize staff access</p>
-                </div>
-            </button>
-
-            <button onclick="switchView('builder')" class="bg-white/70 backdrop-blur-xl border border-white rounded-[2.5rem] p-8 shadow-xl hover:shadow-2xl hover:-translate-y-2 transition-all duration-300 flex flex-col items-center justify-center gap-6 h-64 group">
-                <div class="bg-gradient-to-br from-fuchsia-500 to-violet-600 w-20 h-20 rounded-[1.5rem] flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform">
-                    <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
-                </div>
-                <div class="text-center">
-                    <h2 class="text-2xl font-black text-slate-800 uppercase tracking-tight">Form Builder</h2>
-                    <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-2">Design appraisal structure</p>
-                </div>
-            </button>
+     <div class="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-4xl relative z-10" id="dashboard-grid">
+            <!-- Dynamically populated based on role by renderDashboard() -->
         </div>
     </div>
 
@@ -300,12 +282,25 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        // 2. Auth & State
-        const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
-        if (!isAdmin) {
-            alert("Unauthorized Access. Redirecting to login...");
-            window.location.replace('admin-login.html');
+   // 2. Auth & State
+        let isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+        let activeStaff = JSON.parse(sessionStorage.getItem('minervaActiveStaff'));
+
+        // Fallback migration to sessionStorage to support cross-tab isolation
+        if (!activeStaff && localStorage.getItem('minervaActiveStaff')) {
+            activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+            sessionStorage.setItem('minervaActiveStaff', JSON.stringify(activeStaff));
         }
+
+        if (!isAdmin && !activeStaff) {
+            alert("Unauthorized Access. Redirecting to login...");
+            window.location.replace('index.html');
+        }
+
+        let isDelegated = false;
+        let isNormalTeacher = true;
+        let activeCenter = "GHUMARWIN";
+        let isViewingAsAdmin = false;
 
         let globalInstituteStructure = [];
         let globalAllStaff = [];
@@ -328,10 +323,116 @@
 
         // 3. Init
         window.onload = async () => {
+            if (isAdmin) {
+                isDelegated = true;
+                isNormalTeacher = false;
+                isViewingAsAdmin = true;
+                activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
+            } else if (activeStaff) {
+                activeCenter = activeStaff.center || "GHUMARWIN";
+                try {
+                    const snap = await db.collection("staff_applications").doc(activeStaff.uid || activeStaff.id).get();
+                    if (snap.exists) {
+                        const data = snap.data();
+                        if (data.isMentor === true || data.canManageExams === true || data.isHOD === true) {
+                            isDelegated = true;
+                        }
+                    }
+                } catch(e) { console.error("Delegation check failed:", e); }
+            }
+
+            const centerSwitch = document.getElementById('global-center-switch');
+            if (centerSwitch) {
+                centerSwitch.value = activeCenter;
+                if (!isAdmin && !isDelegated) centerSwitch.disabled = true;
+            }
+
+            renderDashboard();
             switchView('dashboard');
         };
 
-     function switchView(view) {
+        function renderDashboard() {
+            const grid = document.getElementById('dashboard-grid');
+            if (!grid) return;
+            grid.innerHTML = '';
+
+            // 1. Normal teacher -> Empty View
+            if (isNormalTeacher && !isDelegated && !isAdmin) {
+                grid.innerHTML = `
+                    <div class="col-span-full bg-white/70 backdrop-blur-xl border border-white rounded-[2.5rem] p-12 shadow-xl text-center flex flex-col items-center justify-center min-h-[300px]">
+                        <span class="text-6xl mb-4">📭</span>
+                        <h2 class="text-2xl font-black text-slate-800 uppercase tracking-tight">No Active Mentees</h2>
+                        <p class="text-sm font-bold text-slate-500 uppercase tracking-widest mt-2">You currently have no mentorship assignments.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            let html = '';
+
+            // 3. Admin View -> Delegated teacher must NOT see delegation button
+            if (isAdmin || (isViewingAsAdmin && isDelegated)) {
+                if (isAdmin) {
+                    html += `
+                        <button onclick="switchView('delegation')" class="bg-white/70 backdrop-blur-xl border border-white rounded-[2.5rem] p-8 shadow-xl hover:shadow-2xl hover:-translate-y-2 transition-all duration-300 flex flex-col items-center justify-center gap-6 h-64 group">
+                            <div class="bg-gradient-to-br from-indigo-500 to-blue-600 w-20 h-20 rounded-[1.5rem] flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform">
+                                <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                            </div>
+                            <div class="text-center">
+                                <h2 class="text-2xl font-black text-slate-800 uppercase tracking-tight">Mentorship Delegation</h2>
+                                <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-2">Authorize staff access</p>
+                            </div>
+                        </button>
+                    `;
+                }
+
+                html += `
+                    <button onclick="switchView('builder')" class="bg-white/70 backdrop-blur-xl border border-white rounded-[2.5rem] p-8 shadow-xl hover:shadow-2xl hover:-translate-y-2 transition-all duration-300 flex flex-col items-center justify-center gap-6 h-64 group">
+                        <div class="bg-gradient-to-br from-fuchsia-500 to-violet-600 w-20 h-20 rounded-[1.5rem] flex items-center justify-center shadow-lg group-hover:scale-110 transition-transform">
+                            <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                        </div>
+                        <div class="text-center">
+                            <h2 class="text-2xl font-black text-slate-800 uppercase tracking-tight">Form Builder</h2>
+                            <p class="text-xs font-bold text-slate-500 uppercase tracking-widest mt-2">Design appraisal structure</p>
+                        </div>
+                    </button>
+                `;
+            }
+
+            // 2. Delegated teacher logs in -> must see button to switch to admin view
+            if (!isAdmin && isDelegated) {
+                if (!isViewingAsAdmin) {
+                    html = `
+                        <div class="col-span-full bg-white/70 backdrop-blur-xl border border-white rounded-[2.5rem] p-12 shadow-xl text-center flex flex-col items-center justify-center min-h-[300px]">
+                            <span class="text-6xl mb-4">📋</span>
+                            <h2 class="text-2xl font-black text-slate-800 uppercase tracking-tight">My Mentees</h2>
+                            <p class="text-sm font-bold text-slate-500 uppercase tracking-widest mt-2 mb-6">You currently have no direct mentee submissions to review.</p>
+                            <button onclick="toggleAdminView()" class="bg-violet-600 hover:bg-violet-700 text-white px-8 py-4 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg transition-all active:scale-95">
+                                Switch to Admin View ➔
+                            </button>
+                        </div>
+                    `;
+                } else {
+                    html += `
+                        <div class="col-span-full text-center mt-4">
+                            <button onclick="toggleAdminView()" class="text-slate-500 hover:text-slate-800 font-black text-xs uppercase tracking-widest transition-colors">
+                                🔙 Exit Admin View
+                            </button>
+                        </div>
+                    `;
+                }
+            }
+
+            grid.innerHTML = html;
+        }
+
+        window.toggleAdminView = () => {
+            isViewingAsAdmin = !isViewingAsAdmin;
+            renderDashboard();
+            document.querySelector('header p').innerText = isViewingAsAdmin ? "Delegated Mentor (Admin View)" : "Teacher Access";
+        };
+
+        function switchView(view) {
             document.getElementById('view-dashboard').classList.add('hidden');
             document.getElementById('view-delegation').classList.add('hidden');
             document.getElementById('view-builder').classList.add('hidden');
@@ -356,10 +457,15 @@
                 fetchInstituteStructure();
             }
         }
+
         function navigateHome() {
             const currentView = ['dashboard', 'delegation', 'builder'].find(v => document.getElementById(`view-${v}`).classList.contains('flex'));
             if (currentView === 'dashboard') {
-                window.location.href = 'admin.html';
+                if (isAdmin) {
+                    window.location.href = 'admin.html';
+                } else {
+                    window.location.href = 'teacher-portal.html';
+                }
             } else {
                 switchView('dashboard');
             }
