@@ -10,7 +10,6 @@
     
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-    <!-- Include Firebase Storage if media uploads are used -->
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
 
     <style>
@@ -395,6 +394,13 @@
                     <label class="flex items-center p-3 bg-slate-50 rounded-xl border border-slate-200 cursor-pointer hover:bg-slate-100 transition-colors">
                         <input type="checkbox" id="edit-searchable" class="w-4 h-4 accent-sky-600">
                         <span class="ml-3 text-xs font-black text-slate-700 uppercase">Enable Admin Search/Filter</span>
+                    </label>
+                    <label class="flex items-center p-3 bg-slate-50 rounded-xl border border-slate-200 cursor-pointer hover:bg-slate-100 transition-colors">
+                        <input type="checkbox" id="edit-history" class="w-4 h-4 accent-fuchsia-600">
+                        <div class="ml-3 flex flex-col">
+                            <span class="text-xs font-black text-slate-700 uppercase">Dynamic / Per-Round Field</span>
+                            <span class="text-[9px] font-bold text-slate-500 uppercase mt-0.5">Clears field every round & shows previous answer as hint</span>
+                        </div>
                     </label>
                 </div>
             </div>
@@ -1102,6 +1108,484 @@
         }
 
         // ==========================================
+        // FORM BUILDER ENGINE
+        // ==========================================
+        async function fetchInstituteStructure() {
+            try {
+                const [gSnap, dSnap] = await Promise.all([
+                    db.collection("institute_structure").get(),
+                    db.collection("dharamshala_institute_structure").get()
+                ]);
+                
+                globalInstituteStructure = [];
+                gSnap.forEach(d => globalInstituteStructure.push({ branch: "GHUMARWIN", id: d.id, ...d.data() }));
+                dSnap.forEach(d => globalInstituteStructure.push({ branch: "DHARAMSHALA", id: d.id, ...d.data() }));
+
+                onBranchChange();
+            } catch(e) { console.error("Error fetching structure:", e); }
+        }
+
+        function onBranchChange() {
+            // Simplified version since Center is locked dynamically
+            const branch = activeCenter; 
+            const classSelect = document.getElementById('build-class');
+            const secSelect = document.getElementById('build-sec');
+            
+            secSelect.innerHTML = '<option value="">-- Select Section --</option>';
+            secSelect.disabled = true;
+            document.getElementById('no-selection-overlay').classList.remove('hidden');
+
+            let classesSet = new Set();
+            globalInstituteStructure.filter(i => i.branch === branch).forEach(item => {
+                if (item.className) classesSet.add(item.className.trim().toUpperCase());
+            });
+
+            classSelect.innerHTML = '<option value="">-- Select Class --</option>' + Array.from(classesSet).sort().map(c => `<option value="${c}">${c}</option>`).join('');
+            classSelect.disabled = false;
+        }
+
+        function onClassChange() {
+            const branch = activeCenter;
+            const cls = document.getElementById('build-class').value;
+            const secSelect = document.getElementById('build-sec');
+            
+            document.getElementById('no-selection-overlay').classList.remove('hidden');
+
+            if (!cls) { secSelect.innerHTML = '<option value="">-- Select Section --</option>'; secSelect.disabled = true; return; }
+
+            let sectionsSet = new Set();
+            globalInstituteStructure.filter(i => i.branch === branch && String(i.className).trim().toUpperCase() === cls).forEach(item => {
+                if (item.sectionName) sectionsSet.add(String(item.sectionName).trim().toUpperCase());
+            });
+
+            secSelect.innerHTML = '<option value="">-- Select Section --</option>' + Array.from(sectionsSet).sort().map(s => `<option value="${s}">${s}</option>`).join('');
+            secSelect.disabled = false;
+        }
+
+        async function loadFormStructure() {
+            const branch = activeCenter;
+            const cls = document.getElementById('build-class').value;
+            const sec = document.getElementById('build-sec').value;
+            const overlay = document.getElementById('no-selection-overlay');
+            const saveBtn = document.getElementById('save-btn');
+            const cloneBtn = document.getElementById('clone-btn');
+
+            if (!cls || !sec) {
+                overlay.classList.remove('hidden');
+                saveBtn.disabled = true; cloneBtn.disabled = true;
+                return;
+            }
+
+            overlay.classList.add('hidden');
+            saveBtn.disabled = false; cloneBtn.disabled = false;
+            dragZone.innerHTML = "";
+            document.getElementById('canvas-title').innerText = `Form Layout: ${branch} > ${cls} > ${sec}`;
+
+            try {
+                const docId = `${branch}_${cls}_${sec}`.replace(/[^a-zA-Z0-9_]/g, "_").toUpperCase();
+                const docSnap = await db.collection("mentorship_forms").doc(docId).get();
+                
+                if (docSnap.exists) {
+                    const data = docSnap.data();
+                    (data.fields || []).forEach(f => {
+                        const el = document.createElement('div');
+                        setupFieldUI(el, f.type);
+                        
+                        el.setAttribute('data-id', f.id || `f_${Date.now()}_${Math.random().toString(36).substr(2,5)}`);
+                        el.setAttribute('data-label', f.label || "");
+                        el.setAttribute('data-desc', f.desc || "");
+                        el.setAttribute('data-color', f.color || "#ffffff");
+                        el.setAttribute('data-required', f.required === true);
+                        el.setAttribute('data-searchable', f.searchable === true);
+                        el.setAttribute('data-history', f.history === true);
+                        el.setAttribute('data-limit', f.limit || "");
+                        el.setAttribute('data-scale', f.scale || "5");
+                        el.setAttribute('data-options', f.options || "");
+                        
+                        // Restore width directly to style to maintain dynamic resize layout
+                        if (f.widthStyle) {
+                            el.style.width = f.widthStyle;
+                        } else {
+                            el.style.width = "100%"; // Fallback
+                        }
+                        
+                        updateVisuals(el);
+                        dragZone.appendChild(el);
+                    });
+                }
+            } catch (e) { console.error("Error loading form:", e); }
+        }
+
+        // Init Drag & Drop
+        new Sortable(toolbox, { group: { name: 'shared', pull: 'clone', put: false }, sort: false });
+
+        new Sortable(dragZone, { 
+            group: 'shared', animation: 250, ghostClass: 'ghost',
+            onAdd: (e) => {
+                const item = e.item;
+                const type = item.getAttribute('data-type');
+                setupFieldUI(item, type);
+                item.setAttribute('data-id', `f_${Date.now()}_${Math.random().toString(36).substr(2,5)}`);
+                item.setAttribute('data-label', `New ${typeLabels[type]}`);
+                item.setAttribute('data-color', "#ffffff");
+                item.setAttribute('data-history', "false");
+                item.style.width = "100%"; // Default full width on drop
+                updateVisuals(item);
+                openSettings(item);
+            }
+        });
+
+        function setupFieldUI(el, type) {
+            el.className = "form-field-item resizable-field relative p-5 border-2 rounded-lg cursor-move transition-shadow shadow-sm group bg-white";
+            el.setAttribute('data-field-type', type);
+            
+            el.innerHTML = `
+                <!-- 4-Sided Resize Handles -->
+                <div class="resizer resizer-r z-20"></div>
+                <div class="resizer resizer-l z-20"></div>
+                <div class="resizer resizer-b z-20"></div>
+                <div class="resizer resizer-t z-20"></div>
+
+                <div class="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-30 bg-white/90 backdrop-blur rounded-md p-1 shadow-sm border border-slate-200">
+                    <button class="settings-trigger p-1.5 text-slate-500 hover:text-violet-600 hover:bg-violet-50 rounded-md" title="Settings"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg></button>
+                    <button class="delete-trigger p-1.5 text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded-md" title="Delete"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
+                </div>
+                <div class="flex items-start gap-3 w-full pr-12 relative z-10 pointer-events-none">
+                    <div class="bg-slate-100 p-2 rounded-lg text-lg shrink-0 mt-1">${iconMap[type]}</div>
+                    <div class="flex-1 min-w-0">
+                        <h4 class="font-black text-slate-800 text-sm uppercase tracking-tight truncate field-label">Label</h4>
+                        <p class="text-[9px] font-bold text-slate-500 uppercase tracking-widest mt-0.5 truncate field-desc">Description</p>
+                        <div class="flex flex-wrap gap-1.5 mt-2">
+                            <span class="text-[8px] font-black bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded uppercase">${typeLabels[type]}</span>
+                            <span class="badge-req text-[8px] font-black px-1.5 py-0.5 rounded uppercase hidden"></span>
+                            <span class="badge-search text-[8px] font-black bg-sky-100 text-sky-700 border border-sky-200 px-1.5 py-0.5 rounded uppercase hidden">Searchable</span>
+                            <span class="badge-history text-[8px] font-black bg-fuchsia-100 text-fuchsia-700 border border-fuchsia-200 px-1.5 py-0.5 rounded uppercase hidden">Dynamic (Round-wise)</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            el.querySelector('.settings-trigger').onclick = () => openSettings(el);
+            el.querySelector('.delete-trigger').onclick = () => el.remove();
+
+            // Custom JS Drag-to-Resize Logic
+            const resizers = el.querySelectorAll('.resizer');
+            let isResizing = false;
+            let currentResizer = null;
+            let startX, startY, startW, startH;
+
+            resizers.forEach(resizer => {
+                resizer.addEventListener('mousedown', function(e) {
+                    isResizing = true;
+                    currentResizer = resizer;
+                    startX = e.clientX;
+                    startY = e.clientY;
+                    startW = el.offsetWidth;
+                    startH = el.offsetHeight;
+                    e.stopPropagation();
+                    e.preventDefault();
+                    document.addEventListener('mousemove', resizeFn);
+                    document.addEventListener('mouseup', stopResizeFn);
+                });
+            });
+
+            function resizeFn(e) {
+                if (!isResizing) return;
+                let newWidth = startW;
+                let newHeight = startH;
+
+                if (currentResizer.classList.contains('resizer-r')) {
+                    newWidth = startW + (e.clientX - startX);
+                } else if (currentResizer.classList.contains('resizer-l')) {
+                    newWidth = startW - (e.clientX - startX);
+                } else if (currentResizer.classList.contains('resizer-b')) {
+                    newHeight = startH + (e.clientY - startY);
+                } else if (currentResizer.classList.contains('resizer-t')) {
+                    newHeight = startH - (e.clientY - startY);
+                }
+
+                if (currentResizer.classList.contains('resizer-r') || currentResizer.classList.contains('resizer-l')) {
+                    const parentWidth = el.parentElement.offsetWidth;
+                    const pct = Math.min(100, Math.max(20, (newWidth / parentWidth) * 100));
+                    el.style.width = pct + '%';
+                }
+                
+                if (currentResizer.classList.contains('resizer-b') || currentResizer.classList.contains('resizer-t')) {
+                    el.style.minHeight = Math.max(80, newHeight) + 'px';
+                }
+            }
+
+            function stopResizeFn() {
+                isResizing = false;
+                document.removeEventListener('mousemove', resizeFn);
+                document.removeEventListener('mouseup', stopResizeFn);
+            }
+        }
+
+        function openSettings(el) {
+            activeField = el;
+            const type = el.getAttribute('data-field-type');
+            
+            document.getElementById('edit-label').value = el.getAttribute('data-label') || "";
+            document.getElementById('edit-desc').value = el.getAttribute('data-desc') || "";
+            
+            // Native Hex Color
+            const hexColor = el.getAttribute('data-color') || "#ffffff";
+            document.getElementById('edit-color').value = hexColor;
+
+            document.getElementById('edit-required').checked = el.getAttribute('data-required') === "true";
+            document.getElementById('edit-searchable').checked = el.getAttribute('data-searchable') === "true";
+            document.getElementById('edit-history').checked = el.getAttribute('data-history') === "true";
+
+            // Specifics
+            document.getElementById('limit-container').classList.toggle('hidden', type !== 'number');
+            document.getElementById('edit-limit').value = el.getAttribute('data-limit') || "";
+
+            document.getElementById('scale-container').classList.toggle('hidden', type !== 'scale');
+            document.getElementById('edit-scale').value = el.getAttribute('data-scale') || "5";
+
+            document.getElementById('options-container').classList.toggle('hidden', !['dropdown', 'checkbox'].includes(type));
+            document.getElementById('edit-options').value = el.getAttribute('data-options') || "";
+
+            document.getElementById('settings-modal').classList.replace('hidden', 'flex');
+        }
+
+        function closeSettings() {
+            document.getElementById('settings-modal').classList.replace('flex', 'hidden');
+            activeField = null;
+        }
+
+        function applySettings() {
+            if (!activeField) return;
+            
+            const label = document.getElementById('edit-label').value || "Unnamed Field";
+            const hexColor = document.getElementById('edit-color').value;
+
+            activeField.setAttribute('data-label', label);
+            activeField.setAttribute('data-desc', document.getElementById('edit-desc').value);
+            activeField.setAttribute('data-color', hexColor);
+            activeField.setAttribute('data-required', document.getElementById('edit-required').checked);
+            activeField.setAttribute('data-searchable', document.getElementById('edit-searchable').checked);
+            activeField.setAttribute('data-history', document.getElementById('edit-history').checked);
+            
+            activeField.setAttribute('data-limit', document.getElementById('edit-limit').value);
+            activeField.setAttribute('data-scale', document.getElementById('edit-scale').value);
+            activeField.setAttribute('data-options', document.getElementById('edit-options').value);
+            
+            updateVisuals(activeField);
+            closeSettings();
+        }
+
+        function updateVisuals(el) {
+            el.querySelector('.field-label').innerText = el.getAttribute('data-label');
+            const desc = el.getAttribute('data-desc');
+            el.querySelector('.field-desc').innerText = desc || "No description provided.";
+            
+            const req = el.getAttribute('data-required') === "true";
+            const reqBadge = el.querySelector('.badge-req');
+            reqBadge.innerText = req ? "* Compulsory" : "Optional";
+            reqBadge.className = req ? "badge-req text-[8px] font-black px-1.5 py-0.5 rounded uppercase bg-rose-100 text-rose-700 border border-rose-200" : "badge-req text-[8px] font-black px-1.5 py-0.5 rounded uppercase bg-slate-100 text-slate-500 border border-slate-200";
+            reqBadge.classList.remove('hidden');
+
+            el.querySelector('.badge-search').classList.toggle('hidden', el.getAttribute('data-searchable') !== "true");
+            el.querySelector('.badge-history').classList.toggle('hidden', el.getAttribute('data-history') !== "true");
+
+            // Apply custom hex color via style
+            const hex = el.getAttribute('data-color');
+            if (hex && hex !== "#ffffff") {
+                el.style.borderColor = hex;
+                el.style.backgroundColor = hexToRgba(hex, 0.08); // 8% opacity for soft tint
+            } else {
+                el.style.borderColor = "#e2e8f0"; // slate-200
+                el.style.backgroundColor = "#ffffff";
+            }
+        }
+
+        async function saveFormConfig() {
+            const branch = activeCenter;
+            const cls = document.getElementById('build-class').value;
+            const sec = document.getElementById('build-sec').value;
+            if (!cls || !sec) return alert("Select Class and Section first.");
+
+            const btn = document.getElementById('save-btn');
+            const origText = btn.innerHTML;
+            btn.innerHTML = "⏳ Saving..."; btn.disabled = true;
+
+            const fieldsArr = [];
+            dragZone.querySelectorAll('.form-field-item').forEach(f => {
+                fieldsArr.push({
+                    id: f.getAttribute('data-id'),
+                    type: f.getAttribute('data-field-type'),
+                    label: f.getAttribute('data-label'),
+                    desc: f.getAttribute('data-desc'),
+                    color: f.getAttribute('data-color'),
+                    required: f.getAttribute('data-required') === "true",
+                    searchable: f.getAttribute('data-searchable') === "true",
+                    history: f.getAttribute('data-history') === "true",
+                    limit: f.getAttribute('data-limit') || null,
+                    scale: f.getAttribute('data-scale') || null,
+                    options: f.getAttribute('data-options') || "",
+                    widthStyle: f.style.width // Save the dynamic % width
+                });
+            });
+
+            try {
+                const docId = `${branch}_${cls}_${sec}`.replace(/[^a-zA-Z0-9_]/g, "_").toUpperCase();
+                await db.collection("mentorship_forms").doc(docId).set({
+                    branch: branch,
+                    className: cls,
+                    section: sec,
+                    fields: fieldsArr,
+                    updatedAt: Date.now(),
+                    updatedBy: "ADMIN"
+                });
+                alert('✅ Form layout saved successfully!');
+            } catch (e) {
+                alert('Save Failed: ' + e.message);
+                console.error(e);
+            } finally {
+                btn.innerHTML = origText; btn.disabled = false;
+            }
+        }
+
+        // ==========================================
+        // CLONE / DEPLOY MODULE
+        // ==========================================
+        async function openCloneModal() {
+            const container = document.getElementById('clone-tree-container');
+            document.getElementById('clone-modal').classList.replace('hidden', 'flex');
+            
+            try {
+                // Build hierarchical map from globalInstituteStructure
+                let tree = {};
+                globalInstituteStructure.forEach(item => {
+                    const b = item.branch;
+                    const c = String(item.className).trim().toUpperCase();
+                    const s = String(item.sectionName || item.section || "").trim().toUpperCase();
+                    if (!c || !s) return;
+                    
+                    if (!tree[b]) tree[b] = {};
+                    if (!tree[b][c]) tree[b][c] = [];
+                    tree[b][c].push(s);
+                });
+
+                let html = "";
+                Object.keys(tree).sort().forEach(branch => {
+                    html += `
+                        <div class="mb-4 p-4 border border-slate-200 rounded-xl bg-slate-50">
+                            <h4 class="font-black text-slate-800 uppercase tracking-widest text-xs mb-3 flex items-center gap-2">
+                                <input type="checkbox" class="w-4 h-4 accent-fuchsia-600 branch-cb" data-branch="${branch}" onchange="toggleBranchClone(this)"> 
+                                📍 ${branch}
+                            </h4>
+                            <div class="pl-6 space-y-3 border-l-2 border-slate-200 ml-2">
+                    `;
+                    
+                    Object.keys(tree[branch]).sort().forEach(cls => {
+                        const sections = tree[branch][cls].sort();
+                        html += `
+                            <div>
+                                <label class="flex items-center gap-2 font-bold text-slate-700 text-[11px] uppercase mb-1 cursor-pointer">
+                                    <input type="checkbox" class="w-3.5 h-3.5 accent-fuchsia-600 class-cb" data-branch="${branch}" data-class="${cls}" onchange="toggleClassClone(this)">
+                                    Class ${cls}
+                                </label>
+                                <div class="flex flex-wrap gap-2 pl-6">
+                                    ${sections.map(sec => `
+                                        <label class="flex items-center gap-1.5 bg-white border border-slate-200 px-2 py-1 rounded shadow-sm cursor-pointer hover:border-fuchsia-300">
+                                            <input type="checkbox" class="w-3 h-3 accent-fuchsia-600 sec-cb target-clone-cb" value="${branch}|${cls}\vert{}${sec}">
+                                            <span class="text-[10px] font-black uppercase text-slate-600">Sec ${sec}</span>
+                                        </label>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += `</div></div>`;
+                });
+
+                container.innerHTML = html;
+
+            } catch (e) {
+                container.innerHTML = `<p class="text-rose-500 font-bold text-xs text-center py-10">Error loading structure.</p>`;
+            }
+        }
+
+        function closeCloneModal() {
+            document.getElementById('clone-modal').classList.replace('flex', 'hidden');
+        }
+
+        window.toggleBranchClone = (cb) => {
+            const branch = cb.getAttribute('data-branch');
+            document.querySelectorAll(`.class-cb[data-branch="${branch}"]`).forEach(c => {
+                c.checked = cb.checked;
+                window.toggleClassClone(c);
+            });
+        };
+
+        window.toggleClassClone = (cb) => {
+            const branch = cb.getAttribute('data-branch');
+            const cls = cb.getAttribute('data-class');
+            document.querySelectorAll(`.sec-cb[value^="${branch}|${cls}|"]`).forEach(s => s.checked = cb.checked);
+        };
+
+        async function executeCloneDeploy() {
+            const selectedBoxes = document.querySelectorAll('.target-clone-cb:checked');
+            if (selectedBoxes.length === 0) return alert("Select at least one target section to deploy to.");
+
+            const fieldsArr = [];
+            dragZone.querySelectorAll('.form-field-item').forEach(f => {
+                fieldsArr.push({
+                    id: f.getAttribute('data-id'),
+                    type: f.getAttribute('data-field-type'),
+                    label: f.getAttribute('data-label'),
+                    desc: f.getAttribute('data-desc'),
+                    color: f.getAttribute('data-color'),
+                    required: f.getAttribute('data-required') === "true",
+                    searchable: f.getAttribute('data-searchable') === "true",
+                    history: f.getAttribute('data-history') === "true",
+                    limit: f.getAttribute('data-limit') || null,
+                    scale: f.getAttribute('data-scale') || null,
+                    options: f.getAttribute('data-options') || "",
+                    widthStyle: f.style.width
+                });
+            });
+
+            if (fieldsArr.length === 0) return alert("The canvas is empty. Nothing to clone.");
+            if (!confirm(`Deploy this exact form layout to ${selectedBoxes.length} sections? This will overwrite their existing forms.`)) return;
+
+            const btn = document.getElementById('btn-execute-clone');
+            const origText = btn.innerHTML;
+            btn.innerHTML = "⏳ Deploying..."; btn.disabled = true;
+
+            try {
+                const batch = db.batch();
+                
+                selectedBoxes.forEach(cb => {
+                    const [branch, cls, sec] = cb.value.split('|');
+                    const docId = `${branch}_${cls}_${sec}`.replace(/[^a-zA-Z0-9_]/g, "_").toUpperCase();
+                    const ref = db.collection("mentorship_forms").doc(docId);
+                    
+                    batch.set(ref, {
+                        branch: branch,
+                        className: cls,
+                        section: sec,
+                        fields: fieldsArr,
+                        updatedAt: Date.now(),
+                        updatedBy: "ADMIN_CLONE"
+                    });
+                });
+
+                await batch.commit();
+                alert(`✅ Successfully deployed form layout to ${selectedBoxes.length} sections!`);
+                closeCloneModal();
+            } catch (e) {
+                alert("Deployment Failed: " + e.message);
+                console.error(e);
+            } finally {
+                btn.innerHTML = origText; btn.disabled = false;
+            }
+        }
+
+        // ==========================================
         // MY MENTEES (TEACHER VIEW) & FORM EVALUATION
         // ==========================================
         async function fetchMyMentees() {
@@ -1194,8 +1678,6 @@
                 return;
             }
 
-            // We need to async determine if there are missing fields.
-            // For UI speed, we render immediately, then async check and update badges.
             let html = "";
             filtered.forEach(stu => {
                 let reportBadge = `<span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest shadow-sm">Never Evaluated</span>`;
@@ -1271,9 +1753,21 @@
                 let html = `<form id="mentorship-dynamic-form" class="flex flex-wrap gap-4">`;
                 
                 activeFormSchema.fields.forEach(f => {
-                    const val = prevData[f.id] !== undefined ? prevData[f.id] : "";
+                    let val = prevData[f.id] !== undefined ? prevData[f.id] : "";
+                    
+                    // If marked as dynamic history, wipe the current input but generate a hint box
+                    let prevValHint = "";
+                    if (f.history) {
+                        if (val !== "" && val !== null) {
+                            const dispVal = Array.isArray(val) ? val.join(', ') : val;
+                            prevValHint = `<div class="text-[10px] font-bold text-fuchsia-700 bg-fuchsia-50 px-3 py-2 rounded-lg border border-fuchsia-100 mt-2 flex justify-between items-center"><span class="uppercase tracking-widest text-[8px] font-black opacity-70">Previous Answer:</span> <span>${dispVal}</span></div>`;
+                        }
+                        val = ""; // Force new entry
+                    }
+
                     const reqStr = f.required ? 'required' : '';
                     const asterisk = f.required ? '<span class="text-rose-500 ml-1">*</span>' : '';
+                    const historyBadge = f.history ? '<span class="bg-fuchsia-100 text-fuchsia-700 px-1.5 py-0.5 rounded text-[8px] uppercase tracking-widest ml-2 border border-fuchsia-200">🔄 Dynamic</span>' : '';
                     
                     // Hex to Rgba for soft styling
                     let bgCol = "#ffffff", borderCol = "#e2e8f0";
@@ -1287,20 +1781,23 @@
 
                     html += `
                         <div class="flex flex-col p-4 rounded-2xl shadow-sm transition-colors border" style="background-color: ${bgCol}; border-color: ${borderCol}; ${widthStyle}">
-                            <label class="font-black text-slate-800 text-xs uppercase mb-1 tracking-tight">${f.label} ${asterisk}</label>
+                            <label class="font-black text-slate-800 text-xs uppercase mb-1 tracking-tight flex items-center">${f.label} ${asterisk} ${historyBadge}</label>
                             ${f.desc ? `<p class="text-[9px] font-bold text-slate-500 uppercase tracking-widest mb-3 leading-snug">${f.desc}</p>` : ''}
                     `;
 
                     // Input Generation based on Type
                     if (f.type === 'short_text') {
                         html += `<input type="text" name="${f.id}" value="${val}" ${reqStr} class="w-full p-3 bg-white border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-violet-200 transition-shadow">`;
+                        html += prevValHint;
                     } 
                     else if (f.type === 'long_text') {
                         html += `<textarea name="${f.id}" rows="3" ${reqStr} class="w-full p-3 bg-white border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-violet-200 transition-shadow custom-scroll">${val}</textarea>`;
+                        html += prevValHint;
                     } 
                     else if (f.type === 'number') {
                         const maxLen = f.limit ? `maxlength="${f.limit}"` : '';
                         html += `<input type="number" name="${f.id}" value="${val}" ${reqStr} ${maxLen} class="w-full p-3 bg-white border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-violet-200 transition-shadow">`;
+                        html += prevValHint;
                     } 
                     else if (f.type === 'dropdown') {
                         const opts = (f.options || "").split(',').map(o => {
@@ -1308,6 +1805,7 @@
                             return `<option value="${optTrim}" ${val === optTrim ? 'selected' : ''}>${optTrim}</option>`;
                         }).join('');
                         html += `<select name="${f.id}" ${reqStr} class="w-full p-3 bg-white border border-slate-300 rounded-xl text-sm font-bold outline-none focus:ring-2 focus:ring-violet-200 cursor-pointer"><option value="">-- Select --</option>${opts}</select>`;
+                        html += prevValHint;
                     } 
                     else if (f.type === 'checkbox') {
                         const opts = (f.options || "").split(',');
@@ -1324,7 +1822,7 @@
                             `;
                         });
                         html += `</div>`;
-                        // Note: Required validation for checkboxes is tricky in plain HTML forms, usually handled in JS before submit
+                        html += prevValHint;
                     } 
                     else if (f.type === 'scale') {
                         const max = parseInt(f.scale) || 5;
@@ -1339,6 +1837,7 @@
                             `;
                         }
                         html += `</div>`;
+                        html += prevValHint;
                     }
                     else if (['photo', 'video', 'audio', 'pdf', 'multi_file'].includes(f.type)) {
                         const accepts = {
