@@ -244,7 +244,18 @@
                 </div>
                 <div id="live-ticker-text" class="flex flex-col gap-2"></div>
             </div>
-      <!-- Notice Board successfully moved to top -->
+     <!-- Notice Board successfully moved to top -->
+
+            <!-- 🌟 TODAY'S LIVE SCHEDULE 🌟 -->
+            <div id="todays-schedule-card" class="flex flex-col gap-3 my-6">
+                <div class="flex justify-between items-center pl-2 pr-1 border-b border-slate-200 pb-2">
+                    <h3 class="font-black text-slate-800 text-xs uppercase tracking-widest">🗓️ Your Schedule for Today</h3>
+                    <span id="schedule-status-badge" class="text-[9px] font-black bg-emerald-100 text-emerald-700 px-2 py-1 rounded uppercase tracking-widest shadow-sm border border-emerald-200">Live Syncing...</span>
+                </div>
+                <div id="todays-schedule-list" class="flex flex-col gap-2">
+                    <!-- Schedule slots will inject here dynamically -->
+                </div>
+            </div>
 
         </main>
     </div>
@@ -658,6 +669,9 @@ document.getElementById('current-date').innerText = `${new Date().toLocaleDateSt
             return hours * 60 + minutes;
         }
 
+      let liveMasterUnsubscribe = null;
+        let liveHistoryUnsubscribe = null;
+
         async function loadTodaysScheduleForAlerts(teacherName) {
             try {
                 const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
@@ -667,18 +681,21 @@ document.getElementById('current-date').innerText = `${new Date().toLocaleDateSt
                 const todayDayName = daysOfWeek[now.getDay()];
                 const todayDateIso = now.toISOString().split('T')[0];
 
+                // Check Holidays first
                 const holSnap = await getCollection("school_holidays").get();
                 const holidays = holSnap.docs.map(d => d.data());
                 const todayDateOnly = new Date(todayDateIso);
                 todayDateOnly.setHours(0,0,0,0);
 
                 let isHolidayToday = false;
+                let holidayReason = "Scheduled Holiday";
                 for (let h of holidays) {
                     if (h.startDate && h.isFullDay) {
                         let hs = new Date(h.startDate); hs.setHours(0,0,0,0);
                         let he = new Date(h.endDate || h.startDate); he.setHours(23,59,59,999);
                         if (todayDateOnly >= hs && todayDateOnly <= he) {
                             isHolidayToday = true;
+                            holidayReason = h.reason || "Scheduled Holiday";
                             break;
                         }
                     }
@@ -687,32 +704,125 @@ document.getElementById('current-date').innerText = `${new Date().toLocaleDateSt
                 if (isHolidayToday) {
                     todaysSchedule = [];
                     checkUpcomingClasses();
+                    renderTodaysScheduleUI([], true, holidayReason);
                     return;
                 }
 
-                const historySnap = await db.collection(prefix + "timetable_history").doc(todayDateIso).get();
-                if (historySnap.exists && historySnap.data().schedule) {
-                    const historySlots = historySnap.data().schedule;
-                    todaysSchedule = historySlots.filter(s => s.teacher === teacherName || s.teacherName === teacherName);
-                } else {
-                    const dateSnap = await db.collection(prefix + "timetable")
-                        .where("teacherName", "==", teacherName)
-                        .where("date", "==", todayDateIso)
-                        .get();
-
-                    if (!dateSnap.empty) {
-                        todaysSchedule = dateSnap.docs.map(d => d.data());
+                let masterSlots = [];
+                let historySlots = null; // null means no override found
+                
+                const processAndRender = () => {
+                    let activeSlots = [];
+                    const statusBadge = document.getElementById('schedule-status-badge');
+                    
+                    if (historySlots !== null) {
+                        activeSlots = historySlots;
+                        if(statusBadge) {
+                            statusBadge.innerText = "🚨 EXAM/OVERRIDE DAY";
+                            statusBadge.className = "text-[9px] font-black bg-rose-100 text-rose-700 px-2 py-1 rounded uppercase tracking-widest border border-rose-200 shadow-sm animate-pulse";
+                        }
                     } else {
-                        const daySnap = await db.collection(prefix + "timetable")
-                            .where("teacherName", "==", teacherName)
-                            .where("day", "==", todayDayName)
-                            .get();
-                        todaysSchedule = daySnap.docs.map(d => d.data()).filter(item => !item.date);
+                        activeSlots = masterSlots;
+                        if(statusBadge) {
+                            statusBadge.innerText = "🟢 LIVE TIMETABLE";
+                            statusBadge.className = "text-[9px] font-black bg-emerald-100 text-emerald-700 px-2 py-1 rounded uppercase tracking-widest border border-emerald-200 shadow-sm";
+                        }
                     }
-                }
+                    
+                    const nameMatch = teacherName.toLowerCase();
+                    todaysSchedule = activeSlots.filter(s => 
+                        (s.teacher && s.teacher.toLowerCase() === nameMatch) || 
+                        (s.teacherName && s.teacherName.toLowerCase() === nameMatch)
+                    );
+                    
+                    // Sort strictly by start time
+                    todaysSchedule.sort((a,b) => (a.start24 || "").localeCompare(b.start24 || ""));
+                    
+                    checkUpcomingClasses(); // Instantly update the top "Class in 10 mins" alert
+                    renderTodaysScheduleUI(todaysSchedule, false, "");
+                };
+
+                // REAL-TIME LISTENER 1: Override/Exam History
+                liveHistoryUnsubscribe = db.collection(prefix + "timetable_history").doc(todayDateIso).onSnapshot(doc => {
+                    if (doc.exists && doc.data().schedule) {
+                        historySlots = doc.data().schedule.filter(s => s.day === todayDayName);
+                    } else {
+                        historySlots = null;
+                    }
+                    processAndRender();
+                });
+
+                // REAL-TIME LISTENER 2: Master Timetable
+                liveMasterUnsubscribe = db.collection(prefix + "timetable").where("day", "==", todayDayName).onSnapshot(snap => {
+                    masterSlots = snap.docs.map(d => d.data());
+                    processAndRender();
+                });
+
             } catch(e) { console.error("Alert Engine Error:", e); }
         }
 
+        function renderTodaysScheduleUI(schedule, isHoliday, holReason) {
+            const listContainer = document.getElementById('todays-schedule-list');
+            if (!listContainer) return;
+
+            if (isHoliday) {
+                listContainer.innerHTML = `<div class="bg-blue-50 border border-blue-200 p-6 rounded-2xl text-center shadow-inner">
+                    <span class="text-3xl block mb-2">🌴</span>
+                    <p class="font-black text-blue-900 uppercase tracking-widest text-sm">Classes Suspended</p>
+                    <p class="text-[10px] font-bold text-blue-700 uppercase mt-1 tracking-widest">${holReason}</p>
+                </div>`;
+                return;
+            }
+
+            if (schedule.length === 0) {
+                listContainer.innerHTML = `<div class="bg-slate-50 border border-slate-200 p-6 rounded-2xl text-center shadow-inner">
+                    <span class="text-3xl block mb-2 opacity-50">☕</span>
+                    <p class="font-black text-slate-500 uppercase text-xs tracking-widest">No Duties Assigned</p>
+                    <p class="text-[10px] font-bold text-slate-400 uppercase mt-1 tracking-widest">You have a free day today.</p>
+                </div>`;
+                return;
+            }
+
+            let html = "";
+            let examDutyCount = 0;
+
+            schedule.forEach((slot, index) => {
+                const timeStr = `${format12Hour(slot.start24)} - ${format12Hour(slot.end24)}`;
+                const isExam = (slot.subject || "").toUpperCase().includes("EXAM") || (slot.type || "").toUpperCase() === "EXAM" || (slot.remark || "").toUpperCase().includes("EXAM");
+                if (isExam) examDutyCount++;
+
+                const slotColorClass = isExam ? "bg-rose-50 border-rose-200" : "bg-white border-slate-200";
+                const numColorClass  = isExam ? "bg-rose-200 text-rose-800" : "bg-indigo-100 text-indigo-800";
+                const titleColorClass= isExam ? "text-rose-900" : "text-slate-800";
+                
+                html += `
+                <div class="${slotColorClass} border p-4 rounded-2xl flex items-center justify-between gap-3 shadow-sm transition-all hover:shadow-md hover:border-indigo-300">
+                    <div class="flex items-center gap-4">
+                        <span class="${numColorClass} rounded-full w-8 h-8 flex items-center justify-center text-xs font-black shrink-0 shadow-sm border border-white/50">${index + 1}</span>
+                        <div class="flex flex-col">
+                            <span class="font-black ${titleColorClass} text-sm uppercase tracking-widest leading-none">${slot.className} <span class="opacity-40 mx-0.5">|</span> SEC ${slot.section}</span>
+                            <span class="text-[10px] font-bold text-slate-500 uppercase mt-1.5 tracking-widest">${slot.subject} ${slot.room ? `<span class="opacity-40 mx-0.5">•</span> RM: ${slot.room}` : ''}</span>
+                        </div>
+                    </div>
+                    <div class="flex flex-col items-end shrink-0 gap-1.5">
+                        <span class="bg-slate-800 text-white px-3 py-1.5 rounded-lg text-[10px] font-black tracking-widest whitespace-nowrap shadow-sm border border-slate-900">${timeStr}</span>
+                        ${isExam ? `<span class="text-[9px] font-black text-rose-600 bg-rose-100 px-2 py-0.5 rounded border border-rose-200 uppercase tracking-widest animate-pulse">🚨 Exam Duty</span>` : ''}
+                    </div>
+                </div>`;
+            });
+
+            if (examDutyCount > 0) {
+                html = `<div class="bg-rose-600 text-white p-4 rounded-2xl mb-3 flex items-center gap-4 shadow-lg shadow-rose-600/20 border border-rose-500">
+                    <span class="text-3xl animate-bounce-short">📝</span>
+                    <div>
+                        <p class="font-black text-sm uppercase tracking-widest leading-none text-rose-50">Exam Duty Today</p>
+                        <p class="text-[10px] font-bold text-rose-200 uppercase mt-1 tracking-widest">You have ${examDutyCount} assigned invigilation slot(s).</p>
+                    </div>
+                </div>` + html;
+            }
+
+            listContainer.innerHTML = html;
+        }
         function checkUpcomingClasses() {
             if (todaysSchedule.length === 0) return;
             const currentMins = new Date().getHours() * 60 + new Date().getMinutes();
