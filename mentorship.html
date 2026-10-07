@@ -148,8 +148,8 @@
                         </div>
                     </div>
 
-                    <!-- Right: Assign Mentor -->
-                    <div class="flex-1 lg:pl-6 flex flex-col">
+               <!-- Right: Assign Mentor -->
+                    <div id="assign-mentor-panel" class="hidden flex-1 lg:pl-6 flex-col border-t lg:border-t-0 pt-6 lg:pt-0 mt-6 lg:mt-0 border-slate-100">
                         <h3 class="font-black text-slate-800 text-sm uppercase tracking-widest mb-4">2. Assign Mentor</h3>
                         <div class="space-y-4 flex-1">
                             <select id="alloc-dept" onchange="populateAllocStaff()" class="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold uppercase outline-none cursor-pointer">
@@ -615,12 +615,18 @@
             }
         };
 
-  async function fetchAllStudents() {
+async function fetchAllStudents() {
             try {
                 const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                // Fetch ALL approved students (active and inactive) so historical reports remain accessible
-                const snap = await db.collection(prefix + "students").where("admissionStatus", "in", ["APPROVED", "approved"]).get();
-                globalStudents = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                // Fetch all to preserve history, filter in-memory
+                const snap = await db.collection(prefix + "students").get();
+                globalStudents = [];
+                snap.forEach(d => {
+                    const data = d.data();
+                    if (data.admissionStatus !== "PENDING" && data.admissionStatus !== "pending" && data.admissionStatus !== "REJECTED") {
+                        globalStudents.push({id: d.id, ...data});
+                    }
+                });
             } catch (e) { console.error("Error fetching students", e); }
         }
 
@@ -880,7 +886,11 @@
             }
 
           // Only allow ACTIVE students to be assigned to new mentors
-            allocStudentsCache = globalStudents.filter(s => s.className === cls && s.section === sec && s.isActive !== false).sort((a,b) => a.name.localeCompare(b.name));
+         allocStudentsCache = globalStudents.filter(s => 
+                String(s.className || "").trim().toUpperCase() === String(cls).trim().toUpperCase() && 
+                String(s.section || "").trim().toUpperCase() === String(sec).trim().toUpperCase() &&
+                s.isActive !== false // Don't let inactive students be assigned
+            ).sort((a,b) => (a.name || "").localeCompare(b.name || ""));
             
             if(allocStudentsCache.length === 0) {
                 list.innerHTML = `<div class="text-center py-10 text-[10px] font-bold text-slate-400 uppercase tracking-widest">No active students found</div>`;
@@ -889,7 +899,7 @@
             }
         }
 
-   function renderAllocStudentList(students) {
+function renderAllocStudentList(students) {
             const list = document.getElementById('alloc-student-list');
             list.innerHTML = students.map(s => {
                 let currentMentor = "No Mentor";
@@ -908,7 +918,7 @@
                                 <span class="text-xs font-black text-slate-800 uppercase">${s.name}</span>
                                 <span class="text-[9px] font-bold text-slate-400 ml-1">#${s.rollNo || 'N/A'}</span>
                             </div>
-                            <div class="shrink-0 text-right">
+                            <div class="shrink-0 text-left sm:text-right">
                                 <span class="text-[9px] font-black uppercase ${currentMentor === 'No Mentor' ? 'text-amber-500 bg-amber-50 border border-amber-200' : 'text-indigo-600 bg-indigo-50 border border-indigo-200'} px-2 py-0.5 rounded tracking-widest shadow-sm">${currentMentor}</span>
                             </div>
                         </div>
@@ -929,7 +939,6 @@
 
         function toggleAllAllocStudents(masterCb) {
             document.querySelectorAll('.alloc-stu-cb').forEach(cb => {
-                // only check visible ones
                 if(cb.closest('.alloc-stu-row').style.display !== 'none') {
                     cb.checked = masterCb.checked;
                 }
@@ -937,18 +946,18 @@
             updateAllocSelectedCount();
         }
 
-       function updateAllocSelectedCount() {
+        function updateAllocSelectedCount() {
             const checked = document.querySelectorAll('.alloc-stu-cb:checked').length;
             document.getElementById('alloc-selected-count').innerText = `${checked} Selected`;
             
-            const btn = document.getElementById('btn-allocate-students');
-            if (btn) {
+            const panel = document.getElementById('assign-mentor-panel');
+            if (panel) {
                 if (checked > 0) {
-                    btn.classList.remove('hidden');
-                    btn.classList.add('block');
+                    panel.classList.remove('hidden');
+                    panel.classList.add('flex');
                 } else {
-                    btn.classList.add('hidden');
-                    btn.classList.remove('block');
+                    panel.classList.add('hidden');
+                    panel.classList.remove('flex');
                 }
             }
         }
@@ -1010,7 +1019,8 @@
                 document.getElementById('alloc-check-all').checked = false;
                 updateAllocSelectedCount();
                 
-                fetchAllocationDirectory(); // Refresh bottom list
+                await fetchAllocationDirectory(); // Refresh bottom list
+                fetchStudentsForAllocation(); // Refresh mentor badges in the top list
             } catch(e) {
                 alert("Error allocating students: " + e.message);
                 console.error(e);
