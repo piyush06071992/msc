@@ -5205,8 +5205,16 @@ let subjectColumnsHtml = allUniqueSubjects.map(sub => {
                     `;
                 }).join('');
 
-              let subjectHeadersHtml = allUniqueSubjects.map(sub => `
+           let subjectHeadersHtml = allUniqueSubjects.map(sub => `
                     <th class="p-2 text-center border-l border-r border-slate-200 bg-slate-100">${sub} Score</th>
+                `).join('');
+
+                const uniqueExamTypes = [...new Set(examRecords.map(e => e.type))];
+                const typeFiltersHtml = uniqueExamTypes.map(type => `
+                    <label class="flex items-center gap-1 bg-slate-50 px-2 py-0.5 rounded border border-slate-200 cursor-pointer hover:bg-slate-100 transition-colors">
+                        <input type="checkbox" value="${type}" checked class="stu-chart-type-cb w-3 h-3 accent-indigo-600" onchange="renderStudentChart()">
+                        <span class="text-[9px] font-black text-slate-600 uppercase">${type}</span>
+                    </label>
                 `).join('');
 
                 body.innerHTML = `
@@ -5217,7 +5225,7 @@ let subjectColumnsHtml = allUniqueSubjects.map(sub => {
                         </div>
                         <div class="bg-blue-50 border border-blue-200 p-2 rounded-xl text-center shadow-sm">
                             <span class="text-[9px] font-black uppercase tracking-widest text-blue-700 block">Total Scored</span>
-                            <span class="text-lg font-black text-blue-900 mt-0.5 block">${grandTotalObt} / ${grandTotalMax}</span>
+                            <span class="text-lg font-black text-blue-900 mt-0.5 block">${grandTotalObt} /${grandTotalMax}</span>
                         </div>
                         <div class="bg-emerald-50 border border-emerald-200 p-2 rounded-xl text-center shadow-sm">
                             <span class="text-[9px] font-black uppercase tracking-widest text-emerald-700 block">Overall %</span>
@@ -5229,14 +5237,27 @@ let subjectColumnsHtml = allUniqueSubjects.map(sub => {
                         </div>
                     </div>
 
-                    <div class="shrink-0">
+                    <div class="shrink-0 mt-1">
                         <h4 class="font-black text-slate-800 uppercase tracking-widest text-[10px] mb-2">Subject Cumulative Performance</h4>
                         <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2">
                             ${subjectsCardsHtml}
                         </div>
                     </div>
 
-                  <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex-1 flex flex-col min-h-0 overflow-hidden">
+                    <div class="shrink-0 mt-2 bg-white p-3 rounded-xl border border-slate-200 shadow-sm flex flex-col">
+                        <div class="flex flex-wrap justify-between items-center mb-2 gap-2 border-b border-slate-100 pb-2">
+                            <h4 class="font-black text-slate-800 uppercase tracking-widest text-[10px]">Performance Trend</h4>
+                            <div class="flex flex-wrap gap-2 items-center">
+                                <span class="text-[8px] font-bold text-slate-400 uppercase tracking-widest">Filter Exam Types:</span>
+                                ${typeFiltersHtml}
+                            </div>
+                        </div>
+                        <div class="relative w-full h-[220px]">
+                            <canvas id="studentPerformanceChart"></canvas>
+                        </div>
+                    </div>
+
+                  <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex-1 flex flex-col min-h-0 overflow-hidden mt-2">
                         <div class="p-3 bg-slate-100 border-b border-slate-200 flex justify-between items-center shrink-0 z-20">
                             <div class="flex items-center gap-3">
                                 <h4 class="font-black text-slate-700 uppercase tracking-widest text-[10px]">Complete Exam History Log</h4>
@@ -5265,13 +5286,109 @@ let subjectColumnsHtml = allUniqueSubjects.map(sub => {
                     </div>
                 `;
 
-                document.getElementById('comp-stu-name').innerText = stu.name;
+             document.getElementById('comp-stu-name').innerText = stu.name;
                 document.getElementById('comp-stu-meta').innerText = `Roll #${stu.rollNo || '—'} | Class ${stu.className} | Sec ${stu.section}`;
+
+                renderStudentChart();
 
             } catch (e) {
                 console.error(e);
                 body.innerHTML = `<div class="text-center py-20 text-rose-500 font-bold uppercase text-xs">Error generating report: ${e.message}</div>`;
             }
+        }
+
+        let activeStudentChartInstance = null;
+        function renderStudentChart() {
+            if (!activeDossierData) return;
+            const ctx = document.getElementById('studentPerformanceChart');
+            if (!ctx) return;
+            
+            if (activeStudentChartInstance) activeStudentChartInstance.destroy();
+
+            const typeCheckboxes = document.querySelectorAll('.stu-chart-type-cb:checked');
+            const selectedTypes = Array.from(typeCheckboxes).map(cb => cb.value);
+
+            const records = activeDossierData.examRecords.filter(r => !r.isCancelled && selectedTypes.includes(r.type));
+
+            const labels = records.map(r => {
+                const d = new Date(r.date + 'T00:00:00').toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+                return `${d} (${r.type})`;
+            });
+
+            const overallData = records.map(r => r.percentage);
+            const colors = ['#f43f5e', '#10b981', '#f59e0b', '#06b6d4', '#8b5cf6', '#ec4899', '#14b8a6'];
+            
+            let datasets = [{
+                label: 'Overall %',
+                data: overallData,
+                borderColor: '#4f46e5',
+                backgroundColor: 'rgba(79, 70, 229, 0.1)',
+                borderWidth: 3,
+                fill: true,
+                tension: 0.3,
+                order: 1
+            }];
+
+            const allUniqueSubjects = Object.keys(activeDossierData.subjectPerformanceMap).sort();
+            
+            allUniqueSubjects.forEach((sub, i) => {
+                const subData = records.map(r => {
+                    if (r.subjects[sub] && r.subjects[sub].max > 0) {
+                        return ((r.subjects[sub].obt / r.subjects[sub].max) * 100).toFixed(1);
+                    }
+                    return null;
+                });
+                
+                datasets.push({
+                    label: sub,
+                    data: subData,
+                    borderColor: colors[i % colors.length],
+                    borderWidth: 2,
+                    borderDash: [4, 4],
+                    pointBackgroundColor: colors[i % colors.length],
+                    fill: false,
+                    tension: 0.3,
+                    spanGaps: true,
+                    order: 2
+                });
+            });
+
+            activeStudentChartInstance = new Chart(ctx.getContext('2d'), {
+                type: 'line',
+                data: { labels, datasets },
+                options: {
+                    responsive: true, 
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: { 
+                        tooltip: { 
+                            callbacks: {
+                                label: function(context) {
+                                    return context.dataset.label + ': ' + context.parsed.y + '%';
+                                }
+                            }
+                        },
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                boxWidth: 12,
+                                font: { size: 10, family: "'Plus Jakarta Sans', sans-serif", weight: 'bold' }
+                            }
+                        }
+                    },
+                    scales: { 
+                        y: { 
+                            min: 0, max: 100, 
+                            ticks: { font: { size: 9 }, stepSize: 20 },
+                            grid: { color: '#f1f5f9' }
+                        },
+                        x: {
+                            ticks: { font: { size: 9 } },
+                            grid: { display: false }
+                        }
+                    }
+                }
+            });
         }
 
        function exportComprehensiveStudentExcel() {
