@@ -365,7 +365,7 @@
                     return;
                 }
 
-                let resultsData = [];
+               let resultsData = [];
                 let subjectSet = new Set();
                 let subjectTotals = {};
                 let subjectCounts = {};
@@ -375,73 +375,118 @@
                     const gId = subData.groupId;
                     const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
                     const [gDoc, kDoc] = await Promise.all([
-                        db.collection(prefix + "exam_schedules").doc(gId).get(),
-                        db.collection("exam_answer_keys").doc(gId).get()
+                        db.collection(prefix + "exam_schedules").doc(gId).get().catch(()=>null),
+                        db.collection("exam_answer_keys").doc(gId).get().catch(()=>null)
                     ]);
 
-                    if (gDoc.exists && kDoc.exists) {
-                        const date = gDoc.data().date;
-                        const kData = kDoc.data();
-                        const structure = kData.structure || [];
-                        let totalMax = 0;
-                        let totalObtained = 0;
-                        let subScores = {};
+                    let examDate = "Unknown Date";
+                    let examType = "EXAM";
+                    let examTitle = "Assessment";
 
-                        if (subData.isDirectImport) {
-                            const scores = subData.directScores || {};
-                            const directMax = kData.directMaxMarks || {};
-                            Object.keys(scores).forEach(sub => {
-                                const sMax = directMax[sub] || 100;
+                    if (gDoc && gDoc.exists) {
+                        const gd = gDoc.data();
+                        examDate = gd.date || "Unknown Date";
+                        examType = gd.type || "EXAM";
+                        examTitle = gd.title || gd.tag || `${gd.className} Assessment`;
+                    }
+
+                    if (subData.isCancelled) {
+                        resultsData.push({
+                            date: examDate,
+                            type: examType,
+                            title: examTitle,
+                            isCancelled: true,
+                            cancelReason: subData.cancelReason || "Cancelled by Admin",
+                            obt: 0,
+                            max: 0,
+                            overall: 0,
+                            subScores: {},
+                            subRawScores: {}
+                        });
+                        return;
+                    }
+
+                    let kData = kDoc && kDoc.exists ? kDoc.data() : { answers: {}, structure: [], bonusConfig: {}, directMaxMarks: {} };
+                    const structure = kData.structure || [];
+                    const directMaxMarks = kData.directMaxMarks || {};
+                    let totalMax = 0;
+                    let totalObtained = 0;
+                    let subScores = {};
+                    let subRawScores = {};
+
+                    if (subData.isDirectImport) {
+                        const scores = subData.directScores || {};
+                        Object.keys(scores).forEach(sub => {
+                            const upperSub = sub.toUpperCase();
+                            const sMax = directMaxMarks[sub] || 100;
+                            const score = scores[sub];
+
+                            if (score === "ABSENT") {
+                                subRawScores[upperSub] = { obt: 'ABSENT', max: Number(sMax), isAbsent: true };
+                            } else {
                                 totalMax += sMax;
-                                totalObtained += scores[sub];
-                                const pct = (scores[sub] / sMax) * 100;
-                                subScores[sub] = pct;
-                                subjectSet.add(sub);
+                                totalObtained += Number(score);
+                                const pct = (Number(score) / sMax) * 100;
+                                subScores[upperSub] = pct;
+                                subRawScores[upperSub] = { obt: Number(score), max: Number(sMax) };
+                                subjectSet.add(upperSub);
                                 
-                                subjectTotals[sub] = (subjectTotals[sub] || 0) + pct;
-                                subjectCounts[sub] = (subjectCounts[sub] || 0) + 1;
-                            });
-                        } else {
-                            const answers = kData.answers || {};
-                            const bonuses = kData.bonusConfig || {};
-                            const responses = subData.responses || {};
+                                subjectTotals[upperSub] = (subjectTotals[upperSub] || 0) + pct;
+                                subjectCounts[upperSub] = (subjectCounts[upperSub] || 0) + 1;
+                            }
+                        });
+                    } else {
+                        const answers = kData.answers || {};
+                        const bonuses = kData.bonusConfig || {};
+                        const responses = subData.responses || {};
 
-                            structure.forEach(sec => {
-                                let secScore = 0; let secMax = 0;
-                                for (let q = sec.start; q <= sec.end; q++) {
-                                    const pos = sec.correctMarks !== undefined ? sec.correctMarks : 4;
-                                    const neg = sec.wrongMarks !== undefined ? sec.wrongMarks : -1;
-                                    const unatt = sec.unattemptedMarks !== undefined ? sec.unattemptedMarks : 0;
-                                    secMax += pos;
-
-                                    const isAttempted = (responses[q] !== undefined && responses[q] !== "");
-                                    const isCorrect = isAttempted && (String(responses[q]).trim() === String(answers[q]).trim());
-                                    const bRule = bonuses[q] || 'NONE';
-
-                                    if (bRule === 'ALL') secScore += pos;
-                                    else if (bRule === 'ATTEMPTED') { if (isAttempted) secScore += pos; else secScore += unatt; }
-                                    else { if (!isAttempted) secScore += unatt; else if (isCorrect) secScore += pos; else secScore += neg; }
-                                }
-                                totalMax += secMax;
-                                totalObtained += secScore;
-                                if (secMax > 0) {
-                                    const pct = (secScore / secMax) * 100;
-                                    subScores[sec.subject] = pct;
-                                    subjectSet.add(sec.subject);
-                                    
-                                    subjectTotals[sec.subject] = (subjectTotals[sec.subject] || 0) + pct;
-                                    subjectCounts[sec.subject] = (subjectCounts[sec.subject] || 0) + 1;
-                                }
-                            });
+                        let currentStructure = structure;
+                        if (currentStructure.length === 0 && Object.keys(directMaxMarks).length > 0) {
+                            currentStructure = Object.keys(directMaxMarks).map(s => ({ subject: s, isDirect: true, maxMarks: directMaxMarks[s] }));
                         }
 
-                        if (totalMax > 0) {
-                            resultsData.push({
-                                date: date,
-                                overall: (totalObtained / totalMax) * 100,
-                                subScores: subScores
-                            });
-                        }
+                        currentStructure.forEach(sec => {
+                            const upperSub = (sec.subject || "UNKNOWN").toUpperCase();
+                            let secScore = 0; let secMax = 0;
+                            for (let q = sec.start; q <= sec.end; q++) {
+                                const pos = sec.correctMarks !== undefined ? sec.correctMarks : 4;
+                                const neg = sec.wrongMarks !== undefined ? sec.wrongMarks : -1;
+                                const unatt = sec.unattemptedMarks !== undefined ? sec.unattemptedMarks : 0;
+                                secMax += pos;
+
+                                const isAttempted = (responses[q] !== undefined && responses[q] !== null && String(responses[q]).trim() !== "");
+                                const isCorrect = isAttempted && (String(responses[q]).trim() === String(answers[q]).trim());
+                                const bRule = bonuses[q] || 'NONE';
+
+                                if (bRule === 'ALL') secScore += pos;
+                                else if (bRule === 'ATTEMPTED') { if (isAttempted) secScore += pos; else secScore += unatt; }
+                                else { if (!isAttempted) secScore += unatt; else if (isCorrect) secScore += pos; else secScore += neg; }
+                            }
+                            totalMax += secMax;
+                            totalObtained += secScore;
+                            if (secMax > 0) {
+                                const pct = (secScore / secMax) * 100;
+                                subScores[upperSub] = pct;
+                                subRawScores[upperSub] = { obt: secScore, max: secMax };
+                                subjectSet.add(upperSub);
+                                
+                                subjectTotals[upperSub] = (subjectTotals[upperSub] || 0) + pct;
+                                subjectCounts[upperSub] = (subjectCounts[upperSub] || 0) + 1;
+                            }
+                        });
+                    }
+
+                    if (totalMax > 0) {
+                        resultsData.push({
+                            date: examDate,
+                            type: examType,
+                            title: examTitle,
+                            obt: totalObtained,
+                            max: totalMax,
+                            overall: (totalObtained / totalMax) * 100,
+                            subScores: subScores,
+                            subRawScores: subRawScores
+                        });
                     }
                 });
 
@@ -467,63 +512,257 @@
                 weakestEl.innerText = worstSub;
 
                 resultsData.sort((a, b) => a.date.localeCompare(b.date));
-                const labels = resultsData.map(d => new Date(d.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }));
-                const colors = ['#f43f5e', '#10b981', '#f59e0b', '#06b6d4', '#8b5cf6'];
-                
-                let datasets = [{
-                    label: 'Overall Performance (%)',
-                    data: resultsData.map(d => d.overall.toFixed(1)),
-                    borderColor: '#4f46e5',
-                    backgroundColor: 'rgba(79, 70, 229, 0.1)',
-                    borderWidth: 3,
-                    fill: false,
-                    tension: 0.3,
-                    order: 1
-                }];
+                window.studentDossierData = { resultsData, subjectSet: Array.from(subjectSet).sort() };
 
-                let cIdx = 0;
-                Array.from(subjectSet).sort().forEach(sub => {
-                    datasets.push({
-                        label: `${sub} (%)`,
-                        data: resultsData.map(d => d.subScores[sub] !== undefined ? d.subScores[sub].toFixed(1) : null),
-                        borderColor: colors[cIdx % colors.length],
-                        borderWidth: 2,
-                        fill: false,
-                        tension: 0.3,
-                        spanGaps: true,
-                        order: 2
-                    });
-                    cIdx++;
-                });
+                const uniqueExamTypes = [...new Set(resultsData.map(e => e.type))];
+                const typeFiltersHtml = uniqueExamTypes.map(type => `
+                    <label class="flex items-center gap-1 bg-white px-2 py-1 rounded border border-slate-200 cursor-pointer hover:bg-slate-50 transition-colors shadow-sm">
+                        <input type="checkbox" value="${type}" checked class="stu-chart-type-cb w-3 h-3 accent-indigo-600" onchange="renderStudentDashboardChart()">
+                        <span class="text-[9px] font-black text-slate-600 uppercase tracking-widest">${type}</span>
+                    </label>
+                `).join('');
 
-                if (resultsData.length === 1) {
-                    chartCont.innerHTML = `
-                        <div class="w-full flex flex-col items-center justify-center">
-                            <canvas id="studentPerformanceChart" style="max-height: 320px; width: 100%;"></canvas>
-                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-3 text-center">💡 Note: Trend lines connect automatically once you have 2 or more exams recorded.</p>
+                chartCont.className = "flex flex-col gap-4 w-full"; 
+                chartCont.innerHTML = `
+                    <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col w-full">
+                        <div class="flex flex-wrap justify-between items-center mb-4 gap-3 border-b border-slate-100 pb-3">
+                            <h4 class="font-black text-slate-800 uppercase tracking-widest text-xs">Performance Trend</h4>
+                            <div class="flex flex-wrap gap-2 items-center">
+                                <span class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Filter Exam Types:</span>
+                                ${typeFiltersHtml}
+                            </div>
                         </div>
-                    `;
-                } else {
-                    chartCont.innerHTML = '<canvas id="studentPerformanceChart" style="max-height: 350px; width: 100%;"></canvas>';
-                }
+                        <div class="relative w-full h-[300px] sm:h-[350px]">
+                            <canvas id="studentPerformanceChart"></canvas>
+                        </div>
+                    </div>
 
-                const ctx = document.getElementById('studentPerformanceChart').getContext('2d');
-                if (activeChartInstance) activeChartInstance.destroy();
+                    <div class="bg-white rounded-xl border border-slate-200 shadow-sm flex flex-col min-h-0 overflow-hidden mt-4 w-full">
+                        <div class="p-4 bg-slate-100 border-b border-slate-200 flex justify-between items-center shrink-0 z-20">
+                            <div class="flex items-center gap-3">
+                                <h4 class="font-black text-slate-700 uppercase tracking-widest text-[10px] sm:text-xs">Complete Exam History Log</h4>
+                                <button id="clear-history-filter-btn" onclick="filterStudentHistoryByType('ALL')" class="hidden bg-rose-100 text-rose-700 hover:bg-rose-200 px-2 py-0.5 rounded-md text-[8px] font-black uppercase tracking-widest transition-colors shadow-sm">✕ Clear Filter</button>
+                            </div>
+                            <span id="history-record-count" data-total="${resultsData.length}" class="text-[9px] font-bold text-slate-400 uppercase tracking-widest">${resultsData.length} Records</span>
+                        </div>
+                        <div class="overflow-auto custom-scroll w-full">
+                            <table class="w-full text-left border-collapse text-xs whitespace-nowrap min-w-max">
+                                <thead class="bg-slate-50 text-slate-500 uppercase font-black sticky top-0 border-b border-slate-200 text-[9px] z-10 shadow-sm" id="history-table-head">
+                                </thead>
+                                <tbody class="divide-y divide-slate-100 font-bold text-slate-700" id="history-table-body">
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                `;
 
-                activeChartInstance = new Chart(ctx, {
-                    type: 'line',
-                    data: { labels: labels, datasets: datasets },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: { tooltip: { mode: 'index', intersect: false } },
-                        scales: { y: { min: 0, max: 100, title: { display: true, text: 'Percentage Score (%)' } } }
-                    }
-                });
+                renderStudentDashboardChart();
 
             } catch (e) {
                 console.error("Trend Graph Error:", e);
                 chartCont.innerHTML = `<p class="text-center font-bold text-rose-500 py-12 text-xs uppercase">Error loading trend graph: ${e.message}</p>`;
+            }
+        }
+
+        function filterStudentHistoryByType(examType) {
+            const rows = document.querySelectorAll('.history-log-row');
+            const clearBtn = document.getElementById('clear-history-filter-btn');
+            const countLabel = document.getElementById('history-record-count');
+            let visibleCount = 0;
+
+            rows.forEach(row => {
+                if (examType === 'ALL' || row.getAttribute('data-type') === examType) {
+                    row.style.display = '';
+                    visibleCount++;
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+
+            if (examType === 'ALL') {
+                if(clearBtn) clearBtn.classList.add('hidden');
+                if(countLabel) countLabel.innerText = `${countLabel.getAttribute('data-total')} Records`;
+            } else {
+                if(clearBtn) clearBtn.classList.remove('hidden');
+                if(countLabel) countLabel.innerHTML = `<span class="text-indigo-600">${visibleCount} Filtered</span> / ${countLabel.getAttribute('data-total')} Total`;
+            }
+        }
+
+        function renderStudentDashboardChart() {
+            if (!window.studentDossierData) return;
+            const { resultsData, subjectSet } = window.studentDossierData;
+            
+            const ctx = document.getElementById('studentPerformanceChart');
+            if (!ctx) return;
+            
+            if (activeChartInstance) activeChartInstance.destroy();
+
+            const typeCheckboxes = document.querySelectorAll('.stu-chart-type-cb:checked');
+            const selectedTypes = Array.from(typeCheckboxes).map(cb => cb.value);
+
+            const records = resultsData.filter(r => !r.isCancelled && selectedTypes.includes(r.type));
+
+            const labels = records.map(r => {
+                const d = new Date(r.date + 'T00:00:00').toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+                return `${d} (${r.type})`;
+            });
+
+            const overallData = records.map(r => r.overall.toFixed(1));
+            const colors = ['#f43f5e', '#10b981', '#f59e0b', '#06b6d4', '#8b5cf6', '#ec4899', '#14b8a6'];
+            
+            let datasets = [{
+                label: 'Overall Performance (%)',
+                data: overallData,
+                borderColor: '#4f46e5',
+                backgroundColor: 'rgba(79, 70, 229, 0.1)',
+                borderWidth: 3,
+                fill: true,
+                tension: 0.3,
+                order: 1
+            }];
+
+            subjectSet.forEach((sub, i) => {
+                const subData = records.map(r => {
+                    if (r.subScores[sub] !== undefined) {
+                        return r.subScores[sub].toFixed(1);
+                    }
+                    return null;
+                });
+                
+                datasets.push({
+                    label: `${sub} (%)`,
+                    data: subData,
+                    borderColor: colors[i % colors.length],
+                    borderWidth: 2,
+                    borderDash: [4, 4],
+                    pointBackgroundColor: colors[i % colors.length],
+                    fill: false,
+                    tension: 0.3,
+                    spanGaps: true,
+                    order: 2
+                });
+            });
+
+            activeChartInstance = new Chart(ctx.getContext('2d'), {
+                type: 'line',
+                data: { labels, datasets },
+                options: {
+                    responsive: true, 
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: { 
+                        tooltip: { 
+                            callbacks: {
+                                label: function(context) {
+                                    return context.dataset.label + ': ' + context.parsed.y + '%';
+                                }
+                            }
+                        },
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                boxWidth: 12,
+                                font: { size: 10, family: "'Plus Jakarta Sans', sans-serif", weight: 'bold' }
+                            }
+                        }
+                    },
+                    scales: { 
+                        y: { 
+                            min: 0, max: 100, 
+                            ticks: { font: { size: 9 }, stepSize: 20 },
+                            grid: { color: '#f1f5f9' }
+                        },
+                        x: {
+                            ticks: { font: { size: 9 } },
+                            grid: { display: false }
+                        }
+                    }
+                }
+            });
+
+            // -----------------------------------------------------
+            // RENDER THE HISTORY LOG TABLE
+            // -----------------------------------------------------
+            const thead = document.getElementById('history-table-head');
+            const tbody = document.getElementById('history-table-body');
+            
+            if(thead && tbody) {
+                let subjectHeadersHtml = subjectSet.map(sub => `
+                    <th class="p-2 text-center border-l border-r border-slate-200 bg-slate-100">${sub} Score</th>
+                `).join('');
+
+                thead.innerHTML = `
+                    <tr>
+                        <th class="p-2 text-center w-10">#</th>
+                        <th class="p-2">Date</th>
+                        <th class="p-2">Type</th>
+                        <th class="p-2 max-w-[150px]">Exam Title</th>
+                        ${subjectHeadersHtml}
+                        <th class="p-2 text-center border-l border-slate-200 bg-indigo-50/50 text-indigo-800">Total Score</th>
+                        <th class="p-2 text-center bg-emerald-50/50 text-emerald-800">Overall %</th>
+                    </tr>
+                `;
+
+                let tableRowsHtml = resultsData.map((ex, idx) => {
+                    const datePretty = new Date(ex.date + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+                    let typeBadge = "bg-slate-100 text-slate-700";
+                    if (ex.type === 'UT') typeBadge = "bg-blue-100 text-blue-800";
+                    else if (ex.type === 'OT') typeBadge = "bg-amber-100 text-amber-800";
+                    else if (['TERMINAL', 'PREBOARD', 'BOARD'].some(t => ex.type.toUpperCase().includes(t))) typeBadge = "bg-rose-100 text-rose-800";
+
+                    if (ex.isCancelled) {
+                        return `
+                            <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 history-log-row" data-type="${ex.type}">
+                                <td class="p-2 text-center font-mono font-bold text-slate-400">${idx + 1}</td>
+                                <td class="p-2 font-bold text-slate-700 whitespace-nowrap">${datePretty}</td>
+                                <td class="p-2">
+                                    <span onclick="filterStudentHistoryByType('${ex.type}')" class="px-2 py-0.5 rounded text-[9px] font-black uppercase ${typeBadge} cursor-pointer hover:ring-2 hover:ring-offset-1 transition-all shadow-sm" title="Click to filter by ${ex.type}">
+                                        ${ex.type}
+                                    </span>
+                                </td>
+                                <td class="p-2 font-black text-slate-900 uppercase truncate max-w-[150px]" title="${ex.title}">${ex.title}</td>
+                                <td colspan="${subjectSet.length + 2}" class="p-2 text-center font-black text-rose-600 tracking-widest bg-rose-50/50">CANCELLED BY ADMINISTRATION</td>
+                            </tr>
+                        `;
+                    }
+
+                    let subjectColumnsHtml = subjectSet.map(sub => {
+                        if (ex.subRawScores && ex.subRawScores[sub]) {
+                            const d = ex.subRawScores[sub];
+                            if(d.isAbsent) return `<td class="p-2 text-center font-mono font-bold text-rose-500 border-r border-slate-100 whitespace-nowrap">ABSENT</td>`;
+                            return `<td class="p-2 text-center font-mono font-bold text-slate-700 border-r border-slate-100 whitespace-nowrap">${d.obt}/${d.max}</td>`;
+                        } else {
+                            return `<td class="p-2 text-center text-slate-300 border-r border-slate-100">-</td>`;
+                        }
+                    }).join('');
+
+                    return `
+                        <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 history-log-row" data-type="${ex.type}">
+                            <td class="p-2 text-center font-mono font-bold text-slate-400">${idx + 1}</td>
+                            <td class="p-2 font-bold text-slate-700 whitespace-nowrap">${datePretty}</td>
+                            <td class="p-2">
+                                <span onclick="filterStudentHistoryByType('${ex.type}')" class="px-2 py-0.5 rounded text-[9px] font-black uppercase ${typeBadge} cursor-pointer hover:ring-2 hover:ring-offset-1 transition-all shadow-sm" title="Click to filter by ${ex.type}">
+                                    ${ex.type}
+                                </span>
+                            </td>
+                            <td class="p-2 font-black text-slate-900 uppercase truncate max-w-[150px]" title="${ex.title}">${ex.title}</td>
+                            ${subjectColumnsHtml}
+                            <td class="p-2 text-center font-mono font-black text-indigo-700 bg-indigo-50/30 whitespace-nowrap">${ex.obt} / ${ex.max}</td>
+                            <td class="p-2 text-center font-mono font-black text-emerald-700 bg-emerald-50/30">${ex.overall.toFixed(1)}%</td>
+                        </tr>
+                    `;
+                }).join('');
+                
+                tbody.innerHTML = tableRowsHtml;
+            }
+            
+            const clearBtn = document.getElementById('clear-history-filter-btn');
+            if (clearBtn && !clearBtn.classList.contains('hidden')) {
+                // Keep the current active filter intact if they just toggled a checkbox
+                // Since `filterStudentHistoryByType` operates on the DOM elements, it will re-hide elements automatically when re-rendered if the user manually re-applies it.
+                clearBtn.classList.add('hidden'); // Reset to show all on re-render to avoid confusion
+                const countLabel = document.getElementById('history-record-count');
+                if(countLabel) countLabel.innerText = `${resultsData.length} Records`;
             }
         }
 
