@@ -885,8 +885,85 @@
             return match ? (match.secInchargeName || "") : "";
         }
 
-        const normDoc = (val) => String(val || "").replace(/\s/g, '_').toUpperCase();
+      const normDoc = (val) => String(val || "").replace(/\s/g, '_').toUpperCase();
         const normMatch = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+        // --- Lightweight IndexedDB Helper ---
+        const IDB = {
+            dbName: "MinervaERP_Cache",
+            storeName: "MasterStore",
+            async open() {
+                return new Promise((resolve, reject) => {
+                    const req = indexedDB.open(this.dbName, 1);
+                    req.onupgradeneeded = () => req.result.createObjectStore(this.storeName);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                });
+            },
+            async get(key) {
+                const db = await this.open();
+                return new Promise((resolve) => {
+                    const tx = db.transaction(this.storeName, "readonly");
+                    const req = tx.objectStore(this.storeName).get(key);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => resolve(null);
+                });
+            },
+            async set(key, value) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(this.storeName, "readwrite");
+                    tx.objectStore(this.storeName).put(value, key);
+                    tx.oncomplete = () => resolve();
+                    tx.onerror = () => reject(tx.error);
+                });
+            }
+        };
+
+        async function getCachedStudentsRoster(prefix) {
+            try {
+                // 1. Read only 1 document from Firestore to check version
+                const metaDoc = await db.collection("system_metadata").doc("students_version").get();
+                const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
+                
+                // 2. Read local version and stored roster from device IndexedDB
+                const localVersion = await IDB.get(`${prefix}students_last_version`);
+                const cachedRoster = await IDB.get(`${prefix}students_roster`);
+
+                // 3. If version matches and cache exists, bypass Firestore entirely (0 reads!)
+                if (cachedRoster && localVersion && localVersion === serverVersion) {
+                    console.log("⚡ Roster loaded instantly from local IndexedDB");
+                    return cachedRoster;
+                }
+
+                // 4. If version changed, download the fresh collection and update IndexedDB
+                console.log("🔄 Roster updated on server. Refreshing local IndexedDB cache...");
+                const snap = await db.collection(prefix + "students").where("admissionStatus", "!=", "PENDING").get();
+                let freshRoster = [];
+                snap.forEach(d => {
+                    const data = d.data();
+                    if (data.isActive !== false || (data.isActive === false && data.statusChangeDate)) {
+                         freshRoster.push({ id: d.id, ...data });
+                    }
+                });
+
+                await IDB.set(`${prefix}students_roster`, freshRoster);
+                await IDB.set(`${prefix}students_last_version`, serverVersion);
+
+                return freshRoster;
+            } catch (e) {
+                console.warn("Fallback to network fetch:", e);
+                const snap = await db.collection(prefix + "students").get();
+                let fallbackRoster = [];
+                snap.forEach(d => {
+                    const data = d.data();
+                    if (data.admissionStatus !== 'PENDING') {
+                        fallbackRoster.push({ id: d.id, ...data });
+                    }
+                });
+                return fallbackRoster;
+            }
+        }
 
         function parseSafeDate(dVal) {
             if (!dVal) return null;
@@ -1297,11 +1374,15 @@ function switchMainTab(tab) {
         async function fetchData(safeName) {
             const container = document.getElementById('bookshelf-container');
           try {
-                const [ttSnap, structSnap, holSnap, stuSnap, histSnap, staffSnap, remSnap, splSnap] = await Promise.all([
+const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+
+                // 1. Fetch Students Roster first (Using Smart Cache)
+                studentsData = await getCachedStudentsRoster(centerPrefix);
+
+                const [ttSnap, structSnap, holSnap, histSnap, staffSnap, remSnap, splSnap] = await Promise.all([
                     getCollection("timetable").get(),
                     getCollection("institute_structure").get(),
                     getCollection("school_holidays").get(),
-                    getCollection("students").get(),
                     getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"]).get(),
                     db.collection("staff_applications").get(),
                     getCollection("remedial_classes").get(),
@@ -1317,14 +1398,6 @@ function switchMainTab(tab) {
                 
                 specialLeavesData = [];
                 if(splSnap) splSnap.forEach(d => specialLeavesData.push({id: d.id, ...d.data()}));
-
-              studentsData = [];
-                stuSnap.forEach(d => { 
-                    const data = d.data();
-                    if (data.admissionStatus !== 'PENDING') {
-                        studentsData.push({ id: d.id, ...data }); 
-                    }
-                });
                 staffList = staffSnap.docs.map(d => ({ id: d.id, ...d.data() }));
                 if (isAdmin) loadStaffListForPerms();
 
@@ -5169,13 +5242,12 @@ async function listenForMissingAttendance() {
             try {
                 const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-                // 1. Fetch Students to find active sections with > 0 students
-                const allStuSnap = await db.collection(prefix + "students").get();
+             // 1. Fetch Students to find active sections with > 0 students (Using Smart Cache)
+                const allStudents = await getCachedStudentsRoster(prefix);
                 let sectionCounts = {};
-                allStuSnap.forEach(doc => {
-                    const data = doc.data();
-                    if (data.isActive !== false && data.admissionStatus !== 'PENDING') {
-                        const key = `${norm(data.className)}|${norm(data.section)}`;
+                allStudents.forEach(stu => {
+                    if (stu.isActive !== false && stu.admissionStatus !== 'PENDING') {
+                        const key = `${norm(stu.className)}|${norm(stu.section)}`;
                         sectionCounts[key] = (sectionCounts[key] || 0) + 1;
                     }
                 });
