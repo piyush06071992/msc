@@ -3470,9 +3470,10 @@ function getActiveTeacherName() {
                     studentId: stuId, date: dateStr, oldStatus, newStatus, reason, author: activeStaff ? activeStaff.email : 'Admin', timestamp: Date.now()
                 });
 
-                await docRef.set(data);
+              await docRef.set(data);
+                await bumpAttendanceMetadata(monthKey);
 
-          // --- AUTO-SYNC CLASS INCHARGE ON CORRECTION ---
+        // --- AUTO-SYNC CLASS INCHARGE ON CORRECTION ---
                 if (!currentReg.isExamRoom && currentReg.sub !== 'CLASS INCHARGE') {
                     backgroundSyncClassIncharge(dateStr, monthKey, currentReg.c, currentReg.s);
                 }
@@ -3906,7 +3907,7 @@ async function backgroundSyncClassIncharge(dateStr, monthKey, className, section
         const inchargeDocId = `att_${activeCenter}_${normDoc(className)}_${normDoc(sectionName)}_CLASS_INCHARGE_${monthKey}`;
         const inchargeDocRef = getCollection("attendance_records").doc(inchargeDocId);
 
-        if (Object.keys(aggregated).length > 0) {
+    if (Object.keys(aggregated).length > 0) {
             await inchargeDocRef.set({
                 className: className,
                 section: sectionName,
@@ -3917,6 +3918,7 @@ async function backgroundSyncClassIncharge(dateStr, monthKey, className, section
                     [dateStr]: aggregated
                 }
             }, { merge: true });
+            await bumpAttendanceMetadata(monthKey);
         } else {
             // If all other subjects are unmarked/deleted, automatically clean up the Incharge record too
             await inchargeDocRef.update({
@@ -4266,27 +4268,29 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
         }
         // --- DISCREPANCY CHECK END ---
 
- const batch = db.batch();
-        for (const [secName, secRecords] of Object.entries(recordsBySection)) {
-            const secDocId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(secName)}_${normDoc(currentReg.sub)}_${monthKey}`;
-            const secDocRef = getCollection("attendance_records").doc(secDocId);
-            
-            let mergeData = {
-                className: currentReg.c,
-                section: secName,
-                subject: currentReg.sub,
-                monthKey: monthKey,
-                lastUpdated: Date.now(),
-                records: {
-                    [dateStr]: secRecords
-                }
-            };
-            batch.set(secDocRef, mergeData, { merge: true });
-        }
+try {
+           const batch = db.batch();
+            for (const [secName, secRecords] of Object.entries(recordsBySection)) {
+                const secDocId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(secName)}_${normDoc(currentReg.sub)}_${monthKey}`;
+                const secDocRef = getCollection("attendance_records").doc(secDocId);
+                
+                let mergeData = {
+                    className: currentReg.c,
+                    section: secName,
+                    subject: currentReg.sub,
+                    monthKey: monthKey,
+                    lastUpdated: Date.now(),
+                    records: {
+                        [dateStr]: secRecords
+                    }
+                };
+                batch.set(secDocRef, mergeData, { merge: true });
+            }
 
 // FIX: Await full cloud batch commit AND background sync before declaring success
     try {
         await batch.commit();
+        await bumpAttendanceMetadata(monthKey);
         
         // Ensure background Incharge sync finishes and confirms before UI locks
         // DO NOT trigger background sync if the teacher is manually saving the Incharge register itself!
@@ -4488,10 +4492,11 @@ async function requestUnmarkAttendance() {
             if (timerContainerText) timerContainerText.innerHTML = "Deleting from Cloud... <span class='loader border-rose-500 border-top-transparent w-4 h-4 inline-block ml-2'></span>";
 
          try {
-                await docRef.update({
+              await docRef.update({
                     [`records.${dateStr}`]: firebase.firestore.FieldValue.delete()
                 });
                 await db.collection("attendance_edit_requests").doc(reqId).update({ status: "APPROVED_AND_UNMARKED", approvedAt: Date.now() });
+                await bumpAttendanceMetadata(monthKey);
                 
                 // --- CRITICAL FIX: TRIGGER BACKGROUND SYNC UPON UNMARK ---
                 // If this was the only subject marked, the incharge register will auto-delete the day.
@@ -4672,12 +4677,21 @@ async function loadLedger() {
           let prevM = parseInt(m) - 1; let prevY = parseInt(y);
             if (prevM === 0) { prevM = 12; prevY--; }
 
-            try {
-                // Fetch ALL past attendance docs for this session (from August 2026 up to previous month) to map cumulative past unified records accurately
-                const [curQuerySnap, prevQuerySnap] = await Promise.all([
-                    getCollection("attendance_records").where("monthKey", "==", monthVal).get(),
-                    getCollection("attendance_records").where("monthKey", "<", monthVal).where("monthKey", ">=", "2026_08").get()
-                ]);
+           try {
+                // Fetch ALL past attendance docs using IndexedDB caching to slash Firestore reads
+                const curDocsArray = await getCachedMonthAttendanceDocs(monthKey);
+                
+                let pastMonthKeys = [];
+                let [targetY, targetM] = monthVal.split('_').map(Number);
+                let loopDate = new Date(2026, 7, 1); // August 2026
+                let limitDate = new Date(targetY, targetM - 1, 1);
+                while (loopDate < limitDate) {
+                    pastMonthKeys.push(`${loopDate.getFullYear()}_${String(loopDate.getMonth() + 1).padStart(2, '0')}`);
+                    loopDate.setMonth(loopDate.getMonth() + 1);
+                }
+
+                let prevDocsArrays = await Promise.all(pastMonthKeys.map(mk => getCachedMonthAttendanceDocs(mk)));
+                let prevDocsArray = prevDocsArrays.flat();
 
                 let curRecords = {};
            let curStats = {};
@@ -4691,8 +4705,8 @@ async function loadLedger() {
                 let prevUnifiedRecords = {}; // Deduplicated previous month records
                 let earliestMonthKey = null; // Tracks when this ledger actually started
                 
-                curQuerySnap.forEach(doc => {
-                    const data = doc.data();
+                curDocsArray.forEach(item => {
+                    const data = item.data;
                     if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
                         if (data.records) {
                             Object.keys(data.records).forEach(dateStr => {
@@ -4749,8 +4763,8 @@ async function loadLedger() {
                    }
                 });
 
-                prevQuerySnap.forEach(doc => {
-                    const data = doc.data();
+                prevDocsArray.forEach(item => {
+                    const data = item.data;
                     
                     if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
                         if (data.records) {
@@ -4768,7 +4782,7 @@ async function loadLedger() {
                         }
                     }
 
-                 if (normMatch(data.subject) !== normMatch(currentReg.sub)) return;
+                   if (normMatch(data.subject) !== normMatch(currentReg.sub)) return;
 
                     if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
                         if (!earliestMonthKey || data.monthKey < earliestMonthKey) earliestMonthKey = data.monthKey;
@@ -4796,7 +4810,6 @@ async function loadLedger() {
                         }
                    }
                 });
-
             let prevActualWorkingDays = 0;
                 let prevActualStudentAtt = {};
                 
