@@ -705,8 +705,41 @@
             appId: "1:701377739976:web:99998220272090e56e79fd"
         };
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-      const db = firebase.firestore();
+    const db = firebase.firestore();
     // const storage = firebase.storage();
+
+        // --- Lightweight IndexedDB Helper ---
+        const IDB = {
+            dbName: "MinervaERP_Cache",
+            storeName: "MasterStore",
+            async open() {
+                return new Promise((resolve, reject) => {
+                    const req = indexedDB.open(this.dbName, 1);
+                    req.onupgradeneeded = () => req.result.createObjectStore(this.storeName);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                });
+            },
+            async get(key) {
+                const db = await this.open();
+                return new Promise((resolve) => {
+                    const tx = db.transaction(this.storeName, "readonly");
+                    const req = tx.objectStore(this.storeName).get(key);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => resolve(null);
+                });
+            },
+            async set(key, value) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(this.storeName, "readwrite");
+                    const txStore = tx.objectStore(this.storeName);
+                    txStore.put(value, key);
+                    tx.oncomplete = () => resolve();
+                    tx.onerror = () => reject(tx.error);
+                });
+            }
+        };
         
 // --- SECURITY GUARD & AUTO-ROUTER ---
         const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
@@ -818,13 +851,9 @@ function updateUndoButtons() {
             if (activeCenter === "GHUMARWIN") return db.collection(name);
             return db.collection(`${activeCenter.toLowerCase()}_${name}`);
         }
-     function switchAdminCenter(centerName) {
+function switchAdminCenter(centerName) {
             sessionStorage.setItem('minervaAdminCenter', centerName);
-            // Wipe the browser's temporary memory so it is forced to fetch the new center's data!
-            sessionStorage.removeItem('minerva_struct');
-            sessionStorage.removeItem('minerva_timetable');
-            sessionStorage.removeItem('minerva_teachers'); 
-            sessionStorage.removeItem('minerva_rooms'); // Force fetch new rooms
+            // The cache prefixes handle the isolation automatically, so we just reload.
             window.location.reload();
         }
         // --------------------------------------
@@ -989,15 +1018,23 @@ async function checkAndApplyFutureMaster() {
         console.error("Auto-Promote Failed:", e);
     }
 }
-       async function fetchStructure() {
-            // Check memory first!
-            const cached = sessionStorage.getItem('minerva_struct');
-            if (cached) {
-                structureData = JSON.parse(cached);
+    async function fetchStructure() {
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            const metaDoc = await db.collection("system_metadata").doc("master_config_version").get();
+            const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
+            
+            const localVersion = await IDB.get(`${prefix}structure_last_version`);
+            const cachedData = await IDB.get(`${prefix}structure_data`);
+
+            if (cachedData && localVersion === serverVersion) {
+                console.log("⚡ Structure loaded instantly from local IndexedDB");
+                structureData = cachedData;
             } else {
+                console.log("🔄 Structure updated. Fetching fresh config...");
                 const snap = await getCollection("institute_structure").orderBy("className").get();
                 structureData = snap.docs.map(d => d.data());
-                sessionStorage.setItem('minerva_struct', JSON.stringify(structureData)); // Save to memory
+                await IDB.set(`${prefix}structure_data`, structureData);
+                await IDB.set(`${prefix}structure_last_version`, serverVersion);
             }
             
             const pScope = document.getElementById('p-scope');
@@ -1018,38 +1055,41 @@ async function checkAndApplyFutureMaster() {
             }
         }
 
-      async function fetchTeachers() {
-            const cached = sessionStorage.getItem('minerva_teachers');
-            if (cached) {
-                allTeachers = JSON.parse(cached);
+     async function fetchTeachers() {
+            const metaDoc = await db.collection("system_metadata").doc("master_config_version").get();
+            const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
+            
+            const localVersion = await IDB.get(`teachers_last_version`);
+            const cachedData = await IDB.get(`teachers_data`);
+
+            if (cachedData && localVersion === serverVersion) {
+                console.log("⚡ Teachers loaded instantly from local IndexedDB");
+                allTeachers = cachedData.filter(t => t.teacherCenter.includes(activeCenter.toUpperCase()));
                 return;
             }
-            const snap = await getCollection("staff_applications").where("status", "==", "approved").get();
+
+            console.log("🔄 Teachers updated. Fetching fresh config...");
+            const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
             let tempTeachers = [];
             
             snap.docs.forEach(doc => {
                 const data = doc.data();
-                
-                // --- NEW: Filter by Center ---
-                // Find the field that contains "Cent" (handles "Centre" or "Center")
                 const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
-                // If an old teacher doesn't have a center marked, default them to Ghumarwin
                 const teacherCenter = centerKey ? String(data.details[centerKey]).toUpperCase() : "GHUMARWIN";
                 
-                // Only add the teacher if their center matches the active dashboard center
-                if (teacherCenter.includes(activeCenter.toUpperCase())) {
-                    const nameKey = Object.keys(data.details).find(k => k.toLowerCase().includes('name'));
-                    const deptKey = Object.keys(data.details).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                    tempTeachers.push({ 
-                        name: nameKey ? data.details[nameKey] : data.email, 
-                        email: data.email, 
-                        dept: deptKey ? data.details[deptKey] : 'General' 
-                    });
-                }
+                const nameKey = Object.keys(data.details).find(k => k.toLowerCase().includes('name'));
+                const deptKey = Object.keys(data.details).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                tempTeachers.push({ 
+                    name: nameKey ? data.details[nameKey] : data.email, 
+                    email: data.email, 
+                    dept: deptKey ? data.details[deptKey] : 'General',
+                    teacherCenter: teacherCenter
+                });
             });
             
-          allTeachers = tempTeachers;
-            sessionStorage.setItem('minerva_teachers', JSON.stringify(allTeachers));
+            await IDB.set(`teachers_data`, tempTeachers);
+            await IDB.set(`teachers_last_version`, serverVersion);
+            allTeachers = tempTeachers.filter(t => t.teacherCenter.includes(activeCenter.toUpperCase()));
         }
 
      // --- LIVE REAL-TIME ROOM SYNC LISTENER ---
@@ -1068,29 +1108,38 @@ async function checkAndApplyFutureMaster() {
             });
         }
 
-      async function fetchTimetable() {
-            const cached = sessionStorage.getItem('minerva_timetable');
-            if (cached) {
-                globalTimetable = JSON.parse(cached);
-                oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
-                return;
-            }
-            
-            // 1. Context-Aware Draft Check
+     async function fetchTimetable() {
+            // 1. Context-Aware Draft Check - Bypasses Cache
             const draftKey = `draft_${activeCenter}_LIVE`;
             const draftSnap = await db.collection("timetable_drafts").doc(draftKey).get();
             
             if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
                 globalTimetable = draftSnap.data().schedule;
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED MASTER DRAFT</span>`;
+                oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
+                return;
+            } 
+
+            // 2. Load Live Master via Smart Cache
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            const metaDoc = await db.collection("system_metadata").doc("timetable").get();
+            const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
+            
+            const localVersion = await IDB.get(`${prefix}timetable_last_version`);
+            const cachedData = await IDB.get(`${prefix}timetable_data`);
+
+            if (cachedData && localVersion === serverVersion) {
+                console.log("⚡ Timetable loaded instantly from local IndexedDB");
+                globalTimetable = cachedData;
             } else {
-                // 2. Fall back to normal Live Master if no draft exists
+                console.log("🔄 Timetable updated. Fetching fresh schedule...");
                 const snap = await getCollection("timetable").get();
                 globalTimetable = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                await IDB.set(`${prefix}timetable_data`, globalTimetable);
+                await IDB.set(`${prefix}timetable_last_version`, serverVersion);
             }
             
             oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
-            sessionStorage.setItem('minerva_timetable', JSON.stringify(globalTimetable));
         }
         async function fetchLiveMasterCache() {
         try {
@@ -1101,12 +1150,27 @@ async function checkAndApplyFutureMaster() {
         }
     }
 
-        // --- HOLIDAY OVERLAY ENGINE ---
+     // --- HOLIDAY OVERLAY ENGINE ---
         async function fetchHolidays() {
-            try {
-                const snap = await getCollection("school_holidays").get();
-                holidaysData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-            } catch(e) { console.error("Holiday Fetch Error:", e); }
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            const metaDoc = await db.collection("system_metadata").doc("master_config_version").get();
+            const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
+            
+            const localVersion = await IDB.get(`${prefix}holidays_last_version`);
+            const cachedData = await IDB.get(`${prefix}holidays_data`);
+
+            if (cachedData && localVersion === serverVersion) {
+                console.log("⚡ Holidays loaded instantly from local IndexedDB");
+                holidaysData = cachedData;
+            } else {
+                console.log("🔄 Holidays updated. Fetching fresh config...");
+                try {
+                    const snap = await getCollection("school_holidays").get();
+                    holidaysData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    await IDB.set(`${prefix}holidays_data`, holidaysData);
+                    await IDB.set(`${prefix}holidays_last_version`, serverVersion);
+                } catch(e) { console.error("Holiday Fetch Error:", e); }
+            }
         }
 
      function openHolidayModal() {
@@ -3828,13 +3892,14 @@ function peekTeacher(teacherName) {
            }
        });
 function forceSync() {
-            // 1. Tell the browser to forget all the memorized data
-            sessionStorage.removeItem('minerva_struct');
-            sessionStorage.removeItem('minerva_teachers');
-            sessionStorage.removeItem('minerva_timetable');
-            sessionStorage.removeItem('minerva_rooms');
+            // 1. Tell the browser to forget all the memorized versions to force a hard cloud fetch
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            IDB.set(`${prefix}structure_last_version`, 0);
+            IDB.set(`teachers_last_version`, 0);
+            IDB.set(`${prefix}timetable_last_version`, 0);
+            IDB.set(`${prefix}holidays_last_version`, 0);
             
-            // 2. Refresh the page instantly to grab the fresh data from Firebase
+            // 2. Refresh the page instantly
             window.location.reload();
         }
        // --- CALENDAR ENGINE STATE ---
