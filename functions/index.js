@@ -1,5 +1,5 @@
 const { onSchedule } = require("firebase-functions/v2/scheduler");
-const { onDocumentCreated } = require("firebase-functions/v2/firestore");
+const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
 const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
@@ -164,7 +164,34 @@ exports.sendPreClassReminders = onSchedule({
     }
     return null;
 });
+// =======================================================
+// --- AUTO-BUMP MASTER CONFIG VERSION TRIGGER ---
+// =======================================================
+exports.autoBumpMasterConfig = onDocumentWritten({
+    document: "{collectionName}/{docId}",
+    region: "asia-south1",
+    memory: "256MB"
+}, async (event) => {
+    const collectionName = event.params.collectionName;
+    const configKeywords = [
+        'timetable', 
+        'institute_structure', 
+        'school_holidays', 
+        'staff_applications', 
+        'remedial_classes',
+        'special_leaves'
+    ];
 
+    // Automatically bumps version when any master configuration changes
+    if (configKeywords.some(keyword => collectionName.includes(keyword))) {
+        await admin.firestore().collection('system_metadata').doc('master_config_version').set({
+            lastUpdated: Date.now()
+        }, { merge: true });
+        
+        console.log(`🔄 Master config version automatically bumped due to update in: ${collectionName}`);
+    }
+    return null;
+});
 exports.sendInstantPushAlerts = onDocumentCreated({
     document: "instant_alerts/{docId}",
     region: "asia-south1",
