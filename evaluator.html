@@ -1388,11 +1388,16 @@ reportCardSubjects = Array.from(globalSubjectsSet).sort((a,b) => {
                     const thClass = isSorted ? 'bg-fuchsia-50 border-b-4 border-fuchsia-500' : 'bg-white hover:bg-slate-50 border-b border-slate-200';
                     const subMax = subjectMaxMarks[compositeKey] || 0;
                     
+                  const adminBulkAction = (isAdmin || (activeStaff && document.getElementById('tab-btn-eval').style.display !== 'none')) ? `
+                        <button onclick="event.stopPropagation(); adminBulkClearSubject(event, '${dateRaw}', '${sub}', '${compositeKey}')" class="mt-2 text-[8px] font-black bg-rose-100 text-rose-600 hover:bg-rose-200 px-2 py-1 rounded shadow-sm border border-rose-200 transition-colors w-full">🗑️ CLEAR ALL</button>
+                    ` : '';
+
                     theadHtml += `
-                        <th onclick="sortReportCardData('sub_${compositeKey}_desc')" class="p-3 text-center ${thClass} cursor-pointer transition-all whitespace-nowrap">
+                        <th onclick="sortReportCardData('sub_${compositeKey}_desc')" class="p-3 text-center ${thClass} cursor-pointer transition-all whitespace-nowrap align-top">
                             <div class="text-[10px] ${isSorted ? 'text-fuchsia-800 font-black' : 'text-fuchsia-600'} mb-0.5">${sub}${isSorted ? '↓' : ''}</div>
                             <div class="text-[8px] text-slate-500 font-bold mb-0.5">${dateStr}</div>
                             <div class="text-[9px] text-slate-400 font-bold mt-1">Max: ${subMax}</div>
+                            ${adminBulkAction}
                         </th>
                     `;
                 });
@@ -5749,9 +5754,55 @@ alert(`✅ Action successful. Student exam ${decision}.`);
 
                 await docRef.set(updatePayload, { merge: true });
                 
-                alert("🗑️ Score cleared successfully! Please re-generate the report card to see the updated changes.");
+              alert("🗑️ Score cleared successfully! Please re-generate the report card to see the updated changes.");
             } catch(e) {
                 alert("Error clearing score: " + e.message);
+            }
+        }
+
+        async function adminBulkClearSubject(event, dateRaw, subject, compositeKey) {
+            if (!confirm(`🚨 EXTREME WARNING 🚨\n\nYou are about to PERMANENTLY CLEAR the scores for [${subject}] on [${dateRaw}] for ALL ${reportCardData.length} students currently listed in this report card.\n\nAre you absolutely sure you want to proceed?`)) return;
+
+            const btn = event.currentTarget;
+            const orig = btn.innerHTML;
+            btn.innerHTML = "⏳ Clearing...";
+            btn.disabled = true;
+
+            try {
+                const batch = db.batch();
+                let count = 0;
+
+                reportCardData.forEach(stu => {
+                    const sd = stu.subjects[compositeKey];
+                    // Process if they have a submission, even if it's currently scored
+                    if (sd && sd.groupId && !sd.isAbsent && !sd.isUnassignedOpt) {
+                        const docRef = db.collection("omr_submissions").doc(`${sd.groupId}_${stu.rollNo}`);
+                        
+                        const updatePayload = {
+                            isDirectImport: true, // Forces system to ignore old OMR bubble scans
+                            updatedAt: Date.now()
+                        };
+                        updatePayload[`directScores.${subject}`] = firebase.firestore.FieldValue.delete();
+                        
+                        batch.set(docRef, updatePayload, { merge: true });
+                        count++;
+                    }
+                });
+
+                if (count === 0) {
+                    alert("No existing scores found to clear for this subject.");
+                    btn.innerHTML = orig;
+                    btn.disabled = false;
+                    return;
+                }
+
+                await batch.commit();
+                alert(`🗑️ Successfully cleared ${count} scores for ${subject}. Please click "Generate" again to refresh the report card.`);
+                btn.innerHTML = "✅ Cleared";
+            } catch(e) {
+                alert("Error clearing scores: " + e.message);
+                btn.innerHTML = orig;
+                btn.disabled = false;
             }
         }
     </script>
