@@ -1029,18 +1029,29 @@ async function onExamDateChange() {
             }
         }
 
-        function populateShiftDropdown() {
+     function populateShiftDropdown() {
             let shiftSet = new Set();
-            Object.keys(examSectionsMap).forEach(secKey => {
+            let missingTimetable = false;
+
+            const stagedKeys = Object.keys(examSectionsMap);
+            stagedKeys.forEach(secKey => {
                 const t = sectionTimingsCache[secKey];
-                if (t && t.startStr && t.endStr) shiftSet.add(`${t.startStr} - ${t.endStr}`);
+                if (t && t.startStr && t.endStr) {
+                    shiftSet.add(`${t.startStr} - ${t.endStr}`);
+                } else {
+                    missingTimetable = true;
+                }
             });
+
             activeShifts = Array.from(shiftSet).sort();
             const shiftSel = document.getElementById('seating-exam-shift');
             
-          if (activeShifts.length === 0) {
-                shiftSel.innerHTML = '<option value="STANDARD">Standard</option>';
-                currentShift = "STANDARD";
+            if (stagedKeys.length === 0) {
+                shiftSel.innerHTML = '<option value="">No exams staged for this date</option>';
+                currentShift = "";
+            } else if (missingTimetable || activeShifts.length === 0) {
+                shiftSel.innerHTML = '<option value="">Timetable awaited for that date</option>';
+                currentShift = "";
             } else {
                 shiftSel.innerHTML = activeShifts.map(s => `<option value="${s}">${s}</option>`).join('');
                 shiftSel.innerHTML += '<option value="STANDARD">Standard (Legacy)</option>';
@@ -1049,14 +1060,22 @@ async function onExamDateChange() {
             onExamShiftChange();
         }
 
-        async function onExamShiftChange() {
+     async function onExamShiftChange() {
             const date = document.getElementById('seating-exam-date').value;
             const shiftSel = document.getElementById('seating-exam-shift');
             currentShift = shiftSel ? shiftSel.value : "STANDARD";
             
+            if (!currentShift) {
+                currentAllocations = {};
+                busyRoomsMap = {};
+                renderRoomSidebarList();
+                if (activeRoomId) selectRoom(activeRoomId, false);
+                return;
+            }
+
             if (date) {
                 await auditBusyRoomsForDateAndShift(date, currentShift);
-                await loadSeatingAllocations(date); // Firebase handles filtering natively now!
+                await loadSeatingAllocations(date);
             }
         }
 
@@ -1111,54 +1130,41 @@ async function onExamDateChange() {
             }
         }
 
-   async function auditExamSectionsForDate(dateStr) {
-            examSectionsMap = {};
-            try {
-                const examSnap = await getCollection("exam_schedules").where("date", "==", dateStr).get();
-                
-                examSnap.forEach(doc => {
-                    const data = doc.data();
-                    if (data.className && data.section) {
-                        examSectionsMap[`${norm(data.className)}|${norm(data.section)}`] = true;
-                    }
-                    if (Array.isArray(data.sections)) {
-                        data.sections.forEach(s => {
-                            const secName = typeof s === 'object' ? (s.section || s.sectionName) : s;
-                            if (data.className && secName) {
-                                examSectionsMap[`${norm(data.className)}|${norm(secName)}`] = true;
-                            }
-                        });
-                    }
-                    if (data.targets) {
-                        data.targets.forEach(t => {
-                            const cls = t.className || t.class;
-                            const secs = t.sections || t.sectionNames || [];
-                            secs.forEach(s => {
-                                const secName = typeof s === 'object' ? (s.section || s.sectionName) : s;
-                                if (cls && secName) {
-                                    examSectionsMap[`${norm(cls)}|${norm(secName)}`] = true;
-                                }
-                            });
-                        });
-                    }
-                });
-
-                if (Object.keys(examSectionsMap).length === 0) {
-                    allApprovedStudents.forEach(stu => {
-                        if (stu.className && stu.section) {
-                            examSectionsMap[`${norm(stu.className)}|${norm(stu.section)}`] = true;
+async function auditExamSectionsForDate(dateStr) {
+        examSectionsMap = {};
+        try {
+            const examSnap = await getCollection("exam_schedules").where("date", "==", dateStr).get();
+            
+            examSnap.forEach(doc => {
+                const data = doc.data();
+                if (data.className && data.section) {
+                    examSectionsMap[`${norm(data.className)}|${norm(data.section)}`] = true;
+                }
+                if (Array.isArray(data.sections)) {
+                    data.sections.forEach(s => {
+                        const secName = typeof s === 'object' ? (s.section || s.sectionName) : s;
+                        if (data.className && secName) {
+                            examSectionsMap[`${norm(data.className)}|${norm(secName)}`] = true;
                         }
                     });
                 }
-            } catch (e) {
-                console.error("Error auditing exam sections:", e);
-                allApprovedStudents.forEach(stu => {
-                    if (stu.className && stu.section) {
-                        examSectionsMap[`${norm(stu.className)}|${norm(stu.section)}`] = true;
-                    }
-                });
-            }
+                if (data.targets) {
+                    data.targets.forEach(t => {
+                        const cls = t.className || t.class;
+                        const secs = t.sections || t.sectionNames || [];
+                        secs.forEach(s => {
+                            const secName = typeof s === 'object' ? (s.section || s.sectionName) : s;
+                            if (cls && secName) {
+                                examSectionsMap[`${norm(cls)}|${norm(secName)}`] = true;
+                            }
+                        });
+                    });
+                }
+            });
+        } catch (e) {
+            console.error("Error auditing exam sections:", e);
         }
+    }
 
  async function loadSeatingAllocations(date) {
             try {
