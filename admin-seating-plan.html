@@ -1618,16 +1618,16 @@ function renderRoomSidebarList() {
             return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
         }
 
-  async function loadSectionTimingsCache(dateStr) {
+async function loadSectionTimingsCache(dateStr) {
         sectionTimingsCache = {};
         try {
             const dateObj = new Date(dateStr + 'T00:00:00');
             const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
 
+            // 1. Fetch exact timetable slots for this date
             const historySnap = await getCollection("timetable_history").doc(dateStr).get();
             let daySlots = [];
 
-            // 1. Fetch the exact timetable slots for this date
             if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
                 daySlots = (historySnap.data().schedule || []).filter(s => s.day === dayName);
             } else {
@@ -1654,11 +1654,12 @@ function renderRoomSidebarList() {
                 }
             });
 
-            // 3. Scan the timetable blocks for UT, OT, or EXAM
-            Object.keys(sectionSlotsMap).forEach(key => {
-                const slots = sectionSlotsMap[key];
+            // 3. Strictly scan ONLY sections that have exams staged in exam_schedules for this date
+            const stagedKeys = Object.keys(examSectionsMap);
+            stagedKeys.forEach(key => {
+                const slots = sectionSlotsMap[key] || [];
                 
-          // PRIORITY: Look directly at the subjects you manually typed in the Timetable
+                // Look strictly for an exam slot (UT, OT, EXAM, etc.)
                 const examSlot = slots.find(s => {
                     const sub = (s.subject || '').toUpperCase();
                     return ['EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM'].includes(sub) || sub.includes('EXAM');
@@ -1681,40 +1682,11 @@ function renderRoomSidebarList() {
                             endStr: examSlot.end24 || minsTo24(eM),
                             duration: eM - sM
                         };
-                        return; // Lock this timing and skip the fallback!
                     }
                 }
-
-            // FALLBACK: Span the earliest to latest normal class
-                let minS = 24 * 60, maxE = 0;
-                slots.forEach(s => {
-                    if (['BREAK', 'LUNCH BREAK'].includes((s.subject || '').toUpperCase())) return;
-                    let sM = 0, eM = 0;
-                    if (s.start24 && s.end24) {
-                        const [sh, sm] = s.start24.split(':').map(Number);
-                        const [eh, em] = s.end24.split(':').map(Number);
-                        sM = sh * 60 + sm; eM = eh * 60 + em;
-                    } else if (s.sMins !== undefined) {
-                        sM = s.sMins; eM = s.eMins;
-                    }
-                    
-                    if (isBlockSuspendedByHoliday(s.className, s.section, sM, eM)) return;
-
-                    if (sM > 0 && eM > sM) {
-                        if (sM < minS) minS = sM;
-                        if (eM > maxE) maxE = eM;
-                    }
-                });
-
-                if (maxE > minS) {
-                    sectionTimingsCache[key] = {
-                        startMin: minS,
-                        endMin: maxE,
-                        startStr: minsTo24(minS),
-                        endStr: minsTo24(maxE),
-                        duration: maxE - minS
-                    };
-                }
+                // NOTE: The regular class fallback has been completely removed. 
+                // If a staged section has no exam slot in the timetable, it won't be added to sectionTimingsCache, 
+                // triggering the "Timetable awaited for that date" warning in the shift dropdown.
             });
         } catch (e) {
             console.error("Error loading section timings cache:", e);
