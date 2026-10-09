@@ -2492,24 +2492,29 @@ async function fetchMasterUploadsForDate() {
         return;
     }
 
-    container.innerHTML = '<div class="text-center py-20"><span class="loader border-t-teal-600"></span><p class="text-[10px] font-bold text-slate-400 mt-2 uppercase tracking-widest">Scanning Database...</p></div>';
+    container.innerHTML = '<div class="text-center py-20"><span class="loader border-t-teal-600"></span><p class="text-[10px] font-bold text-slate-400 mt-2 uppercase tracking-widest">Cross-referencing staging board...</p></div>';
 
     try {
-        const snap = await getCollection("question_papers").where("date", "==", date).get();
-        if (snap.empty) {
-            container.innerHTML = '<div class="text-center py-20 bg-white rounded-3xl border border-slate-200"><p class="text-slate-400 font-black uppercase text-xs tracking-widest">No papers uploaded for this date.</p></div>';
+        const [schedSnap, paperSnap] = await Promise.all([
+            getCollection("exam_schedules").where("date", "==", date).get(),
+            getCollection("question_papers").where("date", "==", date).get()
+        ]);
+
+        if (schedSnap.empty && paperSnap.empty) {
+            container.innerHTML = '<div class="text-center py-20 bg-white rounded-3xl border border-slate-200"><p class="text-slate-400 font-black uppercase text-xs tracking-widest">No staged exams or papers found for this date.</p></div>';
             return;
         }
 
         window._masterUploadGroups = {};
+        let uploadedPapers = {}; 
 
-        snap.forEach(doc => {
+        paperSnap.forEach(doc => {
             const data = doc.data();
             const qpPath = data.storagePath || "NO_QP";
             const omrPath = data.omrStoragePath || "NO_OMR";
             const groupKey = btoa(qpPath + "|||" + omrPath).replace(/=/g, ''); 
 
-          if (!window._masterUploadGroups[groupKey]) {
+            if (!window._masterUploadGroups[groupKey]) {
                 window._masterUploadGroups[groupKey] = {
                     groupKey: groupKey,
                     series: data.series || 'DEFAULT',
@@ -2526,9 +2531,44 @@ async function fetchMasterUploadsForDate() {
                 sec: data.section,
                 sub: data.subject
             });
+
+            const norm = (str) => String(str || "").toUpperCase().trim();
+            const key = `${norm(data.className)}|${norm(data.section)}|${norm(data.subject)}`;
+            uploadedPapers[key] = { id: doc.id, ...data, groupKey };
         });
 
+        let expectedExams = [];
+        schedSnap.forEach(doc => {
+            const data = doc.data();
+            if (data.targets && data.targets.length > 0) {
+                data.targets.forEach(t => t.sections.forEach(s => {
+                    const sName = typeof s === 'object' ? s.section : s;
+                    const sSubs = typeof s === 'object' && s.subjects ? s.subjects : (t.subjects || []);
+                    (Array.isArray(sSubs) ? sSubs : [sSubs]).forEach(sub => {
+                        expectedExams.push({ cls: t.className, sec: sName, sub: sub });
+                    });
+                }));
+            } else {
+                const subs = Array.isArray(data.subjects) ? data.subjects : [data.subject || 'FULL PAPER'];
+                subs.forEach(sub => {
+                    expectedExams.push({ cls: data.className, sec: data.section, sub: sub });
+                });
+            }
+        });
+
+        Object.keys(uploadedPapers).forEach(key => {
+            const [c, s, sub] = key.split('|');
+            const exists = expectedExams.find(e => String(e.cls).toUpperCase().trim() === c && String(e.sec).toUpperCase().trim() === s && String(e.sub).toUpperCase().trim() === sub);
+            if (!exists) {
+                expectedExams.push({ cls: c, sec: s, sub: sub, orphan: true });
+            }
+        });
+
+        expectedExams.sort((a,b) => String(a.cls).localeCompare(String(b.cls), undefined, {numeric: true}) || String(a.sec).localeCompare(String(b.sec), undefined, {numeric: true}) || String(a.sub).localeCompare(String(b.sub)));
+
+        window._tabularMasterUploadsData = { expectedExams, uploadedPapers };
         renderMasterUploadGroups();
+
     } catch (e) {
         console.error(e);
         container.innerHTML = `<div class="text-center py-20 text-rose-500 font-bold uppercase text-xs">Error: ${e.message}</div>`;
@@ -2537,49 +2577,84 @@ async function fetchMasterUploadsForDate() {
 
 function renderMasterUploadGroups() {
     const container = document.getElementById('master-uploads-list-container');
-    const groups = Object.values(window._masterUploadGroups);
+    const data = window._tabularMasterUploadsData;
+    
+    if (!data || data.expectedExams.length === 0) return;
 
-    if (groups.length === 0) return;
+    let tableRows = '';
+    
+    data.expectedExams.forEach((exam, idx) => {
+        const norm = (str) => String(str || "").toUpperCase().trim();
+        const key = `${norm(exam.cls)}|${norm(exam.sec)}|${norm(exam.sub)}`;
+        const paper = data.uploadedPapers[key];
 
-    let html = '';
-    groups.forEach((group, idx) => {
-        group.targets.sort((a,b) => a.cls.localeCompare(b.cls, undefined, {numeric:true}) || a.sec.localeCompare(b.sec, undefined, {numeric:true}) || a.sub.localeCompare(b.sub));
+        let statusBadge = '<span class="bg-rose-100 text-rose-700 border border-rose-300 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest animate-pulse">❌ Missing</span>';
+        let actionBtns = '';
+        let fileDetails = '<span class="text-slate-400 text-[10px] font-bold uppercase">—</span>';
+        let rowClass = 'hover:bg-slate-50';
 
-        const targetPills = group.targets.map(t => `
-            <div class="inline-flex items-center bg-white border border-slate-200 rounded-lg shadow-sm overflow-hidden text-[9px] font-black uppercase">
-                <span class="px-2 py-1 bg-slate-100 text-slate-600 border-r border-slate-200">${t.cls} | ${t.sec}</span>
-                <span class="px-2 py-1 text-indigo-700">${t.sub}</span>
-                <button onclick="removeSingleTargetFromMaster('${group.groupKey}', '${t.docId}')" class="px-2 py-1 bg-rose-50 text-rose-600 hover:bg-rose-500 hover:text-white transition-colors border-l border-rose-100" title="Remove this subject mapping only">✕</button>
-            </div>
-        `).join('');
+        if (exam.orphan) {
+            rowClass = 'bg-amber-50/50 hover:bg-amber-100'; 
+            statusBadge = '<span class="bg-amber-100 text-amber-700 border border-amber-300 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest" title="Paper uploaded but section not currently staged">⚠️ Unstaged Orphan</span>';
+        }
 
-        html += `
-            <div class="bg-white border-2 border-slate-200 rounded-2xl p-4 sm:p-5 mb-5 shadow-sm">
-                <div class="flex flex-col md:flex-row justify-between md:items-center gap-4 mb-4 pb-4 border-b border-slate-100">
-                    <div>
-                      <div class="flex items-center gap-2 mb-1">
-                            <span class="bg-teal-100 text-teal-800 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest">Package #${idx+1}</span>
-                            <span class="font-black text-slate-800 text-sm uppercase tracking-wider">Series: <span class="text-blue-600">${group.series}</span></span>
-                            <span class="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ml-2">${group.layout.replace(/_/g, ' ')}</span>
-                        </div>
-                        <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1">Uploaded by ${group.uploadedBy} • Broadcasted to ${group.targets.length} targets</p>
-                    </div>
-                    <div class="flex items-center gap-2 flex-wrap">
-                        ${group.qpUrl ? `<button onclick="window.open('${group.qpUrl}', '_blank')" class="bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-600 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-colors shadow-sm">👁️ View QP</button>` : ''}
-                        ${group.omrUrl ? `<button onclick="window.open('${group.omrUrl}', '_blank')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-600 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-colors shadow-sm">⭕ View OMR</button>` : ''}
-                        <button onclick="deleteMasterUploadBatch('${group.groupKey}')" class="bg-rose-50 text-rose-600 border border-rose-200 hover:bg-rose-600 hover:text-white px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-colors shadow-sm ml-2">🗑️ Delete Entire Batch</button>
-                    </div>
-                </div>
-                
-                <h5 class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Common PDF shared by these subjects:</h5>
-                <div class="flex flex-wrap gap-2">
-                    ${targetPills}
-                </div>
-            </div>
+        if (paper) {
+            if (!exam.orphan) statusBadge = '<span class="bg-emerald-100 text-emerald-700 border border-emerald-300 px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest">✅ Uploaded</span>';
+            
+            let links = [];
+            if (paper.url) links.push(`<a href="${paper.url}" target="_blank" class="text-blue-600 hover:underline font-black">QP PDF</a>`);
+            if (paper.omrUrl) links.push(`<a href="${paper.omrUrl}" target="_blank" class="text-emerald-600 hover:underline font-black">OMR PDF</a>`);
+            
+            fileDetails = `<div class="flex flex-col gap-0.5">
+                <span class="text-[10px] font-black text-slate-700 uppercase">SERIES ${paper.series || 'A'}</span>
+                <span class="text-[9px] font-bold text-slate-500">${links.join(' | ')}</span>
+            </div>`;
+
+            actionBtns = `
+                <button onclick="removeSingleTargetFromMaster('${paper.groupKey}', '${paper.id}')" class="bg-white text-rose-600 border border-slate-200 hover:border-rose-300 hover:bg-rose-50 px-2 py-1.5 rounded-lg text-[9px] font-black uppercase transition-colors shadow-sm whitespace-nowrap" title="Unlink this PDF from this specific subject">Unlink</button>
+                <button onclick="deleteMasterUploadBatch('${paper.groupKey}')" class="bg-slate-900 text-white border border-slate-800 hover:bg-rose-600 px-2 py-1.5 rounded-lg text-[9px] font-black uppercase transition-colors shadow-sm whitespace-nowrap" title="Destroy physical file and unlink from ALL sections">Destroy Full Batch</button>
+            `;
+        }
+
+        tableRows += `
+            <tr class="border-b border-slate-200 ${rowClass} transition-colors">
+                <td class="p-3 text-center text-xs font-black text-slate-400 border-r border-slate-200/50">${idx + 1}</td>
+                <td class="p-3 font-black text-slate-800 text-xs border-r border-slate-200/50">${exam.cls}</td>
+                <td class="p-3 font-black text-slate-600 text-xs border-r border-slate-200/50">Sec ${exam.sec}</td>
+                <td class="p-3 font-black text-indigo-700 text-xs uppercase border-r border-slate-200/50">${exam.sub}</td>
+                <td class="p-3 border-r border-slate-200/50">${statusBadge}</td>
+                <td class="p-3 border-r border-slate-200/50">${fileDetails}</td>
+                <td class="p-3 text-right flex justify-end items-center gap-1.5 h-full">${actionBtns}</td>
+            </tr>
         `;
     });
 
-    container.innerHTML = html;
+    container.innerHTML = `
+        <div class="bg-white border border-slate-200 rounded-[1.5rem] shadow-sm overflow-hidden mb-5">
+            <div class="overflow-x-auto custom-scroll">
+                <table class="w-full text-left border-collapse" style="min-width: 850px;">
+                    <thead class="bg-slate-100 text-slate-500 text-[10px] uppercase tracking-widest font-black border-b border-slate-200">
+                        <tr>
+                            <th class="p-3 w-12 text-center border-r border-slate-200">#</th>
+                            <th class="p-3 border-r border-slate-200">Class</th>
+                            <th class="p-3 border-r border-slate-200">Section</th>
+                            <th class="p-3 border-r border-slate-200">Subject</th>
+                            <th class="p-3 border-r border-slate-200">Status</th>
+                            <th class="p-3 border-r border-slate-200">Upload Links</th>
+                            <th class="p-3 text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        ${tableRows}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div class="text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center flex flex-col gap-1.5 items-center justify-center bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-inner">
+            <p><span class="bg-white text-rose-600 border border-slate-200 px-2 py-0.5 rounded shadow-sm">Unlink</span> Removes the PDF mapping for just that specific row/section.</p>
+            <p><span class="bg-slate-900 text-white px-2 py-0.5 rounded shadow-sm">Destroy Full Batch</span> Deletes the physical PDF from storage and unlinks it from EVERY section sharing it.</p>
+        </div>
+    `;
 }
 
 async function deleteMasterUploadBatch(groupKey) {
