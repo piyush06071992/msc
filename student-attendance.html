@@ -2673,156 +2673,142 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
         }
 
 async function loadStudentPersonalView() {
-            const container = document.getElementById('student-personal-content');
-            container.innerHTML = `
-                <div class="text-center py-20 flex flex-col items-center justify-center">
-                    <div class="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mb-4"></div>
-                    <p class="text-xs font-bold text-slate-400 uppercase tracking-widest">Crunching your attendance data...</p>
-                </div>
-            `;
+    const container = document.getElementById('student-personal-content');
+    container.innerHTML = `
+        <div class="text-center py-20 flex flex-col items-center justify-center">
+            <div class="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mb-4"></div>
+            <p class="text-xs font-bold text-slate-400 uppercase tracking-widest">Crunching your attendance data...</p>
+        </div>
+    `;
 
-            try {
-                // 1. Failsafe: Ensure we have the exact unique Document ID of the student
-                let stuId = activeStudent.id || activeStudent.uid || activeStudent.docId;
-                if (!stuId && activeStudent.rollNo) {
-                    const stuSnap = await getCollection("students").where("rollNo", "==", activeStudent.rollNo).get();
-                    if (!stuSnap.empty) {
-                        stuId = stuSnap.docs[0].id;
-                        activeStudent.id = stuId;
-                        sessionStorage.setItem('minervaStudentData', JSON.stringify(activeStudent));
-                    }
-                }
-                if (!stuId) throw new Error("Student ID missing from profile session.");
-
-                let stats = { P: 0, L: 0, Total: 0 };
-                let historyLog = [];
-
-                // 2. Generate exact month keys for the past 6 months
-                let monthKeys = [];
-                let d = new Date();
-                for(let i=0; i<6; i++) {
-                    let mDate = new Date(d.getFullYear(), d.getMonth() - i, 1);
-                    monthKeys.push(`${mDate.getFullYear()}_${String(mDate.getMonth()+1).padStart(2,'0')}`);
-                }
-
-                // 3. Generate all formatting combinations to bypass Teacher vs Admin typos
-                const cSet = new Set([ normDoc(currentReg.c), normDoc(`CLASS ${currentReg.c}`), normDoc(currentReg.c).replace('CLASS_', '') ]);
-                const sSet = new Set([ normDoc(currentReg.s), normDoc(`SEC ${currentReg.s}`), normDoc(currentReg.s).replace('SEC_', '') ]);
-                const subNorm = normDoc(currentReg.sub);
-
-                // 4. Fire explicit document reads for all combinations
-                let docPromises = [];
-                const targetCol = getCollection("attendance_records");
-                
-                monthKeys.forEach(mKey => {
-                    cSet.forEach(cV => {
-                        sSet.forEach(sV => {
-                            // Format 1: With Center Prefix
-                            docPromises.push(targetCol.doc(`att_${activeCenter}_${cV}_${sV}_${subNorm}_${mKey}`).get().catch(() => null));
-                            // Format 2: Legacy format without Center Prefix
-                            docPromises.push(targetCol.doc(`att_${cV}_${sV}_${subNorm}_${mKey}`).get().catch(() => null));
-                        });
-                    });
-                });
-
-                const snaps = await Promise.all(docPromises);
-                
-                snaps.forEach(docSnap => {
-                    if (docSnap && docSnap.exists) {
-                        const data = docSnap.data();
-                        if(data.records) {
-                            Object.keys(data.records).forEach(dateStr => {
-                                const status = data.records[dateStr][stuId];
-                              if(status === 'P' || status === 'A' || status === 'L') {
-                                    let effStat = status === 'A' ? 'L' : status;
-                                    // Prevent duplicate count if multiple document formats exist
-                                    if (!historyLog.some(log => log.date === dateStr)) {
-                                        stats[effStat]++;
-                                        stats.Total++;
-                                        historyLog.push({ date: dateStr, status: effStat });
-                                    }
-                                }
-                            });
-                        }
-                    }
-                });
-
-                if (stats.Total === 0) {
-                    container.innerHTML = `
-                        <div class="text-center py-16 bg-white rounded-[2rem] border-2 border-dashed border-slate-200 shadow-sm">
-                            <span class="text-5xl mb-4 block">👻</span>
-                            <h3 class="text-lg font-black text-slate-700 uppercase tracking-tighter mb-1">No Data Yet</h3>
-                            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Attendance hasn't been marked for this subject.</span>
-                        </div>
-                    `;
-                    return;
-                }
-
-                // Sort history newest first
-                historyLog.sort((a,b) => b.date.localeCompare(a.date));
-
-                const pct = Math.round((stats.P / stats.Total) * 100) || 0;
-                const getHtmlColor = (p) => p >= 75 ? 'text-emerald-600' : (p >= 60 ? 'text-amber-500' : 'text-rose-600');
-                const getHtmlBg = (p) => p >= 75 ? 'bg-emerald-50 border-emerald-200' : (p >= 60 ? 'bg-amber-50 border-amber-200' : 'bg-rose-50 border-rose-200');
-
-                let html = `
-                    <div class="mb-8 p-6 sm:p-8 rounded-[2rem] border-2 ${getHtmlBg(pct)} flex flex-col sm:flex-row items-center justify-between shadow-sm transition-colors gap-6 text-center sm:text-left">
-                        <div>
-                            <h2 class="font-black text-slate-800 text-xl sm:text-2xl uppercase tracking-tighter leading-none">${currentReg.sub}</h2>
-                            <p class="text-[10px] sm:text-xs font-bold text-slate-500 uppercase mt-2 tracking-widest">Total Classes Attended: <span class="font-black text-slate-700">${stats.P} out of ${stats.Total}</span></p>
-                        </div>
-                        <div class="flex flex-col items-center sm:items-end">
-                            <div class="text-5xl sm:text-6xl font-black ${getHtmlColor(pct)} tracking-tighter">${pct}%</div>
-                          <div class="text-[10px] font-black text-slate-500 bg-white/60 px-3 py-1.5 rounded-lg mt-2 uppercase tracking-widest border border-slate-200 shadow-sm flex gap-3">
-                                <span class="text-emerald-600">Present: ${stats.P}</span>
-                                <span class="text-amber-600">Leave: ${stats.L}</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="bg-white rounded-[2rem] border border-slate-200 shadow-sm overflow-hidden">
-                        <div class="p-6 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
-                            <h4 class="font-black text-slate-700 text-sm uppercase tracking-widest">Recent History</h4>
-                        </div>
-                        <div class="p-2">
-                `;
-
-                if(historyLog.length > 0) {
-                    html += `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4">`;
-                    historyLog.slice(0, 30).forEach(log => {
-                        const dObj = new Date(log.date);
-                        const prettyDate = dObj.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
-                        
-                        let sPill = "";
-                        if(log.status === 'P') sPill = `<span class="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-md text-[10px] font-black uppercase tracking-widest">Present</span>`;
-                        else if(log.status === 'A') sPill = `<span class="bg-rose-100 text-rose-700 px-3 py-1 rounded-md text-[10px] font-black uppercase tracking-widest">Absent</span>`;
-                        else if(log.status === 'L') sPill = `<span class="bg-amber-100 text-amber-700 px-3 py-1 rounded-md text-[10px] font-black uppercase tracking-widest">Leave</span>`;
-
-                        html += `
-                            <div class="flex justify-between items-center p-3 rounded-xl border border-slate-100 hover:bg-slate-50 transition-colors">
-                                <span class="text-xs font-bold text-slate-600">${prettyDate}</span>
-                                ${sPill}
-                            </div>
-                        `;
-                    });
-                    html += `</div>`;
-                    if(historyLog.length > 30) html += `<p class="text-center text-[9px] font-bold text-slate-400 uppercase p-4">Showing last 30 records</p>`;
-                }
-
-                html += `
-                        </div>
-                    </div>
-                `;
-                container.innerHTML = html;
-
-            } catch (e) {
-                console.error(e);
-                container.innerHTML = `
-                    <div class="text-center py-10 bg-rose-50 border border-rose-200 rounded-2xl m-4">
-                        <span class="text-rose-500 font-black uppercase tracking-widest text-xs">Error: ${e.message}</span>
-                    </div>`;
+    try {
+        let stuId = activeStudent.id || activeStudent.uid || activeStudent.docId;
+        if (!stuId && activeStudent.rollNo) {
+            const stuSnap = await getCollection("students").where("rollNo", "==", activeStudent.rollNo).get();
+            if (!stuSnap.empty) {
+                stuId = stuSnap.docs[0].id;
+                activeStudent.id = stuId;
+                sessionStorage.setItem('minervaStudentData', JSON.stringify(activeStudent));
             }
         }
+        if (!stuId) throw new Error("Student ID missing from profile session.");
+
+        let stats = { P: 0, L: 0, Total: 0 };
+        let historyLog = [];
+
+        // Generate exact month keys for the past 6 months
+        let monthKeys = [];
+        let d = new Date();
+        for(let i=0; i<6; i++) {
+            let mDate = new Date(d.getFullYear(), d.getMonth() - i, 1);
+            monthKeys.push(`${mDate.getFullYear()}_${String(mDate.getMonth()+1).padStart(2,'0')}`);
+        }
+
+        const subNorm = normMatch(currentReg.sub);
+        const classNorm = normMatch(currentReg.c);
+        const secNorm = normMatch(currentReg.s);
+
+        // Fetch months using IndexedDB Caching (0 reads if unchanged!)
+        for (let mKey of monthKeys) {
+            const docsArray = await getCachedMonthAttendanceDocs(mKey);
+            docsArray.forEach(item => {
+                const data = item.data;
+                const matchesClass = normMatch(data.className) === classNorm;
+                const matchesSec = normMatch(data.section) === secNorm;
+                const matchesSub = normMatch(data.subject) === subNorm;
+
+                if (matchesClass && matchesSec && matchesSub && data.records) {
+                    Object.keys(data.records).forEach(dateStr => {
+                        const status = data.records[dateStr][stuId];
+                        if (status === 'P' || status === 'A' || status === 'L') {
+                            let effStat = status === 'A' ? 'L' : status;
+                            if (!historyLog.some(log => log.date === dateStr)) {
+                                stats[effStat]++;
+                                stats.Total++;
+                                historyLog.push({ date: dateStr, status: effStat });
+                            }
+                        }
+                    });
+                }
+            });
+        }
+
+        if (stats.Total === 0) {
+            container.innerHTML = `
+                <div class="text-center py-16 bg-white rounded-[2rem] border-2 border-dashed border-slate-200 shadow-sm">
+                    <span class="text-5xl mb-4 block">👻</span>
+                    <h3 class="text-lg font-black text-slate-700 uppercase tracking-tighter mb-1">No Data Yet</h3>
+                    <span class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Attendance hasn't been marked for this subject.</span>
+                </div>
+            `;
+            return;
+        }
+
+        // Sort history newest first
+        historyLog.sort((a,b) => b.date.localeCompare(a.date));
+
+        const pct = Math.round((stats.P / stats.Total) * 100) || 0;
+        const getHtmlColor = (p) => p >= 75 ? 'text-emerald-600' : (p >= 60 ? 'text-amber-500' : 'text-rose-600');
+        const getHtmlBg = (p) => p >= 75 ? 'bg-emerald-50 border-emerald-200' : (p >= 60 ? 'bg-amber-50 border-amber-200' : 'bg-rose-50 border-rose-200');
+
+        let html = `
+            <div class="mb-8 p-6 sm:p-8 rounded-[2rem] border-2 ${getHtmlBg(pct)} flex flex-col sm:flex-row items-center justify-between shadow-sm transition-colors gap-6 text-center sm:text-left">
+                <div>
+                    <h2 class="font-black text-slate-800 text-xl sm:text-2xl uppercase tracking-tighter leading-none">${currentReg.sub}</h2>
+                    <p class="text-[10px] sm:text-xs font-bold text-slate-500 uppercase mt-2 tracking-widest">Total Classes Attended: <span class="font-black text-slate-700">${stats.P} out of ${stats.Total}</span></p>
+                </div>
+                <div class="flex flex-col items-center sm:items-end">
+                    <div class="text-5xl sm:text-6xl font-black ${getHtmlColor(pct)} tracking-tighter">${pct}%</div>
+                    <div class="text-[10px] font-black text-slate-500 bg-white/60 px-3 py-1.5 rounded-lg mt-2 uppercase tracking-widest border border-slate-200 shadow-sm flex gap-3">
+                        <span class="text-emerald-600">Present: ${stats.P}</span>
+                        <span class="text-amber-600">Leave: ${stats.L}</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="bg-white rounded-[2rem] border border-slate-200 shadow-sm overflow-hidden">
+                <div class="p-6 bg-slate-50 border-b border-slate-100 flex justify-between items-center">
+                    <h4 class="font-black text-slate-700 text-sm uppercase tracking-widest">Recent History</h4>
+                </div>
+                <div class="p-2">
+        `;
+
+        if(historyLog.length > 0) {
+            html += `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4">`;
+            historyLog.slice(0, 30).forEach(log => {
+                const dObj = new Date(log.date);
+                const prettyDate = dObj.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+                
+                let sPill = "";
+                if(log.status === 'P') sPill = `<span class="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-md text-[10px] font-black uppercase tracking-widest">Present</span>`;
+                else if(log.status === 'A') sPill = `<span class="bg-rose-100 text-rose-700 px-3 py-1 rounded-md text-[10px] font-black uppercase tracking-widest">Absent</span>`;
+                else if(log.status === 'L') sPill = `<span class="bg-amber-100 text-amber-700 px-3 py-1 rounded-md text-[10px] font-black uppercase tracking-widest">Leave</span>`;
+
+                html += `
+                    <div class="flex justify-between items-center p-3 rounded-xl border border-slate-100 hover:bg-slate-50 transition-colors">
+                        <span class="text-xs font-bold text-slate-600">${prettyDate}</span>
+                        ${sPill}
+                    </div>
+                `;
+            });
+            html += `</div>`;
+            if(historyLog.length > 30) html += `<p class="text-center text-[9px] font-bold text-slate-400 uppercase p-4">Showing last 30 records</p>`;
+        }
+
+        html += `
+                </div>
+            </div>
+        `;
+        container.innerHTML = html;
+
+    } catch (e) {
+        console.error(e);
+        container.innerHTML = `
+            <div class="text-center py-10 bg-rose-50 border border-rose-200 rounded-2xl m-4">
+                <span class="text-rose-500 font-black uppercase tracking-widest text-xs">Error: ${e.message}</span>
+            </div>`;
+    }
+}
  async function loadDailyAttendance() {
             stopTTS();
             const searchInput = document.getElementById('register-student-search');
