@@ -964,7 +964,7 @@
             }
         }
 
-        async function getCachedStudentsRoster(prefix) {
+      async function getCachedStudentsRoster(prefix) {
             try {
                 // 1. Read only 1 document from Firestore to check version
                 const metaDoc = await db.collection("system_metadata").doc("students_version").get();
@@ -975,7 +975,7 @@
                 const cachedRoster = await IDB.get(`${prefix}students_roster`);
 
                 // 3. If version matches and cache exists, bypass Firestore entirely (0 reads!)
-                if (cachedRoster && localVersion && localVersion === serverVersion) {
+                if (cachedRoster && localVersion !== null && localVersion !== undefined && localVersion === serverVersion) {
                     console.log("⚡ Roster loaded instantly from local IndexedDB");
                     return cachedRoster;
                 }
@@ -1006,6 +1006,66 @@
                     }
                 });
                 return fallbackRoster;
+            }
+        }
+
+        async function getCachedMasterConfig(prefix) {
+            try {
+                const metaDoc = await db.collection("system_metadata").doc("master_config_version").get();
+                const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
+                
+                const localVersion = await IDB.get(`${prefix}master_config_last_version`);
+                const cachedBundle = await IDB.get(`${prefix}master_config_bundle`);
+
+                if (cachedBundle && localVersion !== null && localVersion !== undefined && localVersion === serverVersion) {
+                    console.log("⚡ Master Config loaded instantly from local IndexedDB");
+                    return cachedBundle;
+                }
+
+                console.log("🔄 Master Config updated. Fetching fresh config bundle...");
+                const [ttSnap, structSnap, holSnap, histSnap, staffSnap, remSnap, splSnap] = await Promise.all([
+                    getCollection("timetable").get(),
+                    getCollection("institute_structure").get(),
+                    getCollection("school_holidays").get(),
+                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"]).get(),
+                    db.collection("staff_applications").get(),
+                    getCollection("remedial_classes").get(),
+                    getCollection("special_leaves").where("status", "==", "ACTIVE").get()
+                ]);
+
+                const bundle = {
+                    timetable: ttSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    structures: structSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    holidays: holSnap.docs.map(d => d.data()),
+                    timetableHistory: histSnap.docs.map(d => d.data()),
+                    staff: staffSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    remedial: remSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    specialLeaves: splSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+                };
+
+                await IDB.set(`${prefix}master_config_bundle`, bundle);
+                await IDB.set(`${prefix}master_config_last_version`, serverVersion);
+                return bundle;
+            } catch (e) {
+                console.warn("Master config cache fallback:", e);
+                const [ttSnap, structSnap, holSnap, histSnap, staffSnap, remSnap, splSnap] = await Promise.all([
+                    getCollection("timetable").get(),
+                    getCollection("institute_structure").get(),
+                    getCollection("school_holidays").get(),
+                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"]).get(),
+                    db.collection("staff_applications").get(),
+                    getCollection("remedial_classes").get(),
+                    getCollection("special_leaves").where("status", "==", "ACTIVE").get()
+                ]);
+                return {
+                    timetable: ttSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    structures: structSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    holidays: holSnap.docs.map(d => d.data()),
+                    timetableHistory: histSnap.docs.map(d => d.data()),
+                    staff: staffSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    remedial: remSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    specialLeaves: splSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+                };
             }
         }
 
@@ -1415,34 +1475,27 @@ function switchMainTab(tab) {
             }
         }
 
-        async function fetchData(safeName) {
+    async function fetchData(safeName) {
             const container = document.getElementById('bookshelf-container');
           try {
-const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+        const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
 
                 // 1. Fetch Students Roster first (Using Smart Cache)
                 studentsData = await getCachedStudentsRoster(centerPrefix);
 
-                const [ttSnap, structSnap, holSnap, histSnap, staffSnap, remSnap, splSnap] = await Promise.all([
-                    getCollection("timetable").get(),
-                    getCollection("institute_structure").get(),
-                    getCollection("school_holidays").get(),
-                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"]).get(),
-                    db.collection("staff_applications").get(),
-                    getCollection("remedial_classes").get(),
-                    getCollection("special_leaves").where("status", "==", "ACTIVE").get()
-                ]);
+                // 2. Fetch Master Configuration Bundle (Using IndexedDB Cache)
+                const masterBundle = await getCachedMasterConfig(centerPrefix);
 
-                holidaysData = holSnap.docs.map(d => d.data());
-                timetableHistoryData = histSnap.docs.map(d => d.data());
-                timetableData = ttSnap.docs.map(d => d.data());
+                timetableData = masterBundle.timetable;
+                const structures = masterBundle.structures;
+                holidaysData = masterBundle.holidays;
+                timetableHistoryData = masterBundle.timetableHistory;
+                staffList = masterBundle.staff;
                 
                 remedialDataMap = {};
-                remSnap.forEach(d => { remedialDataMap[d.id] = d.data(); });
+                masterBundle.remedial.forEach(d => { remedialDataMap[d.id] = d; });
                 
-                specialLeavesData = [];
-                if(splSnap) splSnap.forEach(d => specialLeavesData.push({id: d.id, ...d.data()}));
-                staffList = staffSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                specialLeavesData = masterBundle.specialLeaves;
                 if (isAdmin) loadStaffListForPerms();
 
              const classFilterSelect = document.getElementById('audit-class-filter');
