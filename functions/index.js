@@ -184,11 +184,21 @@ exports.autoBumpMasterConfig = onDocumentWritten({
 
     // Automatically bumps version when any master configuration changes
     if (configKeywords.some(keyword => collectionName.includes(keyword))) {
-        await admin.firestore().collection('system_metadata').doc('master_config_version').set({
-            lastUpdated: Date.now()
-        }, { merge: true });
+        const now = Date.now();
         
-        console.log(`🔄 Master config version automatically bumped due to update in: ${collectionName}`);
+        // 1. Always bump the global master config version
+        await admin.firestore().collection('system_metadata').doc('master_config_version').set({
+            lastUpdated: now
+        }, { merge: true });
+
+        // 2. If the timetable specifically changed, bump its dedicated version doc too
+        if (collectionName.includes('timetable')) {
+            await admin.firestore().collection('system_metadata').doc('timetable').set({
+                lastUpdated: now
+            }, { merge: true });
+        }
+        
+        console.log(`🔄 Master config versions automatically bumped due to update in: ${collectionName}`);
     }
     return null;
 });
