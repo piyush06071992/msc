@@ -1095,15 +1095,19 @@ async function checkAndApplyFutureMaster() {
      // --- LIVE REAL-TIME ROOM SYNC LISTENER ---
         function fetchRooms() {
             return new Promise((resolve) => {
+                const cached = sessionStorage.getItem('minerva_rooms');
+                if (cached) {
+                    allRooms = JSON.parse(cached);
+                    resolve(); // Resolve instantly using cache
+                }
                 getCollection("infrastructure_rooms").onSnapshot(snapshot => {
                     allRooms = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                     allRooms.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base', numeric: true }));
                     sessionStorage.setItem('minerva_rooms', JSON.stringify(allRooms));
-                    resolve();
+                    if (!cached) resolve();
                 }, error => {
                     console.error("Live room sync error:", error);
-                    allRooms = [];
-                    resolve();
+                    if (!cached) { allRooms = []; resolve(); }
                 });
             });
         }
@@ -1141,14 +1145,20 @@ async function checkAndApplyFutureMaster() {
             
             oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
         }
-        async function fetchLiveMasterCache() {
-        try {
-            const snap = await getCollection("timetable").get();
-            liveMasterTimetable = snap.docs.map(d => d.data());
-        } catch(e) {
-            console.error("Master cache fetch error:", e);
+    async function fetchLiveMasterCache() {
+            try {
+                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+                const cachedData = await IDB.get(`${prefix}timetable_data`);
+                if (cachedData) {
+                    liveMasterTimetable = cachedData;
+                } else {
+                    const snap = await getCollection("timetable").get();
+                    liveMasterTimetable = snap.docs.map(d => d.data());
+                }
+            } catch(e) {
+                console.error("Master cache fetch error:", e);
+            }
         }
-    }
 
      // --- HOLIDAY OVERLAY ENGINE ---
         async function fetchHolidays() {
@@ -4003,22 +4013,21 @@ async function confirmDateContext() {
                     let activeMasters = [];
                     futureSnap.docs.forEach(doc => { if (doc.id <= dateVal) activeMasters.push(doc.data()); });
                     
-                    if (activeMasters.length > 0) {
+                  if (activeMasters.length > 0) {
                         // Sort so the most recently scheduled master takes control
                         activeMasters.sort((a, b) => b.date.localeCompare(a.date));
                         globalTimetable = (activeMasters[0].schedule || []).filter(slot => slot.day === dayName);
                         document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 font-bold">📅 FUTURE MASTER (From ${activeMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
                     } else {
-                        // Fallback to the normal Live Master
-                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                        globalTimetable = masterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                        // Fallback to the normal Live Master (Using local cache to prevent network delay)
+                        globalTimetable = liveMasterTimetable.filter(t => t.day === dayName);
                         document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
                     }
                 }
             }
             // --- THE LIVE LEAVE PATCHER FOR ADMIN ---
             const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-            const leaveSnap = await db.collection(prefix + "leave_requests").get(); // Fetched into memory to avoid index errors
+            const leaveSnap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get(); // Much faster targeted query
 
             leaveSnap.forEach(doc => {
                 const leaveData = doc.data();
