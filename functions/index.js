@@ -207,16 +207,21 @@ exports.autoBumpMasterConfig = onDocumentWritten({
 // --- AUTO-BUMP STUDENT CACHE VERSION TRIGGER ---
 // =======================================================
 exports.autoBumpStudentVersion = onDocumentWritten({
-    document: "{centerPrefix}students/{studentId}",
+    document: "{collectionName}/{studentId}",
     region: "asia-south1",
     memory: "256MB"
 }, async (event) => {
-    // Whenever any student is added, approved, edited, or deleted, update the global cache version
-    await admin.firestore().collection('system_metadata').doc('students_version').set({
-        lastUpdated: Date.now()
-    }, { merge: true });
-    
-    console.log(`🔄 Student cache version bumped due to roster update.`);
+    const collectionName = event.params.collectionName;
+
+    // Only proceed if the write happened in one of the student collections
+    if (collectionName === "students" || collectionName === "dharamshala_students") {
+        // Whenever any student is added, approved, edited, or deleted, update the global cache version
+        await admin.firestore().collection('system_metadata').doc('students_version').set({
+            lastUpdated: Date.now()
+        }, { merge: true });
+        
+        console.log(`🔄 Student cache version bumped due to roster update in ${collectionName}.`);
+    }
     return null;
 });
 
