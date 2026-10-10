@@ -198,10 +198,28 @@ exports.autoBumpMasterConfig = onDocumentWritten({
             }, { merge: true });
         }
         
-        console.log(`🔄 Master config versions automatically bumped due to update in: ${collectionName}`);
+      console.log(`🔄 Master config versions automatically bumped due to update in: ${collectionName}`);
     }
     return null;
 });
+
+// =======================================================
+// --- AUTO-BUMP STUDENT CACHE VERSION TRIGGER ---
+// =======================================================
+exports.autoBumpStudentVersion = onDocumentWritten({
+    document: "{centerPrefix}students/{studentId}",
+    region: "asia-south1",
+    memory: "256MB"
+}, async (event) => {
+    // Whenever any student is added, approved, edited, or deleted, update the global cache version
+    await admin.firestore().collection('system_metadata').doc('students_version').set({
+        lastUpdated: Date.now()
+    }, { merge: true });
+    
+    console.log(`🔄 Student cache version bumped due to roster update.`);
+    return null;
+});
+
 exports.sendInstantPushAlerts = onDocumentCreated({
     document: "instant_alerts/{docId}",
     region: "asia-south1",
