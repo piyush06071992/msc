@@ -3410,36 +3410,52 @@ async function downloadRoomPrintPackage() {
     }
 }
 
-     async function commitMasterSeatingPlanToCloud(date) {
-            // 1. Group the massive allocation object by Room Name
-            let roomGroups = {};
+  async function commitMasterSeatingPlanToCloud(date) {
+        // 1. Group the massive allocation object by Room Name
+        let roomGroups = {};
+        
+        // Pre-fill empty objects for all shifted rooms so cleared rooms update properly
+        roomsDatabase.forEach(r => { roomGroups[getShiftedRoomName(r.name)] = {}; });
+        Object.keys(currentAllocations).forEach(seatId => {
+            const roomName = seatId.split('-R')[0];
+            if (!roomGroups[roomName]) roomGroups[roomName] = {};
             
-            // Pre-fill empty objects for all shifted rooms so cleared rooms update properly
-            roomsDatabase.forEach(r => { roomGroups[getShiftedRoomName(r.name)] = {}; });
-            Object.keys(currentAllocations).forEach(seatId => {
-                const roomName = seatId.split('-R')[0];
-                if (!roomGroups[roomName]) roomGroups[roomName] = {};
+            // Keep data clean and light
+            const s = currentAllocations[seatId];
+            if(s) {
+                // Fetch from live students just in case it's missing in the cached s object
+                const liveStu = allApprovedStudents.find(live => live.id === s.id);
+                const optSubject = (liveStu && liveStu.optionalSubject) ? liveStu.optionalSubject : (s.optionalSubject || "");
                 
-          // Keep data clean and light
-                const s = currentAllocations[seatId];
-                if(s) {
-                    // Fetch from live students just in case it's missing in the cached s object
-                    const liveStu = allApprovedStudents.find(live => live.id === s.id);
-                    const optSubject = (liveStu && liveStu.optionalSubject) ? liveStu.optionalSubject : (s.optionalSubject || "");
-                    
-                    roomGroups[roomName][seatId] = {
-                        id: s.id || "", name: s.name || "", rollNo: s.rollNo || "",
-                        admNo: s.admNo || "", className: s.className || "", section: s.section || "",
-                        cheatRisk: s.cheatRisk || false, cheatRiskDetails: s.cheatRiskDetails || [],
-                        optionalSubject: optSubject
-                    };
-                }
-            });
+                roomGroups[roomName][seatId] = {
+                    id: s.id || "", name: s.name || "", rollNo: s.rollNo || "",
+                    admNo: s.admNo || "", className: s.className || "", section: s.section || "",
+                    cheatRisk: s.cheatRisk || false, cheatRiskDetails: s.cheatRiskDetails || [],
+                    optionalSubject: optSubject
+                };
+            }
+        });
 
-            // 2. Batch write each room to its own safe document
-            const batch = db.batch();
-            
-            Object.keys(roomGroups).forEach(roomName => {
+        // 2. Batch write each room to its own safe document
+        const batch = db.batch();
+        
+        // --- 🧹 THE GHOST LEAK FIX: SWEEP AND DELETE ABANDONED ROOMS ---
+        const existingDocsSnap = await db.collection("exam_seating_rooms")
+            .where("date", "==", date)
+            .where("center", "==", activeCenter)
+            .get();
+
+        existingDocsSnap.forEach(doc => {
+            const dbRoomName = doc.data().roomName;
+            // If the room from the database has NO allocated students in our current memory state, DESTROY IT
+            if (!roomGroups[dbRoomName] || Object.keys(roomGroups[dbRoomName]).length === 0) {
+                batch.delete(doc.ref);
+            }
+        });
+        // ---------------------------------------------------------------
+        
+        Object.keys(roomGroups).forEach(roomName => {
+            if (Object.keys(roomGroups[roomName]).length > 0) {
                 const safeRoomName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
                 const docId = `${activeCenter}_${date}_${safeRoomName}`;
                 const ref = db.collection("exam_seating_rooms").doc(docId);
@@ -3452,20 +3468,21 @@ async function downloadRoomPrintPackage() {
                     totalAssigned: Object.keys(roomGroups[roomName]).length,
                     timestamp: Date.now()
                 });
-            });
+            }
+        });
 
-            // 3. Update the master tracker (No student data inside, just the total count)
-            const masterRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${date}`);
-            batch.set(masterRef, {
-                date: date,
-                center: activeCenter,
-                totalAssigned: Object.keys(currentAllocations).length,
-                isPartitioned: true,
-                timestamp: Date.now()
-            }, { merge: true });
+        // 3. Update the master tracker (No student data inside, just the total count)
+        const masterRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${date}`);
+        batch.set(masterRef, {
+            date: date,
+            center: activeCenter,
+            totalAssigned: Object.keys(currentAllocations).length,
+            isPartitioned: true,
+            timestamp: Date.now()
+        }, { merge: true });
 
-            await batch.commit();
-        }
+        await batch.commit();
+    }
 
         // --- PURE STUDENT SEARCH & SEAT LOCATOR ENGINE ---
         function executeGlobalSearch(query) {
