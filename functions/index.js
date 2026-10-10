@@ -603,7 +603,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
 exports.compileSingleRoomOnDemand = onRequest({
     region: "asia-south1",
-    memory: "1GiB",
+    memory: "4GiB", // ⬆️ Increased to handle massive rooms like LH 13 without crashing
     timeoutSeconds: 300,
     cors: true
 }, async (req, res) => {
