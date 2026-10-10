@@ -482,8 +482,8 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     const leftText = `ROOM: ${roomName}`;
                     const rightText = `${subLabel}COPY ${c+1}/${copiesNeeded}`;
                     
-              const topY = height - 22;
-                    const bottomY = 18;
+             const topY = height - 22;
+                    const bottomY = 10; // ⬇️ Moved down to print below OMR dots
 
                     // Simple admin stamps nestled neatly into the frontend margins
                     page.drawText(leftText, { x: 20, y: topY, size, font, color, opacity });
@@ -526,9 +526,9 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 const bottomLeftText = `${stu.name.toUpperCase()}`;
                 const bottomRightText = `CLASS ${stu.className} - SEC ${stu.section}`;
                 
-              // Coordinates adjusted to stay safely within printer margins
+             // Coordinates adjusted to stay safely within printer margins
                 const topY = height - 22;
-                const bottomY = 18;
+                const bottomY = 10; // ⬇️ Moved down to print below OMR dots
 
                 if (task.layout === 'A3_BOOKLET' || task.layout === 'A5_BOOKLET') {
                     const halfWidth = width / 2;
@@ -548,10 +548,10 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                         
                         page.drawText(bottomLeftText, { x: halfWidth + 20, y: bottomY, size, font, color, opacity });
                         page.drawText(bottomRightText, { x: width - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
-                   } else {
+                } else {
                         // BACK PAGE (Inverted / Rotated 180 degrees)
-                        const invTopY = 18; // Physical bottom edge becomes logical top
-                        const invBottomY = height - 18; // Physical top edge becomes logical bottom
+                        const invTopY = 10; // ⬇️ Moved closer to physical edge
+                        const invBottomY = height - 10; // ⬇️ Moved closer to physical edge to bypass dots
                         
                         // -- LEFT PAGE STAMPS (Physical left half) --
                         // Logical Top-Left (SEAT): Placed at physical bottom-right
