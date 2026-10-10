@@ -145,13 +145,18 @@
                         </div>
                     </div>
                     
-              <div class="flex flex-col gap-3">
+            <div class="flex flex-col gap-3">
                         <button id="btn-generate" onclick="runAllocationAlgorithm()" class="w-full bg-slate-900 text-white font-black py-4 sm:py-5 rounded-2xl uppercase tracking-widest text-sm shadow-xl hover:bg-blue-600 transition-all active:scale-95 flex justify-center items-center gap-2">
-                            ⚡ Generate Roster
+                            ⚡ Auto-Generate Roster
                         </button>
-                        <button id="btn-clone" onclick="openCloneDutyModal()" class="w-full bg-fuchsia-600 text-white font-black py-3 rounded-2xl uppercase tracking-widest text-xs shadow-md hover:bg-fuchsia-500 transition-all active:scale-95 flex justify-center items-center gap-2">
-                            🔄 Clone Previous Duty
-                        </button>
+                        <div class="flex gap-2">
+                            <button id="btn-generate-blank" onclick="runAllocationAlgorithm(true)" class="flex-1 bg-white text-slate-700 border border-slate-200 font-black py-3 rounded-2xl uppercase tracking-widest text-[10px] shadow-sm hover:bg-slate-50 transition-all active:scale-95 flex justify-center items-center gap-1">
+                                🔲 Generate Blank
+                            </button>
+                            <button id="btn-clone" onclick="openCloneDutyModal()" class="flex-1 bg-fuchsia-600 text-white font-black py-3 rounded-2xl uppercase tracking-widest text-[10px] shadow-md hover:bg-fuchsia-500 transition-all active:scale-95 flex justify-center items-center gap-1">
+                                🔄 Clone Previous
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -1531,7 +1536,7 @@ if (currentMode === 'EXAM' && eDate) {
         }
 
 // --- ALGORITHM ENGINE (LUNCH & EXAM) ---
-        async function runAllocationAlgorithm() {
+        async function runAllocationAlgorithm(createBlank = false) {
             const selectedRooms = window.renderedActiveRooms || [];
             const exemptedStaffEmails = Array.from(document.querySelectorAll('.staff-cb:checked')).map(i => i.value);
 
@@ -1996,6 +2001,57 @@ async function populateEditStaff() {
             const sInp = document.getElementById('edit-shift-start').value;
             const eInp = document.getElementById('edit-shift-end').value;
             const data = generatedRoster[currentEditParams.roomName].columns[currentEditParams.colKey];
+            
+            // Fix: Dynamically recreate the department list with free counts based on the current search query
+            const depts = getUniqueDepartments();
+            let deptOptions = `<option value="">-- All Depts --</option>`;
+            
+            depts.forEach(d => {
+                let staffInDept = staffData.filter(s => s.rawDept.includes(d));
+                if (searchQuery) {
+                    staffInDept = staffInDept.filter(s => s.name.toLowerCase().includes(searchQuery) || s.email.toLowerCase().includes(searchQuery));
+                }
+                
+                let freeCount = 0;
+                let bStart = sInp ? timeToMins(sInp) : timeToMins(data.timing.split(' - ')[0]);
+                let bEnd = eInp ? timeToMins(eInp) : timeToMins(data.timing.split(' - ')[1]);
+                
+                let scheduleToCheck = timetableData; 
+                let targetDay;
+                if (currentMode === 'LUNCH') {
+                    targetDay = currentEditParams.colKey;
+                    scheduleToCheck = timetableData.filter(t => t.day === targetDay);
+                } else {
+                    const eDate = document.getElementById('dutyTargetDate').value;
+                    targetDay = DAYS_OF_WEEK[new Date(eDate).getDay()];
+                    if(activeDateSchedule && activeDateSchedule.length > 0) scheduleToCheck = activeDateSchedule;
+                }
+
+                staffInDept.forEach(s => {
+                    const sTt = scheduleToCheck.filter(t => t.teacherName === s.name || t.teacher === s.name);
+                    const isBusyInClass = sTt.some(cls => {
+                        if(!cls.timeRange && (!cls.start24 || !cls.end24)) return false;
+                        const clsS = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[0]) : timeToMins(cls.start24);
+                        const clsE = cls.timeRange ? timeToMins(cls.timeRange.split(' - ')[1]) : timeToMins(cls.end24);
+                        return (bStart < clsE && bEnd > clsS);
+                    });
+
+                    let alreadyOnDuty = false;
+                    Object.keys(generatedRoster).forEach(rKey => {
+                        Object.values(generatedRoster[rKey].columns).forEach(colData => {
+                            if (colData.status === 'ASSIGNED' && colData.staff && colData.staff.email === s.email) {
+                                if (!(rKey === currentEditParams.roomName && colData.timing === data.timing)) alreadyOnDuty = true;
+                            }
+                        });
+                    });
+
+                    if (!isBusyInClass && !alreadyOnDuty) freeCount++;
+                });
+
+                deptOptions += `<option value="${d}" ${d === dept ? 'selected' : ''}>${d} (${freeCount} Free)</option>`;
+            });
+            
+            document.getElementById('edit-dept').innerHTML = deptOptions;
             
             let bStart = sInp ? timeToMins(sInp) : timeToMins(data.timing.split(' - ')[0]);
             let bEnd = eInp ? timeToMins(eInp) : timeToMins(data.timing.split(' - ')[1]);
