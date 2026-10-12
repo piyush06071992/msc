@@ -370,9 +370,44 @@
         const db = firebase.firestore();
         const storage = firebase.storage();
         
-        // --- MULTI-CENTER DYNAMIC DB ROUTER ---
+    // --- MULTI-CENTER DYNAMIC DB ROUTER ---
         let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
         sessionStorage.setItem('minervaAdminCenter', activeCenter);
+
+        // --- INDEXED DB CACHE ENGINE ---
+        const IDB = {
+            dbName: "MinervaERP_Cache", storeName: "MasterStore",
+            async open() {
+                return new Promise((resolve, reject) => {
+                    const req = indexedDB.open(this.dbName, 1);
+                    req.onupgradeneeded = () => req.result.createObjectStore(this.storeName);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                });
+            },
+            async get(key) {
+                const db = await this.open();
+                return new Promise(resolve => {
+                    const req = db.transaction(this.storeName, "readonly").objectStore(this.storeName).get(key);
+                    req.onsuccess = () => resolve(req.result); req.onerror = () => resolve(null);
+                });
+            },
+            async set(key, value) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(this.storeName, "readwrite");
+                    tx.objectStore(this.storeName).put(value, key);
+                    tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
+                });
+            }
+        };
+
+        async function bumpPlannerVersion() {
+            if (!navigator.onLine) return;
+            try {
+                await db.collection("system_metadata").doc("planners_version").set({ lastUpdated: Date.now() }, { merge: true });
+            } catch(e) { console.warn("Failed to bump version", e); }
+        }
 
        function getCollection(name) {
             // Global tables that are shared across all centers
@@ -445,49 +480,84 @@
         function openModal(id) { const el = document.getElementById(id); el.classList.remove('hidden'); el.classList.add('flex'); }
         function closeModal(id) { const el = document.getElementById(id); el.classList.add('hidden'); el.classList.remove('flex'); }
 
-        // --- DATABASE ENGINE ---
+  // --- DATABASE ENGINE ---
         async function loadAllData() {
             try {
-                const configDoc = await getCollection("configs").doc("lesson_planner_settings").get();
-                if (configDoc.exists && configDoc.data().dailyComplianceBlockEnabled === true) {
-                    dailyBlockEnabled = true;
-                    const dbBtn = document.getElementById('daily-block-btn');
-                    if (dbBtn) {
-                        dbBtn.innerText = "🛑 Block: ON";
-                        dbBtn.classList.replace('text-slate-500', 'text-rose-600');
-                        dbBtn.classList.replace('border-slate-300', 'border-rose-300');
-                    }
-                }
+                const metaDoc = await db.collection("system_metadata").doc("planners_version").get();
+                const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
+                
+                const cachePrefix = `admin_planner_${activeCenter}_`;
+                const localVersion = await IDB.get(cachePrefix + "version");
+                const cachedBundle = await IDB.get(cachePrefix + "bundle");
 
-            const [structSnap, assignSnap, plannerSnap, staffSnap, ttSnap, holSnap, histSnap, leaveSnap] = await Promise.all([
-                    getCollection("institute_structure").get(),
-                    getCollection("lesson_planner_assignments").get(),
-                    getCollection("lesson_planners").get(),
-                    getCollection("staff_applications").where("status", "==", "approved").get(),
-                    getCollection("timetable").get(),
-                    getCollection("school_holidays").get(),
-                    getCollection("timetable_history").get(),
-                    getCollection("leave_requests").get()
-                ]);
+                if (cachedBundle && localVersion === serverVersion) {
+                    console.log("⚡ Planner Data loaded from IndexedDB cache");
+                    dailyBlockEnabled = cachedBundle.dailyBlockEnabled;
+                    if (dailyBlockEnabled) {
+                        const dbBtn = document.getElementById('daily-block-btn');
+                        if (dbBtn) {
+                            dbBtn.innerText = "🛑 Block: ON";
+                            dbBtn.classList.replace('text-slate-500', 'text-rose-600');
+                            dbBtn.classList.replace('border-slate-300', 'border-rose-300');
+                        }
+                    }
+                    timetableData = cachedBundle.timetableData;
+                    holidaysData = cachedBundle.holidaysData;
+                    window.historyOverrides = cachedBundle.historyOverrides;
+                    window.allLeaveRequests = cachedBundle.allLeaveRequests;
+                    structureData = cachedBundle.structureData;
+                    assignments = cachedBundle.assignments;
+                    planners = cachedBundle.planners;
+                    staffList = cachedBundle.staffList;
+                } else {
+                    console.log("🔄 Fetching fresh planner data from server...");
+                    const configDoc = await getCollection("configs").doc("lesson_planner_settings").get();
+                    dailyBlockEnabled = configDoc.exists && configDoc.data().dailyComplianceBlockEnabled === true;
+                    if (dailyBlockEnabled) {
+                        const dbBtn = document.getElementById('daily-block-btn');
+                        if (dbBtn) {
+                            dbBtn.innerText = "🛑 Block: ON";
+                            dbBtn.classList.replace('text-slate-500', 'text-rose-600');
+                            dbBtn.classList.replace('border-slate-300', 'border-rose-300');
+                        }
+                    }
+
+                    const [structSnap, assignSnap, plannerSnap, staffSnap, ttSnap, holSnap, histSnap, leaveSnap] = await Promise.all([
+                        getCollection("institute_structure").get(),
+                        getCollection("lesson_planner_assignments").get(),
+                        getCollection("lesson_planners").get(),
+                        getCollection("staff_applications").where("status", "==", "approved").get(),
+                        getCollection("timetable").get(),
+                        getCollection("school_holidays").get(),
+                        getCollection("timetable_history").get(),
+                        getCollection("leave_requests").get()
+                    ]);
+                    
+                    timetableData = ttSnap.docs.map(d => d.data());
+                    holidaysData = holSnap.docs.map(d => d.data());
+                    window.historyOverrides = histSnap.docs.map(d => d.data());
+                    window.allLeaveRequests = leaveSnap.docs.map(d => d.data());
+                    structureData = structSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    structureData.sort((a, b) => a.className.localeCompare(b.className) || a.sectionName.localeCompare(b.sectionName));
+                    assignments = assignSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    planners = plannerSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    
+                    staffList = staffSnap.docs.map(doc => {
+                        const d = doc.data(); const det = d.details || {}; let n = d.email;
+                        for (let key in det) { if (key.toLowerCase().includes('name')) n = det[key]; }
+                        return { email: d.email, name: n };
+                    });
+
+                    // Save to IDB
+                    await IDB.set(cachePrefix + "bundle", {
+                        dailyBlockEnabled, timetableData, holidaysData, historyOverrides: window.historyOverrides,
+                        allLeaveRequests: window.allLeaveRequests, structureData, assignments, planners, staffList
+                    });
+                    await IDB.set(cachePrefix + "version", serverVersion);
+                }
                 
-                timetableData = ttSnap.docs.map(d => d.data());
-                holidaysData = holSnap.docs.map(d => d.data());
-                window.historyOverrides = histSnap.docs.map(d => d.data());
-                window.allLeaveRequests = leaveSnap.docs.map(d => d.data());
-                structureData = structSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                structureData.sort((a, b) => a.className.localeCompare(b.className) || a.sectionName.localeCompare(b.sectionName));
-                assignments = assignSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                planners = plannerSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                
-               staffList = staffSnap.docs.map(doc => {
-                    const d = doc.data(); const det = d.details || {}; let n = d.email;
-                    for (let key in det) { if (key.toLowerCase().includes('name')) n = det[key]; }
-                    return { email: d.email, name: n };
-                });
-                
-              // Add the missing scanner hook here!
                 await fetchGlobalUnlockRequests();
-                await runGlobalAdminScanner(); // Option A background scanner
+                await runGlobalAdminScanner();
                 
             } catch(e) { console.error("Data Load Error:", e); }
         }
@@ -688,9 +758,8 @@
             }
         }
 
-        async function updateAssignmentSingle(id, f, v) { await getCollection("lesson_planner_assignments").doc(id).set({ [f]: v }, {merge:true}); await loadAllData(); renderSetup(); }
-        async function wipeData(id) { if(confirm("Destroy syllabus data permanently?")) { await getCollection("lesson_planners").doc(id).delete(); await getCollection("lesson_planner_assignments").doc(id).update({isUploaded:false}); await showEditView(); }}
-
+     async function updateAssignmentSingle(id, f, v) { await getCollection("lesson_planner_assignments").doc(id).set({ [f]: v }, {merge:true}); await bumpPlannerVersion(); await loadAllData(); renderSetup(); }
+        async function wipeData(id) { if(confirm("Destroy syllabus data permanently?")) { await getCollection("lesson_planners").doc(id).delete(); await getCollection("lesson_planner_assignments").doc(id).update({isUploaded:false}); await bumpPlannerVersion(); await showEditView(); }}
         // --- MATH ENGINE & PASTE PREVIEW ---
         function getChapterWiseStats(rows) {
             const chMap = new Map();
@@ -755,9 +824,10 @@
 
         async function confirmUploadToDatabase() {
             const btn = event.target; btn.innerText = "Syncing..."; btn.disabled = true;
-            try {
+           try {
                 await getCollection("lesson_planners").doc(currentUploadId).set({ syllabusData: pendingSyllabusRows }, { merge: true });
                 await getCollection("lesson_planner_assignments").doc(currentUploadId).set({ isUploaded: true }, { merge: true });
+                await bumpPlannerVersion();
                 closeModal('preview-modal'); alert("Syllabus Engine Synced Successfully!"); await showEditView();
             } catch (err) { alert("Database Save Error: " + err.message); } finally { btn.innerText = "Confirm Math & Synchronize Data"; btn.disabled = false; }
         }
@@ -1959,12 +2029,12 @@ let chStartStr = rows[0]?.chapterStartDate; let chStart = chStartStr ? new Date(
             
             try {
                 const newState = !isCurrentlyOn;
-                await getCollection("configs").doc("lesson_planner_settings").set({
+             await getCollection("configs").doc("lesson_planner_settings").set({
                     dailyComplianceBlockEnabled: newState
                 }, { merge: true });
+                await bumpPlannerVersion();
                 
                 dailyBlockEnabled = newState;
-                
                 if (newState) {
                     btn.innerText = "🛑 Block: ON";
                     btn.classList.replace('text-slate-500', 'text-rose-600');
@@ -2007,7 +2077,8 @@ let chStartStr = rows[0]?.chapterStartDate; let chStart = chStartStr ? new Date(
                     updatePayload.lockReason = "Manual Admin Lock";
                 }
                 
-                await getCollection("lesson_planners").doc(currentUploadId).update(updatePayload);
+               await getCollection("lesson_planners").doc(currentUploadId).update(updatePayload);
+                await bumpPlannerVersion();
                 alert(`Planner successfully ${actionStr}ed!`);
                 await loadAllData();
                 // Refresh the modal to show the new button state
@@ -2129,12 +2200,13 @@ async function fetchGlobalUnlockRequests() {
        try {
                 // Route the update through getCollection to dynamically switch prefixes
                 const todayStr = new Date().toLocaleDateString('en-GB');
-                await getCollection("lesson_planners").doc(reqId).update({ 
+            await getCollection("lesson_planners").doc(reqId).update({ 
                     unlockRequested: false, 
                     isUnlocked: true,
                     unlockedAt: Date.now(),
                     lockHistory: firebase.firestore.FieldValue.arrayUnion(`Unlocked by Admin on ${todayStr} (Valid 24h)`)
                 });
+                await bumpPlannerVersion();
                 document.getElementById(`unlock-req-${reqId}`).remove();
                 
                 // Remove from local array
@@ -2176,7 +2248,8 @@ async function fetchGlobalUnlockRequests() {
                     });
                 });
                 
-                await batch.commit(); 
+await batch.commit(); 
+                await bumpPlannerVersion();
                 alert("All requests approved successfully!");
                 closeModal('global-unlock-modal');
                 fetchGlobalUnlockRequests(); 
@@ -2212,7 +2285,8 @@ async function fetchGlobalUnlockRequests() {
                 upd.forEach(r => { if (r['CHAPTER NAME'] === chName) r.chapterStartDate = el.value; });
             });
 
-            await getCollection("lesson_planners").doc(currentUploadId).update({ syllabusData: upd });
+         await getCollection("lesson_planners").doc(currentUploadId).update({ syllabusData: upd });
+            await bumpPlannerVersion();
             alert("Database Updated Successfully!"); toggleDrillEditMode(); await loadAllData(); renderSummary();
         }
         // --- MEDIA EDIT ENGINE ---
@@ -2273,7 +2347,8 @@ async function fetchGlobalUnlockRequests() {
                     upd.push(newRow);
                 });
 
-                await getCollection("lesson_planners").doc(currentUploadId).update({ syllabusData: upd });
+             await getCollection("lesson_planners").doc(currentUploadId).update({ syllabusData: upd });
+                await bumpPlannerVersion();
                 alert("Details Updated & Progress Preserved!"); 
                 closeModal('editor-modal'); 
                 await showEditView();
@@ -2670,8 +2745,9 @@ let actDays = 0;
                     }
                 }
 
-                if (hasChanges) {
+             if (hasChanges) {
                     await batch.commit();
+                    await bumpPlannerVersion();
                     alert("Initialization completed successfully! Target section is now cleanly synchronized.");
                     closeModal('migrate-modal');
                     window.location.reload(); 
