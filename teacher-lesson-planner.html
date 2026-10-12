@@ -132,9 +132,44 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-      // --- MULTI-CENTER DYNAMIC DB ROUTER (TEACHER EDITION) ---
+     // --- MULTI-CENTER DYNAMIC DB ROUTER (TEACHER EDITION) ---
         const storedStaff = JSON.parse(localStorage.getItem('minervaActiveStaff')) || {};
         let activeCenter = "GHUMARWIN"; // Will automatically update based on profile
+
+        // --- INDEXED DB CACHE ENGINE ---
+        const IDB = {
+            dbName: "MinervaERP_Cache", storeName: "MasterStore",
+            async open() {
+                return new Promise((resolve, reject) => {
+                    const req = indexedDB.open(this.dbName, 1);
+                    req.onupgradeneeded = () => req.result.createObjectStore(this.storeName);
+                    req.onsuccess = () => resolve(req.result);
+                    req.onerror = () => reject(req.error);
+                });
+            },
+            async get(key) {
+                const db = await this.open();
+                return new Promise(resolve => {
+                    const req = db.transaction(this.storeName, "readonly").objectStore(this.storeName).get(key);
+                    req.onsuccess = () => resolve(req.result); req.onerror = () => resolve(null);
+                });
+            },
+            async set(key, value) {
+                const db = await this.open();
+                return new Promise((resolve, reject) => {
+                    const tx = db.transaction(this.storeName, "readwrite");
+                    tx.objectStore(this.storeName).put(value, key);
+                    tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
+                });
+            }
+        };
+
+        async function bumpPlannerVersion() {
+            if (!navigator.onLine) return;
+            try {
+                await db.collection("system_metadata").doc("planners_version").set({ lastUpdated: Date.now() }, { merge: true });
+            } catch(e) { console.warn("Failed to bump version", e); }
+        }
 
       function getCollection(name) {
             const globalCollections = ['configs', 'staff_applications', 'system_metadata'];
@@ -224,26 +259,109 @@
             } else { fetchTodayData(); }
         }
 
-        async function fetchTodayData() {
+   async function fetchTodayData() {
             const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const todayName = days[new Date().getDay()];
             const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
             
             try {
-                const holSnap = await getCollection("school_holidays").get();
-                holidaysData = holSnap.docs.map(d => d.data());
-                const histSnap = await getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get();
-                window.historyOverrides = histSnap.docs.map(d => d.data());
-            } catch(e) { console.error("Error fetching exclusions:", e); }
-
-       try {
-                const [snap, plannerSnap] = await Promise.all([
-                    getCollection("timetable").get(),
-                    getCollection("lesson_planners").get()
-                ]);
-                window.fullTimetable = snap.docs.map(d => d.data());
-                window.allPlanners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                const metaDoc = await db.collection("system_metadata").doc("planners_version").get();
+                const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
                 
+                const cachePrefix = `teacher_planner_${activeCenter}_`;
+                const localVersion = await IDB.get(cachePrefix + "version");
+                const cachedBundle = await IDB.get(cachePrefix + "bundle");
+
+                let structures = [];
+
+                if (cachedBundle && localVersion === serverVersion) {
+                    console.log("⚡ Planner Data loaded from IndexedDB cache");
+                    holidaysData = cachedBundle.holidaysData;
+                    window.historyOverrides = cachedBundle.historyOverrides;
+                    window.fullTimetable = cachedBundle.fullTimetable;
+                    window.allPlanners = cachedBundle.allPlanners;
+                    window.myAbsences = cachedBundle.myAbsences;
+                    window.mySubstitutions = cachedBundle.mySubstitutions;
+                    structures = cachedBundle.structures;
+                    globalAutoLock = cachedBundle.globalAutoLock;
+                    enableDailyBlock = cachedBundle.enableDailyBlock;
+                } else {
+                    console.log("🔄 Fetching fresh planner data from server...");
+                    const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+
+                    const [holSnap, histSnap, ttSnap, plannerSnap, leaveSnap, lockDoc, structSnap] = await Promise.all([
+                        getCollection("school_holidays").get(),
+                        getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get(),
+                        getCollection("timetable").get(),
+                        getCollection("lesson_planners").get(),
+                        db.collection(prefix + "leave_requests").get(),
+                        getCollection("configs").doc("lesson_planner_settings").get(),
+                        getCollection("institute_structure").get()
+                    ]);
+
+                    holidaysData = holSnap.docs.map(d => d.data());
+                    window.historyOverrides = histSnap.docs.map(d => d.data());
+                    window.fullTimetable = ttSnap.docs.map(d => d.data());
+                    window.allPlanners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                    structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
+
+                    globalAutoLock = true;
+                    enableDailyBlock = false;
+                    if (lockDoc.exists) {
+                        if (lockDoc.data().autoLockEnabled === false) globalAutoLock = false;
+                        if (lockDoc.data().dailyComplianceBlockEnabled === true) enableDailyBlock = true;
+                    }
+
+                    window.myAbsences = [];
+                    window.mySubstitutions = [];
+                    
+                    leaveSnap.forEach(doc => {
+                        const leaveData = doc.data();
+                        
+                        // Parse Personal Absences
+                        if (leaveData.status === "APPROVED" && leaveData.teacherEmail === activeStaff.email) {
+                            if (leaveData.type === 'FULL') {
+                                let currDate = new Date(leaveData.startDate + "T00:00:00");
+                                let endObj = new Date((leaveData.endDate || leaveData.startDate) + "T00:00:00");
+                                while(currDate <= endObj) {
+                                    const localY = currDate.getFullYear();
+                                    const localM = String(currDate.getMonth() + 1).padStart(2, '0');
+                                    const localD = String(currDate.getDate()).padStart(2, '0');
+                                    const localDateStr = `${localY}-${localM}-${localD}`;
+                                    window.myAbsences.push({ date: localDateStr, isFullDay: true });
+                                    currDate.setDate(currDate.getDate() + 1);
+                                }
+                            } else if (leaveData.adjustments) {
+                                leaveData.adjustments.forEach(adj => {
+                                    let cNameAdj = adj.className || (adj.sub ? adj.sub.split('|')[0].trim() : "");
+                                    let sNameAdj = adj.section || (adj.sub && adj.sub.split('|')[1] ? adj.sub.split('|')[1].replace('Sec', '').trim() : "");
+                                    window.myAbsences.push({ date: adj.date, isFullDay: false, className: cNameAdj, section: sNameAdj, subject: adj.title });
+                                });
+                            }
+                        }
+
+                        // Parse Incoming Substitute Duties
+                        if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
+                            if (leaveData.adjustments) {
+                                leaveData.adjustments.forEach(adj => {
+                                    if (adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
+                                        window.mySubstitutions.push(adj);
+                                    }
+                                });
+                            }
+                        }
+                    });
+
+                    // Save to IDB
+                    await IDB.set(cachePrefix + "bundle", {
+                        holidaysData, historyOverrides: window.historyOverrides,
+                        fullTimetable: window.fullTimetable, allPlanners: window.allPlanners,
+                        myAbsences: window.myAbsences, mySubstitutions: window.mySubstitutions,
+                        structures, globalAutoLock, enableDailyBlock
+                    });
+                    await IDB.set(cachePrefix + "version", serverVersion);
+                }
+
                 const mySafeNameMatch = safeName.trim().toLowerCase();
 
                 // Isolate this specific teacher's normal schedule (Case Insensitive)
@@ -257,7 +375,7 @@
                 const offset = todayDateObj.getTimezoneOffset() * 60000;
                 const todayIsoStr = (new Date(todayDateObj - offset)).toISOString().split('T')[0];
                 
-               const todayDocsRaw = getScheduleSnapshotForDate(todayIsoStr, todayName);
+                const todayDocsRaw = getScheduleSnapshotForDate(todayIsoStr, todayName);
                 
                 let todayDocs = todayDocsRaw.filter(s => {
                     const nameMatch = (s.teacherName && s.teacherName.trim().toLowerCase() === mySafeNameMatch) || 
@@ -266,9 +384,7 @@
                     return nameMatch && dayMatch;
                 });
                 
-            // --- RESTORED FALLBACK: Keep classes visible but locked ---
-                // Let the normal timetable load so the dashboard can render the cards. 
-                // The unified Exclusion Engine will automatically catch that it's an exam day and lock them!
+                // --- RESTORED FALLBACK: Keep classes visible but locked ---
                 if (todayDocs.length === 0 && window.teacherTimetable.some(t => t.day === todayName)) {
                     todayDocs = window.teacherTimetable.filter(t => t.day === todayName);
                 }
@@ -283,63 +399,28 @@
                     let ampm = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
                     return `${h.toString().padStart(2, '0')}:${m} ${ampm}`;
                 }
-              const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-               const leaveSnap = await db.collection(prefix + "leave_requests").get();
-                window.myAbsences = [];
-                leaveSnap.forEach(doc => {
-                    const leaveData = doc.data();
-                    
-                    if (leaveData.status === "APPROVED" && leaveData.teacherEmail === activeStaff.email) {
-                       if (leaveData.type === 'FULL') {
-                            let currDate = new Date(leaveData.startDate + "T00:00:00");
-                            let endObj = new Date((leaveData.endDate || leaveData.startDate) + "T00:00:00");
-                            while(currDate <= endObj) {
-                                // TIMEZONE FIX: Force local YYYY-MM-DD instead of UTC to prevent date shifting
-                                const localY = currDate.getFullYear();
-                                const localM = String(currDate.getMonth() + 1).padStart(2, '0');
-                                const localD = String(currDate.getDate()).padStart(2, '0');
-                                const localDateStr = `${localY}-${localM}-${localD}`;
-                                
-                                window.myAbsences.push({ date: localDateStr, isFullDay: true });
-                                currDate.setDate(currDate.getDate() + 1);
-                            }
-                        } else if (leaveData.adjustments) {
-                            leaveData.adjustments.forEach(adj => {
-                                let cNameAdj = adj.className || (adj.sub ? adj.sub.split('|')[0].trim() : "");
-                                let sNameAdj = adj.section || (adj.sub && adj.sub.split('|')[1] ? adj.sub.split('|')[1].replace('Sec', '').trim() : "");
-                                window.myAbsences.push({ date: adj.date, isFullDay: false, className: cNameAdj, section: sNameAdj, subject: adj.title });
-                            });
-                        }
-                    }
 
-                    if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
-                        if (leaveData.adjustments) {
-                            leaveData.adjustments.forEach(adj => {
-                                if (adj.date === todayIsoStr && adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
-                                    const parts = (adj.sub || "").split('|');
-                                    const cName = parts[0] ? parts[0].trim() : "Extra Duty";
-                                    const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "Task";
-                                    
-                                    todayDocs.push({
-                                        id: 'sub_' + Math.random().toString(36).substr(2,9),
-                                        className: cName,
-                                        section: sName,
-                                        subject: adj.title,
-                                        timeRange: `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`,
-                                        duration: adj.end - adj.start,
-                                        teacher: activeStaff.name,
-                                        teacherName: activeStaff.name
-                                    });
-                                }
-                            });
-                        }
+                // Append substitute duties that land on today
+                window.mySubstitutions.forEach(adj => {
+                    if (adj.date === todayIsoStr) {
+                        const parts = (adj.sub || "").split('|');
+                        const cName = parts[0] ? parts[0].trim() : "Extra Duty";
+                        const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "Task";
+                        
+                        todayDocs.push({
+                            id: 'sub_' + Math.random().toString(36).substr(2,9),
+                            className: cName,
+                            section: sName,
+                            subject: adj.title,
+                            timeRange: `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`,
+                            duration: adj.end - adj.start,
+                            teacher: activeStaff.name,
+                            teacherName: activeStaff.name
+                        });
                     }
                 });
-                                    
-               if(todayDocs.length > 0) {
-                    const structSnap = await getCollection("institute_structure").get();
-                    const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
 
+               if(todayDocs.length > 0) {
                     mySessions = todayDocs.map((data, index) => {
                         const docId = data.id || `override_${index}`; 
                         
@@ -1616,8 +1697,9 @@ const offset = new Date().getTimezoneOffset() * 60000;
                     updatePayload.activityLogs = firebase.firestore.FieldValue.arrayUnion(...newActivityLogs);
                 }
                 
-                try {
+          try {
                     await getCollection("lesson_planners").doc(activeSubjectId).update(updatePayload);
+                    await bumpPlannerVersion();
                     
                     alert(`✅ SYNC SUCCESSFUL\n\nCloud handshake complete. Your data was safely secured.`);
                     closeModal('syllabus-modal');
@@ -1645,7 +1727,7 @@ async function autoRequestUnlock(dateStr) {
             if(isDemoMode) return;
             try {
                 const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
-                await getCollection("lesson_planners").doc(activeSubjectId).set({ 
+               await getCollection("lesson_planners").doc(activeSubjectId).set({ 
                     unlockRequested: true, 
                     isUnlocked: false,
                     lockedDate: dateStr,
@@ -1654,6 +1736,7 @@ async function autoRequestUnlock(dateStr) {
                     lockReason: "Missed Compliance Grace Period",
                     lockHistory: firebase.firestore.FieldValue.arrayUnion(`Locked on ${new Date().toLocaleDateString('en-GB')} for missing ${dateStr}`)
                 }, { merge: true });
+                await bumpPlannerVersion();
                 window.unlockRequested = true;
                 const btn = document.getElementById('request-unlock-btn');
                 if (btn) {
@@ -1673,7 +1756,7 @@ async function autoRequestUnlock(dateStr) {
             try {
                 const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
                 const todayStr = new Date().toLocaleDateString('en-GB');
-                await getCollection("lesson_planners").doc(activeSubjectId).set({ 
+            await getCollection("lesson_planners").doc(activeSubjectId).set({ 
                     unlockRequested: true,
                     lockedDate: "Manual Correction",
                     requestedAt: new Date().getTime(),
@@ -1681,6 +1764,7 @@ async function autoRequestUnlock(dateStr) {
                     lockReason: "Manual Unlock Request",
                     lockHistory: firebase.firestore.FieldValue.arrayUnion(`Requested Manual Unlock on ${todayStr}`)
                 }, { merge: true });
+                await bumpPlannerVersion();
                 alert("Unlock Request Sent! Please tell the Admin to approve it.");
                 
                 btn.innerText = "Unlock Requested ⏳";
