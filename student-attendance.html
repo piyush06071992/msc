@@ -2109,7 +2109,7 @@ function updateAuditSectionFilter() {
         }
      window.globalLowAttData = [];
 
-        async function loadLowAttendanceAudit() {
+     async function loadLowAttendanceAudit() {
             const tbody = document.getElementById('audit-table-body');
             const summaryBar = document.getElementById('audit-summary-bar');
             const pctInput = document.getElementById('audit-pct-filter').value;
@@ -2134,12 +2134,27 @@ function updateAuditSectionFilter() {
             const monthKey = `${y}_${m}`;
 
             try {
+                // 1. Fetch current month's records
                 let query = getCollection("attendance_records").where("monthKey", "==", monthKey);
                 if (filterClass) query = query.where("className", "==", filterClass);
                 if (filterSection) query = query.where("section", "==", filterSection);
                 if (filterSubject) query = query.where("subject", "==", filterSubject);
 
                 const snap = await query.get();
+                
+                // 2. We need to recursively look back to find the true baseline stats if the current month's aggregatedStats are empty.
+                let pastMonthKeys = [];
+                let loopDate = new Date(2026, 7, 1); // August 2026 (Start of session)
+                let limitDate = new Date(y, m - 1, 1);
+                while (loopDate < limitDate) {
+                    pastMonthKeys.push(`${loopDate.getFullYear()}_${String(loopDate.getMonth() + 1).padStart(2, '0')}`);
+                    loopDate.setMonth(loopDate.getMonth() + 1);
+                }
+                
+                // Use IndexedDB Cache to fetch all past records rapidly
+                let prevDocsArrays = await Promise.all(pastMonthKeys.map(mk => getCachedMonthAttendanceDocs(mk)));
+                let prevDocsArray = prevDocsArrays.flat();
+
                 let lowAttRows = [];
                 window.globalLowAttData = [];
 
@@ -2149,12 +2164,92 @@ function updateAuditSectionFilter() {
                     const sName = data.section;
                     const subject = data.subject || "Unknown";
 
-                    // Local verification backup just in case of fuzzy string mapping in Firestore
                     if (filterSubject && normMatch(subject) !== normMatch(filterSubject)) return;
 
                     const records = data.records || {};
-                    const stats = data.aggregatedStats || {};
-                    const globalPrevWork = stats.globalTotalWorkingDays || 0;
+                    
+                    // --- DYNAMIC BASELINE CALCULATOR ---
+                    // This mimics the exact logic used by the Ledger to build the Grand Total
+                    let curStats = data.aggregatedStats || {};
+                    let prevStats = {};
+                    let oldSectionPrevStats = {};
+                    let prevActualWorkingDays = 0;
+                    let prevActualStudentAtt = {};
+                    
+                    // Find matching previous month records for this specific class/section/subject
+                    let prevUnifiedRecords = {};
+                    let earliestMonthKey = null;
+
+                    prevDocsArray.forEach(item => {
+                        const pData = item.data;
+                        if (normMatch(pData.className) === normMatch(cName) && normMatch(pData.section) === normMatch(sName)) {
+                            if (normMatch(pData.subject) === normMatch(subject)) {
+                                if (!earliestMonthKey || pData.monthKey < earliestMonthKey) earliestMonthKey = pData.monthKey;
+                                if (pData.aggregatedStats) {
+                                    prevStats = { ...prevStats, ...pData.aggregatedStats };
+                                }
+                                if (pData.records) {
+                                    Object.keys(pData.records).forEach(dKey => {
+                                        prevUnifiedRecords[dKey] = { ...(prevUnifiedRecords[dKey] || {}), ...pData.records[dKey] };
+                                    });
+                                }
+                            } else {
+                                // Fallback stats from other subjects in the same section
+                                if (pData.aggregatedStats && pData.aggregatedStats.students) {
+                                    Object.entries(pData.aggregatedStats.students).forEach(([sId, val]) => {
+                                        if (!oldSectionPrevStats[sId]) oldSectionPrevStats[sId] = { att: 0, working: 0 };
+                                        if (typeof val === 'object') {
+                                            oldSectionPrevStats[sId].att += val.att || 0;
+                                            oldSectionPrevStats[sId].working += val.working || 0;
+                                        } else {
+                                            oldSectionPrevStats[sId].att += val || 0;
+                                            oldSectionPrevStats[sId].working = pData.aggregatedStats.globalTotalWorkingDays || 0;
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    });
+
+                    // Calculate actual working days and attendance from previous un-aggregated months
+                    if (earliestMonthKey) {
+                        const [startY, startM] = earliestMonthKey.split('_').map(Number);
+                        let curD = new Date(startY, startM - 1, 1);
+                        const endD = new Date(y, m - 1, 0); 
+                        
+                        while (curD <= endD) {
+                            const cy = curD.getFullYear();
+                            const cm = String(curD.getMonth() + 1).padStart(2, '0');
+                            const cd = String(curD.getDate()).padStart(2, '0');
+                            const dateStrIter = `${cy}-${cm}-${cd}`;
+                            
+                            const status = checkDateStatus(dateStrIter);
+                            let hasAttendanceMarked = prevUnifiedRecords[dateStrIter] && Object.keys(prevUnifiedRecords[dateStrIter]).length > 0;
+                            const remKey = `${dateStrIter}_${normDoc(cName)}_${normDoc(sName)}`;
+                            const isRemedialDay = remedialDataMap[remKey] ? true : false;
+                            
+                            let isWorkingDay = false;
+                            if (isRemedialDay) isWorkingDay = false;
+                            else if (hasAttendanceMarked) isWorkingDay = true;
+                            else if (status.isExcluded) isWorkingDay = false;
+                            else isWorkingDay = true; 
+                            
+                            if (isWorkingDay) {
+                                prevActualWorkingDays++;
+                                if (prevUnifiedRecords[dateStrIter]) {
+                                    Object.keys(prevUnifiedRecords[dateStrIter]).forEach(stuId => {
+                                        if (prevUnifiedRecords[dateStrIter][stuId] === 'P') {
+                                            prevActualStudentAtt[stuId] = (prevActualStudentAtt[stuId] || 0) + 1;
+                                        }
+                                    });
+                                }
+                            }
+                            curD.setDate(curD.getDate() + 1);
+                        }
+                    }
+
+                    const prevTotalWorking = curStats.globalTotalWorkingDays !== undefined ? curStats.globalTotalWorkingDays : ((prevStats.globalTotalWorkingDays || 0) + prevActualWorkingDays);
+                    // --- END DYNAMIC BASELINE CALCULATOR ---
 
                     let currentWorking = 0;
                     let validDates = [];
@@ -2166,16 +2261,39 @@ function updateAuditSectionFilter() {
                         }
                     });
 
-                    const totalWorking = globalPrevWork + currentWorking;
-                    if (totalWorking === 0) return;
+                    const grandTotalWorking = prevTotalWorking + currentWorking;
+                    if (grandTotalWorking === 0) return;
 
                     const secStudents = studentsData.filter(s => normMatch(s.className) === normMatch(cName) && normMatch(s.section) === normMatch(sName) && s.isActive !== false);
 
                     secStudents.forEach(stu => {
-                        let prevAtt = 0;
-                        if (stats.students && stats.students[stu.id] !== undefined) {
-                            const val = stats.students[stu.id];
-                            prevAtt = typeof val === 'object' ? (val.att || 0) : val;
+                        let stuPrevAtt = 0;
+                        let stuPrevWork = prevTotalWorking;
+                        
+                        const getStuStats = (statsObj, sid) => {
+                            if (!statsObj || !statsObj.students || statsObj.students[sid] === undefined) return null;
+                            const val = statsObj.students[sid];
+                            if (typeof val === 'object') return val;
+                            return { att: val, working: statsObj.globalTotalWorkingDays || 0 };
+                        };
+                        
+                        let curStuStats = getStuStats(curStats, stu.id);
+                        if (curStuStats) {
+                            stuPrevAtt = curStuStats.att || 0;
+                            stuPrevWork = curStuStats.working !== undefined ? curStuStats.working : prevTotalWorking;
+                        } else if (stu.transferDate && oldSectionPrevStats[stu.id]) {
+                            // Handle cross-section transfers
+                            if (typeof oldSectionPrevStats[stu.id] === 'object') {
+                                stuPrevAtt = oldSectionPrevStats[stu.id].att || 0;
+                                stuPrevWork = oldSectionPrevStats[stu.id].working || prevTotalWorking;
+                            } else {
+                                stuPrevAtt = oldSectionPrevStats[stu.id];
+                                stuPrevWork = prevTotalWorking;
+                            }
+                        } else {
+                            let prevBaseStats = getStuStats(prevStats, stu.id) || { att: 0, working: (prevStats.globalTotalWorkingDays || 0) };
+                            stuPrevAtt = prevBaseStats.att + (prevActualStudentAtt[stu.id] || 0);
+                            stuPrevWork = prevBaseStats.working + prevActualWorkingDays;
                         }
 
                         let currAtt = 0;
@@ -2183,20 +2301,16 @@ function updateAuditSectionFilter() {
                             if (records[date][stu.id] === 'P') currAtt++;
                         });
 
-                        const grandAtt = prevAtt + currAtt;
+                        const grandAtt = stuPrevAtt + currAtt;
+                        const stuGrandTotalWorking = stuPrevWork + currentWorking;
 
-                        let stuTotalWorking = totalWorking;
-                        if (stats.students && stats.students[stu.id] && typeof stats.students[stu.id] === 'object' && stats.students[stu.id].working !== undefined) {
-                             stuTotalWorking = stats.students[stu.id].working + currentWorking;
-                        }
-
-                        const pct = stuTotalWorking > 0 ? (grandAtt / stuTotalWorking) * 100 : 0;
+                        const pct = stuGrandTotalWorking > 0 ? (grandAtt / stuGrandTotalWorking) * 100 : 0;
 
                         if (pct < threshold) {
                             lowAttRows.push({
                                 c: cName, s: sName, sub: subject,
                                 adm: stu.admNo || '-', roll: stu.rollNo || 'N/A', name: stu.name,
-                                att: grandAtt, work: stuTotalWorking, pct: pct.toFixed(1)
+                                att: grandAtt, work: stuGrandTotalWorking, pct: pct.toFixed(1)
                             });
                         }
                     });
