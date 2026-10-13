@@ -5044,8 +5044,10 @@ const promises = subSnap.docs.map(async (doc) => {
                         examTitle = gd.title || gd.tag || `${gd.className} Assessment`;
                     }
 
-                  if (subData.isCancelled) {
+               if (subData.isCancelled) {
                         examRecords.push({
+                            groupId: groupId,
+                            rollNo: rollNo,
                             date: examDate,
                             type: examType,
                             title: examTitle,
@@ -5054,7 +5056,8 @@ const promises = subSnap.docs.map(async (doc) => {
                             obt: 0,
                             max: 0,
                             percentage: 0,
-                            subjects: {}
+                            subjects: {},
+                            adminRemark: adminRemark
                         });
                         continue;
                     }
@@ -5064,8 +5067,10 @@ const promises = subSnap.docs.map(async (doc) => {
                     const answers = kData.answers || {};
                     const bonuses = kData.bonusConfig || {};
                     const responses = subData.responses || {};
-                    const directScores = subData.directScores || {};
+                 const directScores = subData.directScores || {};
                     const isDirect = subData.isDirectImport === true;
+                    const adminRemark = subData.adminRemark || "";
+                    const groupId = subData.groupId || gId;
 
                     const secStruct = globalInstituteStructure.find(st => String(st.className).trim().toUpperCase() === String(stu.className).trim().toUpperCase() && String(st.sectionName || st.section).trim().toUpperCase() === String(stu.section).trim().toUpperCase());
                     const optSubs = (secStruct && secStruct.optionalSubjects) ? secStruct.optionalSubjects.map(s => s.trim().toUpperCase()) : [];
@@ -5134,14 +5139,17 @@ const promises = subSnap.docs.map(async (doc) => {
 
                     const pct = examMax > 0 ? ((examObt / examMax) * 100).toFixed(1) : 0;
 
-                    examRecords.push({
+               examRecords.push({
+                        groupId: groupId,
+                        rollNo: rollNo,
                         date: examDate,
                         type: examType,
                         title: examTitle,
                         obt: examObt,
                         max: examMax,
                         percentage: pct,
-                        subjects: subjectBreakdown
+                        subjects: subjectBreakdown,
+                        adminRemark: adminRemark
                     });
                 }
 
@@ -5170,12 +5178,20 @@ const promises = subSnap.docs.map(async (doc) => {
                     `;
                 }).join('');
 
-             let tableRowsHtml = examRecords.map((ex, idx) => {
+           let tableRowsHtml = examRecords.map((ex, idx) => {
                     const datePretty = new Date(ex.date + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
                     let typeBadge = "bg-slate-100 text-slate-700";
                     if (ex.type === 'UT') typeBadge = "bg-blue-100 text-blue-800";
                     else if (ex.type === 'OT') typeBadge = "bg-amber-100 text-amber-800";
                     else if (['TERMINAL', 'PREBOARD', 'BOARD'].some(t => ex.type.toUpperCase().includes(t))) typeBadge = "bg-rose-100 text-rose-800";
+
+                    let remarkCell = '';
+                    if (isAdmin) {
+                        const safeRemark = (ex.adminRemark || '').replace(/'/g, "\\'").replace(/"/g, "&quot;");
+                        const adminActionHtml = `<button onclick="setAdminRemark('${ex.groupId}', '${ex.rollNo}', '${safeRemark}')" class="ml-1 text-[10px] bg-purple-100 hover:bg-purple-200 text-purple-700 px-1.5 py-0.5 rounded transition-colors shadow-sm" title="Edit Remark">✎</button>`;
+                        const remarkDisplay = ex.adminRemark ? `<div class="text-[9px] whitespace-normal min-w-[100px] text-purple-700 italic font-semibold">${ex.adminRemark}</div>` : `<span class="text-[9px] text-slate-300">No Remark</span>`;
+                        remarkCell = `<td class="p-2 text-center border-l border-slate-100 align-middle"><div class="flex items-center justify-center gap-1">${remarkDisplay}${adminActionHtml}</div></td>`;
+                    }
 
                     if (ex.isCancelled) {
                         return `
@@ -5189,20 +5205,31 @@ const promises = subSnap.docs.map(async (doc) => {
                                 </td>
                                 <td class="p-2 font-black text-slate-900 uppercase truncate max-w-[150px]" title="${ex.title}">${ex.title}</td>
                                 <td colspan="${allUniqueSubjects.length + 2}" class="p-2 text-center font-black text-rose-600 tracking-widest bg-rose-50/50">CANCELLED BY ADMINISTRATION</td>
+                                ${remarkCell}
                             </tr>
                         `;
                     }
 
-let subjectColumnsHtml = allUniqueSubjects.map(sub => {
+                    const isOverallAbsent = Object.keys(ex.subjects).length > 0 && Object.values(ex.subjects).every(d => d.isAbsent);
+
+                    let subjectColumnsHtml = allUniqueSubjects.map(sub => {
                         if (ex.subjects[sub]) {
                             const d = ex.subjects[sub];
+                            if (d.isAbsent) {
+                                return `<td class="p-2 text-center font-mono font-black text-rose-500 border-r border-slate-100 whitespace-nowrap bg-rose-50/30" title="Absent/Leave">ABSENT</td>`;
+                            }
                             return `<td class="p-2 text-center font-mono font-bold text-slate-700 border-r border-slate-100 whitespace-nowrap">${d.obt}/${d.max}</td>`;
                         } else {
                             return `<td class="p-2 text-center text-slate-300 border-r border-slate-100">-</td>`;
                         }
                     }).join('');
 
-                   return `
+                    const totalHtml = isOverallAbsent ? 
+                        `<td class="p-2 text-center font-mono font-black text-rose-600 bg-rose-50/30 whitespace-nowrap" colspan="2">ABSENT / LEAVE</td>` : 
+                        `<td class="p-2 text-center font-mono font-black text-indigo-700 bg-indigo-50/30 whitespace-nowrap">${ex.obt} / ${ex.max}</td>
+                         <td class="p-2 text-center font-mono font-black text-emerald-700 bg-emerald-50/30">${ex.percentage}%</td>`;
+
+                    return `
                         <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 history-log-row" data-type="${ex.type}">
                             <td class="p-2 text-center font-mono font-bold text-slate-400">${idx + 1}</td>
                             <td class="p-2 font-bold text-slate-700 whitespace-nowrap">${datePretty}</td>
@@ -5213,8 +5240,8 @@ let subjectColumnsHtml = allUniqueSubjects.map(sub => {
                             </td>
                             <td class="p-2 font-black text-slate-900 uppercase truncate max-w-[150px]" title="${ex.title}">${ex.title}</td>
                             ${subjectColumnsHtml}
-                            <td class="p-2 text-center font-mono font-black text-indigo-700 bg-indigo-50/30 whitespace-nowrap">${ex.obt} / ${ex.max}</td>
-                            <td class="p-2 text-center font-mono font-black text-emerald-700 bg-emerald-50/30">${ex.percentage}%</td>
+                            ${totalHtml}
+                            ${remarkCell}
                         </tr>
                     `;
                 }).join('');
@@ -5295,8 +5322,9 @@ let subjectColumnsHtml = allUniqueSubjects.map(sub => {
                                         <th class="p-2">Type</th>
                                         <th class="p-2 max-w-[150px]">Exam Title</th>
                                         ${subjectHeadersHtml}
-                                        <th class="p-2 text-center border-l border-slate-200 bg-indigo-50/50 text-indigo-800">Total Score</th>
+                                      <th class="p-2 text-center border-l border-slate-200 bg-indigo-50/50 text-indigo-800">Total Score</th>
                                         <th class="p-2 text-center bg-emerald-50/50 text-emerald-800">Overall %</th>
+                                        ${isAdmin ? '<th class="p-2 text-center bg-purple-50/50 text-purple-800">Admin Remarks</th>' : ''}
                                     </tr>
                                 </thead>
                                 <tbody class="divide-y divide-slate-100 font-bold text-slate-700">
@@ -5740,7 +5768,25 @@ alert(`✅ Action successful. Student exam ${decision}.`);
             }
         }
 
-      async function adminClearSubjectScore(groupId, rollNo, subject) {
+      async function setAdminRemark(groupId, rollNo, currentRemark) {
+            if (!isAdmin) return alert("Only administrators can add or edit remarks.");
+            
+            const remark = prompt(`Enter special admin remark for this exam (Leave blank to clear):`, currentRemark || "");
+            if (remark === null) return; // Action Cancelled
+            
+            try {
+                await db.collection("omr_submissions").doc(`${groupId}_${rollNo}`).set({
+                    adminRemark: remark.trim(),
+                    updatedAt: Date.now()
+                }, { merge: true });
+                
+                alert("✅ Admin remark updated successfully! Please re-open the student report to view the changes.");
+            } catch(e) {
+                alert("Error updating remark: " + e.message);
+            }
+        }
+
+        async function adminClearSubjectScore(groupId, rollNo, subject) {
             if (!confirm(`🚨 WARNING: This will PERMANENTLY CLEAR the score for ${subject}. Are you absolutely sure?`)) return;
 
             try {
