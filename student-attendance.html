@@ -287,9 +287,14 @@
                     <select id="audit-section-filter" onchange="updateAuditSubjectFilter(); loadAbsenteesAudit();" class="border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none shadow-sm">
                         <option value="">All Sections</option>
                     </select>
-                  <select id="audit-subject-filter" onchange="loadAbsenteesAudit()" class="border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none shadow-sm">
+                 <select id="audit-subject-filter" onchange="loadAbsenteesAudit()" class="border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none shadow-sm">
                         <option value="">All Subjects</option>
                     </select>
+                    <div class="flex items-center gap-1 border-l border-slate-300 pl-2 ml-1">
+                        <input type="number" id="audit-pct-filter" placeholder="Below % (e.g. 75)" class="w-32 border border-slate-300 rounded-xl px-3 py-2 text-xs font-bold bg-white outline-none shadow-sm transition-all focus:border-amber-500">
+                        <button onclick="loadLowAttendanceAudit()" class="bg-amber-500 hover:bg-amber-600 text-white px-3 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all" title="View Low Attendance">📉 Pct Filter</button>
+                        <button id="btn-export-low-att" onclick="exportLowAttendanceExcel()" class="hidden bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-md transition-all" title="Download Excel">📥 Excel</button>
+                    </div>
                     <button onclick="loadAbsenteesAudit()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all">Filter</button>
                     <button onclick="check4DayAbsentees()" class="bg-rose-600 hover:bg-rose-700 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-lg animate-pulse flex items-center gap-1 transition-all"><span class="text-sm">🚨</span> 4-Day Alert</button>
                 </div>
@@ -1955,6 +1960,20 @@ function updateAuditSectionFilter() {
         }
 
      async function loadAbsenteesAudit() {
+            const theadTr = document.querySelector('#main-view-absentees thead tr');
+            if (theadTr) {
+                theadTr.innerHTML = `
+                    <th class="p-4">Date & Day</th>
+                    <th class="p-4">Class & Sec</th>
+                    <th class="p-4">Subject</th>
+                    <th class="p-4">Adm & Roll</th>
+                    <th class="p-4">Student Name</th>
+                    <th class="p-4">Status</th>
+                `;
+            }
+            const btnExport = document.getElementById('btn-export-low-att');
+            if (btnExport) btnExport.classList.add('hidden');
+
           const tbody = document.getElementById('audit-table-body');
             tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 text-slate-400 font-bold uppercase">Loading Leave Audit...</td></tr>`;
 
@@ -2082,7 +2101,201 @@ function updateAuditSectionFilter() {
                 tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 text-rose-500 font-bold uppercase">Error loading audit data.</td></tr>`;
             }
         }
-     async function check4DayAbsentees() {
+     window.globalLowAttData = [];
+
+        async function loadLowAttendanceAudit() {
+            const tbody = document.getElementById('audit-table-body');
+            const summaryBar = document.getElementById('audit-summary-bar');
+            const pctInput = document.getElementById('audit-pct-filter').value;
+            const btnExport = document.getElementById('btn-export-low-att');
+
+            if (!pctInput || isNaN(pctInput)) {
+                return alert("Please enter a valid percentage threshold (e.g. 75).");
+            }
+            const threshold = parseFloat(pctInput);
+
+            const filterDate = document.getElementById('audit-date-filter').value;
+            const filterClass = document.getElementById('audit-class-filter').value;
+            const filterSection = document.getElementById('audit-section-filter') ? document.getElementById('audit-section-filter').value : "";
+            const filterSubject = document.getElementById('audit-subject-filter') ? document.getElementById('audit-subject-filter').value : "";
+
+            if (!filterDate) return alert("Please select a date to determine the target tracking month.");
+
+            tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10"><span class="loader border-t-amber-500"></span><div class="mt-2 text-xs font-bold text-slate-400 uppercase tracking-widest">Compiling cumulative attendance logs...</div></td></tr>`;
+            if (btnExport) btnExport.classList.add('hidden');
+
+            const [y, m, d] = filterDate.split('-');
+            const monthKey = `${y}_${m}`;
+
+            try {
+                let query = getCollection("attendance_records").where("monthKey", "==", monthKey);
+                if (filterClass) query = query.where("className", "==", filterClass);
+                if (filterSection) query = query.where("section", "==", filterSection);
+                if (filterSubject) query = query.where("subject", "==", filterSubject);
+
+                const snap = await query.get();
+                let lowAttRows = [];
+                window.globalLowAttData = [];
+
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    const cName = data.className;
+                    const sName = data.section;
+                    const subject = data.subject || "Unknown";
+
+                    // Local verification backup just in case of fuzzy string mapping in Firestore
+                    if (filterSubject && normMatch(subject) !== normMatch(filterSubject)) return;
+
+                    const records = data.records || {};
+                    const stats = data.aggregatedStats || {};
+                    const globalPrevWork = stats.globalTotalWorkingDays || 0;
+
+                    let currentWorking = 0;
+                    let validDates = [];
+                    
+                    Object.keys(records).forEach(dateStr => {
+                        if (dateStr <= filterDate && Object.keys(records[dateStr]).length > 0) {
+                            currentWorking++;
+                            validDates.push(dateStr);
+                        }
+                    });
+
+                    const totalWorking = globalPrevWork + currentWorking;
+                    if (totalWorking === 0) return;
+
+                    const secStudents = studentsData.filter(s => normMatch(s.className) === normMatch(cName) && normMatch(s.section) === normMatch(sName) && s.isActive !== false);
+
+                    secStudents.forEach(stu => {
+                        let prevAtt = 0;
+                        if (stats.students && stats.students[stu.id] !== undefined) {
+                            const val = stats.students[stu.id];
+                            prevAtt = typeof val === 'object' ? (val.att || 0) : val;
+                        }
+
+                        let currAtt = 0;
+                        validDates.forEach(date => {
+                            if (records[date][stu.id] === 'P') currAtt++;
+                        });
+
+                        const grandAtt = prevAtt + currAtt;
+
+                        let stuTotalWorking = totalWorking;
+                        if (stats.students && stats.students[stu.id] && typeof stats.students[stu.id] === 'object' && stats.students[stu.id].working !== undefined) {
+                             stuTotalWorking = stats.students[stu.id].working + currentWorking;
+                        }
+
+                        const pct = stuTotalWorking > 0 ? (grandAtt / stuTotalWorking) * 100 : 0;
+
+                        if (pct < threshold) {
+                            lowAttRows.push({
+                                c: cName, s: sName, sub: subject,
+                                adm: stu.admNo || '-', roll: stu.rollNo || 'N/A', name: stu.name,
+                                att: grandAtt, work: stuTotalWorking, pct: pct.toFixed(1)
+                            });
+                        }
+                    });
+                });
+
+                lowAttRows.sort((a,b) => a.c.localeCompare(b.c) || a.s.localeCompare(b.s) || a.name.localeCompare(b.name));
+                window.globalLowAttData = lowAttRows;
+
+                if (lowAttRows.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 text-emerald-600 font-black uppercase tracking-widest bg-emerald-50 rounded-2xl border-2 border-dashed border-emerald-200">✅ All Good! No students found below ${threshold}% attendance.</td></tr>`;
+                    return;
+                }
+
+                if (btnExport) btnExport.classList.remove('hidden');
+
+                const theadTr = document.querySelector('#main-view-absentees thead tr');
+                theadTr.innerHTML = `
+                    <th class="p-4">Class & Sec</th>
+                    <th class="p-4">Subject</th>
+                    <th class="p-4">Adm & Roll</th>
+                    <th class="p-4">Student Name</th>
+                    <th class="p-4">Att / Work Days</th>
+                    <th class="p-4">Percentage</th>
+                `;
+
+                let html = "";
+                lowAttRows.forEach(row => {
+                    let colorClass = row.pct < 50 ? 'text-rose-600 bg-rose-50 border-rose-200' : 'text-amber-600 bg-amber-50 border-amber-200';
+                    html += `<tr class="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                        <td class="p-4 uppercase font-bold text-slate-700">Class ${row.c} - Sec ${row.s}</td>
+                        <td class="p-4 font-bold text-purple-600 uppercase">${row.sub}</td>
+                        <td class="p-4 font-mono font-bold"><span class="text-slate-400 text-[10px] block">Adm: ${row.adm}</span>#${row.roll}</td>
+                        <td class="p-4 uppercase font-black text-slate-900">${row.name}</td>
+                        <td class="p-4 font-mono font-bold text-slate-600">${row.att} / ${row.work}</td>
+                        <td class="p-4"><span class="px-2.5 py-1 rounded-lg text-[10px] font-black uppercase border ${colorClass}">${row.pct}%</span></td>
+                    </tr>`;
+                });
+
+                tbody.innerHTML = html;
+                
+                if (summaryBar) {
+                    summaryBar.innerHTML = `
+                        <div class="flex items-center gap-2">
+                            <span class="w-3 h-3 rounded-full bg-amber-500"></span>
+                            <span class="text-xs font-black uppercase text-slate-700">Low Attendance Alerts (< ${threshold}%)</span>
+                        </div>
+                        <div class="flex items-center gap-4 flex-wrap">
+                            <span class="text-xs font-black uppercase text-rose-700 bg-rose-50 px-3 py-1 rounded-lg border border-rose-200">Total Flagged: <strong>${lowAttRows.length}</strong></span>
+                        </div>
+                    `;
+                    summaryBar.classList.remove('hidden');
+                    summaryBar.classList.add('flex');
+                }
+
+            } catch (e) {
+                console.error(e);
+                tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest">Error calculating percentages.</td></tr>`;
+            }
+        }
+
+        function exportLowAttendanceExcel() {
+            if (!window.globalLowAttData || window.globalLowAttData.length === 0) return alert("No data to export.");
+
+            const threshold = document.getElementById('audit-pct-filter').value;
+            const filterDate = document.getElementById('audit-date-filter').value;
+            const prettyDate = new Date(filterDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+
+            let tableHtml = `
+                <table border="1">
+                    <tr><th colspan="6" style="background-color: #8b5cf6; color: #ffffff; font-size: 16px; font-weight: bold; text-align: center;">LOW ATTENDANCE REPORT (< ${threshold}%)</th></tr>
+                    <tr><th colspan="6" style="background-color: #c4b5fd; color: #1e1b4b; font-size: 12px; font-weight: bold; text-align: center;">As of: ${prettyDate} | Branch: ${activeCenter}</th></tr>
+                    <tr>
+                        <th style="background-color: #eff6ff; color: #1e3a8a; font-weight: bold;">Class & Section</th>
+                        <th style="background-color: #eff6ff; color: #1e3a8a; font-weight: bold;">Subject</th>
+                        <th style="background-color: #eff6ff; color: #1e3a8a; font-weight: bold;">Roll No</th>
+                        <th style="background-color: #eff6ff; color: #1e3a8a; font-weight: bold;">Student Name</th>
+                        <th style="background-color: #eff6ff; color: #1e3a8a; font-weight: bold;">Att / Work Days</th>
+                        <th style="background-color: #eff6ff; color: #1e3a8a; font-weight: bold;">Percentage</th>
+                    </tr>
+            `;
+
+            window.globalLowAttData.forEach(row => {
+                const pctColor = parseFloat(row.pct) < 50 ? '#ef4444' : '#d97706';
+                tableHtml += `
+                    <tr>
+                        <td style="text-align: center; font-weight: bold;">Class ${row.c} - ${row.s}</td>
+                        <td style="text-align: center;">${row.sub}</td>
+                        <td style="text-align: center; font-weight: bold;">${row.roll}</td>
+                        <td style="text-align: left; font-weight: bold;">${row.name}</td>
+                        <td style="text-align: center; mso-number-format:'\\@';">${row.att} / ${row.work}</td>
+                        <td style="text-align: center; font-weight: bold; color: ${pctColor};">${row.pct}%</td>
+                    </tr>
+                `;
+            });
+
+            tableHtml += `</table>`;
+
+            const fullHTML = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="utf-8"></head><body>${tableHtml}</body></html>`;
+            const blob = new Blob(['\ufeff', fullHTML], { type: 'application/vnd.ms-excel' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = `Low_Attendance_${threshold}Pct_${filterDate}.xls`;
+            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        }
+
+      async function check4DayAbsentees() {
             const tbody = document.getElementById('audit-table-body');
             const summaryBar = document.getElementById('audit-summary-bar');
             
