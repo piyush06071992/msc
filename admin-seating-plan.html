@@ -1134,17 +1134,32 @@ async function onExamDateChange() {
    async function buildPaperMap(dateStr) {
             sectionPaperMap = {};
             try {
-                const [examSnap, groupSnap] = await Promise.all([
+              const [examSnap, groupSnap, qpSnap] = await Promise.all([
                     getCollection("exam_schedules").where("date", "==", dateStr).get(),
-                    db.collection("admin_paper_groups").where("date", "==", dateStr).get()
+                    db.collection("admin_paper_groups").where("date", "==", dateStr).get(),
+                    getCollection("question_papers").where("date", "==", dateStr).get()
                 ]);
+
+                let uploadedPapersMap = {};
+                if (qpSnap) {
+                    qpSnap.forEach(doc => {
+                        const data = doc.data();
+                        const key = `${norm(data.className)}|${norm(data.section)}`;
+                        if(!uploadedPapersMap[key]) uploadedPapersMap[key] = {};
+                        uploadedPapersMap[key][(data.subject || "").toUpperCase()] = data.storagePath || data.url || data.omrStoragePath || data.omrUrl || doc.id;
+                    });
+                }
 
                 examSnap.forEach(doc => {
                     const data = doc.data();
                     const proc = (cName, sName, subs) => {
                         const key = `${norm(cName)}|${norm(sName)}`;
                         if (!sectionPaperMap[key]) sectionPaperMap[key] = [];
-                        subs.forEach(sub => sectionPaperMap[key].push({ subject: sub.toUpperCase(), code: 'UNMAPPED' }));
+                        subs.forEach(sub => {
+                            const subUpper = sub.toUpperCase();
+                            const uploadId = (uploadedPapersMap[key] && uploadedPapersMap[key][subUpper]) ? uploadedPapersMap[key][subUpper] : null;
+                            sectionPaperMap[key].push({ subject: subUpper, code: 'UNMAPPED', uploadId: uploadId });
+                        });
                     };
                     
                     if (data.targets && data.targets.length > 0) {
@@ -2142,8 +2157,11 @@ seatsHtml += `
                         const papers1 = sectionPaperMap[key1] || [];
                         const papers2 = sectionPaperMap[key2] || [];
 
-                        const shared = papers1.find(p1 => 
-                            papers2.some(p2 => p1.subject === p2.subject && p1.code === p2.code)
+                     const shared = papers1.find(p1 => 
+                            papers2.some(p2 => p1.subject === p2.subject && (
+                                (p1.code !== 'UNMAPPED' && p1.code === p2.code) || 
+                                (p1.uploadId !== null && p1.uploadId === p2.uploadId)
+                            ))
                         );
 
                         if (isSameSection || shared) {
