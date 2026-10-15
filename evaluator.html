@@ -1653,7 +1653,22 @@ let subHtml = reportCardSubjects.map(compositeKey => {
                 const [sub, dateRaw] = compositeKey.split('|');
                 const sd = stu.subjects[compositeKey];
                 const dateStr = dateRaw ? new Date(dateRaw).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'}) : '';
-
+if (sd && typeof sd.obt === 'string' && sd.obt.startsWith('N/A')) {
+                    const reason = sd.obt.replace('N/A ', '');
+                    return `
+                        <div class="bg-white rounded-2xl border border-sky-200 shadow-sm overflow-hidden flex flex-col">
+                            <div class="bg-sky-50 px-4 py-2 border-b border-sky-100 font-black text-sky-800 uppercase tracking-widest text-xs flex justify-between items-center">
+                                <div>${sub} <span class="block text-[8px] text-sky-500 font-bold mt-0.5 normal-case tracking-normal">${dateStr}</span></div>
+                                <span class="text-[9px] bg-sky-100 text-sky-700 px-2 py-0.5 rounded border border-sky-200 shadow-sm uppercase tracking-widest">Exempt (N/A)</span>
+                            </div>
+                            <div class="p-4 flex flex-col justify-center items-center bg-white flex-1">
+                                <span class="text-xs font-black text-sky-700 uppercase">N/A</span>
+                                <span class="text-[9px] font-bold text-slate-400 mt-1 uppercase italic">${reason}</span>
+                            </div>
+                            <div class="bg-sky-200 h-1.5 w-full"></div>
+                        </div>
+                    `;
+                }
                if (sd && sd.isUnassignedOpt) {
                     return `
                         <div class="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col opacity-50">
@@ -3257,6 +3272,20 @@ async function loadManualGradingGrid() {
                 document.body.style.overflow = '';
                 return;
             }
+    function toggleManualNA(rollNo, cb) {
+            const row = cb.closest('tr') || cb.closest('tr.block');
+            if (!row) return;
+            const markInput = row.querySelector('.manual-mark-input');
+            const reasonInput = row.querySelector('.na-reason-input');
+            
+            if (cb.checked) {
+                if (markInput) { markInput.value = ''; markInput.disabled = true; markInput.classList.add('bg-slate-100', 'opacity-50'); }
+                if (reasonInput) { reasonInput.style.display = 'block'; reasonInput.focus(); }
+            } else {
+                if (markInput) { markInput.disabled = false; markInput.classList.remove('bg-slate-100', 'opacity-50'); }
+                if (reasonInput) { reasonInput.style.display = 'none'; reasonInput.value = ''; }
+            }
+        }
 
             // Set Fullscreen Modal Headers
             document.getElementById('manual-modal-title').innerText = `${manualActiveGroup.className} - ${manualActiveSection}`;
@@ -3389,7 +3418,7 @@ async function loadManualGradingGrid() {
                 let html = "";
                 let canSaveAny = false;
 
-                manualActiveStudents.forEach((stu, idx) => {
+              manualActiveStudents.forEach((stu, idx) => {
                     const att = localAttCache[stu.id] || 'U';
                     const isAbsent = (att === 'A' || att === 'L');
                     
@@ -3399,7 +3428,19 @@ async function loadManualGradingGrid() {
 
                     const roll = String(stu.rollNo || '').trim().toUpperCase();
                     const exData = existingScores[roll];
-                    const existingVal = exData ? exData.score : '';
+                    
+                    // Check if saved score is explicitly "N/A" or object containing exemption reason
+                    let existingVal = '';
+                    let exemptReason = '';
+                    if (exData) {
+                        if (typeof exData.score === 'object' && exData.score !== null) {
+                            existingVal = exData.score.value || '';
+                            exemptReason = exData.score.reason || '';
+                        } else {
+                            existingVal = exData.score;
+                        }
+                    }
+                    const isExempt = (String(existingVal).toUpperCase() === 'N/A');
 
                     let isLocked = false;
                     let unlockRequested = false;
@@ -3441,14 +3482,30 @@ async function loadManualGradingGrid() {
                                 } else {
                                     actionHtml = `<button onclick="requestScoreUnlock('${roll}')" class="bg-amber-500 hover:bg-amber-400 text-white px-2 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest shadow-sm transition-all w-full border border-amber-600">Request Edit</button>`;
                                 }
-                      } else {
-                                    canSaveAny = true;
-                                    const currentMax = parseFloat(document.getElementById('manual-max-marks').value);
-                                    const isMaxValid = !isNaN(currentMax) && currentMax > 0;
-                                    const disableAttr = isMaxValid ? '' : 'disabled title="Enter Max Marks above first"';
-                                    const disableClasses = isMaxValid ? 'bg-white' : 'bg-slate-100 opacity-50 cursor-not-allowed';
+                            } else {
+                                canSaveAny = true;
+                                const currentMax = parseFloat(document.getElementById('manual-max-marks').value);
+                                const isMaxValid = !isNaN(currentMax) && currentMax > 0;
+                                const disableAttr = isMaxValid ? '' : 'disabled title="Enter Max Marks above first"';
+                                const disableClasses = isMaxValid ? 'bg-white' : 'bg-slate-100 opacity-50 cursor-not-allowed';
 
-                                    inputHtml = `<input type="number" step="any" data-roll="${roll}" value="${existingVal}" oninput="validateManualScore(this)" class="manual-mark-input w-full min-w-[60px] py-1.5 px-2 text-sm border border-slate-300 rounded text-center font-black text-slate-800 outline-none focus:border-fuchsia-500 shadow-inner ${disableClasses}" ${disableAttr} placeholder="Score">`;
+                                const displayInputValue = isExempt ? '' : existingVal;
+                                const naChecked = isExempt ? 'checked' : '';
+                                const reasonDisplay = isExempt ? '' : 'style="display:none;"';
+
+                                inputHtml = `
+                                    <div class="space-y-1.5">
+                                        <div class="flex gap-1">
+                                            <input type="number" step="any" data-roll="${roll}" value="${displayInputValue}" oninput="validateManualScore(this)" class="manual-mark-input w-full py-1.5 px-2 text-xs border border-slate-300 rounded text-center font-black text-slate-800 outline-none focus:border-fuchsia-500 shadow-inner ${disableClasses}" ${disableAttr} placeholder="Score">
+                                        </div>
+                                        <div class="flex items-center justify-between px-1">
+                                            <label class="flex items-center gap-1 cursor-pointer text-[9px] font-black text-slate-500 uppercase">
+                                                <input type="checkbox" data-roll="${roll}" class="na-checkbox accent-fuchsia-600 rounded" ${naChecked} onchange="toggleManualNA('${roll}', this)"> N/A (Exempt)
+                                            </label>
+                                        </div>
+                                        <input type="text" data-roll="${roll}" value="${exemptReason}" class="na-reason-input w-full py-1 px-1.5 text-[10px] border border-amber-300 rounded outline-none bg-amber-50 text-amber-900 font-bold placeholder-amber-400" ${reasonDisplay} placeholder="Reason (e.g. Medical)">
+                                    </div>
+                                `;
                                     
                                     let statusText = 'Edit';
                                     let statusColor = 'text-emerald-600';
@@ -3557,18 +3614,28 @@ function closeManualGradingModal() {
             // Bypass strict attendance validation for older historical exams
             const requireAttendanceCheck = manualActiveGroup.date >= "2026-09-01";
             
-            inputs.forEach(inp => {
+       inputs.forEach(inp => {
                 const roll = inp.getAttribute('data-roll');
                 const val = inp.value.trim();
                 const row = inp.closest('tr');
                 const isAbsent = row && row.innerText.includes('Absent');
                 const isUnmarked = row && row.innerHTML.includes('Unmarked');
 
+                const naCb = row ? row.querySelector(`.na-checkbox[data-roll="${roll}"]`) : null;
+                const isExempt = naCb ? naCb.checked : false;
+                const reasonInp = row ? row.querySelector(`.na-reason-input[data-roll="${roll}"]`) : null;
+                const reasonVal = reasonInp ? reasonInp.value.trim() : "";
+
                 inp.classList.remove('border-rose-500', 'bg-rose-50');
 
                 if (isUnmarked && requireAttendanceCheck) {
                     unmarkedCount++;
                     inp.classList.add('border-rose-500', 'bg-rose-50');
+                } else if (isExempt) {
+                    // Valid exemption case! Save as structured object
+                    const exemptObj = { value: 'N/A', reason: reasonVal || 'Exempted' };
+                    updates.push({ rollNo: roll, score: exemptObj });
+                    draftUpdates[roll] = exemptObj;
                 } else if (val === "" && !isAbsent && requireAttendanceCheck) {
                     unsubmittedCount++;
                     inp.classList.add('border-rose-500', 'bg-rose-50');
@@ -4094,24 +4161,32 @@ async function loadResultsForGroupAndSection(groupId, targetSectionKey, isFullEx
                     const optSubs = (secStruct && secStruct.optionalSubjects) ? secStruct.optionalSubjects.map(s => s.trim().toUpperCase()) : [];
                     const stuOpt = String(stu.optionalSubject || "").trim().toUpperCase();
 
-                    if (isCancelled) {
-                        // Skip adding to class-wide analytics if cancelled
+                 if (isCancelled) {
+                    // Skip adding to class-wide analytics if cancelled
                 } else if (isDirectImport) {
-                        structure.forEach(sec => {
-                            const upperSub = (sec.subject || "").toUpperCase();
-                            if (optSubs.includes(upperSub) && stuOpt !== upperSub) {
-                                subjectScores[sec.subject] = '—';
-                                return; // Skip calculation for unassigned optional subject
-                            }
-                            
+                    structure.forEach(sec => {
+                        const upperSub = (sec.subject || "").toUpperCase();
+                        if (optSubs.includes(upperSub) && stuOpt !== upperSub) {
+                            subjectScores[sec.subject] = '—';
+                            return; // Skip calculation for unassigned optional subject
+                        }
+                        
+                        const rawScoreEntry = directScores[sec.subject];
+                        const isExempt = (typeof rawScoreEntry === 'object' && rawScoreEntry !== null && rawScoreEntry.value === 'N/A') || (String(rawScoreEntry).toUpperCase() === 'N/A');
+
+                        if (isExempt) {
+                            const reasonText = (typeof rawScoreEntry === 'object' && rawScoreEntry.reason) ? rawScoreEntry.reason : 'Exempt';
+                            subjectScores[sec.subject] = `N/A (${reasonText})`;
+                        } else {
                             const actualMax = sec.isDirect ? sec.maxMarks : ((sec.correctMarks !== undefined ? sec.correctMarks : 4) * (sec.end - sec.start + 1));
                             totalMax += actualMax;
                             
-                            const score = directScores[sec.subject] !== undefined ? Number(directScores[sec.subject]) : 0;
+                            const score = rawScoreEntry !== undefined && rawScoreEntry !== "ABSENT" ? Number(rawScoreEntry) : 0;
                             subjectScores[sec.subject] = (subjectScores[sec.subject] || 0) + score;
                             totalObtained += score;
-                        });
-                    } else {
+                        }
+                    });
+                } else {
                         structure.forEach(sec => {
                             const upperSub = (sec.subject || "UNKNOWN").toUpperCase();
                             if (optSubs.includes(upperSub) && stuOpt !== upperSub) {
@@ -4293,8 +4368,11 @@ async function loadResultsForGroupAndSection(groupId, targetSectionKey, isFullEx
                                 return `<td class="p-3.5 text-center font-black text-rose-600 bg-rose-50 ${tdClass}">CANCELLED</td>`;
                             }
                             
-                            const score = stu.hasSubmission && stu.subjectScores[sub] !== undefined ? stu.subjectScores[sub] : '—';
-                            if (stu.hasSubmission && isDetailedViewActive && !stu.isDirectImport && stu.subjectBreakdown && stu.subjectBreakdown[sub]) {
+                       const rawScore = stu.hasSubmission && stu.subjectScores[sub] !== undefined ? stu.subjectScores[sub] : '—';
+                            const isExemptDisplay = String(rawScore).startsWith('N/A');
+                            const score = isExemptDisplay ? `<span class="bg-sky-100 text-sky-800 px-2 py-0.5 rounded text-[9px] font-black uppercase" title="${rawScore}">${rawScore}</span>` : rawScore;
+
+                            if (stu.hasSubmission && !isExemptDisplay && isDetailedViewActive && !stu.isDirectImport && stu.subjectBreakdown && stu.subjectBreakdown[sub]) {
                                 const b = stu.subjectBreakdown[sub];
                                 return `
                                     <td class="p-2 text-center font-mono ${tdClass}">
