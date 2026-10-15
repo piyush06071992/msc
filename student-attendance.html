@@ -3363,28 +3363,26 @@ async function loadStudentPersonalView() {
             </div>`;
     }
 }
- async function loadDailyAttendance() {
-            stopTTS();
-            const searchInput = document.getElementById('register-student-search');
-            if (searchInput) searchInput.value = "";
-            const dateStr = document.getElementById('daily-date-picker').value;
-            
-            if (currentReg && currentReg.isExamRoom) {
-                return loadExamRoomAttendance(currentReg.s, dateStr);
-            }
+async function loadDailyAttendance() {
+        stopTTS();
+        const searchInput = document.getElementById('register-student-search');
+        if (searchInput) searchInput.value = "";
+        const dateStr = document.getElementById('daily-date-picker').value;
+        
+        if (currentReg && currentReg.isExamRoom) {
+            return loadExamRoomAttendance(currentReg.s, dateStr);
+        }
 
-            const [y, m, d] = dateStr.split('-');
-            const monthKey = `${y}_${m}`;
-            
-            const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthKey}`;
-            
-            const listContainer = document.getElementById('daily-students-list');
-            const btn = document.getElementById('save-daily-btn');
-            const waBtn = document.getElementById('btn-whatsapp-share');
-          const exclBanner = document.getElementById('exclusion-warning-banner');
-            listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
+        const [y, m, d] = dateStr.split('-');
+        const monthKey = `${y}_${m}`;
+        
+        const listContainer = document.getElementById('daily-students-list');
+        const btn = document.getElementById('save-daily-btn');
+        const waBtn = document.getElementById('btn-whatsapp-share');
+        const exclBanner = document.getElementById('exclusion-warning-banner');
+        listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
 
-            let myStudents = getActiveStudentsForDate(currentReg.c, currentReg.s, dateStr);
+        let myStudents = getActiveStudentsForDate(currentReg.c, currentReg.s, dateStr);
 
             if(myStudents.length === 0) {
                 listContainer.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs border-2 border-dashed border-slate-300 rounded-2xl">No active students found in this section.</div>`; return;
@@ -3739,111 +3737,14 @@ async function loadStudentPersonalView() {
             } catch(e) { console.error(e); }
         }
 
-        async function checkMissingPastAttendance() {
-            // Do not show warnings to Admins, Students, or during temporary Exam Duties
-            if (!currentReg || !currentReg.canEdit || isAdmin || activeStudent || currentReg.isExamRoom) return;
-
-            const START_DATE = "2026-09-01";
-            const offset = new Date().getTimezoneOffset() * 60000;
-            const todayIso = new Date(Date.now() - offset).toISOString().split('T')[0];
-
-            if (todayIso <= START_DATE) return;
-
-            // Safe Date iteration ignoring timezone shifts
-            let dCur = new Date(START_DATE + "T00:00:00");
-            const dEnd = new Date(todayIso + "T00:00:00");
-            dEnd.setDate(dEnd.getDate() - 1); // Check up to yesterday
-
-            let datesToCheck = [];
-            let monthsToFetch = new Set();
-
-            while (dCur <= dEnd) {
-                const y = dCur.getFullYear();
-                const m = String(dCur.getMonth() + 1).padStart(2, '0');
-                const d = String(dCur.getDate()).padStart(2, '0');
-                const iso = `${y}-${m}-${d}`;
-                
-                monthsToFetch.add(`${y}_${m}`);
-                
-                if (dCur.getDay() !== 0) { // Not Sunday
-                    const status = checkDateStatus(iso);
-                    const remKey = `${iso}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}`;
-                    const isRemedial = remedialDataMap[remKey] ? true : false;
-                    
-                    // Only check days that were officially scheduled and not holidays/remedial
-                    if (!status.isExcluded && !isRemedial) {
-                        datesToCheck.push(iso);
-                    }
-                }
-                dCur.setDate(dCur.getDate() + 1);
+      async function checkMissingPastAttendance() {
+            // Only check if looking at past dates; skip entirely for today's roll call to ensure lightning-fast loading
+            const dateStr = document.getElementById('daily-date-picker')?.value;
+            if (!currentReg || !currentReg.canEdit || isAdmin || activeStudent || currentReg.isExamRoom || !dateStr || dateStr === todayISO) {
+                const banner = document.getElementById('lock-warning-banner');
+                if(banner) { banner.classList.add('hidden'); banner.classList.remove('flex'); }
+                return;
             }
-
-            if (datesToCheck.length === 0) return;
-
-            let missingDates = [];
-
-           // Group fetches by month to minimize database reads
-            for (let mKey of monthsToFetch) {
-                try {
-                    let directRecords = {};
-                    let hasInchargeFallback = {}; 
-                    
-                    if (currentReg.sub === 'CLASS INCHARGE') {
-                        // For Incharge, we must check if ANY subject in this section has attendance
-                        const monthSnap = await getCollection("attendance_records")
-                            .where("monthKey", "==", mKey)
-                            .where("className", "==", currentReg.c)
-                            .get();
-                            
-                        monthSnap.forEach(doc => {
-                            const data = doc.data();
-                            if (normMatch(data.section) === normMatch(currentReg.s)) {
-                                if (normMatch(data.subject) === normMatch("CLASS INCHARGE")) {
-                                    directRecords = data.records || {};
-                                } else if (data.records) {
-                                    // Cross-subject check: Log any day where another subject has attendance
-                                    Object.keys(data.records).forEach(date => {
-                                        if (Object.keys(data.records[date]).length > 0) {
-                                            hasInchargeFallback[date] = true;
-                                        }
-                                    });
-                                }
-                            }
-                        });
-                    } else {
-                        // Normal subject fetch
-                        const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${mKey}`;
-                        const docSnap = await getCollection("attendance_records").doc(docId).get();
-                        directRecords = docSnap.exists ? docSnap.data().records || {} : {};
-                    }
-
-                    datesToCheck.filter(d => d.startsWith(mKey.replace('_', '-'))).forEach(d => {
-                        const hasDirect = directRecords[d] && Object.keys(directRecords[d]).length > 0;
-                        const hasFallback = currentReg.sub === 'CLASS INCHARGE' && hasInchargeFallback[d];
-                        
-                        // Only flag as missing if BOTH the incharge register and all other subjects are completely empty
-                        if (!hasDirect && !hasFallback) {
-                            missingDates.push(d);
-                        }
-                    });
-                } catch(e) { console.warn("Could not fetch past records for audit", e); }
-            }
-
-            // Trigger the UI Banner
-            const banner = document.getElementById('lock-warning-banner');
-            if (missingDates.length > 0) {
-                missingDates.sort((a,b) => b.localeCompare(a));
-                const count = missingDates.length;
-                const oldest = new Date(missingDates[missingDates.length-1]).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'});
-                
-                document.getElementById('lock-warning-text').innerHTML = `⚠️ YOU HAVE ${count} PAST DATE(S) WITH UNMARKED ATTENDANCE (OLDEST: ${oldest}). PLEASE MARK THEM ASAP.`;
-                banner.classList.remove('hidden');
-                banner.classList.add('flex');
-            } else {
-                banner.classList.add('hidden');
-                banner.classList.remove('flex');
-            }
-        }
 
 function getActiveTeacherName() {
             if (!activeStaff) return 'Admin';
