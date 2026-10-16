@@ -2151,9 +2151,9 @@ function updateAuditSectionFilter() {
                     const dObj = new Date(parseInt(y), parseInt(m)-1, parseInt(d));
                     if (dObj.getDay() === 0) return; // Skip Sundays
 
-                    let isHol = false;
+                   let isHol = false;
                     for(let h of holidaysData) {
-                        if(h.startDate && h.isFullDay) {
+                        if(h.status !== 'CANCELLED' && h.startDate && h.isFullDay) {
                             const [sy, sm, sd] = h.startDate.split('-');
                             let hs = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd));
                             
@@ -2924,15 +2924,15 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
                     let stuExamStart = "00:00";
                     let stuExamEnd = "23:59";
                     
-                    const dObjDetect = new Date(dateStr);
+                  const dObjDetect = new Date(dateStr);
                     const dayNameDetect = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dObjDetect.getDay()];
-                    const overrideDetect = timetableHistoryData.find(o => o.date === dateStr && o.type !== "FUTURE_MASTER");
-                    let scheduleDetect = [];
-                    if (overrideDetect && overrideDetect.schedule) {
-                        scheduleDetect = overrideDetect.schedule.filter(s => normMatch(s.className) === normMatch(stu.className) && normMatch(s.section) === normMatch(stu.section));
-                    } else {
-                        scheduleDetect = timetableData.filter(t => t.day === dayNameDetect && normMatch(t.className) === normMatch(stu.className) && (normMatch(t.section || t.sectionName) === normMatch(stu.section)));
-                    }
+                    
+                    const snapshotLocal = getScheduleSnapshotForDate(dateStr);
+                    let scheduleDetect = snapshotLocal.schedule.filter(s => 
+                        (snapshotLocal.isOverride ? true : s.day === dayNameDetect) &&
+                        normMatch(s.className) === normMatch(stu.className) && 
+                        normMatch(s.section || s.sectionName) === normMatch(stu.section)
+                    );
                     
                     const examSlot = scheduleDetect.find(slot => {
                         const tSub = (slot.subject || slot.title || "").toUpperCase();
@@ -4498,11 +4498,11 @@ async function saveDailyAttendance() {
 const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.email) : "");
         let targetRegistersToSync = [];
         
-        // --- SMART EXAM SYNC: Fetch today's schedule to find the exact Exam Subject ---
+     // --- SMART EXAM SYNC: Fetch today's schedule to find the exact Exam Subject ---
         const dObjDetect = new Date(dateStr);
         const dayNameDetect = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dObjDetect.getDay()];
-        const overrideDetect = timetableHistoryData.find(o => o.date === dateStr && o.type !== "FUTURE_MASTER");
-        const activeSched = (overrideDetect && overrideDetect.schedule) ? overrideDetect.schedule : timetableData.filter(t => t.day === dayNameDetect);
+        const snapshotSync = getScheduleSnapshotForDate(dateStr);
+        const activeSched = snapshotSync.isOverride ? snapshotSync.schedule : snapshotSync.schedule.filter(t => t.day === dayNameDetect);
 
         if (window.instituteStructures) {
             window.instituteStructures.forEach(st => {
@@ -5873,10 +5873,10 @@ async function listenForMissingAttendance() {
                 const leaveSnap = await db.collection(prefix + "leave_requests").where("status", "in", ["APPROVED", "PENDING"]).get();
                 const allLeaves = leaveSnap.docs.map(d => d.data());
 
-                function getScheduleSnapshot(dateIso) {
-                    const exactOverride = ttHist.find(h => h.date === dateIso && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE"));
+             function getScheduleSnapshot(dateIso) {
+                    const exactOverride = ttHist.find(h => h.date === dateIso && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE") && h.status !== "CANCELLED");
                     if (exactOverride && exactOverride.schedule) return exactOverride.schedule;
-                    const masterSnapshots = ttHist.filter(h => h.type === "LIVE_MASTER_UPDATE" || h.type === "APPLIED_MASTER" || h.type === "FUTURE_MASTER");
+                    const masterSnapshots = ttHist.filter(h => (h.type === "LIVE_MASTER_UPDATE" || h.type === "APPLIED_MASTER" || h.type === "FUTURE_MASTER") && h.status !== "CANCELLED");
                     const sortedMasters = masterSnapshots.sort((a, b) => b.date.localeCompare(a.date));
                     const validMaster = sortedMasters.find(h => h.date <= dateIso);
                     if (validMaster && validMaster.schedule) return validMaster.schedule;
@@ -5955,11 +5955,11 @@ schedule.forEach(slot => {
                         const [sh, sm_slot] = (slot.start24 || "00:00").split(':').map(Number);
                         const startMins = sh * 60 + sm_slot;
 
-                        // --- HOLIDAY / HALF-DAY SCANNER LOGIC ---
+                       // --- HOLIDAY / HALF-DAY SCANNER LOGIC ---
                         let isHoliday = false;
                         if (typeof holidaysData !== 'undefined' && holidaysData.length > 0) {
                             for (let h of holidaysData) {
-                                if (h.suspendClasses === false || !h.startDate) continue;
+                                if (h.status === 'CANCELLED' || h.suspendClasses === false || !h.startDate) continue;
 
                                 const [sy, sm_hol, sd] = h.startDate.split('-');
                                 let hs = new Date(parseInt(sy), parseInt(sm_hol)-1, parseInt(sd));
@@ -6404,17 +6404,14 @@ async function loadDiscrepancies() {
 
                let html = `<div class="space-y-6">`;
                 
-                // Fetch the override schedule for this date if it exists
-                let activeScheduleForDate = timetableData;
-                const overrideDoc = timetableHistoryData.find(o => o.date === dateStr && o.type !== "FUTURE_MASTER");
-                if (overrideDoc && overrideDoc.schedule) {
-                    activeScheduleForDate = overrideDoc.schedule;
-                }
+               // Fetch the time machine schedule for this date
+                const snapshotDisc = getScheduleSnapshotForDate(dateStr);
+                let activeScheduleForDate = snapshotDisc.schedule;
 
                 discrepancyList.forEach((disc, index) => {
                     // Get timetable slots for this student's class/section on this day to sort chronologically
                     let classSlots = activeScheduleForDate.filter(t => 
-                        (overrideDoc ? true : t.day === dayName) && 
+                        (snapshotDisc.isOverride ? true : t.day === dayName) && 
                         normMatch(t.className) === normMatch(disc.className) && 
                         normMatch(t.section || t.sectionName) === normMatch(disc.section)
                     );
