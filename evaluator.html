@@ -5313,7 +5313,8 @@ const promises = subSnap.docs.map(async (doc) => {
                     `;
                 }).join('');
 
-           let tableRowsHtml = examRecords.map((ex, idx) => {
+        window.renderDossierTableRows = function(records, allUniqueSubjects) {
+                return records.map((ex, idx) => {
                     const datePretty = new Date(ex.date + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
                     let typeBadge = "bg-slate-100 text-slate-700";
                     if (ex.type === 'UT') typeBadge = "bg-blue-100 text-blue-800";
@@ -5380,9 +5381,50 @@ const promises = subSnap.docs.map(async (doc) => {
                         </tr>
                     `;
                 }).join('');
+            };
+
+            let tableRowsHtml = window.renderDossierTableRows(examRecords, allUniqueSubjects);
+
+            window.currentDossierSort = window.currentDossierSort || { col: 'date', asc: false };
+            window.sortDossierTable = function(col) {
+                if (!activeDossierData) return;
+                if (window.currentDossierSort.col === col) {
+                    window.currentDossierSort.asc = !window.currentDossierSort.asc;
+                } else {
+                    window.currentDossierSort.col = col;
+                    window.currentDossierSort.asc = (col === 'date' || col === 'total' || col === 'pct') ? false : true;
+                }
+
+                let records = activeDossierData.examRecords;
+                const subjects = Object.keys(activeDossierData.subjectPerformanceMap).sort();
+
+                records.sort((a, b) => {
+                    let valA, valB;
+                    if (col === 'date') { valA = a.date; valB = b.date; }
+                    else if (col === 'type') { valA = a.type; valB = b.type; }
+                    else if (col === 'title') { valA = a.title; valB = b.title; }
+                    else if (col === 'total') { valA = a.obt; valB = b.obt; }
+                    else if (col === 'pct') { valA = parseFloat(a.percentage); valB = parseFloat(b.percentage); }
+                    else if (col.startsWith('sub_')) {
+                        const sub = col.replace('sub_', '');
+                        valA = a.subjects[sub] && !a.subjects[sub].isAbsent ? a.subjects[sub].obt : -1;
+                        valB = b.subjects[sub] && !b.subjects[sub].isAbsent ? b.subjects[sub].obt : -1;
+                    }
+
+                    if (valA < valB) return window.currentDossierSort.asc ? -1 : 1;
+                    if (valA > valB) return window.currentDossierSort.asc ? 1 : -1;
+                    return 0;
+                });
+
+                document.getElementById('dossier-table-body').innerHTML = window.renderDossierTableRows(records, subjects);
+                const clearBtn = document.getElementById('clear-history-filter-btn');
+                if (clearBtn && !clearBtn.classList.contains('hidden')) {
+                    filterStudentHistoryByType('ALL'); // Reset filter if active to avoid visual bugs
+                }
+            };
 
            let subjectHeadersHtml = allUniqueSubjects.map(sub => `
-                    <th class="p-2 text-center border-l border-r border-slate-200 bg-slate-100">${sub} Score</th>
+                    <th class="p-2 text-center border-l border-r border-slate-200 bg-slate-100 cursor-pointer hover:bg-slate-200 transition-colors" onclick="sortDossierTable('sub_${sub}')">${sub} Score ↕️</th>
                 `).join('');
 
                 const uniqueExamTypes = [...new Set(examRecords.map(e => e.type))];
@@ -5450,19 +5492,19 @@ const promises = subSnap.docs.map(async (doc) => {
                         </div>
                         <div class="overflow-auto custom-scroll flex-1">
                             <table class="w-full text-left border-collapse text-xs whitespace-nowrap">
-                                <thead class="bg-slate-50 text-slate-500 uppercase font-black sticky top-0 border-b border-slate-200 text-[9px] z-10 shadow-sm">
+                          <thead class="bg-slate-50 text-slate-500 uppercase font-black sticky top-0 border-b border-slate-200 text-[9px] z-10 shadow-sm select-none">
                                     <tr>
                                         <th class="p-2 text-center w-10">#</th>
-                                        <th class="p-2">Date</th>
-                                        <th class="p-2">Type</th>
-                                        <th class="p-2 max-w-[150px]">Exam Title</th>
+                                        <th class="p-2 cursor-pointer hover:bg-slate-200 transition-colors" onclick="sortDossierTable('date')">Date ↕️</th>
+                                        <th class="p-2 cursor-pointer hover:bg-slate-200 transition-colors" onclick="sortDossierTable('type')">Type ↕️</th>
+                                        <th class="p-2 max-w-[150px] cursor-pointer hover:bg-slate-200 transition-colors" onclick="sortDossierTable('title')">Exam Title ↕️</th>
                                         ${subjectHeadersHtml}
-                                      <th class="p-2 text-center border-l border-slate-200 bg-indigo-50/50 text-indigo-800">Total Score</th>
-                                        <th class="p-2 text-center bg-emerald-50/50 text-emerald-800">Overall %</th>
+                                      <th class="p-2 text-center border-l border-slate-200 bg-indigo-50/50 text-indigo-800 cursor-pointer hover:bg-indigo-100 transition-colors" onclick="sortDossierTable('total')">Total Score ↕️</th>
+                                        <th class="p-2 text-center bg-emerald-50/50 text-emerald-800 cursor-pointer hover:bg-emerald-100 transition-colors" onclick="sortDossierTable('pct')">Overall % ↕️</th>
                                         ${isAdmin ? '<th class="p-2 text-center bg-purple-50/50 text-purple-800">Admin Remarks</th>' : ''}
                                     </tr>
                                 </thead>
-                                <tbody class="divide-y divide-slate-100 font-bold text-slate-700">
+                                <tbody id="dossier-table-body" class="divide-y divide-slate-100 font-bold text-slate-700">
                                     ${tableRowsHtml}
                                 </tbody>
                             </table>
@@ -5502,14 +5544,13 @@ const promises = subSnap.docs.map(async (doc) => {
             const overallData = records.map(r => r.percentage);
             const colors = ['#f43f5e', '#10b981', '#f59e0b', '#06b6d4', '#8b5cf6', '#ec4899', '#14b8a6'];
             
-            let datasets = [{
+    let datasets = [{
                 label: 'Overall %',
                 data: overallData,
+                backgroundColor: '#4f46e5',
                 borderColor: '#4f46e5',
-                backgroundColor: 'rgba(79, 70, 229, 0.1)',
-                borderWidth: 3,
-                fill: true,
-                tension: 0.3,
+                borderWidth: 1,
+                borderRadius: 4,
                 order: 1
             }];
 
@@ -5526,19 +5567,16 @@ const promises = subSnap.docs.map(async (doc) => {
                 datasets.push({
                     label: sub,
                     data: subData,
+                    backgroundColor: colors[i % colors.length] + 'CC', // Added opacity
                     borderColor: colors[i % colors.length],
-                    borderWidth: 2,
-                    borderDash: [4, 4],
-                    pointBackgroundColor: colors[i % colors.length],
-                    fill: false,
-                    tension: 0.3,
-                    spanGaps: true,
+                    borderWidth: 1,
+                    borderRadius: 4,
                     order: 2
                 });
             });
 
             activeStudentChartInstance = new Chart(ctx.getContext('2d'), {
-                type: 'line',
+                type: 'bar',
                 data: { labels, datasets },
                 options: {
                     responsive: true, 
