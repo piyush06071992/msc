@@ -1305,7 +1305,8 @@ async function saveHoliday() {
             
             const btn = event.target; btn.innerText = "Saving..."; btn.disabled = true;
             
-            try {
+          try {
+                const versionId = "v_hol_" + Date.now();
                 const data = {
                     type: eventType,
                     staffStatus: staffStatus,
@@ -1316,9 +1317,25 @@ async function saveHoliday() {
                     endTime: isFullDay ? null : endTime,
                     targetClasses,
                     targetStaff,
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    version_id: versionId,
+                    status: "ACTIVE",
+                    cancelled_at: null
                 };
-                await getCollection("school_holidays").add(data);
+                const docRef = await getCollection("school_holidays").add(data);
+                
+                // Log this version to the registry
+                await getCollection("timetable_versions").doc(versionId).set({
+                    version_id: versionId,
+                    start_date: startDate,
+                    created_at: Date.now(),
+                    type: "HOLIDAY_CREATED",
+                    doc_id: docRef.id
+                });
+                
+                // Bump config version so Student Attendance knows to fetch new holidays
+                await getCollection("system_metadata").doc("master_config_version").set({ lastUpdated: Date.now() }, { merge: true });
+
                 alert("Holiday / Event Rule Saved!");
                 
                // Reset form
@@ -1337,14 +1354,16 @@ async function saveHoliday() {
             finally { btn.innerText = "➕ Add Exception"; btn.disabled = false; }
         }
 
-        function renderActiveHolidays() {
+       function renderActiveHolidays() {
             const list = document.getElementById('active-holidays-list');
-            if (holidaysData.length === 0) {
+            const activeHolidays = holidaysData.filter(h => h.status !== "CANCELLED");
+            
+            if (activeHolidays.length === 0) {
                 list.innerHTML = '<p class="text-xs text-slate-400 font-bold italic">No active exceptions.</p>';
                 return;
             }
 
-            const sorted = [...holidaysData].sort((a,b) => new Date(b.startDate) - new Date(a.startDate));
+            const sorted = [...activeHolidays].sort((a,b) => new Date(b.startDate) - new Date(a.startDate));
             
             list.innerHTML = sorted.map(h => {
                 const dateStr = h.startDate === h.endDate ? new Date(h.startDate).toLocaleDateString('en-GB') : `${new Date(h.startDate).toLocaleDateString('en-GB')} to ${new Date(h.endDate).toLocaleDateString('en-GB')}`;
@@ -1374,10 +1393,28 @@ async function saveHoliday() {
             }).join('');
         }
 
-        async function deleteHoliday(id) {
+    async function deleteHoliday(id) {
             if(!confirm("Remove this holiday? The original timetable will be restored immediately.")) return;
             try {
-                await getCollection("school_holidays").doc(id).delete();
+                const versionId = "v_hol_cancel_" + Date.now();
+                
+                await getCollection("school_holidays").doc(id).update({ 
+                    status: "CANCELLED", 
+                    cancelled_at: Date.now(),
+                    cancel_version_id: versionId
+                });
+
+                // Log the cancellation to the registry
+                await getCollection("timetable_versions").doc(versionId).set({
+                    version_id: versionId,
+                    created_at: Date.now(),
+                    type: "HOLIDAY_CANCELLED",
+                    doc_id: id
+                });
+                
+                // Bump config version so Student Attendance drops the holiday
+                await getCollection("system_metadata").doc("master_config_version").set({ lastUpdated: Date.now() }, { merge: true });
+
                 await fetchHolidays();
                 renderActiveHolidays();
                 renderDirectDashboard();
@@ -1974,10 +2011,10 @@ async function saveHoliday() {
                 let overrides = [];
                 const todayStr = new Date().toISOString().split('T')[0];
                 
-                snap.docs.forEach(doc => {
+               snap.docs.forEach(doc => {
                     const data = doc.data();
-                    // Show both past and future overrides so Admin has a full record
-                    if (data.type === "DAILY_OVERRIDE" || data.type === "EXAM_OVERRIDE") {
+                    // Show both past and future overrides so Admin has a full record (Ignore cancelled ones)
+                    if ((data.type === "DAILY_OVERRIDE" || data.type === "EXAM_OVERRIDE") && data.status !== "CANCELLED") {
                         overrides.push(data);
                     }
                 });
@@ -2024,10 +2061,24 @@ async function saveHoliday() {
             confirmDateContext();
         }
 
-        async function deleteSpecialDate(date) {
+       async function deleteSpecialDate(date) {
             if(!confirm(`⚠️ REVERT DATE: Are you sure you want to delete the override for ${date}?\n\nThis will instantly revert that day back to the standard Live Master schedule.`)) return;
             try {
-                await getCollection("timetable_history").doc(date).delete();
+                const versionId = "v_override_revert_" + Date.now();
+                
+                await getCollection("timetable_history").doc(date).update({ 
+                    status: "CANCELLED",
+                    cancelled_at: Date.now(),
+                    cancel_version_id: versionId
+                });
+
+                await getCollection("timetable_versions").doc(versionId).set({
+                    version_id: versionId,
+                    created_at: Date.now(),
+                    type: "OVERRIDE_REVERTED",
+                    date_affected: date
+                });
+
                 alert(`✅ Special schedule for ${date} removed successfully. Restored to Live Master.`);
                 
                 manageSpecialDates(); // Refresh list automatically
@@ -4445,10 +4496,12 @@ async function confirmMultiDates() {
         const allMasterSlots = masterSnapAll.docs.map(doc => doc.data());
         let allMismatches = [];
 
-        const batch = db.batch();
-        const auditPayloads = [];
-        for (const dateIso of selectedDates) {
-            const [y, m_val, d_val] = dateIso.split('-');
+const batch = db.batch();
+            const auditPayloads = [];
+            const versionId = "v_override_" + Date.now(); // Version stamp for these overrides
+            
+            for (const dateIso of selectedDates) {
+                const [y, m_val, d_val] = dateIso.split('-');
             const localDate = new Date(y, m_val - 1, d_val);
             const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const dayName = daysArr[localDate.getDay()];
@@ -4548,7 +4601,7 @@ async function confirmMultiDates() {
                     return slot;
                 });
                 
-                const overridePortion = stampedSourceSlots.filter(ss => {
+             const overridePortion = stampedSourceSlots.filter(ss => {
                     const key = `${norm(ss.className)}|${norm(ss.section)}`;
                     return normalizedTargetKeys.includes(key);
                 });
@@ -4556,15 +4609,31 @@ async function confirmMultiDates() {
                 finalMergedSchedule = [...normalPortion, ...overridePortion];
             }
 
+            // Tag all slots with the version
+            finalMergedSchedule = finalMergedSchedule.map(slot => ({
+                ...slot,
+                version_id: versionId,
+                effective_from: dateIso
+            }));
+
             batch.set(getCollection("timetable_history").doc(dateIso), {
                 date: dateIso,
                 lastUpdated: Date.now(),
                 schedule: finalMergedSchedule,
                 type: "DAILY_OVERRIDE",
-                tag: schedName
+                tag: schedName,
+                version_id: versionId
             });
             auditPayloads.push({ date: dateIso, schedule: finalMergedSchedule });
         }
+        
+        // Log the version registry
+        batch.set(getCollection("timetable_versions").doc(versionId), {
+            version_id: versionId,
+            created_at: Date.now(),
+            type: "DAILY_OVERRIDE",
+            dates_affected: selectedDates
+        });
 
         if (allMismatches.length > 0) {
             let warningText = "⚠️ Master Schedule Discrepancies Detected:\nThe following slots differ from the Live Master Schedule:\n\n";
