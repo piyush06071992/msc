@@ -3674,13 +3674,15 @@ async function loadDailyAttendance() {
                     specialLeave = activeLeaveData; 
                 }
 
-                let isInchargeReg = isRegisterSubjectIncharge(currentReg.c, currentReg.s, currentReg.sub);
+              let isInchargeReg = isRegisterSubjectIncharge(currentReg.c, currentReg.s, currentReg.sub);
                 let isProtectedIncharge = isInchargeReg; // <-- FIX: Incharge bypasses Special Leaves on ALL days
                 let effectiveVal = val === 'A' ? 'L' : val;
 
-       let attControls = "";
-        if (specialLeave && !isProtectedIncharge) {
-            const isDuty = specialLeave.category === 'DUTY';
+        let attControls = "";
+        const isDuty = specialLeave && specialLeave.category === 'DUTY';
+        const shouldLockSpecial = specialLeave && (isDuty || !isProtectedIncharge);
+
+        if (shouldLockSpecial) {
             effectiveVal = isDuty ? 'P' : 'L'; // Lock logic visually
             const badgeColor = isDuty ? 'text-purple-700 bg-purple-50 border-purple-200' : 'text-sky-700 bg-sky-50 border-sky-200';
             const iconText = isDuty ? '🏛️ School Duty' : '🏃 Auth. Leave';
@@ -3693,9 +3695,9 @@ async function loadDailyAttendance() {
                 <input type="radio" name="att_${stu.id}" value="${effectiveVal}" class="att-radio hidden" checked>
             `;
         } else if (specialLeave && isProtectedIncharge && canModify) {
-            const isDuty = specialLeave.category === 'DUTY';
-            const badgeColor = isDuty ? 'text-purple-700 bg-purple-50 border-purple-200' : 'text-sky-700 bg-sky-50 border-sky-200';
-            const iconText = isDuty ? '🏛️ Info: School Duty' : '🏃 Info: Auth. Leave';
+            // This now only applies to LEAVE (not DUTY), allowing Incharge to overwrite Leave if the kid showed up.
+            const badgeColor = 'text-sky-700 bg-sky-50 border-sky-200';
+            const iconText = '🏃 Info: Auth. Leave';
             
             attControls = `
                 <div class="mr-3 px-2.5 py-1 rounded-md border text-[8px] font-black uppercase tracking-widest ${badgeColor} flex flex-col justify-center text-left">
@@ -3715,15 +3717,21 @@ async function loadDailyAttendance() {
                             <input type="radio" name="att_${stu.id}" id="L_${stu.id}" value="L" class="att-radio" ${effectiveVal==='L' ? 'checked' : ''} onchange="updateDailyStats()">
                             <label for="L_${stu.id}" class="att-label right text-slate-500 hover:bg-slate-50 select-none" style="border-radius: 0 8px 8px 0; border-left: none;">L</label>
                         `;
-                    } else {
-                        if (effectiveVal) {
-                            let statusColor = effectiveVal === 'P' ? 'text-emerald-700 bg-emerald-50 border-emerald-200' : 'text-amber-700 bg-amber-50 border-amber-200';
-                            let statusText = effectiveVal === 'P' ? 'Present' : 'Leave';
-                            attControls = `<div class="px-4 py-1.5 rounded border text-[10px] font-black uppercase tracking-widest ${statusColor}">${statusText}</div>`;
-                        } else {
-                            attControls = `<div class="px-4 py-1.5 rounded border text-[10px] font-black uppercase tracking-widest text-slate-400 bg-slate-100 border-slate-200 shadow-inner">Unmarked</div>`;
-                        }
-                    }
+        } else {
+            let extraBadge = "";
+            if (specialLeave) {
+                const badgeColor = isDuty ? 'text-purple-700 bg-purple-50 border-purple-200' : 'text-sky-700 bg-sky-50 border-sky-200';
+                const iconText = isDuty ? '🏛️ School Duty' : '🏃 Auth. Leave';
+                extraBadge = `<div class="mr-2 px-2 py-1 rounded border text-[8px] font-black uppercase tracking-widest ${badgeColor}">${iconText}</div>`;
+            }
+            if (effectiveVal) {
+                let statusColor = effectiveVal === 'P' ? 'text-emerald-700 bg-emerald-50 border-emerald-200' : 'text-amber-700 bg-amber-50 border-amber-200';
+                let statusText = effectiveVal === 'P' ? 'Present' : 'Leave';
+                attControls = `<div class="flex items-center">${extraBadge}<div class="px-4 py-1.5 rounded border text-[10px] font-black uppercase tracking-widest ${statusColor}">${statusText}</div></div>`;
+            } else {
+                attControls = `<div class="flex items-center">${extraBadge}<div class="px-4 py-1.5 rounded border text-[10px] font-black uppercase tracking-widest text-slate-400 bg-slate-100 border-slate-200 shadow-inner">Unmarked</div></div>`;
+            }
+        }
         
            html += `
 <div id="row_${stu.id}" class="student-row bg-white p-3 sm:p-4 rounded-xl shadow-sm border border-slate-200 flex justify-between items-center transition-all duration-300 gap-2" data-cname="${stu.className}" data-sname="${stu.section}" data-roll="${stu.rollNo || 'N/A'}">
@@ -3881,11 +3889,12 @@ function getActiveTeacherName() {
             const specialLeave = isStudentOnSpecialLeave(stuId, dateStr, classEndTimeStr, classStartTimeStr);
             const isProtectedIncharge = isRegisterSubjectIncharge(currentReg.c, currentReg.s, currentReg.sub);
             
-            if (specialLeave && !isProtectedIncharge) {
-                if (specialLeave.category === 'DUTY' && newStatus === 'L') {
+          if (specialLeave) {
+                const isDuty = specialLeave.category === 'DUTY';
+                if (isDuty && newStatus === 'L') {
                     return alert("🚨 Correction Blocked: This student is on Official School Duty. You cannot mark them Absent. Cancel the Duty from the Leaves & Duties tab first if necessary.");
                 }
-                if (specialLeave.category !== 'DUTY' && newStatus === 'P') {
+                if (!isDuty && !isProtectedIncharge && newStatus === 'P') {
                     return alert("🚨 Correction Blocked: This student is on an Authorized Special Leave. You cannot mark them Present. Cancel the leave from the Leaves & Duties tab first if necessary.");
                 }
             }
@@ -5659,9 +5668,17 @@ let shouldGreyOut = false;
                             inlineStyle = "color: #ef4444; font-weight: 900; background-color: #f1f5f9;";
                         } else if (ds.isFuture) { 
                             cellContent = ""; 
-                        } else {
+                       } else {
                             let effectiveRecStatus = curRecords[ds.date] && curRecords[ds.date][stu.id];
-                            if (!effectiveRecStatus && currentReg.sub === 'CLASS INCHARGE' && anySubjectPresentStatus[ds.date] && anySubjectPresentStatus[ds.date][stu.id]) {
+                            
+                            // Dynamic School Duty Override for Ledger Visuals
+                            let hasDuty = false;
+                            const activeLeaveData = specialLeavesData.find(s => s.studentId === stu.id && s.date === ds.date && s.status === 'ACTIVE');
+                            if (activeLeaveData && activeLeaveData.category === 'DUTY') hasDuty = true;
+
+                            if (hasDuty) {
+                                effectiveRecStatus = 'P'; // School Duty counts as Present globally
+                            } else if (!effectiveRecStatus && currentReg.sub === 'CLASS INCHARGE' && anySubjectPresentStatus[ds.date] && anySubjectPresentStatus[ds.date][stu.id]) {
                                 effectiveRecStatus = anySubjectPresentStatus[ds.date][stu.id];
                             }
 
