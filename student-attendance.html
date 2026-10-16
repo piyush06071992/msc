@@ -1090,13 +1090,13 @@
                     return cachedBundle;
                 }
 
-              console.log("🔄 Fetching initial config bundle...");
+             console.log("🔄 Fetching initial config bundle...");
                 const [ttSnap, structSnap, holSnap, staffSnap, histSnap, remSnap, splSnap] = await Promise.all([
                     getCollection("timetable").get(),
                     getCollection("institute_structure").get(),
                     getCollection("school_holidays").get(),
                     db.collection("staff_applications").get(),
-                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"]).get(),
+                    getCollection("timetable_history").get(),
                     getCollection("remedial_classes").get(),
                     getCollection("special_leaves").where("status", "==", "ACTIVE").get()
                 ]);
@@ -1136,10 +1136,10 @@
 
         async function backgroundRefreshMasterConfig(prefix) {
             try {
-                const [histSnap, remSnap, splSnap] = await Promise.all([
-                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"]).get(),
-                    getCollection("remedial_classes").get(),
-                    getCollection("special_leaves").where("status", "==", "ACTIVE").get()
+          const [holSnap, histSnap, structSnap] = await Promise.all([
+                    getCollection("school_holidays").get(),
+                    getCollection("timetable_history").get(),
+                    getCollection("institute_structure").where("className", "==", student.className).where("sectionName", "==", student.section).get()
                 ]);
                 const cached = await IDB.get(`${prefix}master_config_bundle`) || {};
                 cached.timetableHistory = histSnap.docs.map(d => d.data());
@@ -3090,6 +3090,18 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             currentReg = null;
         }
 
+function getScheduleSnapshotForDate(dateIso) {
+            const exactOverride = timetableHistoryData.find(h => h.date === dateIso && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE") && h.status !== "CANCELLED");
+            if (exactOverride && exactOverride.schedule) return { schedule: exactOverride.schedule, isOverride: true, tag: exactOverride.tag };
+            
+            const masterSnapshots = timetableHistoryData.filter(h => (h.type === "LIVE_MASTER_UPDATE" || h.type === "APPLIED_MASTER" || h.type === "FUTURE_MASTER") && h.status !== "CANCELLED");
+            const sortedMasters = masterSnapshots.sort((a, b) => b.date.localeCompare(a.date));
+            const validMaster = sortedMasters.find(h => h.date <= dateIso);
+            
+            if (validMaster && validMaster.schedule) return { schedule: validMaster.schedule, isOverride: false, tag: null };
+            return { schedule: timetableData, isOverride: false, tag: null };
+        }
+
    function getSlotExistsForDate(dateStr, c = null, s = null, sub = null) {
              const tgtC = c || (currentReg ? currentReg.c : null);
              const tgtS = s || (currentReg ? currentReg.s : null);
@@ -3102,18 +3114,19 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
              const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
              const dayName = dayNames[checkD.getDay()];
 
-             const override = timetableHistoryData.find(o => o.date === dateStr && o.type !== "FUTURE_MASTER");
-             if (override && override.schedule) {
+             const snapshot = getScheduleSnapshotForDate(dateStr);
+             
+             if (snapshot.isOverride) {
                  if (tgtSub === 'CLASS INCHARGE') {
-                     return override.schedule.some(slot => normMatch(slot.className) === normMatch(tgtC) && normMatch(slot.section) === normMatch(tgtS));
+                     return snapshot.schedule.some(slot => normMatch(slot.className) === normMatch(tgtC) && normMatch(slot.section) === normMatch(tgtS));
                  }
-                 return override.schedule.some(slot => normMatch(slot.className) === normMatch(tgtC) && normMatch(slot.section) === normMatch(tgtS) && normMatch(slot.subject) === normMatch(tgtSub));
+                 return snapshot.schedule.some(slot => normMatch(slot.className) === normMatch(tgtC) && normMatch(slot.section) === normMatch(tgtS) && normMatch(slot.subject) === normMatch(tgtSub));
              }
              
              if (tgtSub === 'CLASS INCHARGE') {
-                 return timetableData.some(t => t.day === dayName && normMatch(t.className) === normMatch(tgtC) && normMatch(t.section || t.sectionName) === normMatch(tgtS));
+                 return snapshot.schedule.some(t => t.day === dayName && normMatch(t.className) === normMatch(tgtC) && normMatch(t.section || t.sectionName) === normMatch(tgtS));
              }
-             return timetableData.some(t => t.day === dayName && normMatch(t.className) === normMatch(tgtC) && normMatch(t.section || t.sectionName) === normMatch(tgtS) && normMatch(t.subject) === normMatch(tgtSub));
+             return snapshot.schedule.some(t => t.day === dayName && normMatch(t.className) === normMatch(tgtC) && normMatch(t.section || t.sectionName) === normMatch(tgtS) && normMatch(t.subject) === normMatch(tgtSub));
          }
 
    function checkDateStatus(dateToCheckStr, forceC = null, forceS = null, forceSub = null) {
@@ -3130,17 +3143,13 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             
             if (checkD.getDay() === 0) return { isExcluded: true, reason: "Sunday" }; 
 
-            // Extract the specific class time for the current subject on this day
             let currentClassStartMins = 0;
             let currentClassEndMins = 0;
             
-            // Look for it in Overrides first, then Live Master
-            let scheduleToCheck = timetableData;
-            const overrideData = timetableHistoryData.find(o => o.date === dateToCheckStr && o.type !== "FUTURE_MASTER");
-            if (overrideData && overrideData.schedule) scheduleToCheck = overrideData.schedule;
+            const snapshot = getScheduleSnapshotForDate(dateToCheckStr);
             
-            const slotMatch = scheduleToCheck.find(t => 
-                (overrideData ? true : t.day === dayName) && 
+            const slotMatch = snapshot.schedule.find(t => 
+                (snapshot.isOverride ? true : t.day === dayName) && 
                 normMatch(t.className) === normMatch(tgtC) && 
                 normMatch(t.section || t.sectionName) === normMatch(tgtS) && 
                 normMatch(t.subject) === normMatch(tgtSub)
@@ -3155,19 +3164,20 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
 
             // 1. Check strict holidays from school_holidays
             for(let h of holidaysData) {
-                if(h.startDate && h.suspendClasses !== false) {
-                    const [sy, sm, sd] = h.startDate.split('-');
-                    let hs = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd));
-                    
-                    let he = hs;
-                    if (h.endDate) {
-                        const [ey, em, ed] = h.endDate.split('-');
-                        he = new Date(parseInt(ey), parseInt(em)-1, parseInt(ed), 23, 59, 59);
-                    } else {
-                        he = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd), 23, 59, 59);
-                    }
+                if (h.status === 'CANCELLED' || h.suspendClasses === false || !h.startDate) continue;
 
-                 if(checkD >= hs && checkD <= he) {
+                const [sy, sm, sd] = h.startDate.split('-');
+                let hs = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd));
+                
+                let he = hs;
+                if (h.endDate) {
+                    const [ey, em, ed] = h.endDate.split('-');
+                    he = new Date(parseInt(ey), parseInt(em)-1, parseInt(ed), 23, 59, 59);
+                } else {
+                    he = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd), 23, 59, 59);
+                }
+
+                if(checkD >= hs && checkD <= he) {
                                const targetCls = `${normMatch(tgtC)}|${normMatch(tgtS)}`;
                                 const matchesClass = h.targetClasses.some(tc => {
                                     if(tc === 'ALL') return true;
@@ -3202,13 +3212,11 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
                                     }
                                 }
                             }
-                }
             }
 
-// 2. Check Overrides/History for tags
-            const override = timetableHistoryData.find(o => o.date === dateToCheckStr && o.type !== "FUTURE_MASTER");
-            if (override) {
-                const classSlots = (override.schedule || []).filter(s => normMatch(s.className) === normMatch(tgtC) && normMatch(s.section) === normMatch(tgtS));
+// 2. Check Time Machine Snapshot
+            if (snapshot.isOverride) {
+                const classSlots = snapshot.schedule.filter(s => normMatch(s.className) === normMatch(tgtC) && normMatch(s.section) === normMatch(tgtS));
                 if (classSlots.length === 0) {
                     return { isExcluded: true, reason: "Class Not Scheduled" };
                 } else {
@@ -3217,8 +3225,8 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
                     const subjExists = classSlots.some(s => normMatch(s.subject) === normMatch(tgtSub));
                     if (!subjExists) {
                         let reason = "Class Not Scheduled";
-                        if (override.tag && override.tag !== "Daily Override") {
-                            reason = override.tag;
+                        if (snapshot.tag && snapshot.tag !== "Daily Override") {
+                            reason = snapshot.tag;
                         }
                         return { isExcluded: true, reason: reason };
                     } else {
@@ -3229,7 +3237,7 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
 
          // 3. Check regular slots from master timetable
              const slotExists = getSlotExistsForDate(dateToCheckStr, tgtC, tgtS, tgtSub);
-             if (!slotExists && !override) {
+             if (!slotExists && !snapshot.isOverride) {
                 return { isExcluded: true, reason: "No Class Scheduled" };
             }
 
@@ -3549,17 +3557,18 @@ async function loadDailyAttendance() {
               // FIX: Define the canModify flag before rendering the student list
                 const canModify = currentReg.canEdit && !activeStudent && !isAdmin && editUnlocked && !isFutureDate && (!hasAttendanceMarked || window.approvedEditUnlocked);
 
-                // --- NEW: EXAM DAY AUTO-DETECT (Runs once per register load) ---
+              // --- NEW: EXAM DAY AUTO-DETECT (Runs once per register load) ---
                 const dObjDetect = new Date(dateStr);
                 const dayNameDetect = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dObjDetect.getDay()];
                 let isExamDay = false;
-                const overrideDetect = timetableHistoryData.find(o => o.date === dateStr && o.type !== "FUTURE_MASTER");
-                let scheduleDetect = [];
-                if (overrideDetect && overrideDetect.schedule) {
-                    scheduleDetect = overrideDetect.schedule.filter(s => normMatch(s.className) === normMatch(currentReg.c) && normMatch(s.section) === normMatch(currentReg.s));
-                } else {
-                    scheduleDetect = timetableData.filter(t => t.day === dayNameDetect && normMatch(t.className) === normMatch(currentReg.c) && (normMatch(t.section || t.sectionName) === normMatch(currentReg.s)));
-                }
+                
+                const snapshotGlobal = getScheduleSnapshotForDate(dateStr);
+                let scheduleDetect = snapshotGlobal.schedule.filter(s => 
+                    (snapshotGlobal.isOverride ? true : s.day === dayNameDetect) &&
+                    normMatch(s.className) === normMatch(currentReg.c) && 
+                    normMatch(s.section || s.sectionName) === normMatch(currentReg.s)
+                );
+
                 isExamDay = scheduleDetect.some(slot => {
                     const tSub = (slot.subject || slot.title || "").toUpperCase();
                     return tSub.includes('EXAM') || tSub.includes('UT') || tSub.includes('OT') || tSub.includes('PREBOARD') || tSub.includes('TERMINAL');
