@@ -4047,10 +4047,10 @@ async function confirmDateContext() {
             const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
             const draftKey = `draft_${activeCenter}_${dateVal}`;
             
-            const [draftSnap, historySnap, futureSnap, leaveSnap] = await Promise.all([
+            const [draftSnap, historySnap, masterSnap, leaveSnap] = await Promise.all([
                 db.collection("timetable_drafts").doc(draftKey).get(),
                 getCollection("timetable_history").doc(dateVal).get(),
-                getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get(),
+                getCollection("timetable_history").where("type", "in", ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"]).get(),
                 db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get()
             ]);
             
@@ -4063,14 +4063,27 @@ async function confirmDateContext() {
                     globalTimetable = (hData.schedule || []).filter(slot => slot.day === dayName);
                     if (nameTagInp) nameTagInp.value = hData.tag || "";
                     document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
-                } else {
+             } else {
                     let activeMasters = [];
-                    futureSnap.docs.forEach(doc => { if (doc.id <= dateVal) activeMasters.push(doc.data()); });
+                    const todayISO = new Date().toISOString().split('T')[0];
+                    
+                    masterSnap.docs.forEach(doc => { 
+                        const d = doc.data();
+                        if (d.date <= dateVal && d.status !== "CANCELLED") activeMasters.push(d); 
+                    });
                     
                   if (activeMasters.length > 0) {
+                        // Sort descending to find the closest active master BEFORE or ON the target date
                         activeMasters.sort((a, b) => b.date.localeCompare(a.date));
                         globalTimetable = (activeMasters[0].schedule || []).filter(slot => slot.day === dayName);
-                        document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 font-bold">📅 FUTURE MASTER (From ${activeMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
+                        
+                        if (activeMasters[0].date > todayISO) {
+                            document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 font-bold">📅 FUTURE MASTER (From ${activeMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
+                        } else if (activeMasters[0].date < todayISO) {
+                            document.getElementById('view-label').innerHTML = `<span class="text-slate-600 font-bold">🕰️ HISTORICAL MASTER (From ${activeMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
+                        } else {
+                            document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
+                        }
                     } else {
                         globalTimetable = liveMasterTimetable.filter(t => t.day === dayName);
                         document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
