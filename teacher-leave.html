@@ -32,10 +32,13 @@
         <button onclick="window.location.href='teacher-portal.html'" class="p-2 bg-indigo-800 rounded-xl active:bg-indigo-700">
             <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
         </button>
-        <div>
+     <div class="flex-1">
             <h1 class="text-lg font-black uppercase tracking-tight leading-none">Leave Manager</h1>
             <p class="text-[10px] font-bold text-indigo-300 uppercase tracking-widest mt-1" id="pref-name">Loading Profile...</p>
         </div>
+        <button id="incharge-tt-btn" onclick="openTodayTimetable()" class="hidden p-2.5 bg-indigo-800 text-indigo-100 rounded-xl active:bg-indigo-700 shadow-sm border border-indigo-700 flex items-center justify-center gap-2" title="View Today's Complete Timetable">
+            <span class="text-lg">📅</span>
+        </button>
     </header>
 
     <main class="p-4 space-y-5 max-w-2xl mx-auto">
@@ -261,8 +264,9 @@
                 if (sData.dutyEndTime) myDutyEnd = sData.dutyEndTime;
             }
 
-          if(activeStaff.isLeaveIncharge) {
+         if(activeStaff.isLeaveIncharge) {
                 document.getElementById('tab-incharge').classList.replace('hidden', 'flex');
+                document.getElementById('incharge-tt-btn').classList.replace('hidden', 'flex');
             }
 
             document.getElementById('pref-name').innerText = (activeStaff.name || activeStaff.email) + " • " + (activeStaff.center || "GHUMARWIN");
@@ -1491,11 +1495,10 @@ async function loadDatabases() {
                                         return !staffTt.some(slot => {
                                             const s = timeToMins(slot.start24 || (slot.timeRange ? slot.timeRange.split(' - ')[0] : "00:00"));
                                             const e = timeToMins(slot.end24 || (slot.timeRange ? slot.timeRange.split(' - ')[1] : "00:00"));
-                                            const hasOverlap = (adj.start < e && adj.end > s);
-                                            
-                                            if (!hasOverlap) return false;
-                                            return (s <= adj.start && e >= adj.end); 
-                                        });
+                                          const hasOverlap = (adj.start < e && adj.end > s);
+                
+                return hasOverlap; 
+            });
                                     });
 
                                     let deptMap = {};
@@ -1694,11 +1697,77 @@ async function loadDatabases() {
             }
             return dateStr;
         }
-        function getStaffDept(email) {
+      function getStaffDept(email) {
             const st = staffData.find(s => s.email.toLowerCase() === (email || "").toLowerCase());
             return st ? st.dept : "General";
         }
 
+        function openTodayTimetable() {
+            const today = new Date();
+            const todayIso = today.toISOString().split('T')[0];
+            const dayName = today.toLocaleDateString('en-US', { weekday: 'long' });
+            
+            let activeSchedule = [];
+            const override = historyData.find(o => o.date === todayIso);
+            if (override && override.schedule) {
+                activeSchedule = override.schedule;
+            } else {
+                activeSchedule = timetableData.filter(t => t.day === dayName);
+            }
+            
+            allLeaves.forEach(l => {
+                if (l.status === "APPROVED" || l.status === "PENDING") {
+                    (l.adjustments || []).forEach(adj => {
+                        if (adj.date === todayIso && adj.substituteResponse === "ACCEPTED") {
+                            const sh = Math.floor(adj.start / 60).toString().padStart(2, '0');
+                            const sm = (adj.start % 60).toString().padStart(2, '0');
+                            const eh = Math.floor(adj.end / 60).toString().padStart(2, '0');
+                            const em = (adj.end % 60).toString().padStart(2, '0');
+                            activeSchedule.push({
+                                teacherName: adj.adjustedTo, teacherEmail: adj.adjustedEmail,
+                                start24: `${sh}:${sm}`, end24: `${eh}:${em}`,
+                                subject: adj.title || "Extra Duty",
+                                className: (adj.sub || "").split('|')[0] || "Cover",
+                                section: (adj.sub || "").split('|')[1] || "",
+                                isSub: true
+                            });
+                        }
+                    });
+                }
+            });
+            
+            let html = `<div class="space-y-4">`;
+            const grouped = {};
+            activeSchedule.forEach(slot => {
+                if (!grouped[slot.className]) grouped[slot.className] = {};
+                if (!grouped[slot.className][slot.section]) grouped[slot.className][slot.section] = [];
+                grouped[slot.className][slot.section].push(slot);
+            });
+            
+            Object.keys(grouped).sort().forEach(cName => {
+                html += `<div class="bg-slate-50 rounded-xl p-3 border border-slate-200"><h4 class="font-black text-indigo-800 uppercase tracking-widest text-xs border-b border-slate-200 pb-2 mb-2">${cName}</h4><div class="space-y-2">`;
+                Object.keys(grouped[cName]).sort().forEach(sName => {
+                    html += `<div class="bg-white p-2 rounded-lg shadow-sm border border-slate-100"><div class="text-[10px] font-black text-slate-500 uppercase mb-1">SEC ${sName}</div><div class="flex flex-wrap gap-2">`;
+                    const sortedSlots = grouped[cName][sName].sort((a,b) => (a.start24||"").localeCompare(b.start24||""));
+                    sortedSlots.forEach(s => {
+                        if (s.subject === 'NONE' || s.subject === 'BREAK') return;
+                        html += `<div class="text-[9px] bg-slate-50 border border-slate-200 px-2 py-1 rounded">
+                            <span class="font-black text-slate-700">${s.start24}-${s.end24}</span>
+                            <span class="font-bold text-indigo-600 ml-1">${s.subject}</span>
+                            <span class="text-slate-500 ml-1">[${s.teacherName || s.teacher || 'TBA'}] ${s.isSub ? '⭐' : ''}</span>
+                        </div>`;
+                    });
+                    html += `</div></div>`;
+                });
+                html += `</div></div>`;
+            });
+            html += `</div>`;
+            
+            document.getElementById('tsm-name').innerText = "Today's Timetable";
+            document.getElementById('tsm-date').innerText = new Date().toLocaleDateString('en-GB', {weekday:'long', day:'numeric', month:'short', year:'numeric'});
+            document.getElementById('tsm-feed').innerHTML = html || `<div class="p-6 text-center text-slate-400 font-bold text-xs uppercase">No classes today.</div>`;
+            document.getElementById('teacher-schedule-modal').classList.replace('hidden', 'flex');
+        }
     </script>
 </body>
 </html>
