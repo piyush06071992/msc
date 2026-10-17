@@ -1,4 +1,4 @@
-const { onDocumentCreated, onDocumentWritten } = require("firebase-functions/v2/firestore");
+const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
@@ -7,67 +7,6 @@ const crypto = require("crypto");
 if (!admin.apps.length) {
     admin.initializeApp();
 }
-
-// =======================================================
-// --- AUTO-BUMP MASTER CONFIG VERSION TRIGGER ---
-// =======================================================
-exports.autoBumpMasterConfig = onDocumentWritten({
-    document: "{collectionName}/{docId}",
-    region: "asia-south1",
-    memory: "256MB"
-}, async (event) => {
-    const collectionName = event.params.collectionName;
-    const configKeywords = [
-        'timetable', 
-        'institute_structure', 
-        'school_holidays', 
-        'staff_applications', 
-        'remedial_classes',
-        'special_leaves'
-    ];
-
-    // Automatically bumps version when any master configuration changes
-    if (configKeywords.some(keyword => collectionName.includes(keyword))) {
-        const now = Date.now();
-        
-        // 1. Always bump the global master config version
-        await admin.firestore().collection('system_metadata').doc('master_config_version').set({
-            lastUpdated: now
-        }, { merge: true });
-
-        // 2. If the timetable specifically changed, bump its dedicated version doc too
-        if (collectionName.includes('timetable')) {
-            await admin.firestore().collection('system_metadata').doc('timetable').set({
-                lastUpdated: now
-            }, { merge: true });
-        }
-        
-      console.log(`🔄 Master config versions automatically bumped due to update in: ${collectionName}`);
-    }
-    return null;
-});
-
-// =======================================================
-// --- AUTO-BUMP STUDENT CACHE VERSION TRIGGER ---
-// =======================================================
-exports.autoBumpStudentVersion = onDocumentWritten({
-    document: "{collectionName}/{studentId}",
-    region: "asia-south1",
-    memory: "256MB"
-}, async (event) => {
-    const collectionName = event.params.collectionName;
-
-    // Only proceed if the write happened in one of the student collections
-    if (collectionName === "students" || collectionName === "dharamshala_students") {
-        // Whenever any student is added, approved, edited, or deleted, update the global cache version
-        await admin.firestore().collection('system_metadata').doc('students_version').set({
-            lastUpdated: Date.now()
-        }, { merge: true });
-        
-        console.log(`🔄 Student cache version bumped due to roster update in ${collectionName}.`);
-    }
-    return null;
-});
 
 exports.sendInstantPushAlerts = onDocumentCreated({
     document: "instant_alerts/{docId}",
