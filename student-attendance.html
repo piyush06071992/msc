@@ -5079,15 +5079,41 @@ async function requestUnmarkAttendance() {
 
             const docId = `att_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthVal}`;
             
-            getCollection("attendance_records").doc(docId).get().then(snap => {
+           getCollection("attendance_records").doc(docId).get().then(snap => {
                 let data = snap.exists ? snap.data() : {};
                 let stats = data.aggregatedStats || { globalTotalWorkingDays: 0, students: {} };
+                let curRecords = data.records || {};
                 
-           prevWorkingInput.value = stats.globalTotalWorkingDays || 0;
+            prevWorkingInput.value = stats.globalTotalWorkingDays || 0;
                 
+                // --- FIX: Filter out non-enrolled students for Optional Subjects ---
+                let isOptional = false;
+                const currentSub = currentReg ? currentReg.sub : "";
+                if (window.instituteStructures) {
+                    window.instituteStructures.filter(st => normMatch(st.className) === normMatch(currentReg.c) && normMatch(st.sectionName || st.section) === normMatch(currentReg.s)).forEach(st => {
+                        if (st.optionalSubjects && st.optionalSubjects.some(os => normMatch(os) === normMatch(currentSub))) {
+                            isOptional = true;
+                        }
+                    });
+                }
+
                 const monthStart = `${y}-${m}-01`;
                 const myStudents = studentsData.filter(stu => {
                     if (normMatch(stu.className) !== normMatch(currentReg.c) || normMatch(stu.section) !== normMatch(currentReg.s)) return false;
+                    
+                    if (isOptional) {
+                        const stuOpt = normMatch(stu.optionalSubject || "");
+                        if (stuOpt !== normMatch(currentSub)) {
+                            const hasAttendanceInMonth = Object.keys(curRecords).some(d => curRecords[d] && curRecords[d][stu.id]);
+                            const shiftDate = stu.optSubEffectiveDate || "";
+                            const [sy, sm] = shiftDate.split('-');
+                            const shiftMonth = `${sy}_${sm}`;
+                            
+                            // If they shifted subjects, only show them if they shifted DURING this month, or if they have past records here
+                            if (!hasAttendanceInMonth && shiftMonth !== monthVal) return false;
+                        }
+                    }
+
                     // Keep students who left DURING or AFTER this month, but hide those who left BEFORE this month
                     if (stu.isActive === false && stu.statusChangeDate && stu.statusChangeDate < monthStart) return false;
                     return true;
