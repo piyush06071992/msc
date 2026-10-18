@@ -2297,11 +2297,20 @@ async function saveStudentProfileInline(e) {
             const newOptSub = optSelect.value || "";
             const origOptSub = optSelect.dataset.original || "";
             const shiftType = document.getElementById('sp-opt-shift-type').value;
-            let optDateVal = document.getElementById('sp-opt-date').value;
+        let optDateVal = document.getElementById('sp-opt-date').value;
             
             const stu = globalStudentsData.find(s => s.id === activeProfileStudentId);
             
             let requiresMigration = false;
+
+            // --- NEW: Detect Roll Number Changes ---
+            const oldRollNo = stu.rollNo || "";
+            const newRollNo = clean('sp-roll');
+            let requiresRollMigration = false;
+            
+            if (oldRollNo !== "" && newRollNo !== "" && oldRollNo.toUpperCase() !== newRollNo.toUpperCase()) {
+                requiresRollMigration = true;
+            }
 
             if (stu && origOptSub && origOptSub !== newOptSub && newOptSub !== "") {
                 if (shiftType === 'CORRECTION') {
@@ -2345,11 +2354,17 @@ async function saveStudentProfileInline(e) {
 
          if (aadharVal !== "[Redacted]" && aadharVal !== "") updates.aadhar = aadharVal;
 
-                await getCollection("students").doc(activeProfileStudentId).update(updates);
+              await getCollection("students").doc(activeProfileStudentId).update(updates);
 
                 if (requiresMigration) {
                     btn.innerHTML = "⏳ Migrating Attendance...";
                     await executeAttendanceMigration(stu.id, stu.className, stu.section, origOptSub, newOptSub);
+                }
+                
+                // --- NEW: Execute Score Migration ---
+                if (requiresRollMigration) {
+                    btn.innerHTML = "⏳ Migrating Exam Scores...";
+                    await executeScoreRollMigration(oldRollNo, newRollNo);
                 }
 
                 alert("✅ Profile Updated Successfully!");
@@ -2417,10 +2432,30 @@ async function saveStudentProfileInline(e) {
                 }
 
                 await batch.commit();
-            } catch (error) {
+           } catch (error) {
                 console.error("Attendance Migration Error:", error);
                 alert("Warning: Profile updated, but failed to migrate historical attendance.");
             }
+        }
+
+        async function executeScoreRollMigration(oldRoll, newRoll) {
+            const oldRollUpper = String(oldRoll).trim().toUpperCase();
+            const newRollUpper = String(newRoll).trim().toUpperCase();
+            
+            const snap = await db.collection("omr_submissions").where("rollNo", "==", oldRollUpper).get();
+            if (snap.empty) return;
+
+            const batch = db.batch();
+            snap.docs.forEach(doc => {
+                const data = doc.data();
+                const groupId = data.groupId;
+                
+                const newDocRef = db.collection("omr_submissions").doc(`${groupId}_${newRollUpper}`);
+                batch.set(newDocRef, { ...data, rollNo: newRollUpper });
+                batch.delete(doc.ref);
+            });
+
+            await batch.commit();
         }
 
         async function openStudentAttendance() {
