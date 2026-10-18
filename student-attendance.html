@@ -2318,9 +2318,15 @@ function updateAuditSectionFilter() {
                         if (normMatch(pData.className) === normMatch(cName) && normMatch(pData.section) === normMatch(sName)) {
                             if (normMatch(pData.subject) === normMatch(subject)) {
                                 if (!earliestMonthKey || pData.monthKey < earliestMonthKey) earliestMonthKey = pData.monthKey;
-                                if (pData.aggregatedStats) {
-                                    prevStats = { ...prevStats, ...pData.aggregatedStats };
+                                
+                                if (pData.aggregatedStats && pData.aggregatedStats.globalTotalWorkingDays !== undefined) {
+                                    if (!latestBaselineMonth || pData.monthKey > latestBaselineMonth) {
+                                        latestBaselineMonth = pData.monthKey;
+                                        baselineWorkingDays = pData.aggregatedStats.globalTotalWorkingDays;
+                                        baselineStudentAtt = pData.aggregatedStats.students || {};
+                                    }
                                 }
+                                
                                 if (pData.records) {
                                     Object.keys(pData.records).forEach(dKey => {
                                         prevUnifiedRecords[dKey] = { ...(prevUnifiedRecords[dKey] || {}), ...pData.records[dKey] };
@@ -2345,8 +2351,10 @@ function updateAuditSectionFilter() {
                     });
 
                  // Calculate actual working days and attendance from previous un-aggregated months
-                    if (earliestMonthKey) {
-                        const [startY, startM] = earliestMonthKey.split('_').map(Number);
+                  // Calculate actual working days and attendance from previous un-aggregated months
+                    let startPointMonth = latestBaselineMonth ? latestBaselineMonth : earliestMonthKey;
+                    if (startPointMonth) {
+                        const [startY, startM] = startPointMonth.split('_').map(Number);
                         let curD = new Date(startY, startM - 1, 1);
                         const endD = new Date(y, m - 1, 0); 
                         
@@ -2381,7 +2389,7 @@ function updateAuditSectionFilter() {
                         }
                     }
 
-                  const prevTotalWorking = curStats.globalTotalWorkingDays !== undefined ? curStats.globalTotalWorkingDays : (prevStats.globalTotalWorkingDays || prevActualWorkingDays);
+                 const prevTotalWorking = curStats.globalTotalWorkingDays !== undefined ? curStats.globalTotalWorkingDays : (baselineWorkingDays + prevActualWorkingDays);
                     // --- END DYNAMIC BASELINE CALCULATOR ---
 
                     let currentWorking = 0;
@@ -2403,18 +2411,25 @@ function updateAuditSectionFilter() {
                         let stuPrevAtt = 0;
                         let stuPrevWork = prevTotalWorking;
                         
-                        const getStuStats = (statsObj, sid) => {
-                            if (!statsObj || !statsObj.students || statsObj.students[sid] === undefined) return null;
-                            const val = statsObj.students[sid];
+                    const getBaselineStuStats = (sid) => {
+                            if (baselineStudentAtt[sid] === undefined) return null;
+                            const val = baselineStudentAtt[sid];
                             if (typeof val === 'object') return val;
-                            return { att: val, working: statsObj.globalTotalWorkingDays || 0 };
+                            return { att: val, working: baselineWorkingDays };
+                        };
+
+                        const getCurStuStats = (sid) => {
+                            if (!curStats || !curStats.students || curStats.students[sid] === undefined) return null;
+                            const val = curStats.students[sid];
+                            if (typeof val === 'object') return val;
+                            return { att: val, working: curStats.globalTotalWorkingDays || 0 };
                         };
                         
-                       let prevBaseStats = getStuStats(prevStats, stu.id) || { att: 0, working: (prevStats.globalTotalWorkingDays || 0) };
+                       let prevBaseStats = getBaselineStuStats(stu.id) || { att: 0, working: baselineWorkingDays };
                         let dynamicPrevAtt = prevBaseStats.att + (prevActualStudentAtt[stu.id] || 0);
                         let dynamicPrevWork = prevBaseStats.working + prevActualWorkingDays;
 
-                        let curStuStats = getStuStats(curStats, stu.id);
+                        let curStuStats = getCurStuStats(stu.id);
 
                         if (stu.transferDate && oldSectionPrevStats[stu.id]) {
                             // Handle cross-section transfers
@@ -5260,16 +5275,19 @@ async function loadLedger() {
                 let prevDocsArray = prevDocsArrays.flat();
 
                 let curRecords = {};
-         let curStats = {};
-                let prevStats = {}; // Kept for legacy compatibility
-                
-          let oldSectionRecords = {};
+       let curStats = {};
+                let prevStats = {};
                 let oldSectionPrevStats = {};
+                let prevActualWorkingDays = 0;
+                let prevActualStudentAtt = {};
                 
-                let anySubjectPresentStatus = {}; // For current month
-                let prevAnySubjectPresentStatus = {}; // For previous month
-                let prevUnifiedRecords = {}; // Deduplicated previous month records
-                let earliestMonthKey = null; // Tracks when this ledger actually started
+                // Find matching previous month records for this specific class/section/subject
+                let prevUnifiedRecords = {};
+                let earliestMonthKey = null;
+                
+                let latestBaselineMonth = null;
+                let baselineWorkingDays = 0;
+                let baselineStudentAtt = {};
                 
                 let latestBaselineMonth = null;
                 let baselineWorkingDays = 0;
@@ -5354,12 +5372,17 @@ async function loadLedger() {
 
                    if (normMatch(data.subject) !== normMatch(currentReg.sub)) return;
 
-                    if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
+                   if (normMatch(data.className) === normMatch(currentReg.c) && normMatch(data.section) === normMatch(currentReg.s)) {
                         if (!earliestMonthKey || data.monthKey < earliestMonthKey) earliestMonthKey = data.monthKey;
                         
-                        if (data.aggregatedStats) {
-                            prevStats = { ...prevStats, ...data.aggregatedStats };
+                        if (data.aggregatedStats && data.aggregatedStats.globalTotalWorkingDays !== undefined) {
+                            if (!latestBaselineMonth || data.monthKey > latestBaselineMonth) {
+                                latestBaselineMonth = data.monthKey;
+                                baselineWorkingDays = data.aggregatedStats.globalTotalWorkingDays;
+                                baselineStudentAtt = data.aggregatedStats.students || {};
+                            }
                         }
+                        
                         if (data.records) {
                             Object.keys(data.records).forEach(dKey => {
                                 prevUnifiedRecords[dKey] = { ...(prevUnifiedRecords[dKey] || {}), ...data.records[dKey] };
@@ -5380,11 +5403,12 @@ async function loadLedger() {
                         }
                    }
                 });
-            let prevActualWorkingDays = 0;
+let prevActualWorkingDays = 0;
                 let prevActualStudentAtt = {};
                 
-                if (earliestMonthKey) {
-                    const [startY, startM] = earliestMonthKey.split('_').map(Number);
+                let startPointMonth = latestBaselineMonth ? latestBaselineMonth : earliestMonthKey;
+                if (startPointMonth) {
+                    const [startY, startM] = startPointMonth.split('_').map(Number);
                     let curD = new Date(startY, startM - 1, 1);
                     const endD = new Date(prevY, prevM, 0); // Last day of previous month
                     
@@ -5551,7 +5575,7 @@ async function loadLedger() {
                     dayHeaders += `<th class="${bg} min-w-[25px] font-black border-r border-b border-black text-[9px]">${d}</th>`;
                 }
 
-         const prevTotalWorking = curStats.globalTotalWorkingDays !== undefined ? curStats.globalTotalWorkingDays : ((prevStats.globalTotalWorkingDays || 0) + prevActualWorkingDays);
+     const prevTotalWorking = curStats.globalTotalWorkingDays !== undefined ? curStats.globalTotalWorkingDays : (baselineWorkingDays + prevActualWorkingDays);
                 const grandTotalWorking = prevTotalWorking + totalWorkingDaysMonth;
 
            let subjectTeacherName = "";
@@ -5648,19 +5672,25 @@ async function loadLedger() {
                     let stuPrevAtt = 0;
                     let stuPrevWork = prevTotalWorking;
                     
-                    const getStuStats = (statsObj, sid) => {
-                        if (!statsObj || !statsObj.students || statsObj.students[sid] === undefined) return null;
-                        const val = statsObj.students[sid];
-                        if (typeof val === 'object') return val;
-                        return { att: val, working: statsObj.globalTotalWorkingDays || 0 };
-                    };
-                    
-               // REPLACE WITH THIS:
-let prevBaseStats = getStuStats(prevStats, stu.id) || { att: 0, working: (prevStats.globalTotalWorkingDays || 0) };
-let dynamicPrevAtt = prevBaseStats.att + (prevActualStudentAtt[stu.id] || 0);
-let dynamicPrevWork = prevBaseStats.working + prevActualWorkingDays;
+                  const getBaselineStuStats = (sid) => {
+                            if (baselineStudentAtt[sid] === undefined) return null;
+                            const val = baselineStudentAtt[sid];
+                            if (typeof val === 'object') return val;
+                            return { att: val, working: baselineWorkingDays };
+                        };
 
-let curStuStats = getStuStats(curStats, stu.id);
+                        const getCurStuStats = (sid) => {
+                            if (!curStats || !curStats.students || curStats.students[sid] === undefined) return null;
+                            const val = curStats.students[sid];
+                            if (typeof val === 'object') return val;
+                            return { att: val, working: curStats.globalTotalWorkingDays || 0 };
+                        };
+                        
+                       let prevBaseStats = getBaselineStuStats(stu.id) || { att: 0, working: baselineWorkingDays };
+                        let dynamicPrevAtt = prevBaseStats.att + (prevActualStudentAtt[stu.id] || 0);
+                        let dynamicPrevWork = prevBaseStats.working + prevActualWorkingDays;
+
+                        let curStuStats = getCurStuStats(stu.id);
 
 if (isCurrentClass && stu.transferDate && oldSectionPrevStats[stu.id]) {
     if (typeof oldSectionPrevStats[stu.id] === 'object') {
@@ -5671,7 +5701,6 @@ if (isCurrentClass && stu.transferDate && oldSectionPrevStats[stu.id]) {
         stuPrevWork = prevTotalWorking;
     }
 } else {
-    // FIX: Strictly prioritize manual baseline settings if they exist.
     if (curStuStats && (curStuStats.working !== undefined || curStuStats.att !== undefined)) {
         stuPrevAtt = curStuStats.att !== undefined ? curStuStats.att : 0;
         stuPrevWork = curStuStats.working !== undefined ? curStuStats.working : prevTotalWorking;
