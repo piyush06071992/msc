@@ -1818,7 +1818,43 @@ function renderAssignedPaperCard(r, index, totalCards) {
                     });
                 });
 
-                let allDocs = Object.values(docsByPath).filter(d => d.date && d.date >= todayIso);
+               let allDocs = Object.values(docsByPath).filter(d => d.date && d.date >= todayIso);
+
+                // --- GHOST MAPPING FILTER: Cross-verify with active staging ---
+                const [validSchedSnap, validDSchedSnap] = await Promise.all([
+                    db.collection("exam_schedules").where("date", ">=", todayIso).get().catch(()=>({forEach:()=>{}})),
+                    db.collection("dharamshala_exam_schedules").where("date", ">=", todayIso).get().catch(()=>({forEach:()=>{}}))
+                ]);
+                
+                let validKeys = new Set();
+                const parseValidSched = (snap) => {
+                    snap.forEach(doc => {
+                        const d = doc.data();
+                        const processSec = (cName, secName, subs) => {
+                            (Array.isArray(subs)?subs:[subs]).forEach(sub => {
+                                validKeys.add(`${d.date}_${cName}_${secName}_${sub}`.toUpperCase().trim());
+                            });
+                        };
+                        if (d.targets && d.targets.length > 0) {
+                            d.targets.forEach(t => t.sections.forEach(s => {
+                                const secName = typeof s === 'object' ? s.section : s;
+                                const subs = typeof s === 'object' && s.subjects ? s.subjects : (t.subjects || []);
+                                processSec(t.className, secName, subs);
+                            }));
+                        } else {
+                            processSec(d.className, d.section, d.subjects || []);
+                        }
+                    });
+                };
+                parseValidSched(validSchedSnap);
+                parseValidSched(validDSchedSnap);
+
+                allDocs = allDocs.filter(d => {
+                    if (!d.sections || !Array.isArray(d.sections)) return false;
+                    return d.sections.some(s => validKeys.has(`${d.date}_${s.className}_${s.section}_${d.subject}`.toUpperCase().trim()));
+                });
+                // ---------------------------------------------------------------
+
                 if (allDocs.length === 0) { card.classList.add('hidden'); return; }
 
              // 2. Fetch Admin Paper Groups (for cross-referencing Routing/Coordinator) & Students (for context counting)
@@ -1938,13 +1974,38 @@ function renderAssignedPaperCard(r, index, totalCards) {
             const offset = (new Date()).getTimezoneOffset() * 60000;
             const todayIso = (new Date(Date.now() - offset)).toISOString().split('T')[0];
 
-       try {
+     try {
                 // Fetching by date only to bypass Firebase Composite Index restrictions, then filtering by name
-                const [snap, gStuSnap, dStuSnap] = await Promise.all([
+                const [snap, gStuSnap, dStuSnap, validSchedSnap, validDSchedSnap] = await Promise.all([
                     db.collection('admin_paper_groups').where('date', '>=', todayIso).get(),
                     db.collection("students").get(),
-                    db.collection("dharamshala_students").get()
+                    db.collection("dharamshala_students").get(),
+                    db.collection("exam_schedules").where("date", ">=", todayIso).get().catch(()=>({forEach:()=>{}})),
+                    db.collection("dharamshala_exam_schedules").where("date", ">=", todayIso).get().catch(()=>({forEach:()=>{}}))
                 ]);
+
+                let validKeys = new Set();
+                const parseValidSched = (snap) => {
+                    snap.forEach(doc => {
+                        const d = doc.data();
+                        const processSec = (cName, secName, subs) => {
+                            (Array.isArray(subs)?subs:[subs]).forEach(sub => {
+                                validKeys.add(`${d.date}_${cName}_${secName}_${sub}`.toUpperCase().trim());
+                            });
+                        };
+                        if (d.targets && d.targets.length > 0) {
+                            d.targets.forEach(t => t.sections.forEach(s => {
+                                const secName = typeof s === 'object' ? s.section : s;
+                                const subs = typeof s === 'object' && s.subjects ? s.subjects : (t.subjects || []);
+                                processSec(t.className, secName, subs);
+                            }));
+                        } else {
+                            processSec(d.className, d.section, d.subjects || []);
+                        }
+                    });
+                };
+                parseValidSched(validSchedSnap);
+                parseValidSched(validDSchedSnap);
 
                 let studentsMap = { GHUMARWIN: [], DHARAMSHALA: [] };
                 gStuSnap.forEach(d => { const s = d.data(); if(s.isActive !== false) studentsMap.GHUMARWIN.push(s); });
@@ -1976,6 +2037,18 @@ function renderAssignedPaperCard(r, index, totalCards) {
                             seenSectionsForDate.add(`${data.date}_${sk}`);
                         });
                     }
+                });
+
+            // Filter out Ghost Groups using validKeys
+                latestGroups = latestGroups.filter(g => {
+                    return (g.sectionKeys || []).some(sk => {
+                        const parts = sk.split('|');
+                        const cName = parts[1];
+                        const secName = parts[2];
+                        return Array.from(g.subjectSet || []).some(sub => 
+                            validKeys.has(`${g.date}_${cName}_${secName}_${sub}`.toUpperCase().trim())
+                        );
+                    });
                 });
 
                 // Now sort back by date ascending for UI rendering
