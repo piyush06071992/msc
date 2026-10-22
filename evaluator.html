@@ -3408,6 +3408,38 @@ async function loadManualGradingGrid() {
                 const optionalSubs = (secStruct && secStruct.optionalSubjects) ? secStruct.optionalSubjects.map(sub => normMatchLoc(sub)) : [];
                 const isCurrentSubOptional = optionalSubs.includes(normMatchLoc(manualActiveSubject));
                 
+               const subSnap = await db.collection("omr_submissions").where("groupId", "==", manualActiveGroup.id).get();
+                let existingScores = {};
+                subSnap.forEach(doc => {
+                    const d = doc.data();
+                    if (d.directScores && d.directScores[sub] !== undefined) {
+                        existingScores[String(d.rollNo).trim().toUpperCase()] = {
+                            score: d.directScores[sub],
+                            updatedAt: d.updatedAt || 0,
+                            unlockedAt: d.unlockedAt || 0,
+                            unlockRequested: d.unlockRequested || false,
+                            isDraft: false
+                        };
+                    }
+                });
+
+                // Fetch pending drafts
+                const draftDoc = await db.collection("manual_grading_drafts").doc(`${manualActiveGroup.id}_${sub}`).get();
+                if (draftDoc.exists) {
+                    const draftData = draftDoc.data().scores || {};
+                    Object.keys(draftData).forEach(roll => {
+                        const rollUpper = String(roll).trim().toUpperCase();
+                        // Only apply draft if a finalized submission doesn't already exist
+                        if (!existingScores[rollUpper]) {
+                            existingScores[rollUpper] = {
+                                score: draftData[rollUpper],
+                                updatedAt: draftDoc.data().updatedAt || 0,
+                                isDraft: true
+                            };
+                        }
+                    });
+                }
+
                 manualActiveStudents = globalStudentsData.filter(s => {
                     const center = s.actualBranch || s.center || s.branch || activeCenter;
                     const matchesCenter = !manualActiveGroup.branches || manualActiveGroup.branches.length === 0 || manualActiveGroup.branches.includes(center);
@@ -3465,37 +3497,6 @@ async function loadManualGradingGrid() {
                     existingMax = keysDoc.data().directMaxMarks[sub];
                 }
                 document.getElementById('manual-max-marks').value = existingMax;
-             const subSnap = await db.collection("omr_submissions").where("groupId", "==", manualActiveGroup.id).get();
-                let existingScores = {};
-                subSnap.forEach(doc => {
-                    const d = doc.data();
-                    if (d.directScores && d.directScores[sub] !== undefined) {
-                        existingScores[String(d.rollNo).trim().toUpperCase()] = {
-                            score: d.directScores[sub],
-                            updatedAt: d.updatedAt || 0,
-                            unlockedAt: d.unlockedAt || 0,
-                            unlockRequested: d.unlockRequested || false,
-                            isDraft: false
-                        };
-                    }
-                });
-
-                // Fetch pending drafts
-                const draftDoc = await db.collection("manual_grading_drafts").doc(`${manualActiveGroup.id}_${sub}`).get();
-                if (draftDoc.exists) {
-                    const draftData = draftDoc.data().scores || {};
-                    Object.keys(draftData).forEach(roll => {
-                        const rollUpper = String(roll).trim().toUpperCase();
-                        // Only apply draft if a finalized submission doesn't already exist
-                        if (!existingScores[rollUpper]) {
-                            existingScores[rollUpper] = {
-                                score: draftData[rollUpper],
-                                updatedAt: draftDoc.data().updatedAt || 0,
-                                isDraft: true
-                            };
-                        }
-                    });
-                }
 
                 if (manualActiveStudents.length === 0) {
                     tbody.innerHTML = `<tr><td colspan="6" class="text-center py-10 font-bold text-slate-400">No students found.</td></tr>`;
