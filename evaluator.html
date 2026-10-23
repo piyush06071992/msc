@@ -1299,8 +1299,13 @@ if (examTotalMax > 0) {
                     const optSubs = (secStruct && secStruct.optionalSubjects) ? secStruct.optionalSubjects.map(s => s.trim().toUpperCase()) : [];
                     const stuOpt = stu.optionalSubject ? String(stu.optionalSubject).trim().toUpperCase() : "";
 
-             globalSubjectsSet.forEach(compositeKey => {
+globalSubjectsSet.forEach(compositeKey => {
                         const [sub, examDate] = compositeKey.split('|');
+
+                        if (stu.addDate && examDate < stu.addDate) {
+                            stu.subjects[compositeKey] = { obt: 'N/A (Joined After)', max: 0, isExempt: true, subjectName: sub };
+                            return;
+                        }
                         
                         if (optSubs.includes(sub) && stuOpt !== sub) {
                             stu.subjects[compositeKey] = { obt: '—', max: 0, isUnassignedOpt: true, subjectName: sub };
@@ -2932,16 +2937,23 @@ function getGroupForStudent(stu, dateStr) {
                         group = getGroupForStudent(stu, dateStr);
                     }
 
-                    if (group) {
+                if (group) {
+                        const isAdmittedAfter = stu.addDate && dateStr < stu.addDate;
+
                         Object.keys(subjMappings).forEach(subj => {
                             if (isLegacy || (group.subjects || []).map(s=>s.toUpperCase()).includes(subj)) {
-                                const mark = row[subjMappings[subj]];
-                                if (mark === undefined || mark === null || String(mark).trim() === "" || isNaN(Number(mark))) {
-                                    scores[subj] = "ABSENT";
-                                    hasMarks = true; 
-                                } else {
-                                    scores[subj] = Number(mark);
+                                if (isAdmittedAfter) {
+                                    scores[subj] = { value: 'N/A', reason: 'Joined After Exam' };
                                     hasMarks = true;
+                                } else {
+                                    const mark = row[subjMappings[subj]];
+                                    if (mark === undefined || mark === null || String(mark).trim() === "" || isNaN(Number(mark))) {
+                                        scores[subj] = "ABSENT";
+                                        hasMarks = true; 
+                                    } else {
+                                        scores[subj] = Number(mark);
+                                        hasMarks = true;
+                                    }
                                 }
                             }
                         });
@@ -2952,7 +2964,7 @@ function getGroupForStudent(stu, dateStr) {
                         let warnings = [];
                         let defaultAction = 'SAVE';
 
-                        if (!isLegacy) {
+                        if (!isLegacy && !isAdmittedAfter) {
                             if (att === 'A' || att === 'L') {
                                 if(hasMarks && Object.values(scores).some(s => s !== "ABSENT")) { warnings.push('Student is Absent/Leave in Attendance Hub'); defaultAction = 'DROP'; }
                             } else if (att === 'P') {
@@ -3515,9 +3527,10 @@ async function loadManualGradingGrid() {
                 let html = "";
                 let canSaveAny = false;
 
-              manualActiveStudents.forEach((stu, idx) => {
+           manualActiveStudents.forEach((stu, idx) => {
                     const att = localAttCache[stu.id] || 'U';
                     const isAbsent = (att === 'A' || att === 'L');
+                    const isAdmittedAfter = stu.addDate && examDate < stu.addDate;
                     
                     let attBadge = '<span class="text-slate-400 font-bold">Unmarked</span>';
                     if (att === 'P') attBadge = '<span class="text-emerald-600 font-black">Present</span>';
@@ -3536,6 +3549,9 @@ async function loadManualGradingGrid() {
                         } else {
                             existingVal = exData.score;
                         }
+                    } else if (isAdmittedAfter) {
+                        existingVal = 'N/A';
+                        exemptReason = 'Joined After Exam';
                     }
                     const isExempt = (String(existingVal).toUpperCase() === 'N/A');
 
@@ -4270,7 +4286,7 @@ async function loadResultsForGroupAndSection(groupId, targetSectionKey, isFullEx
              currentExamResults = pooledStudents.map(stu => {
                     const roll = String(stu.rollNo || '').trim().toUpperCase();
                     const submissionData = submissionsMap[roll] || {};
-                    const isDirectImport = submissionData.isDirectImport === true;
+                const isDirectImport = submissionData.isDirectImport === true;
              const isCancelled = submissionData.isCancelled === true;
                     const studentResponses = submissionData.responses || {};
                     const directScores = submissionData.directScores || {};
@@ -4286,7 +4302,15 @@ async function loadResultsForGroupAndSection(groupId, targetSectionKey, isFullEx
                     const optSubs = (secStruct && secStruct.optionalSubjects) ? secStruct.optionalSubjects.map(s => s.trim().toUpperCase()) : [];
                     const stuOpt = String(stu.optionalSubject || "").trim().toUpperCase();
 
-                 if (isCancelled) {
+                    const isAdmittedAfter = stu.addDate && examDate < stu.addDate;
+
+                 if (isAdmittedAfter) {
+                    structure.forEach(sec => {
+                        const upperSub = (sec.subject || "UNKNOWN").toUpperCase();
+                        subjectScores[sec.subject] = `N/A (Joined After)`;
+                        subjectBreakdown[upperSub] = { obt: `N/A (Joined After)`, max: 0, isExempt: true };
+                    });
+                 } else if (isCancelled) {
                     // Skip adding to class-wide analytics if cancelled
                 } else if (isDirectImport) {
                     structure.forEach(sec => {
