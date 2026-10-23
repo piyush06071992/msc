@@ -3563,66 +3563,9 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
         // === SAVE ENGINE & EMAIL NOTIFICATION                                     ===
         // ============================================================================
         
-        async function auditBrokenLeaves(targetDateStr, newSchedule) {
-            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-            const leaveSnap = await db.collection(prefix + "leave_requests").get();
-            let brokenCount = 0;
-            const batch = db.batch();
-
-            leaveSnap.forEach(doc => {
-                const leave = doc.data();
-                if (leave.status !== "PENDING" && leave.status !== "APPROVED") return;
-                if (!leave.adjustments) return;
-
-                let needsUpdate = false;
-                let updatedAdjustments = [...leave.adjustments];
-
-                updatedAdjustments.forEach(adj => {
-                    if (adj.date !== targetDateStr || adj.substituteResponse !== "ACCEPTED") return;
-
-                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                    
-                    let stillExists = false;
-                    let subIsBusy = false;
-
-                    newSchedule.forEach(slot => {
-                        const sMins = parseInt((slot.start24||"0:0").split(':')[0])*60 + parseInt((slot.start24||"0:0").split(':')[1]);
-                        const eMins = parseInt((slot.end24||"0:0").split(':')[0])*60 + parseInt((slot.end24||"0:0").split(':')[1]);
-
-                        const cNameMatch = norm(slot.className) === norm((adj.sub || "").split('|')[0]);
-                        const sNameMatch = norm(slot.section) === norm(((adj.sub || "").split('|')[1] || "").replace('Sec', ''));
-                       const subMatch = norm(slot.subject) === norm(adj.title);
-                        
-                        if (cNameMatch && sNameMatch && subMatch && !(adj.end <= sMins - 15 || adj.start >= eMins + 15)) {
-                            stillExists = true;
-                        }
-
-                        if (norm(slot.teacherName || slot.teacher) === norm(adj.adjustedTo)) {
-                            if (adj.start < eMins && adj.end > sMins) {
-                                subIsBusy = true;
-                            }
-                        }
-                    });
-
-                    if (adj.type === "OTHER" || (adj.sub || "").includes("Custom")) stillExists = true; 
-
-                    if (!stillExists || subIsBusy) {
-                        adj.substituteResponse = "BROKEN_BY_ADMIN";
-                        adj.substituteMessage = stillExists ? "Double-booked by Admin Timetable update" : "Class was moved or deleted by Admin";
-                        needsUpdate = true;
-                        brokenCount++;
-                    }
-                });
-
-                if (needsUpdate) {
-                    batch.update(doc.ref, { adjustments: updatedAdjustments });
-                }
-            });
-
-            if (brokenCount > 0) {
-                await batch.commit();
-                alert(`🚨 WARNING: Schedule saved, BUT ${brokenCount} approved leave substitution(s) were broken by your changes!\n\nPlease visit the Leave Manager to assign new substitutes.`);
-            }
+ async function auditBrokenLeaves(targetDateStr, newSchedule) {
+            // Disabled: Substitutions persist through time shifts; conflicts are handled via visual grid clashes.
+            return;
         }
 
       async function saveAllChanges() {
@@ -5024,11 +4967,12 @@ async function executeImport() {
                 if (normStr(leave.teacherName) !== normStr(slot.teacherName || slot.teacher)) return;
                 if (!leave.adjustments) return;
 
-                leave.adjustments.forEach(adj => {
+             leave.adjustments.forEach(adj => {
                     if (adj.date === targetDate && adj.substituteResponse === "ACCEPTED") {
-                        // Check for overlap between substitution window and imported slot
-                        if (!(adj.end <= slotSMins - 15 || adj.start >= slotEMins + 15)) {
-                            // Apply Substitution!
+                        // Responsibility-bound: Match by subject title regardless of time shift
+                        const adjSubject = (adj.title || "").trim();
+                        if (adjSubject && normStr(slot.subject) === normStr(adjSubject)) {
+                            // Apply Substitution
                             slot.origTeacher = slot.teacher;
                             slot.origTeacherName = slot.teacherName;
                             slot.origTeacherEmail = slot.teacherEmail;
