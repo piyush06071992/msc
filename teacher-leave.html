@@ -697,7 +697,27 @@ async function loadDatabases() {
                 return (h * 60) + (m || 0);
             } catch(e) { return 0; } 
         }
-        function minsTo12H(m) { let h=Math.floor(m/60)%24; let mn=m%60; let mod=h>=12?'PM':'AM'; h=h%12||12; return `${h.toString().padStart(2,'0')}:${mn.toString().padStart(2,'0')} ${mod}`; }
+      function minsTo12H(m) { let h=Math.floor(m/60)%24; let mn=m%60; let mod=h>=12?'PM':'AM'; h=h%12||12; return `${h.toString().padStart(2,'0')}:${mn.toString().padStart(2,'0')} ${mod}`; }
+
+        // --- DYNAMIC MASTER TIMETABLE ROUTER ---
+        // Intelligently finds the correct schedule for ANY past, present, or future date!
+        function getScheduleForDate(targetDateIso, dayName) {
+            // 1. Exact Date Overrides win first (e.g., UT/OT Days) - Ignoring Cancelled Zombies!
+            const exactOverride = historyData.find(o => o.date === targetDateIso && o.status !== "CANCELLED" && (o.type === "DAILY_OVERRIDE" || o.type === "EXAM_OVERRIDE"));
+            if (exactOverride && exactOverride.schedule) {
+                return exactOverride.schedule.filter(t => (t.day || "").trim() === dayName);
+            }
+            
+            // 2. If no override, trace backward to find the closest active Master Schedule
+            let validMasters = historyData.filter(h => h.date <= targetDateIso && h.status !== "CANCELLED" && ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"].includes(h.type));
+            if (validMasters.length > 0) {
+                validMasters.sort((a, b) => b.date.localeCompare(a.date)); // Sort newest to oldest
+                return (validMasters[0].schedule || []).filter(t => (t.day || "").trim() === dayName);
+            }
+            
+            // 3. Absolute Failsafe (Should rarely hit if timeline is healthy)
+            return timetableData.filter(t => (t.day || "").trim() === dayName);
+        }
 
         function selectReplacement(clashId, name, email, rowEl, calcSMins, calcEMins, calcTimeStr, isCustomMode) {
             const container = document.getElementById('clash-' + clashId);
@@ -889,12 +909,9 @@ async function loadDatabases() {
                 
                 if(dayName === 'Sunday') continue;
 
-               // (Broad holiday check removed. We now evaluate suspensions per individual class slot below.)
+           // (Broad holiday check removed. We now evaluate suspensions per individual class slot below.)
 
-                const override = historyData.find(o => o.date === tDate);
-                let activeSchedule = (override && override.schedule) 
-                    ? override.schedule.filter(t => (t.day || "").trim() === dayName) 
-                    : timetableData.filter(t => (t.day || "").trim() === dayName);
+                let activeSchedule = getScheduleForDate(tDate, dayName);
 
                 // --- INJECT ACCEPTED SUBSTITUTIONS ---
                 let virtualSchedule = [...activeSchedule];
@@ -1531,12 +1548,11 @@ async function loadDatabases() {
                                         </div>
                                     `;
                                 } else if(isInchargeReq) {
-                                    const dParts = adj.date.split('-');
+                                  const dParts = adj.date.split('-');
                                     const localDateObj = new Date(dParts[0], dParts[1] - 1, dParts[2]);
                                     const dayName = localDateObj.toLocaleDateString('en-US', { weekday: 'long' });
                                     
-                                    const override = historyData.find(o => o.date === adj.date);
-                                    let activeSchedule = (override && override.schedule) ? override.schedule : timetableData.filter(t => t.day === dayName);
+                                    let activeSchedule = getScheduleForDate(adj.date, dayName);
 
                                     const subs = staffData.filter(staff => {
                                         if ((staff.name || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase() === (req.teacherName || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase()) return false;
@@ -1682,15 +1698,12 @@ async function loadDatabases() {
             const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
             const tNameNorm = norm(teacherName);
             
-            const dParts = dateIso.split('-');
+          const dParts = dateIso.split('-');
             const localDateObj = new Date(dParts[0], dParts[1] - 1, dParts[2]);
             const dayName = localDateObj.toLocaleDateString('en-US', { weekday: 'long' });
             
             // 1. Grab Base Schedule
-            const override = historyData.find(o => o.date === dateIso);
-            const baseSchedule = (override && override.schedule) 
-                ? override.schedule.filter(t => (t.day || "").trim() === dayName)
-                : timetableData.filter(t => (t.day || "").trim() === dayName);
+            const baseSchedule = getScheduleForDate(dateIso, dayName);
                 
             let teacherClasses = baseSchedule.filter(s => norm(s.teacherName || s.teacher) === tNameNorm);
             
@@ -1800,18 +1813,12 @@ async function loadDatabases() {
             window.open(waLink, '_blank');
         }
 
-        function openTodayTimetable() {
+       function openTodayTimetable() {
             const today = new Date();
             const todayIso = today.toISOString().split('T')[0];
             const dayName = today.toLocaleDateString('en-US', { weekday: 'long' });
             
-            let activeSchedule = [];
-            const override = historyData.find(o => o.date === todayIso);
-            if (override && override.schedule) {
-                activeSchedule = override.schedule;
-            } else {
-                activeSchedule = timetableData.filter(t => t.day === dayName);
-            }
+            let activeSchedule = getScheduleForDate(todayIso, dayName);
             
             allLeaves.forEach(l => {
                 if (l.status === "APPROVED" || l.status === "PENDING") {
