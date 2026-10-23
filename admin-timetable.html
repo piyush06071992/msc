@@ -3352,10 +3352,10 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                     let clashes = [];
                     myVirtuals.forEach(myV => {
                         const overlaps = virtualDb.filter(otherV => {
-                            if(otherV.entId === myV.entId) return false;
+                           if(otherV.entId === myV.entId) return false;
                             if(otherV.day !== myV.day) return false; 
                             if(otherV.teacher !== myV.teacher) return false; 
-                            if(otherV.section === myV.section) return false; 
+                            if(otherV.className === myV.className && otherV.section === myV.section) return false; 
                             
                             // MERGED CLASS EXCEPTION
                             if (otherV.room !== "" && myV.room !== "" && otherV.room.toLowerCase() === myV.room.toLowerCase()) return false;
@@ -4158,11 +4158,11 @@ async function confirmDateContext() {
                 db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get()
             ]);
             
-           if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
+         if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
                 globalTimetable = draftSnap.data().schedule;
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED OVERRIDE DRAFT:</span> ${prettyDate}`;
             } else {
-                if (historySnap.exists && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
+                if (historySnap.exists && historySnap.data().status !== "CANCELLED" && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
                     const hData = historySnap.data();
                     globalTimetable = (hData.schedule || []).filter(slot => slot.day === dayName);
                     if (nameTagInp) nameTagInp.value = hData.tag || "";
@@ -5005,8 +5005,46 @@ async function executeImport() {
             sourceSlots = masterSnap.docs.map(d => d.data());
         }
         
-        const importedData = sourceSlots.filter(s => s.className === className && s.section === sectionName);
+     const importedData = sourceSlots.filter(s => s.className === className && s.section === sectionName);
         if (importedData.length === 0) throw new Error("No data found for this class on that date.");
+
+        // --- NEW: FETCH LEAVES AND AUTO-APPLY SUBSTITUTIONS TO IMPORTED DATA ---
+        const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+        const leaveSnap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get();
+        const activeLeaves = leaveSnap.docs.map(d => d.data());
+        const targetDate = currentContextDate || new Date().toISOString().split('T')[0];
+        const normStr = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+        importedData.forEach(slot => {
+            if (!slot.teacher || slot.teacher === "NONE") return;
+            const slotSMins = universalTimeToMins(slot.start24);
+            const slotEMins = universalTimeToMins(slot.end24);
+
+            activeLeaves.forEach(leave => {
+                if (normStr(leave.teacherName) !== normStr(slot.teacherName || slot.teacher)) return;
+                if (!leave.adjustments) return;
+
+                leave.adjustments.forEach(adj => {
+                    if (adj.date === targetDate && adj.substituteResponse === "ACCEPTED") {
+                        // Check for overlap between substitution window and imported slot
+                        if (!(adj.end <= slotSMins - 15 || adj.start >= slotEMins + 15)) {
+                            // Apply Substitution!
+                            slot.origTeacher = slot.teacher;
+                            slot.origTeacherName = slot.teacherName;
+                            slot.origTeacherEmail = slot.teacherEmail;
+                            slot.origRemark = slot.remark;
+                            slot.isTemporarySub = true;
+
+                            slot.teacher = adj.adjustedTo;
+                            slot.teacherName = adj.adjustedTo;
+                            slot.teacherEmail = adj.adjustedEmail;
+                            slot.remark = "(Sub for " + (leave.teacherName || "Leave").split(' ')[0] + ")";
+                        }
+                    }
+                });
+            });
+        });
+        // ----------------------------------------------------------------------
 
    // 2. Use cached Live Master Schedule for accurate comparison
         let targetDayName = currentContextDate ? new Date(currentContextDate).toLocaleDateString('en-US', { weekday: 'long' }) : new Date().toLocaleDateString('en-US', { weekday: 'long' });
