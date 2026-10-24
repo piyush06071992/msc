@@ -505,7 +505,7 @@
                         <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 items-end">
                     <div>
                         <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Center</label>
-                        <select id="rc-center" onchange="populateRcClasses()" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold outline-none cursor-pointer uppercase">
+                        <select id="rc-center" onchange="populateRcClasses(); populateRcDates();" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold outline-none cursor-pointer uppercase">
                             <option value="GHUMARWIN">Ghumarwin</option>
                             <option value="DHARAMSHALA">Dharamshala</option>
                         </select>
@@ -518,13 +518,13 @@
                         <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Section</label>
                         <select id="rc-sec" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold outline-none cursor-pointer uppercase"></select>
                     </div>
-                    <div>
+                   <div>
                         <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Start Date</label>
-                        <input type="date" id="rc-start" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold outline-none cursor-pointer">
+                        <select id="rc-start" onchange="filterRcEndDates()" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold outline-none cursor-pointer uppercase"></select>
                     </div>
                     <div>
                         <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">End Date</label>
-                        <input type="date" id="rc-end" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold outline-none cursor-pointer">
+                        <select id="rc-end" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold outline-none cursor-pointer uppercase"></select>
                     </div>
                     <div class="col-span-2 md:col-span-1 lg:col-span-1">
                         <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Exam Types</label>
@@ -995,10 +995,71 @@ window.onload = async () => {
         let subjectMaxMarks = {}; // NEW: Stores global max marks per subject
         let activeIndividualStudent = null;
 
+       let globalRcDateMap = {};
+
         function generateReportCards() {
             document.getElementById('report-card-modal').classList.replace('hidden', 'flex');
             document.getElementById('rc-center').value = activeCenter;
             populateRcClasses();
+            populateRcDates();
+        }
+
+        async function populateRcDates() {
+            const center = document.getElementById('rc-center').value;
+            const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
+            try {
+                const snap = await db.collection(prefix + "exam_schedules").get();
+                globalRcDateMap = {};
+                snap.forEach(d => { 
+                    const data = d.data();
+                    if (data.date) {
+                        if (!globalRcDateMap[data.date]) globalRcDateMap[data.date] = new Set();
+                        if (data.type) globalRcDateMap[data.date].add(data.type);
+                    }
+                });
+                
+                const sortedDates = Object.keys(globalRcDateMap).sort((a, b) => a.localeCompare(b));
+                const startSel = document.getElementById('rc-start');
+                
+                if (sortedDates.length === 0) {
+                    startSel.innerHTML = '<option value="">No exams found</option>';
+                    document.getElementById('rc-end').innerHTML = '<option value="">No exams found</option>';
+                    return;
+                }
+                
+                startSel.innerHTML = sortedDates.map(d => {
+                    const types = Array.from(globalRcDateMap[d]).join(', ');
+                    const typeStr = types ? ` - ${types}` : '';
+                    return `<option value="${d}">${new Date(d + 'T00:00:00').toLocaleDateString('en-GB', {day:'numeric',month:'short',year:'numeric'})}${typeStr}</option>`;
+                }).join('');
+                
+                filterRcEndDates();
+            } catch(e) { console.error(e); }
+        }
+
+        function filterRcEndDates() {
+            const startVal = document.getElementById('rc-start').value;
+            const endSel = document.getElementById('rc-end');
+            if (!startVal) return;
+            
+            const sortedDates = Object.keys(globalRcDateMap).sort((a, b) => a.localeCompare(b));
+            // Filter out dates that are before the selected start date
+            const validDates = sortedDates.filter(d => d >= startVal);
+            
+            let currentEndVal = endSel.value;
+            
+            endSel.innerHTML = validDates.map(d => {
+                const types = Array.from(globalRcDateMap[d]).join(', ');
+                const typeStr = types ? ` - ${types}` : '';
+                return `<option value="${d}">${new Date(d + 'T00:00:00').toLocaleDateString('en-GB', {day:'numeric',month:'short',year:'numeric'})}${typeStr}</option>`;
+            }).join('');
+            
+            // Retain previous end date if still valid, otherwise set to latest available valid date
+            if (validDates.includes(currentEndVal)) {
+                endSel.value = currentEndVal;
+            } else if (validDates.length > 0) {
+                endSel.value = validDates[validDates.length - 1]; 
+            }
         }
 
         async function populateRcClasses() {
