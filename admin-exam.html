@@ -2607,7 +2607,8 @@ function renderMasterUploadGroups() {
         groupsHtml = groups.map((g, idx) => {
             let links = [];
             if (g.qpUrl) links.push(`<a href="${g.qpUrl}" target="_blank" class="bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-600 hover:text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-colors shadow-sm inline-flex items-center gap-1">📄 QP PDF</a>`);
-            if (g.omrUrl) links.push(`<a href="${g.omrUrl}" target="_blank" class="bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-600 hover:text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-colors shadow-sm inline-flex items-center gap-1">⭕ OMR PDF</a>`);
+           if (g.omrUrl) links.push(`<a href="${g.omrUrl}" target="_blank" class="bg-emerald-50 border border-emerald-200 text-emerald-700 hover:bg-emerald-600 hover:text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-colors shadow-sm inline-flex items-center gap-1">⭕ OMR PDF</a>`);
+                links.push(`<button onclick="openAnswerKeyModal('${g.groupKey}')" class="bg-amber-50 border border-amber-200 text-amber-700 hover:bg-amber-600 hover:text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase transition-colors shadow-sm inline-flex items-center gap-1">🔑 Answer Key</button>`);
 
             let targetsHtml = g.targets.map(t => `
                 <div class="bg-white border border-slate-200 px-3 py-2 rounded-xl flex items-center justify-between shadow-2xs gap-2">
@@ -2726,6 +2727,167 @@ async function removeSingleTargetFromMaster(groupKey, docId) {
         alert("Failed to remove target: " + e.message);
     }
 }
+
+// --- ANSWER KEY ENGINE ---
+window._currentAkGroup = null;
+window._currentAkSubjects = [];
+
+async function openAnswerKeyModal(groupKey) {
+    const group = window._masterUploadGroups[groupKey];
+    if (!group) return;
+    window._currentAkGroup = group;
+    
+    // Extract unique subjects linked to this Master PDF
+    const subs = new Set();
+    group.targets.forEach(t => subs.add(t.sub.toUpperCase()));
+    window._currentAkSubjects = Array.from(subs).sort();
+
+    let configHtml = '';
+    window._currentAkSubjects.forEach((sub, idx) => {
+        configHtml += `
+            <div class="flex items-center justify-between bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+                <span class="font-black text-indigo-700 text-xs uppercase truncate pr-2">${sub}</span>
+                <div class="flex items-center gap-2 shrink-0">
+                    <label class="text-[10px] font-bold text-slate-500 uppercase">Total Qs:</label>
+                    <input type="number" id="ak-num-${idx}" value="25" min="1" class="w-16 p-1.5 border border-slate-300 rounded-lg text-xs font-black outline-none text-center bg-slate-50 focus:border-indigo-500">
+                </div>
+            </div>
+        `;
+    });
+    document.getElementById('ak-subject-config').innerHTML = configHtml;
+    document.getElementById('ak-grid-container').innerHTML = '';
+    document.getElementById('ak-paste-area').value = '';
+    
+    document.getElementById('ak-manual-setup').classList.remove('hidden');
+    document.getElementById('ak-manual-grid').classList.add('hidden');
+    document.getElementById('btn-save-ak').classList.add('hidden');
+    
+    document.getElementById('answer-key-modal').classList.replace('hidden', 'flex');
+}
+
+function closeAnswerKeyModal() {
+    document.getElementById('answer-key-modal').classList.replace('flex', 'hidden');
+}
+
+function generateAkGrid() {
+    let currentQ = 1; // Continuous global numbering across all subjects
+    let gridHtml = '';
+
+    window._currentAkSubjects.forEach((sub, idx) => {
+        const numQs = parseInt(document.getElementById(`ak-num-${idx}`).value) || 0;
+        if(numQs <= 0) return;
+
+        let colsHtml = '';
+        // Group in columns of 10
+        for (let i = 0; i < numQs; i += 10) {
+            let chunkHtml = '<div class="flex flex-col gap-1.5">';
+            for (let j = 0; j < 10 && (i + j) < numQs; j++) {
+                const qNum = currentQ++; // Increment globally so Chem starts where Phys left off
+                chunkHtml += `
+                    <div class="flex items-center gap-2">
+                        <span class="w-7 text-right text-[10px] font-black text-slate-500">Q${qNum}.</span>
+                        <input type="text" id="ak-ans-${qNum}" data-sub="${sub}" data-q="${qNum}" class="ak-ans-input w-12 p-1.5 border border-slate-300 rounded-lg text-xs font-black outline-none text-center focus:border-indigo-500 uppercase shadow-sm">
+                    </div>
+                `;
+            }
+            chunkHtml += '</div>';
+            colsHtml += chunkHtml;
+        }
+
+        gridHtml += `
+            <div class="bg-slate-50 p-4 rounded-2xl border border-slate-200 shadow-sm">
+                <h4 class="font-black text-indigo-700 text-xs uppercase mb-3 border-b border-slate-200 pb-2">${sub}</h4>
+                <div class="flex flex-wrap gap-x-6 gap-y-4">
+                    ${colsHtml}
+                </div>
+            </div>
+        `;
+    });
+
+    document.getElementById('ak-grid-container').innerHTML = gridHtml;
+    document.getElementById('ak-manual-setup').classList.add('hidden');
+    document.getElementById('ak-manual-grid').classList.remove('hidden');
+    document.getElementById('ak-manual-grid').classList.add('flex');
+    document.getElementById('btn-save-ak').classList.remove('hidden');
+}
+
+function smartParsePaste() {
+    const text = document.getElementById('ak-paste-area').value;
+    if(!text.trim()) return alert("Please paste the PDF text first.");
+    
+    const lines = text.split('\n');
+    let allAnswers = [];
+    
+    // Parse each line looking for the word "Answer"
+    lines.forEach(line => {
+        if (line.toLowerCase().includes('answer') || line.toLowerCase().includes('ans')) {
+            // Strip the word "Answer" out, then parse the remaining tokens
+            let cleanLine = line.replace(/answers?|ans/gi, '').trim();
+            let tokens = cleanLine.split(/\s+/);
+            tokens.forEach(t => {
+                const cleanT = t.trim().toUpperCase();
+                if(cleanT !== '' && cleanT !== ':') allAnswers.push(cleanT);
+            });
+        }
+    });
+
+    const inputs = document.querySelectorAll('.ak-ans-input');
+    if(allAnswers.length === 0) {
+        alert("Could not automatically detect rows containing 'Answer'. Please manually fill the grid or ensure you copied the 'Answer' row labels.");
+        return;
+    }
+
+    let filled = 0;
+    for(let i = 0; i < inputs.length && i < allAnswers.length; i++) {
+        inputs[i].value = allAnswers[i];
+        filled++;
+    }
+    alert(`✅ Successfully mapped ${filled} answers from the pasted text! Please review the grid.`);
+}
+
+async function saveAnswerKey() {
+    const inputs = document.querySelectorAll('.ak-ans-input');
+    let answerData = {};
+    let total = 0;
+    
+    inputs.forEach(inp => {
+        const sub = inp.getAttribute('data-sub');
+        const q = inp.getAttribute('data-q');
+        const val = inp.value.trim().toUpperCase();
+        if(val) {
+            if(!answerData[sub]) answerData[sub] = {};
+            answerData[sub][q] = val; // Store globally continuous Q# directly to value
+            total++;
+        }
+    });
+
+    if(total === 0) return alert("No answers provided. Grid is empty.");
+    
+    const btn = document.getElementById('btn-save-ak');
+    const orig = btn.innerText;
+    btn.innerText = "⏳ Saving Key..."; 
+    btn.disabled = true;
+
+    try {
+        const group = window._currentAkGroup;
+        await getCollection("answer_keys").doc(group.groupKey).set({
+            groupKey: group.groupKey,
+            date: group.targets[0]?.date || document.getElementById('manage-uploads-date').value,
+            answers: answerData,
+            updatedAt: Date.now(),
+            updatedBy: typeof activeStaff !== 'undefined' && activeStaff ? (activeStaff.name || activeStaff.email) : "Admin"
+        }, { merge: true });
+
+        alert("✅ Answer Key Saved Successfully!");
+        closeAnswerKeyModal();
+    } catch(e) {
+        console.error(e);
+        alert("Error saving answer key: " + e.message);
+    } finally {
+        btn.innerText = orig; 
+        btn.disabled = false;
+    }
+}
     </script>
 
    <!-- MASTER EXAM PDF UPLOAD WIZARD MODAL -->
@@ -2788,6 +2950,45 @@ async function removeSingleTargetFromMaster(groupKey, docId) {
            <div class="p-3 bg-white border-t border-slate-200 flex flex-col sm:flex-row gap-3 shrink-0">
                 <button onclick="closeMasterUploadModal()" class="flex-1 py-3 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-black uppercase text-xs tracking-widest transition-colors">Cancel</button>
                 <button onclick="saveMasterPdfUpload()" id="btn-save-master-upload" class="flex-2 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-md transition-all active:scale-95">☁️ Upload & Broadcast to Checked Subjects</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ANSWER KEY MODAL -->
+    <div id="answer-key-modal" class="fixed inset-0 bg-slate-900/85 backdrop-blur-md z-[450] hidden items-center justify-center p-2 sm:p-4">
+        <div class="bg-white rounded-[2rem] w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[96vh]">
+            <div class="p-4 sm:p-5 bg-amber-500 border-b border-amber-600 flex justify-between items-center shrink-0 text-white">
+                <div>
+                    <h3 class="font-black text-lg uppercase tracking-tighter">Manage Answer Key</h3>
+                    <p class="text-[9px] font-bold text-amber-100 uppercase tracking-widest mt-0.5">Configure questions and map answers</p>
+                </div>
+                <button onclick="closeAnswerKeyModal()" class="bg-amber-600 text-amber-100 hover:bg-rose-500 hover:text-white w-8 h-8 rounded-full font-black text-base transition-colors flex items-center justify-center">✕</button>
+            </div>
+            
+            <div class="flex-1 overflow-y-auto custom-scroll flex flex-col">
+                <!-- Step 1: Configuration -->
+                <div id="ak-manual-setup" class="p-6">
+                    <h4 class="font-black text-slate-800 text-sm uppercase tracking-widest mb-4">1. Configure Question Counts</h4>
+                    <div id="ak-subject-config" class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6"></div>
+                    <button onclick="generateAkGrid()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3 rounded-xl font-black uppercase text-xs tracking-widest shadow-md transition-colors">Generate Answer Grid</button>
+                </div>
+
+                <!-- Step 2: Grid & Paste -->
+                <div id="ak-manual-grid" class="p-6 hidden flex-col">
+                    <div class="bg-slate-50 border border-slate-200 p-4 rounded-xl mb-6">
+                        <h4 class="font-black text-indigo-700 text-xs uppercase tracking-widest mb-2 flex items-center gap-2"><span>⚡ Smart Paste from PDF</span></h4>
+                        <p class="text-[10px] font-bold text-slate-500 mb-2">Copy the entire answer key table from the PDF and paste it below. The system will automatically extract lines containing the word "Answer" and sequentially fill the grids below.</p>
+                        <textarea id="ak-paste-area" rows="3" class="w-full p-2 border border-slate-300 rounded-lg text-xs font-mono outline-none focus:border-indigo-500 mb-2" placeholder="Paste PDF text here..."></textarea>
+                        <button onclick="smartParsePaste()" class="bg-indigo-100 text-indigo-700 hover:bg-indigo-200 px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors border border-indigo-200 shadow-sm">Parse & Fill Grid</button>
+                    </div>
+
+                    <h4 class="font-black text-slate-800 text-sm uppercase tracking-widest mb-4">2. Review & Edit Answers</h4>
+                    <div id="ak-grid-container" class="space-y-6"></div>
+                </div>
+            </div>
+            
+            <div class="p-4 bg-white border-t border-slate-200 shrink-0">
+                <button onclick="saveAnswerKey()" id="btn-save-ak" class="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-black uppercase text-xs tracking-widest shadow-md transition-all active:scale-95 hidden">💾 Save Answer Key</button>
             </div>
         </div>
     </div>
