@@ -2732,18 +2732,29 @@ function viewAnswerKeyModal(groupKey) {
     const akData = window._loadedAnswerKeys ? window._loadedAnswerKeys[groupKey] : null;
     if (!akData || !akData.answers) return alert("No answer key found for this batch.");
 
-    // Flatten and collect all questions, ensuring unique question numbers via Map deduplication
     let uniqueMap = new Map();
-    Object.keys(akData.answers).forEach(sub => {
-        const qMap = akData.answers[sub];
-        Object.keys(qMap).forEach(qNum => {
-            const qInt = parseInt(qNum);
-            // Store uniquely by question number to prevent double entries
-            uniqueMap.set(qInt, { qNum: qInt, ans: qMap[qNum] });
-        });
-    });
+    
+    // Check if the data is flat { "1": "A" } or nested by subject { "PHYSICS": { "1": "A" } }
+    const firstKey = Object.keys(akData.answers)[0];
+    const isNested = isNaN(parseInt(firstKey));
 
-    // Convert map back to array and sort numerically
+    if (isNested) {
+        // Legacy Support: Nested by subject
+        Object.keys(akData.answers).forEach(sub => {
+            const qMap = akData.answers[sub];
+            Object.keys(qMap).forEach(qNum => {
+                const qInt = parseInt(qNum);
+                uniqueMap.set(qInt, { qNum: qInt, ans: qMap[qNum] });
+            });
+        });
+    } else {
+        // New Unified Support: Flat dictionary
+        Object.keys(akData.answers).forEach(qNum => {
+            const qInt = parseInt(qNum);
+            uniqueMap.set(qInt, { qNum: qInt, ans: akData.answers[qNum] });
+        });
+    }
+
     let allQuestions = Array.from(uniqueMap.values()).sort((a, b) => a.qNum - b.qNum);
 
     let gridHtml = '<div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3">';
@@ -2828,23 +2839,21 @@ async function removeSingleTargetFromMaster(groupKey, docId) {
 
 // --- EXCEL ANSWER KEY ENGINE ---
 window._currentAkGroup = null;
-window._currentAkSubjects = [];
 window._loadedWorkbook = null;
+window._tempGlobalAnswers = null;
 
 async function openAnswerKeyModal(groupKey) {
     const group = window._masterUploadGroups[groupKey];
     if (!group) return;
     window._currentAkGroup = group;
-    
-    const subs = new Set();
-    group.targets.forEach(t => subs.add(t.sub.toUpperCase()));
-    window._currentAkSubjects = Array.from(subs).sort();
 
+    // Reset UI state cleanly so a new file forces a fresh read
     document.getElementById('ak-excel-file').value = '';
     document.getElementById('ak-excel-config').classList.add('hidden');
     document.getElementById('ak-preview-box').classList.add('hidden');
     document.getElementById('btn-save-ak').classList.add('hidden');
     window._loadedWorkbook = null;
+    window._tempGlobalAnswers = null;
 
     document.getElementById('answer-key-modal').classList.replace('hidden', 'flex');
 }
@@ -2864,44 +2873,6 @@ function handleExcelFileSelect(e) {
             window._loadedWorkbook = XLSX.read(data, { type: 'array' });
             
             // Populate sheet select options
-            const sheetNames = window._loadedWorkbook.SheetNames;
-            const sheetSelect = document.getElementById('ak-sheet-select');
-            sheetSelect.innerHTML = sheetNames.map(s => `<option value="${s}">${s}</option>`).join('');
-
-            // Populate target subject options
-            const subSelect = document.getElementById('ak-target-subject');
-            subSelect.innerHTML = window._currentAkSubjects.map(sub => `<option value="${sub}">${sub}</option>`).join('');
-
-            document.getElementById('ak-excel-config').classList.remove('hidden');
-            document.getElementById('ak-preview-box').classList.add('hidden');
-            document.getElementById('btn-save-ak').classList.add('hidden');
-        } catch (err) {
-            alert("Error reading Excel file: " + err.message);
-        }
-    };
-    reader.readAsArrayBuffer(file);
-}
-
-// Convert Excel column letter to 0-based index (e.g. 'A' -> 0, 'B' -> 1, 'AA' -> 26)
-function colLetterToIndex(letter) {
-    let col = 0;
-    const l = letter.toUpperCase().trim();
-    for (let i = 0; i < l.length; i++) {
-        col = col * 26 + (l.charCodeAt(i) - 64);
-    }
-    return col - 1;
-}
-
-function handleExcelFileSelect(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = function(evt) {
-        try {
-            const data = new Uint8Array(evt.target.result);
-            window._loadedWorkbook = XLSX.read(data, { type: 'array' });
-            
             const sheetNames = window._loadedWorkbook.SheetNames;
             const sheetSelect = document.getElementById('ak-sheet-select');
             sheetSelect.innerHTML = sheetNames.map(s => `<option value="${s}">${s}</option>`).join('');
@@ -2941,7 +2912,6 @@ function parseExcelAnswerKey() {
     const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
 
     let globalAnswers = {};
-    let previewHtml = '';
     let count = 0;
 
     for (let r = startRow - 1; r < rows.length; r++) {
@@ -2957,7 +2927,6 @@ function parseExcelAnswerKey() {
 
             if (!isNaN(cleanQ) && cleanAns !== '') {
                 globalAnswers[cleanQ] = cleanAns;
-                previewHtml += `<div class="flex justify-between border-b border-slate-100 py-1 px-2"><span class="font-black text-slate-500">Q${cleanQ}:</span> <span class="font-black text-teal-700">${cleanAns}</span></div>`;
                 count++;
             }
         }
@@ -2967,47 +2936,23 @@ function parseExcelAnswerKey() {
         return alert("No valid answers found using these coordinates. Please check your start row and column letters.");
     }
 
-    // Automatically distribute global questions into the subjects linked in this batch (e.g. Physics 1-25, Chem 26-50, Math 51-75)
-    const subjects = window._currentAkSubjects; // Sorted alphabetically (e.g., Chemistry, Mathematics, Physics or Biology, Chemistry, Physics)
-    // Let's sort subjects based on standard default order or keep alphabetical. Usually they match sequential Q numbers.
-    let distributedAnswers = {};
-    let sortedSubs = [...subjects];
-
-    let currentQIdx = 1;
-    sortedSubs.forEach(sub => {
-        distributedAnswers[sub] = {};
-        // Count how many questions belong to this subject by looking up continuous numbers in globalAnswers
-        // Or assign blocks of 25 / whatever is present
-        let assignedForSub = 0;
-        while (globalAnswers[currentQIdx]) {
-            distributedAnswers[sub][currentQIdx] = globalAnswers[currentQIdx];
-            currentQIdx++;
-            assignedForSub++;
-        }
-        // Fallback if numbers don't start at 1 or have gaps: assign chunk if empty
-        if (assignedForSub === 0 && count > 0) {
-            // grab next available keys
-            const keys = Object.keys(globalAnswers).map(Number).sort((a,b)=>a-b);
-            if (keys.length > 0) {
-                let chunkKeys = keys.slice(0, 25); // default chunk size 25
-                chunkKeys.forEach(k => {
-                    distributedAnswers[sub][k] = globalAnswers[k];
-                    delete globalAnswers[k];
-                });
-            }
-        }
+    // Build Preview HTML numerically
+    let previewHtml = '';
+    Object.keys(globalAnswers).map(Number).sort((a,b)=>a-b).forEach(q => {
+        previewHtml += `<div class="flex justify-between border-b border-slate-100 py-1 px-2"><span class="font-black text-slate-500">Q${q}:</span> <span class="font-black text-teal-700">${globalAnswers[q]}</span></div>`;
     });
 
-    window._tempDistributedAnswers = distributedAnswers;
+    // Save exactly as a flat dictionary, totally ignoring subjects
+    window._tempGlobalAnswers = globalAnswers;
 
     document.getElementById('ak-preview-content').innerHTML = previewHtml;
     document.getElementById('ak-preview-box').classList.remove('hidden');
     document.getElementById('btn-save-ak').classList.remove('hidden');
-    alert(`✅ Successfully parsed ${count} total answers across ${sortedSubs.length} subject(s)! Review preview and save.`);
+    alert(`✅ Successfully parsed ${count} total answers!\nReview the preview below and click Save.`);
 }
 
 async function saveAnswerKey() {
-    const answerData = window._tempDistributedAnswers;
+    const answerData = window._tempGlobalAnswers;
     if (!answerData) return alert("No parsed answers to save.");
 
     const btn = document.getElementById('btn-save-ak');
@@ -3022,13 +2967,14 @@ async function saveAnswerKey() {
         await docRef.set({
             groupKey: group.groupKey,
             date: group.targets[0]?.date || document.getElementById('manage-uploads-date').value,
-            answers: answerData,
+            answers: answerData, // Flat dictionary of { "1": "A", "2": "B" }
             updatedAt: Date.now(),
             updatedBy: typeof activeStaff !== 'undefined' && activeStaff ? (activeStaff.name || activeStaff.email) : "Admin"
         }, { merge: true });
 
-        alert("✅ All Subject Answer Keys Saved Successfully in One Go!");
+        alert("✅ Answer Key Saved Successfully!");
         closeAnswerKeyModal();
+        fetchMasterUploadsForDate(); // Refresh UI to show the View AK button instantly
     } catch(e) {
         console.error(e);
         alert("Error saving answer key: " + e.message);
