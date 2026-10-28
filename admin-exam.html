@@ -2796,11 +2796,44 @@ function colLetterToIndex(letter) {
     return col - 1;
 }
 
+function handleExcelFileSelect(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+        try {
+            const data = new Uint8Array(evt.target.result);
+            window._loadedWorkbook = XLSX.read(data, { type: 'array' });
+            
+            const sheetNames = window._loadedWorkbook.SheetNames;
+            const sheetSelect = document.getElementById('ak-sheet-select');
+            sheetSelect.innerHTML = sheetNames.map(s => `<option value="${s}">${s}</option>`).join('');
+
+            document.getElementById('ak-excel-config').classList.remove('hidden');
+            document.getElementById('ak-preview-box').classList.add('hidden');
+            document.getElementById('btn-save-ak').classList.add('hidden');
+        } catch (err) {
+            alert("Error reading Excel file: " + err.message);
+        }
+    };
+    reader.readAsArrayBuffer(file);
+}
+
+// Convert Excel column letter to 0-based index (e.g. 'A' -> 0, 'B' -> 1)
+function colLetterToIndex(letter) {
+    let col = 0;
+    const l = letter.toUpperCase().trim();
+    for (let i = 0; i < l.length; i++) {
+        col = col * 26 + (l.charCodeAt(i) - 64);
+    }
+    return col - 1;
+}
+
 function parseExcelAnswerKey() {
     if (!window._loadedWorkbook) return alert("Please upload an Excel file first.");
 
     const sheetName = document.getElementById('ak-sheet-select').value;
-    const targetSub = document.getElementById('ak-target-subject').value;
     const startRow = parseInt(document.getElementById('ak-start-row').value) || 1;
     const qColLetter = document.getElementById('ak-q-col').value;
     const ansColLetter = document.getElementById('ak-ans-col').value;
@@ -2809,14 +2842,12 @@ function parseExcelAnswerKey() {
     const ansColIdx = colLetterToIndex(ansColLetter);
 
     const worksheet = window._loadedWorkbook.Sheets[sheetName];
-    // Convert worksheet to an array of rows (arrays)
     const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
 
-    let extractedAnswers = {};
+    let globalAnswers = {};
     let previewHtml = '';
     let count = 0;
 
-    // Loop through rows starting from (startRow - 1) to handle merged header rows cleanly
     for (let r = startRow - 1; r < rows.length; r++) {
         const row = rows[r];
         if (!row) continue;
@@ -2824,13 +2855,12 @@ function parseExcelAnswerKey() {
         const qVal = row[qColIdx];
         const ansVal = row[ansColIdx];
 
-        // If both question number and answer exist and qVal is a valid number
         if (qVal !== undefined && qVal !== '' && ansVal !== undefined && ansVal !== '') {
             const cleanQ = parseInt(qVal);
             const cleanAns = String(ansVal).trim().toUpperCase();
 
             if (!isNaN(cleanQ) && cleanAns !== '') {
-                extractedAnswers[cleanQ] = cleanAns;
+                globalAnswers[cleanQ] = cleanAns;
                 previewHtml += `<div class="flex justify-between border-b border-slate-100 py-1 px-2"><span class="font-black text-slate-500">Q${cleanQ}:</span> <span class="font-black text-teal-700">${cleanAns}</span></div>`;
                 count++;
             }
@@ -2838,20 +2868,51 @@ function parseExcelAnswerKey() {
     }
 
     if (count === 0) {
-        return alert("No valid answers found using these coordinates. Please check your start row and column letters (e.g., A, B).");
+        return alert("No valid answers found using these coordinates. Please check your start row and column letters.");
     }
 
-    window._tempExtractedAnswers = { subject: targetSub, answers: extractedAnswers };
+    // Automatically distribute global questions into the subjects linked in this batch (e.g. Physics 1-25, Chem 26-50, Math 51-75)
+    const subjects = window._currentAkSubjects; // Sorted alphabetically (e.g., Chemistry, Mathematics, Physics or Biology, Chemistry, Physics)
+    // Let's sort subjects based on standard default order or keep alphabetical. Usually they match sequential Q numbers.
+    let distributedAnswers = {};
+    let sortedSubs = [...subjects];
+
+    let currentQIdx = 1;
+    sortedSubs.forEach(sub => {
+        distributedAnswers[sub] = {};
+        // Count how many questions belong to this subject by looking up continuous numbers in globalAnswers
+        // Or assign blocks of 25 / whatever is present
+        let assignedForSub = 0;
+        while (globalAnswers[currentQIdx]) {
+            distributedAnswers[sub][currentQIdx] = globalAnswers[currentQIdx];
+            currentQIdx++;
+            assignedForSub++;
+        }
+        // Fallback if numbers don't start at 1 or have gaps: assign chunk if empty
+        if (assignedForSub === 0 && count > 0) {
+            // grab next available keys
+            const keys = Object.keys(globalAnswers).map(Number).sort((a,b)=>a-b);
+            if (keys.length > 0) {
+                let chunkKeys = keys.slice(0, 25); // default chunk size 25
+                chunkKeys.forEach(k => {
+                    distributedAnswers[sub][k] = globalAnswers[k];
+                    delete globalAnswers[k];
+                });
+            }
+        }
+    });
+
+    window._tempDistributedAnswers = distributedAnswers;
 
     document.getElementById('ak-preview-content').innerHTML = previewHtml;
     document.getElementById('ak-preview-box').classList.remove('hidden');
     document.getElementById('btn-save-ak').classList.remove('hidden');
-    alert(`✅ Successfully extracted ${count} answers for ${targetSub}! Review the preview below and click Save.`);
+    alert(`✅ Successfully parsed ${count} total answers across ${sortedSubs.length} subject(s)! Review preview and save.`);
 }
 
 async function saveAnswerKey() {
-    const data = window._tempExtractedAnswers;
-    if (!data || !data.answers) return alert("No parsed answers to save.");
+    const answerData = window._tempDistributedAnswers;
+    if (!answerData) return alert("No parsed answers to save.");
 
     const btn = document.getElementById('btn-save-ak');
     const orig = btn.innerText;
@@ -2861,22 +2922,16 @@ async function saveAnswerKey() {
     try {
         const group = window._currentAkGroup;
         const docRef = getCollection("answer_keys").doc(group.groupKey);
-        
-        // Fetch existing document to merge answers across multiple subjects if needed
-        const docSnap = await docRef.get();
-        let existingAnswers = docSnap.exists ? (docSnap.data().answers || {}) : {};
-        
-        existingAnswers[data.subject] = data.answers;
 
         await docRef.set({
             groupKey: group.groupKey,
             date: group.targets[0]?.date || document.getElementById('manage-uploads-date').value,
-            answers: existingAnswers,
+            answers: answerData,
             updatedAt: Date.now(),
             updatedBy: typeof activeStaff !== 'undefined' && activeStaff ? (activeStaff.name || activeStaff.email) : "Admin"
         }, { merge: true });
 
-        alert(`✅ Answer Key for ${data.subject} Saved Successfully!`);
+        alert("✅ All Subject Answer Keys Saved Successfully in One Go!");
         closeAnswerKeyModal();
     } catch(e) {
         console.error(e);
@@ -2974,14 +3029,10 @@ async function saveAnswerKey() {
                 <div id="ak-excel-config" class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4 hidden">
                     <h4 class="font-black text-slate-800 text-xs uppercase tracking-widest border-b pb-2">2. Map Table Coordinates</h4>
                     
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                   <div class="grid grid-cols-1 gap-4">
                         <div>
                             <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Subsheet / Tab Name</label>
                             <select id="ak-sheet-select" class="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold outline-none cursor-pointer uppercase"></select>
-                        </div>
-                        <div>
-                            <label class="block text-[9px] font-black text-slate-500 uppercase tracking-widest mb-1">Target Subject in ERP</label>
-                            <select id="ak-target-subject" class="w-full p-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold outline-none cursor-pointer uppercase"></select>
                         </div>
                     </div>
 
