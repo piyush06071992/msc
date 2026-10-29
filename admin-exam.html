@@ -86,26 +86,21 @@
                     <p class="text-xs sm:text-sm font-bold text-slate-500 uppercase tracking-widest mt-1">Select subjects to auto-generate the staging table</p>
                 </div>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-8 bg-slate-50 p-4 sm:p-6 rounded-2xl border border-slate-200 shadow-inner">
-                <div>
-                    <label class="block text-xs sm:text-sm font-black text-slate-600 uppercase tracking-widest mb-2 ml-1">Target Date</label>
-                    <input type="date" id="exam-date" class="input-field shadow-sm bg-white">
-                </div>
-                <div>
-                    <label class="block text-xs sm:text-sm font-black text-slate-600 uppercase tracking-widest mb-2 ml-1">Exam Type</label>
-                    <select id="exam-type" class="input-field shadow-sm bg-white">
-                        <option value="UT">UT</option>
-                        <option value="OT">OT</option>
-                        <option value="Terminal Exams">Terminal Exams</option>
-                        <option value="Preboard">Preboard</option>
-                        <option value="Board Exam">Board Exam</option>
-                    </select>
-                </div>
+            <div class="mb-6 bg-slate-50 p-4 sm:p-6 rounded-2xl border border-slate-200 shadow-inner">
+                <label class="block text-xs sm:text-sm font-black text-slate-600 uppercase tracking-widest mb-2 ml-1">1. Target Date</label>
+                <input type="date" id="exam-date" class="input-field shadow-sm bg-white max-w-md">
             </div>
+            
             <div class="mb-8">
-                <label class="block text-xs sm:text-sm font-black text-slate-600 uppercase tracking-widest mb-3 ml-1">Master Subjects</label>
-                <div id="subject-container" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 bg-white border border-slate-200 p-4 rounded-2xl max-h-64 overflow-y-auto custom-scroll shadow-sm">
-                    <div class="col-span-full text-center py-4 text-slate-400 font-bold text-sm">Loading Subjects...</div>
+                <div class="flex items-center justify-between mb-3 ml-1">
+                    <label class="block text-xs sm:text-sm font-black text-slate-600 uppercase tracking-widest">2. Select Classes & Sections</label>
+                    <div class="flex gap-2">
+                        <button onclick="toggleAllHierarchy(true)" class="text-[10px] font-black bg-emerald-100 text-emerald-700 px-3 py-1.5 rounded-lg uppercase transition-colors shadow-sm">Select All</button>
+                        <button onclick="toggleAllHierarchy(false)" class="text-[10px] font-black bg-rose-100 text-rose-700 px-3 py-1.5 rounded-lg uppercase transition-colors shadow-sm">Clear</button>
+                    </div>
+                </div>
+                <div id="hierarchy-container" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 bg-white border border-slate-200 p-4 rounded-2xl max-h-80 overflow-y-auto custom-scroll shadow-sm">
+                    <div class="col-span-full text-center py-4 text-slate-400 font-bold text-sm">Loading Classes...</div>
                 </div>
             </div>
             <div id="staging-wrapper" class="hidden">
@@ -495,7 +490,7 @@
         let structureData = [], allTeachers = [], availableDepartments = [];
         const SPECIAL_SUBJECTS = ['BREAK','LUNCH BREAK','FRUIT BREAK','ASSEMBLY','EXAM','UT','OT','TERMINAL EXAMS','PREBOARD','BOARD EXAM','EVENT'];
 
-       window.onload = async () => {
+      window.onload = async () => {
             await checkPermission();
             const today = new Date();
             const offset = today.getTimezoneOffset() * 60000;
@@ -506,26 +501,44 @@
             document.getElementById('export-end-date').value = (new Date(nextWeek - offset)).toISOString().slice(0,10);
             applyBranchTheme();
             await Promise.all([fetchDepartmentsFromForm(), fetchStructure(), fetchTeachers()]);
-            populateMasterSubjects();
+            buildHierarchyUI();
             document.getElementById('exam-date').addEventListener('change', fetchExistingExamsForDate);
             await fetchExistingExamsForDate();
             listenForExamsTabular();
         };
 
         window.stagedContext = {};
+        window.stagedDocsContext = {};
         async function fetchExistingExamsForDate() {
             const date = document.getElementById('exam-date').value;
             if (!date) return;
             try {
                 const snap = await getCollection("exam_schedules").where("date","==",date).get();
                 window.stagedContext = {};
+                window.stagedDocsContext = {};
                 snap.forEach(doc => {
                     const data = doc.data();
-                    const key = data.className+'|'+data.section;
-                    if (!window.stagedContext[key]) window.stagedContext[key] = [];
-                    window.stagedContext[key].push(...(data.subjects||[]).map(s=>s.toUpperCase()));
+                    const proc = (c, s, subs, type) => {
+                        const key = c+'|'+s;
+                        if (!window.stagedContext[key]) window.stagedContext[key] = { subjects: [], type: type || 'UT' };
+                        window.stagedContext[key].subjects.push(...(subs||[]).map(sub=>sub.toUpperCase()));
+                        window.stagedContext[key].subjects = [...new Set(window.stagedContext[key].subjects)];
+                        if (!window.stagedDocsContext[key]) window.stagedDocsContext[key] = [];
+                        window.stagedDocsContext[key].push(doc.id);
+                    };
+                    if (data.targets && data.targets.length > 0) {
+                        data.targets.forEach(t => t.sections.forEach(sec => {
+                            const sName = typeof sec === 'object' ? sec.section : sec;
+                            const sSubs = typeof sec === 'object' && sec.subjects ? sec.subjects : (t.subjects || []);
+                            proc(t.className, sName, sSubs, data.type);
+                        }));
+                    } else {
+                        proc(data.className, data.section, data.subjects || [], data.type);
+                    }
                 });
-                generateStagingTable();
+                if (!document.getElementById('staging-wrapper').classList.contains('hidden')) {
+                    generateStagingTable();
+                }
             } catch(e) { console.error(e); }
         }
 
@@ -597,130 +610,163 @@
         }
 
         // ── STAGING ────────────────────────────────────────────────────────
-        function populateMasterSubjects() {
-            let all = new Set();
-            structureData.forEach(st=>(st.subjects||[]).forEach(s=>all.add(s.trim())));
-            const cont = document.getElementById('subject-container');
-            cont.innerHTML = '';
-            Array.from(all).sort().forEach(sub=>{
-                if (!SPECIAL_SUBJECTS.includes(sub.toUpperCase())) {
-                    cont.innerHTML += '<label class="flex items-center gap-3 p-4 bg-slate-50 border-2 border-slate-100 rounded-xl cursor-pointer hover:bg-indigo-50 hover:border-indigo-400 transition-all shadow-sm"><input type="checkbox" class="master-sub-cb accent-indigo-600 shrink-0" value="'+sub+'" onchange="generateStagingTable()"><span class="text-sm font-black text-slate-800 uppercase tracking-tight leading-tight break-words">'+sub+'</span></label>';
-                }
+        function buildHierarchyUI() {
+            const cont = document.getElementById('hierarchy-container');
+            const grouped = {};
+            structureData.forEach(sec => {
+                if(!grouped[sec.className]) grouped[sec.className] = [];
+                grouped[sec.className].push(sec);
             });
+            
+            let html = "";
+            Object.keys(grouped).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(cls => {
+                const safeClsId = cls.replace(/[^a-zA-Z0-9]/g,'_');
+                const sections = grouped[cls].sort((a,b)=>a.sectionName.localeCompare(b.sectionName,undefined,{numeric:true}));
+                
+                let secsHtml = sections.map(sec => {
+                    const safeSecId = safeClsId + '_' + sec.sectionName.replace(/[^a-zA-Z0-9]/g,'_');
+                    return '<label class="flex items-center gap-2 cursor-pointer p-2 hover:bg-slate-50 rounded-lg"><input type="checkbox" class="hier-sec-cb cls-group-'+safeClsId+' accent-indigo-600" data-class="'+cls+'" data-sec="'+sec.sectionName+'" onchange="checkHierClass(\''+safeClsId+'\'); generateStagingTable();"><span class="text-xs font-bold text-slate-700">Sec '+sec.sectionName+'</span></label>';
+                }).join('');
+
+                html += '<div class="bg-slate-50 border border-slate-200 rounded-xl p-3 shadow-sm"><label class="flex items-center gap-2 cursor-pointer border-b border-slate-200 pb-2 mb-2"><input type="checkbox" id="hier_cls_'+safeClsId+'" class="hier-cls-cb accent-orange-500" onchange="toggleHierClass(\''+safeClsId+'\', this.checked); generateStagingTable();"><span class="font-black text-slate-800 uppercase tracking-widest text-sm">Class '+cls+'</span></label><div class="grid grid-cols-2 gap-1">'+secsHtml+'</div></div>';
+            });
+            cont.innerHTML = html || '<div class="col-span-full text-center py-4 text-slate-400 font-bold text-sm">No classes found</div>';
+        }
+
+        function toggleHierClass(safeClsId, isChecked) {
+            document.querySelectorAll('.cls-group-'+safeClsId).forEach(cb => cb.checked = isChecked);
+        }
+
+        function checkHierClass(safeClsId) {
+            const cbs = document.querySelectorAll('.cls-group-'+safeClsId);
+            const master = document.getElementById('hier_cls_'+safeClsId);
+            if (master) {
+                const allC = Array.from(cbs).every(cb=>cb.checked);
+                const someC = Array.from(cbs).some(cb=>cb.checked);
+                master.checked = allC;
+                master.indeterminate = !allC && someC;
+            }
+        }
+
+        function toggleAllHierarchy(isChecked) {
+            document.querySelectorAll('.hier-cls-cb, .hier-sec-cb').forEach(cb => cb.checked = isChecked);
+            document.querySelectorAll('.hier-cls-cb').forEach(cb => cb.indeterminate = false);
+            generateStagingTable();
+        }
+
+        function getAllSubjectsList() {
+            let all = new Set();
+            structureData.forEach(st=>(st.subjects||[]).forEach(s=>all.add(s.trim().toUpperCase())));
+            return Array.from(all).sort().filter(s => !SPECIAL_SUBJECTS.includes(s));
         }
 
         function generateStagingTable() {
-            const selSubs = Array.from(document.querySelectorAll('.master-sub-cb:checked')).map(cb=>cb.value.toUpperCase());
             const wrapper = document.getElementById('staging-wrapper');
             const grid = document.getElementById('staging-grid');
-            if (selSubs.length===0) { wrapper.classList.add('hidden'); grid.innerHTML=''; return; }
+            const checkedSections = Array.from(document.querySelectorAll('.hier-sec-cb:checked'));
+            
+            if (checkedSections.length === 0) { wrapper.classList.add('hidden'); grid.innerHTML=''; return; }
             wrapper.classList.remove('hidden');
-            const matched = [];
-            structureData.forEach(sec=>{
-                const secSubs = (sec.subjects||[]).map(s=>s.toUpperCase());
-                const over = secSubs.filter(s=>selSubs.includes(s));
-                if (over.length>0) matched.push({className:sec.className, sectionName:sec.sectionName, matchedSubjects:over});
-            });
-            if (matched.length===0) { grid.innerHTML='<div class="text-center text-rose-500 font-black uppercase tracking-widest py-8 bg-rose-50 rounded-2xl border border-rose-200">No classes found teaching these subjects.</div>'; return; }
-            const grouped = {};
-            matched.forEach(sec=>{ if(!grouped[sec.className]) grouped[sec.className]=[]; grouped[sec.className].push(sec); });
+
+            const allSubjects = getAllSubjectsList();
+            
             let html = "";
-            Object.keys(grouped).sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(cls=>{
-                const safeClsId = cls.replace(/[^a-zA-Z0-9]/g,'_');
-                const sections = grouped[cls].sort((a,b)=>a.sectionName.localeCompare(b.sectionName,undefined,{numeric:true}));
-                let secCards = "";
-                sections.forEach(sec=>{
-                    const safeId = 'row_'+safeClsId+'_'+sec.sectionName.replace(/[^a-zA-Z0-9]/g,'_');
-                    const existing = window.stagedContext[sec.className+'|'+sec.sectionName]||[];
-                    let activeSubs = [];
-                    const pillsHtml = sec.matchedSubjects.map(sub=>{
-                        if (existing.includes(sub)) return '<div class="inline-flex items-center bg-slate-100 border border-slate-200 text-slate-400 text-[10px] sm:text-xs font-black uppercase px-2 sm:px-3 py-1.5 rounded-lg shadow-sm cursor-not-allowed"><span>'+sub+' ✓</span></div>';
-                        activeSubs.push(sub);
-                        return '<div id="pill_'+safeId+'_'+sub.replace(/[^a-zA-Z0-9]/g,'')+'" class="inline-flex items-center bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] sm:text-xs font-black uppercase px-2 sm:px-3 py-1.5 rounded-lg shadow-sm"><span>'+sub+'</span><button type="button" onclick="removeInlineSubject(\''+safeId+'\',\''+sub.replace(/[^a-zA-Z0-9]/g,'')+'\',\''+sub+'\')" class="ml-2 text-rose-500 hover:text-rose-700 text-sm font-black">&times;</button></div>';
-                    }).join('');
-                    const isDisabled = activeSubs.length===0;
-                    secCards += '<div class="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col gap-3 shadow-sm hover:border-indigo-300 transition-all '+(isDisabled?'opacity-50 grayscale':'')+'" id="card_'+safeId+'"><div class="flex justify-between items-center border-b border-slate-100 pb-3"><label class="flex items-center gap-3 cursor-pointer w-full"><input type="checkbox" id="cb_'+safeId+'" class="staging-row-cb class-group-'+safeClsId+' w-5 h-5 accent-emerald-600" onchange="checkStagingClassIndeterminate(\''+safeClsId+'\');toggleCardOpacity(this);" '+(isDisabled?'disabled':'checked')+'><span class="font-black text-slate-700 uppercase tracking-widest text-sm">Sec '+sec.sectionName+'</span></label><button type="button" onclick="promptAddSubject(\''+safeId+'\')" class="text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-colors whitespace-nowrap shadow-sm">+ Sub</button></div><div><input type="hidden" id="data_'+safeId+'" data-class="'+sec.className+'" data-sec="'+sec.sectionName+'" value=\''+JSON.stringify(activeSubs)+'\'><div id="pills_container_'+safeId+'" class="flex flex-wrap gap-2 items-start mt-1">'+pillsHtml+'</div></div></div>';
-                });
-                html += '<div class="bg-slate-50 border-2 border-slate-200 rounded-[2rem] overflow-hidden shadow-sm"><div class="bg-indigo-100/60 p-4 sm:p-5 border-b border-slate-200 flex items-center justify-between"><label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" id="master_stage_cls_'+safeClsId+'" checked class="w-6 h-6 accent-orange-500" onchange="toggleStagingClass(\''+safeClsId+'\',this.checked)"><h3 class="font-black text-indigo-900 text-base sm:text-lg uppercase tracking-widest">Class '+cls+'</h3></label></div><div class="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">'+secCards+'</div></div>';
+            checkedSections.forEach(cb => {
+                const cName = cb.getAttribute('data-class');
+                const sName = cb.getAttribute('data-sec');
+                const safeId = 'stg_' + cName.replace(/[^a-zA-Z0-9]/g,'_') + '_' + sName.replace(/[^a-zA-Z0-9]/g,'_');
+                
+                const existingData = window.stagedContext[cName+'|'+sName] || { subjects: [], type: 'UT' };
+                const activeSubs = existingData.subjects.length > 0 ? existingData.subjects : [];
+                const currentType = existingData.type;
+
+                let subOptionsHtml = allSubjects.map(sub => {
+                    const isChecked = activeSubs.includes(sub);
+                    return '<label class="flex items-center gap-2 p-1.5 hover:bg-slate-50 cursor-pointer"><input type="checkbox" value="'+sub+'" class="sub-tick-'+safeId+' accent-indigo-600" '+(isChecked ? 'checked' : '')+' onchange="updateStagingData(\''+safeId+'\')"><span class="text-xs font-bold text-slate-700">'+sub+'</span></label>';
+                }).join('');
+
+                const typeOptions = ['UT', 'OT', 'Terminal Exams', 'Preboard', 'Board Exam'].map(t => 
+                    '<option value="'+t+'" '+(t === currentType ? 'selected' : '')+'>'+t+'</option>'
+                ).join('');
+
+                html += '<div class="bg-white border border-slate-200 rounded-2xl p-4 flex flex-col lg:flex-row gap-4 shadow-sm relative staging-card" id="card_'+safeId+'"><div class="flex-1 flex flex-col justify-center border-b lg:border-b-0 lg:border-r border-slate-100 pb-3 lg:pb-0 lg:pr-4"><label class="flex items-center gap-3 cursor-pointer"><input type="checkbox" id="cb_'+safeId+'" class="staging-row-cb w-5 h-5 accent-emerald-600" checked onchange="toggleCardOpacity(this);"><div><div class="font-black text-indigo-900 uppercase tracking-widest text-sm">Class '+cName+'</div><div class="font-black text-slate-500 uppercase tracking-widest text-xs">Sec '+sName+'</div></div></label></div><div class="flex-1 flex flex-col gap-2"><label class="text-[10px] font-black text-slate-500 uppercase tracking-widest">Exam Type</label><div class="flex gap-2"><select id="type_'+safeId+'" class="flex-1 p-2 border border-slate-200 rounded-lg text-xs font-bold bg-slate-50 outline-none staging-type-select">'+typeOptions+'</select><button type="button" onclick="replicateType(\''+safeId+'\')" class="px-2 py-1 bg-amber-100 text-amber-700 rounded text-[10px] font-black uppercase shadow-sm" title="Replicate type to all sections">↓ All</button></div></div><div class="flex-[2] flex flex-col gap-2"><label class="text-[10px] font-black text-slate-500 uppercase tracking-widest">Subjects (Multi-Tick)</label><div class="flex gap-2 items-start"><details class="flex-1 relative group"><summary class="p-2 border border-slate-200 rounded-lg text-xs font-bold bg-slate-50 cursor-pointer list-none flex justify-between items-center"><span id="sub_label_'+safeId+'">'+(activeSubs.length > 0 ? activeSubs.length + ' Selected' : 'Select Subjects')+'</span><span>▼</span></summary><div class="absolute z-50 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-xl max-h-48 overflow-y-auto p-2 grid grid-cols-1 sm:grid-cols-2 gap-1">'+subOptionsHtml+'</div></details><button type="button" onclick="replicateSubjects(\''+safeId+'\')" class="px-2 py-1 bg-amber-100 text-amber-700 rounded text-[10px] font-black uppercase shrink-0 h-[34px] shadow-sm" title="Replicate subjects to all sections">↓ All</button></div><input type="hidden" id="data_'+safeId+'" data-class="'+cName+'" data-sec="'+sName+'" value=\''+JSON.stringify(activeSubs)+'\'><div id="pills_'+safeId+'" class="flex flex-wrap gap-1 mt-1">'+activeSubs.map(s => '<span class="bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded text-[9px] font-black uppercase">'+s+'</span>').join('')+'</div></div></div>';
             });
             grid.innerHTML = html;
         }
 
+        function updateStagingData(safeId) {
+            const checked = Array.from(document.querySelectorAll('.sub-tick-'+safeId+':checked')).map(cb => cb.value);
+            document.getElementById('data_'+safeId).value = JSON.stringify(checked);
+            document.getElementById('sub_label_'+safeId).innerText = checked.length > 0 ? checked.length + ' Selected' : 'Select Subjects';
+            document.getElementById('pills_'+safeId).innerHTML = checked.map(s => '<span class="bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-0.5 rounded text-[9px] font-black uppercase">'+s+'</span>').join('');
+            
+            const rowCb = document.getElementById('cb_'+safeId);
+            if (!rowCb.checked && checked.length > 0) {
+                rowCb.checked = true;
+                toggleCardOpacity(rowCb);
+            }
+        }
+
+        function replicateType(sourceId) {
+            const val = document.getElementById('type_'+sourceId).value;
+            document.querySelectorAll('.staging-type-select').forEach(sel => sel.value = val);
+        }
+
+        function replicateSubjects(sourceId) {
+            const checkedVals = Array.from(document.querySelectorAll('.sub-tick-'+sourceId+':checked')).map(cb => cb.value);
+            document.querySelectorAll('.staging-card').forEach(card => {
+                const safeId = card.id.replace('card_','');
+                if (safeId === sourceId) return;
+                
+                document.querySelectorAll('.sub-tick-'+safeId).forEach(cb => {
+                    cb.checked = checkedVals.includes(cb.value);
+                });
+                updateStagingData(safeId);
+            });
+        }
+
         function toggleCardOpacity(cb) {
-            const card = cb.closest('div[id^="card_"]');
+            const card = cb.closest('.staging-card');
             if (card) { if(cb.checked){card.classList.remove('opacity-50','grayscale');}else{card.classList.add('opacity-50','grayscale');} }
         }
-        function toggleStagingClass(classId, isChecked) {
-            document.querySelectorAll('.class-group-'+classId+':not(:disabled)').forEach(cb=>{cb.checked=isChecked;toggleCardOpacity(cb);});
-        }
-        function checkStagingClassIndeterminate(classId) {
-            const cbs = document.querySelectorAll('.class-group-'+classId+':not(:disabled)');
-            const master = document.getElementById('master_stage_cls_'+classId);
-            if (master) {
-                const allC = Array.from(cbs).every(cb=>cb.checked);
-                const someC = Array.from(cbs).some(cb=>cb.checked);
-                master.checked = allC; master.indeterminate = !allC && someC;
-            }
-        }
+        
         function checkGlobalStagingIndeterminate() {}
-
-        function promptAddSubject(safeId) {
-            const newSub = prompt("Enter new subject name to add:");
-            if (!newSub||!newSub.trim()) return;
-            const sub = newSub.trim().toUpperCase();
-            const dataInput = document.getElementById('data_'+safeId);
-            const cName = dataInput.getAttribute('data-class'), sName = dataInput.getAttribute('data-sec');
-            const existing = window.stagedContext[cName+'|'+sName]||[];
-            if (existing.includes(sub)) return alert("Already saved for this date.");
-            let cur = JSON.parse(dataInput.value);
-            if (cur.includes(sub)) return alert("Already active.");
-            cur.push(sub); dataInput.value = JSON.stringify(cur);
-            const cb = document.getElementById('cb_'+safeId);
-            cb.disabled = false; cb.checked = true; toggleCardOpacity(cb);
-            const safeSub = sub.replace(/[^a-zA-Z0-9]/g,'');
-            document.getElementById('pills_container_'+safeId).insertAdjacentHTML('beforeend',
-                '<div id="pill_'+safeId+'_'+safeSub+'" class="inline-flex items-center bg-indigo-50 border border-indigo-200 text-indigo-700 text-[10px] sm:text-xs font-black uppercase px-2 sm:px-3 py-1.5 rounded-lg shadow-sm m-1"><span>'+sub+'</span><button type="button" onclick="removeInlineSubject(\''+safeId+'\',\''+safeSub+'\',\''+sub+'\')" class="ml-2 text-rose-500 hover:text-rose-700 text-sm font-black">&times;</button></div>');
-            const cm = cb.className.match(/class-group-(\S+)/);
-            if (cm&&cm[1]) checkStagingClassIndeterminate(cm[1]);
-        }
-
-        function removeInlineSubject(safeId, safeSub, origSub) {
-            const pill = document.getElementById('pill_'+safeId+'_'+safeSub);
-            if (pill) pill.remove();
-            const dataInput = document.getElementById('data_'+safeId);
-            let cur = JSON.parse(dataInput.value).filter(s=>s!==origSub);
-            dataInput.value = JSON.stringify(cur);
-            if (cur.length===0) {
-                const cb = document.getElementById('cb_'+safeId);
-                cb.checked = false; cb.disabled = true; toggleCardOpacity(cb);
-            }
-        }
 
         async function saveStagingToDB() {
             const date = document.getElementById('exam-date').value;
-            const type = document.getElementById('exam-type').value;
             if (!date) return alert("Please select an Exam Date.");
             const checked = Array.from(document.querySelectorAll('.staging-row-cb:checked'));
             if (checked.length===0) return alert("No sections checked!");
+            
             const btn = document.getElementById('save-btn');
             const orig = btn.innerHTML; btn.innerHTML="⏳ Saving..."; btn.disabled=true;
+            
             try {
                 const batch = db.batch();
-                checked.forEach(cb=>{
+                let sName2 = "Admin", sDept = "Management";
+                if (activeStaff&&activeStaff.name) { sName2=activeStaff.name; sDept=activeStaff.dept?(Array.isArray(activeStaff.dept)?activeStaff.dept[0]:activeStaff.dept.split(',')[0]):"Management"; }
+                
+                checked.forEach(cb => {
                     const safeId = cb.id.replace('cb_','');
                     const di = document.getElementById('data_'+safeId);
                     const cName = di.getAttribute('data-class'), sName = di.getAttribute('data-sec');
                     const subs = JSON.parse(di.value);
-                    if (subs.length>0) {
-                        let sName2 = "Admin", sDept = "Management";
-                        if (activeStaff&&activeStaff.name) { sName2=activeStaff.name; sDept=activeStaff.dept?(Array.isArray(activeStaff.dept)?activeStaff.dept[0]:activeStaff.dept.split(',')[0]):"Management"; }
-                        batch.set(getCollection("exam_schedules").doc(), { date, type, className:cName, section:sName, subjects:subs, timestamp:Date.now(), savedBy:sName2, savedByDept:sDept });
+                    const type = document.getElementById('type_'+safeId).value;
+                    
+                    if (subs.length > 0) {
+                        const oldDocs = window.stagedDocsContext[cName+'|'+sName] || [];
+                        oldDocs.forEach(docId => {
+                            batch.delete(getCollection("exam_schedules").doc(docId));
+                        });
+                        
+                        const newRef = getCollection("exam_schedules").doc();
+                        batch.set(newRef, { date, type, className:cName, section:sName, subjects:subs, timestamp:Date.now(), savedBy:sName2, savedByDept:sDept });
                     }
                 });
+                
                 await batch.commit();
                 alert("✅ Saved!");
-                document.querySelectorAll('.master-sub-cb').forEach(cb=>cb.checked=false);
-                generateStagingTable();
+                await fetchExistingExamsForDate(); 
             } catch(e) { alert("Error: "+e.message); }
             finally { btn.innerHTML=orig; btn.disabled=false; }
         }
