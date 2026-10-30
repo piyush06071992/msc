@@ -209,7 +209,9 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
 
         const sectionPapers = matchedSubKey ? papersBySection[secKey][matchedSubKey] : {};
         let roomSeriesList = Object.keys(sectionPapers).length > 0 ? Object.keys(sectionPapers).sort() : availableSeries;
-        const layout = (layoutBySection[secKey] && layoutBySection[secKey][matchedSubKey]) ? layoutBySection[secKey][matchedSubKey] : 'A4_STANDARD';
+        
+        // FIX: Force OMRs to always remain standard A4, regardless of the Question Paper layout
+        const layout = docType === 'omr' ? 'A4_STANDARD' : ((layoutBySection[secKey] && layoutBySection[secKey][matchedSubKey]) ? layoutBySection[secKey][matchedSubKey] : 'A4_STANDARD');
         
         const basePaperLinks = sectionPapers["SERIES A"] || Object.values(sectionPapers)[0] || {};
         const basePdfUrl = docType === 'omr' ? basePaperLinks.omr : basePaperLinks.qp;
@@ -270,15 +272,15 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     const leftText = `ROOM: ${roomName}`;
                     const rightText = `${subLabel}COPY ${c+1}/${copiesNeeded}`;
                     
-             const topY = height - 22;
-                    const bottomY = 18; // ⬆️ Adjusted to clear 6mm physical printer margins safely
+             const topY = height - 25;
+                    const bottomY = 25; 
 
-                    // Simple admin stamps nestled neatly into the frontend margins
-                    page.drawText(leftText, { x: 20, y: topY, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 20, y: topY, size, font, color, opacity });
+                    // Shifted X to 45 and Y to 25 to safely dodge printer margins AND black OMR corner dots
+                    page.drawText(leftText, { x: 45, y: topY, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 45, y: topY, size, font, color, opacity });
                     
-                    page.drawText(leftText, { x: 20, y: bottomY, size, font, color, opacity });
-                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 20, y: bottomY, size, font, color, opacity });
+                    page.drawText(leftText, { x: 45, y: bottomY, size, font, color, opacity });
+                    page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 45, y: bottomY, size, font, color, opacity });
                 });
             }
         } catch (err) {
@@ -314,9 +316,9 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 const bottomLeftText = `${stu.name.toUpperCase()}`;
                 const bottomRightText = `CLASS ${stu.className} - SEC ${stu.section}`;
                 
-             // Coordinates adjusted to stay safely within printer margins
-                const topY = height - 22;
-                const bottomY = 18; // ⬆️ Adjusted to clear 6mm physical printer margins safely
+             // Shifted X to 45 and Y to 25 to safely dodge printer margins AND black OMR corner dots
+                const topY = height - 25;
+                const bottomY = 25; 
 
                 if (task.layout === 'A3_BOOKLET' || task.layout === 'A5_BOOKLET') {
                     const halfWidth = width / 2;
@@ -324,52 +326,44 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     if (pageIdx % 2 === 0) {
                         // FRONT PAGE (Upright)
                         // -- LEFT PAGE STAMPS --
-                        page.drawText(topLeftText, { x: 20, y: topY, size, font, color, opacity });
-                        page.drawText(topRightText, { x: halfWidth - font.widthOfTextAtSize(topRightText, size) - 20, y: topY, size, font, color, opacity });
+                        page.drawText(topLeftText, { x: 45, y: topY, size, font, color, opacity });
+                        page.drawText(topRightText, { x: halfWidth - font.widthOfTextAtSize(topRightText, size) - 45, y: topY, size, font, color, opacity });
                         
-                        page.drawText(bottomLeftText, { x: 20, y: bottomY, size, font, color, opacity });
-                        page.drawText(bottomRightText, { x: halfWidth - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
+                        page.drawText(bottomLeftText, { x: 45, y: bottomY, size, font, color, opacity });
+                        page.drawText(bottomRightText, { x: halfWidth - font.widthOfTextAtSize(bottomRightText, size) - 45, y: bottomY, size, font, color, opacity });
 
                         // -- RIGHT PAGE STAMPS --
-                        page.drawText(topLeftText, { x: halfWidth + 20, y: topY, size, font, color, opacity });
-                        page.drawText(topRightText, { x: width - font.widthOfTextAtSize(topRightText, size) - 20, y: topY, size, font, color, opacity });
+                        page.drawText(topLeftText, { x: halfWidth + 45, y: topY, size, font, color, opacity });
+                        page.drawText(topRightText, { x: width - font.widthOfTextAtSize(topRightText, size) - 45, y: topY, size, font, color, opacity });
                         
-                        page.drawText(bottomLeftText, { x: halfWidth + 20, y: bottomY, size, font, color, opacity });
-                        page.drawText(bottomRightText, { x: width - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
+                        page.drawText(bottomLeftText, { x: halfWidth + 45, y: bottomY, size, font, color, opacity });
+                        page.drawText(bottomRightText, { x: width - font.widthOfTextAtSize(bottomRightText, size) - 45, y: bottomY, size, font, color, opacity });
                 } else {
                         // BACK PAGE (Inverted / Rotated 180 degrees)
-                        const invTopY = 18; // ⬆️ Clears hardware margin
-                        const invBottomY = height - 18; // ⬆️ Clears hardware margin below dots
+                        const invTopY = 25; 
+                        const invBottomY = height - 25; 
                         
                         // -- LEFT PAGE STAMPS (Physical left half) --
-                        // Logical Top-Left (SEAT): Placed at physical bottom-right
-                        page.drawText(topLeftText, { x: halfWidth - 20, y: invTopY, size, font, color, opacity, rotate: degrees(180) });
-                        // Logical Top-Right (ROLL): Placed at physical bottom-left
-                        page.drawText(topRightText, { x: 20 + font.widthOfTextAtSize(topRightText, size), y: invTopY, size, font, color, opacity, rotate: degrees(180) });
+                        page.drawText(topLeftText, { x: halfWidth - 45, y: invTopY, size, font, color, opacity, rotate: degrees(180) });
+                        page.drawText(topRightText, { x: 45 + font.widthOfTextAtSize(topRightText, size), y: invTopY, size, font, color, opacity, rotate: degrees(180) });
                         
-                        // Logical Bottom-Left (NAME): Placed at physical top-right
-                        page.drawText(bottomLeftText, { x: halfWidth - 20, y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
-                        // Logical Bottom-Right (CLASS): Placed at physical top-left
-                        page.drawText(bottomRightText, { x: 20 + font.widthOfTextAtSize(bottomRightText, size), y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
+                        page.drawText(bottomLeftText, { x: halfWidth - 45, y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
+                        page.drawText(bottomRightText, { x: 45 + font.widthOfTextAtSize(bottomRightText, size), y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
 
                         // -- RIGHT PAGE STAMPS (Physical right half) --
-                        // Logical Top-Left (SEAT): Placed at physical bottom-right
-                        page.drawText(topLeftText, { x: width - 20, y: invTopY, size, font, color, opacity, rotate: degrees(180) });
-                        // Logical Top-Right (ROLL): Placed at physical bottom-left
-                        page.drawText(topRightText, { x: halfWidth + 20 + font.widthOfTextAtSize(topRightText, size), y: invTopY, size, font, color, opacity, rotate: degrees(180) });
+                        page.drawText(topLeftText, { x: width - 45, y: invTopY, size, font, color, opacity, rotate: degrees(180) });
+                        page.drawText(topRightText, { x: halfWidth + 45 + font.widthOfTextAtSize(topRightText, size), y: invTopY, size, font, color, opacity, rotate: degrees(180) });
                         
-                        // Logical Bottom-Left (NAME): Placed at physical top-right
-                        page.drawText(bottomLeftText, { x: width - 20, y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
-                        // Logical Bottom-Right (CLASS): Placed at physical top-left
-                        page.drawText(bottomRightText, { x: halfWidth + 20 + font.widthOfTextAtSize(bottomRightText, size), y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
+                        page.drawText(bottomLeftText, { x: width - 45, y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
+                        page.drawText(bottomRightText, { x: halfWidth + 45 + font.widthOfTextAtSize(bottomRightText, size), y: invBottomY, size, font, color, opacity, rotate: degrees(180) });
                     }
                 } else {
                     // Standard Portrait Layouts
-                    page.drawText(topLeftText, { x: 20, y: topY, size, font, color, opacity });
-                    page.drawText(topRightText, { x: width - font.widthOfTextAtSize(topRightText, size) - 20, y: topY, size, font, color, opacity });
+                    page.drawText(topLeftText, { x: 45, y: topY, size, font, color, opacity });
+                    page.drawText(topRightText, { x: width - font.widthOfTextAtSize(topRightText, size) - 45, y: topY, size, font, color, opacity });
                     
-                    page.drawText(bottomLeftText, { x: 20, y: bottomY, size, font, color, opacity });
-                    page.drawText(bottomRightText, { x: width - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomLeftText, { x: 45, y: bottomY, size, font, color, opacity });
+                    page.drawText(bottomRightText, { x: width - font.widthOfTextAtSize(bottomRightText, size) - 45, y: bottomY, size, font, color, opacity });
                 }
             });
         } catch (err) {
