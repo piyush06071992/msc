@@ -187,9 +187,13 @@
                     <button onclick="downloadRoomPrintPackage()" id="btn-download-room-print" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-md transition-all active:scale-95 border border-emerald-400 flex items-center gap-1.5 hidden">
                         📥 Download Room Print
                     </button>
-                    <!-- NEW: Bulk Download Room OMRs (Seat-Wise) -->
+                   <!-- NEW: Bulk Download Room OMRs (Seat-Wise) -->
                     <button onclick="printRoomOMRsSeatWise()" class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-md transition-all active:scale-95 border border-blue-400 flex items-center gap-1.5" title="Print/Download Pre-Filled OMRs for all allocated seats in this room">
                         🖨️ Room OMRs (Seat-Wise)
+                    </button>
+                    <!-- NEW: Bulk Download Room Answer Keys -->
+                    <button id="btn-room-ak" onclick="printRoomAnswerKeys()" class="bg-amber-600 hover:bg-amber-500 text-white px-4 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-md transition-all active:scale-95 border border-amber-400 flex items-center gap-1.5" title="Print/Download Answer Keys for all allocated seats in this room">
+                        🔑 Answer Keys
                     </button>
                     <!-- NEW: Empty Seats Only Toggle -->
                     <label class="bg-white/10 backdrop-blur-md border border-white/20 px-3.5 py-2.5 rounded-xl flex items-center gap-2 cursor-pointer text-white text-[10px] font-black uppercase tracking-widest shadow-inner transition-all hover:bg-white/20">
@@ -1184,9 +1188,9 @@ async function onExamDateChange() {
                             (g.subjects||[]).forEach(sub => {
                                 const detail = (g.subExams && g.subExams[sub]) ? g.subExams[sub] : {};
                                 const code = detail.shortCode || 'UNMAPPED';
-                                const mode = detail.mode || g.mode || 'Offline';
-                                const entry = sectionPaperMap[key].find(e => e.subject === sub.toUpperCase());
-                                if (entry) { entry.code = code; entry.mode = mode; }
+                               const mode = detail.mode || g.mode || 'Offline';
+                        const entry = sectionPaperMap[key].find(e => e.subject === sub.toUpperCase());
+                        if (entry) { entry.code = code; entry.mode = mode; entry.groupKey = g.groupKey; }
                             });
                         }
                     });
@@ -3367,6 +3371,154 @@ async function printRoomOMRsSeatWise() {
     } else {
         // No online exams detected, print all directly
         executeRoomOMRPrint(false);
+    }
+}
+
+async function printRoomAnswerKeys() {
+    const date = document.getElementById('seating-exam-date').value;
+    const room = roomsDatabase.find(r => r.id === activeRoomId);
+    if (!date || !room) return alert("Select an exam date and active room first.");
+
+    const shiftedRoomName = getShiftedRoomName(room.name);
+    let requiredKeys = [];
+    
+    Object.keys(currentAllocations).forEach(seatId => {
+        if (seatId.startsWith(`${shiftedRoomName}-`)) {
+            const stu = currentAllocations[seatId];
+            if (stu && stu.className && stu.section) {
+                const secKey = `${norm(stu.className)}|${norm(stu.section)}`;
+                const papers = sectionPaperMap[secKey] || [];
+                
+                if (papers.length > 0) {
+                    let configuredOptionals = [];
+                    if (typeof globalStructureData !== 'undefined') {
+                        const structMatch = globalStructureData.find(st => norm(st.className) === norm(stu.className) && norm(st.sectionName) === norm(stu.section));
+                        if (structMatch && structMatch.optionalSubjects) {
+                            configuredOptionals = structMatch.optionalSubjects.map(s => s.toUpperCase());
+                        }
+                    }
+                    
+                    let scheduledSubjects = papers.map(p => p.subject.toUpperCase());
+                    let scheduledOptionals = scheduledSubjects.filter(sub => configuredOptionals.includes(sub));
+                    
+                    if (scheduledOptionals.length === 0) {
+                        papers.forEach(p => {
+                            requiredKeys.push({ cls: stu.className, sec: stu.section, subject: p.subject, groupKey: p.groupKey });
+                        });
+                    } else {
+                        if (stu.optionalSubject) {
+                            const stuOptNorm = String(stu.optionalSubject).toUpperCase().trim();
+                            let matchedPaper = papers.find(p => {
+                                const subNorm = String(p.subject).toUpperCase().trim();
+                                return subNorm === stuOptNorm || subNorm.includes(stuOptNorm) || stuOptNorm.includes(subNorm);
+                            });
+                            if (matchedPaper) {
+                                requiredKeys.push({ cls: stu.className, sec: stu.section, subject: matchedPaper.subject, groupKey: matchedPaper.groupKey });
+                            }
+                        }
+                        papers.forEach(p => {
+                            if (!configuredOptionals.includes(p.subject.toUpperCase())) {
+                                requiredKeys.push({ cls: stu.className, sec: stu.section, subject: p.subject, groupKey: p.groupKey });
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    });
+
+    if (requiredKeys.length === 0) return alert("No valid subjects mapped for students in this room.");
+
+    const btn = document.getElementById('btn-room-ak');
+    const orig = btn.innerHTML;
+    btn.innerHTML = "⏳ Generating...";
+    btn.disabled = true;
+
+    try {
+        const akSnap = await db.collection("answer_keys").where("date", "==", date).get();
+        let akDatabase = {};
+        akSnap.forEach(doc => {
+            akDatabase[doc.id] = doc.data();
+        });
+
+        let printGroups = {};
+        requiredKeys.forEach(req => {
+            if (!req.groupKey) return;
+            const key = `${req.cls}|${req.sec}|${req.subject}`;
+            if (!printGroups[key]) {
+                printGroups[key] = { cls: req.cls, sec: req.sec, subject: req.subject, groupKey: req.groupKey, count: 0 };
+            }
+            printGroups[key].count++;
+        });
+
+        let htmlContent = '<div style="display: flex; flex-wrap: wrap; gap: 15px; justify-content: flex-start; padding: 10px; width: 100%; box-sizing: border-box; background: white; flex-direction: row;">';
+        let chitsFound = false;
+
+        Object.values(printGroups).forEach(group => {
+            if (!group.groupKey || !akDatabase[group.groupKey]) return;
+            
+            const akData = akDatabase[group.groupKey];
+            const answers = akData.answers || {};
+            
+            let uniqueMap = new Map();
+            Object.keys(answers).forEach(qNum => {
+                const qInt = parseInt(qNum);
+                if (!isNaN(qInt)) uniqueMap.set(qInt, { qNum: qInt, ans: answers[qNum] });
+            });
+            let allQuestions = Array.from(uniqueMap.values()).sort((a, b) => a.qNum - b.qNum);
+
+            if (allQuestions.length === 0) return;
+
+            let colsHtml = '<div style="display: flex; gap: 15px; justify-content: center; width: 100%;">';
+            for(let i=0; i<allQuestions.length; i+=10) {
+                let chunk = allQuestions.slice(i, i+10);
+                colsHtml += '<div style="display: flex; flex-direction: column; gap: 4px; flex: 1;">';
+                chunk.forEach(q => {
+                    colsHtml += `<div style="display: flex; justify-content: space-between;"><span style="color: #64748b;">${q.qNum}.</span> <span style="font-weight: 900; color: #0f172a;">${q.ans}</span></div>`;
+                });
+                colsHtml += '</div>';
+            }
+            colsHtml += '</div>';
+
+            for (let i = 1; i <= group.count; i++) {
+                chitsFound = true;
+                htmlContent += `
+                    <div style="width: calc(50% - 15px); border: 2px dashed #cbd5e1; border-radius: 12px; padding: 15px; margin-bottom: 10px; box-sizing: border-box; page-break-inside: avoid; font-family: 'Arial', sans-serif; font-size: 10px;">
+                        <div style="text-align: center; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; margin-bottom: 10px;">
+                            <div style="font-weight: 900; font-size: 14px; text-transform: uppercase; color: #1e1b4b;">CLASS ${group.cls} - SEC ${group.sec}</div>
+                            <div style="font-weight: 900; color: #4338ca; margin-top: 4px; font-size: 11px;">${group.subject}</div>
+                            <div style="font-size: 10px; color: #64748b; margin-top: 5px; font-weight: bold;">COPY ${i} / ${group.count}</div>
+                        </div>
+                        ${colsHtml}
+                    </div>
+                `;
+            }
+        });
+
+        htmlContent += '</div>';
+
+        if (!chitsFound) {
+            alert("No uploaded answer keys found for the subjects allocated in this room.");
+            return;
+        }
+
+        const printArea = document.getElementById('omr-print-target-area');
+        printArea.innerHTML = htmlContent;
+        
+        // Brief delay to ensure browser renders the DOM before triggering print dialog
+        setTimeout(() => {
+            window.print();
+            setTimeout(() => {
+                printArea.innerHTML = '';
+            }, 1000);
+        }, 300);
+
+    } catch (e) {
+        console.error("Error generating answer keys:", e);
+        alert("Failed to generate answer keys: " + e.message);
+    } finally {
+        btn.innerHTML = orig;
+        btn.disabled = false;
     }
 }
 
