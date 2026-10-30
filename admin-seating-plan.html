@@ -1138,11 +1138,22 @@ async function onExamDateChange() {
    async function buildPaperMap(dateStr) {
             sectionPaperMap = {};
             try {
-              const [examSnap, groupSnap, qpSnap] = await Promise.all([
+              const [examSnap, groupSnap, qpSnap, omrTemplatesSnap] = await Promise.all([
                     getCollection("exam_schedules").where("date", "==", dateStr).get(),
                     db.collection("admin_paper_groups").where("date", "==", dateStr).get(),
-                    getCollection("question_papers").where("date", "==", dateStr).get()
+                    getCollection("question_papers").where("date", "==", dateStr).get(),
+                    getCollection("section_omr_templates").get()
                 ]);
+
+                let permanentOmrMap = {};
+                if (omrTemplatesSnap) {
+                    omrTemplatesSnap.forEach(doc => {
+                        const d = doc.data();
+                        if (d.className && d.section) {
+                            permanentOmrMap[`${norm(d.className)}|${norm(d.section)}`] = true;
+                        }
+                    });
+                }
 
                 let uploadedPapersMap = {};
                 if (qpSnap) {
@@ -1156,7 +1167,8 @@ async function onExamDateChange() {
                         const akGroupKey = btoa(encodeURIComponent(qpPath + "|||" + omrPath)).replace(/=/g, '');
 
                         uploadedPapersMap[key][(data.subject || "").toUpperCase()] = {
-                            uploadId: data.storagePath || data.url || data.omrStoragePath || data.omrUrl || doc.id,
+                            hasQp: !!(data.storagePath || data.url),
+                            hasOmr: !!(data.omrStoragePath || data.omrUrl),
                             groupKey: akGroupKey
                         };
                     });
@@ -1173,7 +1185,8 @@ async function onExamDateChange() {
                             sectionPaperMap[key].push({ 
                                 subject: subUpper, 
                                 code: 'UNMAPPED', 
-                                uploadId: upData ? upData.uploadId : null,
+                                hasQp: upData ? upData.hasQp : false,
+                                hasOmr: (upData && upData.hasOmr) ? true : !!permanentOmrMap[key],
                                 groupKey: upData ? upData.groupKey : null 
                             });
                         });
@@ -3334,7 +3347,7 @@ async function printRoomOMRsSeatWise() {
     window._onlineSeatIdsCache = [];
     const shiftedRoomName = getShiftedRoomName(room.name);
     
-    // --- NEW: MISSING UPLOAD SCANNER ---
+    // --- STRICT MISSING OMR SCANNER ---
     let missingUploads = new Set();
 
     Object.keys(currentAllocations).forEach(seatId => {
@@ -3352,12 +3365,12 @@ async function printRoomOMRsSeatWise() {
                     window._onlineSeatIdsCache.push(seatId);
                 }
 
-                // Check for missing uploads
+                // Check for missing OMR templates
                 if (papers.length === 0) {
                     missingUploads.add(`Class ${stu.className} Sec ${stu.section} (No subjects mapped)`);
                 } else {
                     papers.forEach(p => {
-                        if (!p.uploadId && p.mode !== 'Online') {
+                        if (!p.hasOmr && p.mode !== 'Online') {
                             missingUploads.add(`Class ${stu.className} Sec ${stu.section} (${p.subject})`);
                         }
                     });
@@ -3370,11 +3383,10 @@ async function printRoomOMRsSeatWise() {
         return alert(`No allocated students found in Room ${room.name} to print OMRs.`);
     }
 
-    // --- WARNING POPUP ---
     if (missingUploads.size > 0) {
         const missingList = Array.from(missingUploads).join('\n- ');
-        const confirmMsg = `⚠️ MISSING PAPER/OMR WARNING\n\nThe files for the following sections have NOT been uploaded yet:\n\n- ${missingList}\n\nDo you want to proceed anyway? (Missing sections will be skipped in the print).`;
-        if (!confirm(confirmMsg)) return;
+        alert(`🚨 CANNOT PRINT OMR SHEETS\n\nThe OMR PDFs for the following sections are missing:\n\n- ${missingList}\n\nPlease upload them or set a Permanent Master OMR to proceed.`);
+        return;
     }
 
     // Trigger confirmation modal if online exams are detected
@@ -3459,6 +3471,22 @@ async function printRoomAnswerKeys() {
         akSnap.forEach(doc => {
             akDatabase[doc.id] = doc.data();
         });
+
+        // --- STRICT MISSING ANSWER KEY SCANNER ---
+        let missingUploads = new Set();
+        Object.values(printGroups).forEach(group => {
+            if (!group.groupKey || !akDatabase[group.groupKey]) {
+                missingUploads.add(`Class ${group.cls} Sec ${group.sec} (${group.subject})`);
+            }
+        });
+
+        if (missingUploads.size > 0) {
+            const missingList = Array.from(missingUploads).join('\n- ');
+            alert(`🚨 CANNOT PRINT ANSWER KEYS\n\nThe Answer Keys for the following sections are missing:\n\n- ${missingList}\n\nPlease upload them in the Exam Manager to proceed.`);
+            btn.innerHTML = orig;
+            btn.disabled = false;
+            return;
+        }
 
         let htmlContent = '<div style="display: flex; flex-wrap: wrap; gap: 15px; justify-content: flex-start; padding: 10px; width: 100%; box-sizing: border-box; background: white; flex-direction: row;">';
         let chitsFound = false;
@@ -3623,7 +3651,7 @@ async function downloadRoomPrintPackage() {
 
     if (!date || !shiftedRoomName) return alert("Select a date and room first.");
 
-    // --- NEW: MISSING PAPER SCANNER ---
+    // --- STRICT MISSING QUESTION PAPER SCANNER ---
     let missingUploads = new Set();
     Object.keys(currentAllocations).forEach(seatId => {
         if (seatId.startsWith(`${shiftedRoomName}-`)) {
@@ -3632,12 +3660,11 @@ async function downloadRoomPrintPackage() {
                 const secKey = `${norm(stu.className)}|${norm(stu.section)}`;
                 const papers = sectionPaperMap[secKey] || [];
                 
-                // If a section has scheduled papers, check if the uploadId exists
                 if (papers.length === 0) {
                     missingUploads.add(`Class ${stu.className} Sec ${stu.section} (No subjects mapped)`);
                 } else {
                     papers.forEach(p => {
-                        if (!p.uploadId && p.mode !== 'Online') {
+                        if (!p.hasQp && p.mode !== 'Online') {
                             missingUploads.add(`Class ${stu.className} Sec ${stu.section} (${p.subject})`);
                         }
                     });
@@ -3648,8 +3675,8 @@ async function downloadRoomPrintPackage() {
 
     if (missingUploads.size > 0) {
         const missingList = Array.from(missingUploads).join('\n- ');
-        const confirmMsg = `⚠️ MISSING PAPER WARNING\n\nThe question papers for the following sections have NOT been uploaded yet:\n\n- ${missingList}\n\nDo you want to proceed anyway? (Missing papers will be skipped in the print).`;
-        if (!confirm(confirmMsg)) return;
+        alert(`🚨 CANNOT PRINT ROOM PACKAGE\n\nThe Question Papers for the following sections are missing:\n\n- ${missingList}\n\nPlease upload them in the Exam Manager to proceed.`);
+        return;
     }
     // ----------------------------------
 
