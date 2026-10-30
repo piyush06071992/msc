@@ -3520,21 +3520,23 @@ async function printRoomAnswerKeys() {
             return;
         }
 
-       // --- NATIVE PDF GENERATION VIA PDF-LIB (HORIZONTAL GRID LAYOUT) ---
+       // --- NATIVE PDF GENERATION VIA PDF-LIB ---
         const { PDFDocument, rgb, StandardFonts } = window.PDFLib;
         const pdfDoc = await PDFDocument.create();
         const fontReg = await pdfDoc.embedFont(StandardFonts.Helvetica);
         const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
 
+        // A4 Portrait Dimensions
         const pageWidth = 595.28;
         const pageHeight = 841.89;
         const margin = 20;
-        const gap = 15; // Tighter gap to maximize table room
+        const gap = 20;
 
         let currentPage = pdfDoc.addPage([pageWidth, pageHeight]);
         let chitIndex = 0; 
         let chitsFound = false;
         
+        // Track the current page's grid capacity (to handle mixing sizes safely)
         let currentGridCapacity = 6; 
 
         Object.values(printGroups).forEach(group => {
@@ -3546,11 +3548,13 @@ async function printRoomAnswerKeys() {
             if (!firstKey) return;
             
             const isNested = isNaN(parseInt(firstKey));
+
             if (isNested) {
                 Object.keys(answers).forEach(sub => {
-                    Object.keys(answers[sub]).forEach(qNum => {
+                    const qMap = answers[sub];
+                    Object.keys(qMap).forEach(qNum => {
                         const qInt = parseInt(qNum);
-                        if (!isNaN(qInt)) uniqueMap.set(qInt, { qNum: qInt, ans: answers[sub][qNum] });
+                        if (!isNaN(qInt)) uniqueMap.set(qInt, { qNum: qInt, ans: qMap[qNum] });
                     });
                 });
             } else {
@@ -3564,18 +3568,41 @@ async function printRoomAnswerKeys() {
             const totalQs = allQuestions.length;
             if (totalQs === 0) return;
 
-            // --- DYNAMIC GRID MATH ---
-            // If <= 100 questions, pack 6 chits per page. If 180 questions, give them 4 chits per page so rows fit.
-            const chitsPerPage = totalQs <= 100 ? 6 : 4;
-            const chitRows = totalQs <= 100 ? 3 : 2;
+            // --- DYNAMIC GRID & SPACING MATH ---
+            // 1. Choose Grid Size (6 chits for <= 90 Qs, 4 chits for > 90 Qs)
+            const chitsPerPage = totalQs <= 90 ? 6 : 4;
+            const chitRows = totalQs <= 90 ? 3 : 2;
             
             const chitW = (pageWidth - (margin * 2) - gap) / 2;
             const chitH = (pageHeight - (margin * 2) - (gap * (chitRows - 1))) / chitRows;
             
+            // 2. Determine Columns inside Chit to maximize readability
+            const headerHeight = 55;
+            const availableAnsHeight = chitH - headerHeight - 10;
+            
+            let cols = 2;
+            let itemsPerCol = Math.ceil(totalQs / cols);
+            let dynamicLineHeight = availableAnsHeight / itemsPerCol;
+            
+            // Push to more columns if the line height gets too squished (below 7.5px)
+            while (dynamicLineHeight < 7.5 && cols < 5) {
+                cols++;
+                itemsPerCol = Math.ceil(totalQs / cols);
+                dynamicLineHeight = availableAnsHeight / itemsPerCol;
+            }
+            
+            // Cap the line height so short exams (e.g., 20 Qs) don't get stretched ridiculously far apart
+            dynamicLineHeight = Math.min(14, dynamicLineHeight);
+            
+            const colWidth = (chitW - 20) / cols;
+            const fontSize = cols >= 5 ? 7.5 : (cols === 4 ? 8 : 9);
+            const ansOffsetX = cols >= 5 ? 14 : 16; 
+
             // Generate physical copies
             for (let i = 1; i <= group.count; i++) {
                 chitsFound = true;
                 
+                // Add new page if the grid is full OR if the grid layout changes (e.g. 4-chit to 6-chit)
                 if (chitIndex >= currentGridCapacity || currentGridCapacity !== chitsPerPage) {
                     if (chitIndex > 0) currentPage = pdfDoc.addPage([pageWidth, pageHeight]);
                     chitIndex = 0;
@@ -3585,84 +3612,55 @@ async function printRoomAnswerKeys() {
                 const col = chitIndex % 2;
                 const row = Math.floor(chitIndex / 2);
                 const x = margin + (col * (chitW + gap));
-                const y = pageHeight - margin - (row * (chitH + gap)); 
+                const y = pageHeight - margin - (row * (chitH + gap)); // Y is the TOP of the chit
                 
-                // Draw Dashed Chit Border
+                // Draw Dashed Border
                 currentPage.drawRectangle({
                     x: x, y: y - chitH, width: chitW, height: chitH,
                     borderColor: rgb(0.6, 0.6, 0.6), borderWidth: 1, borderDashArray: [4, 4]
                 });
 
-                // Draw Headers (Cleaned up, no subjects printed)
+                // Draw Headers
                 let currentY = y - 16;
                 const titleText = `CLASS ${group.cls} - SEC ${group.sec}`;
                 const titleW = fontBold.widthOfTextAtSize(titleText, 11);
                 currentPage.drawText(titleText, { x: x + (chitW - titleW)/2, y: currentY, font: fontBold, size: 11, color: rgb(0.1, 0.1, 0.3) });
-                currentY -= 12;
+                currentY -= 14;
+
+                const secKey = `${norm(group.cls)}|${norm(group.sec)}`;
+                if (subjectCountPerSection[secKey] && subjectCountPerSection[secKey].size > 1) {
+                    const subW = fontBold.widthOfTextAtSize(group.subject, 9);
+                    currentPage.drawText(group.subject, { x: x + (chitW - subW)/2, y: currentY, font: fontBold, size: 9, color: rgb(0.2, 0.2, 0.8) });
+                    currentY -= 12;
+                }
 
                 const metaText = `ROOM: ${room.name.toUpperCase()} • COPY ${i} / ${group.count}`;
-                const metaW = fontBold.widthOfTextAtSize(metaText, 9);
-                currentPage.drawText(metaText, { x: x + (chitW - metaW)/2, y: currentY, font: fontBold, size: 9, color: rgb(0.4, 0.4, 0.4) });
-                currentY -= 10;
+                const metaW = fontBold.widthOfTextAtSize(metaText, 8);
+                currentPage.drawText(metaText, { x: x + (chitW - metaW)/2, y: currentY, font: fontBold, size: 8, color: rgb(0.4, 0.4, 0.4) });
+                currentY -= 12;
 
-                // --- HORIZONTAL BOXED TABLE ENGINE ---
-                const availableAnsHeight = currentY - (y - chitH) - 10; // Extra 10px buffer at bottom
-                // Use 15 questions per block for huge exams, 10 for normal tests
-                const qPerBlock = totalQs > 120 ? 15 : 10;
-                const numBlocks = Math.ceil(totalQs / qPerBlock);
-                
-                // Stretch line height dynamically to fill the chit perfectly
-                const maxCellH = 16;
-                const minCellH = 9;
-                let cellH = availableAnsHeight / (numBlocks * 2); // *2 because each block has Q.No and Ans rows
-                cellH = Math.max(minCellH, Math.min(maxCellH, cellH)); 
-                
-                const labelW = 28;
-                const cellW = (chitW - 10 - labelW) / qPerBlock; 
-                const tableX = x + 5;
-                const fontSize = qPerBlock === 15 ? 7.5 : 8.5;
-                const fontYOffset = (cellH - fontSize) / 2 + 1.5;
+                // Draw Header Divider Line
+                currentPage.drawLine({
+                    start: { x: x + 10, y: currentY },
+                    end: { x: x + chitW - 10, y: currentY },
+                    thickness: 1, color: rgb(0.8, 0.8, 0.8)
+                });
+                currentY -= 8; // Small padding before answers
 
-                for(let b = 0; b < numBlocks; b++) {
-                    // 1. Draw Q.No Row
-                    let rowY = currentY - cellH;
-                    currentPage.drawRectangle({ x: tableX, y: rowY, width: labelW, height: cellH, borderColor: rgb(0,0,0), borderWidth: 0.5, color: rgb(0.92, 0.94, 0.96) });
-                    currentPage.drawText("Q.No", { x: tableX + 3, y: rowY + fontYOffset, font: fontBold, size: fontSize, color: rgb(0,0,0) });
+                const startY = currentY;
+
+                // Draw Answer Grid
+                allQuestions.forEach((q, idx) => {
+                    const c = Math.floor(idx / itemsPerCol);
+                    const r = idx % itemsPerCol;
                     
-                    for(let j = 0; j < qPerBlock; j++) {
-                        const qIdx = (b * qPerBlock) + j;
-                        const cellX = tableX + labelW + (j * cellW);
-                        currentPage.drawRectangle({ x: cellX, y: rowY, width: cellW, height: cellH, borderColor: rgb(0,0,0), borderWidth: 0.5, color: rgb(0.92, 0.94, 0.96) });
-                        
-                        if (qIdx < totalQs) {
-                            const qNumStr = allQuestions[qIdx].qNum.toString();
-                            const textW = fontBold.widthOfTextAtSize(qNumStr, fontSize);
-                            currentPage.drawText(qNumStr, { x: cellX + (cellW-textW)/2, y: rowY + fontYOffset, font: fontBold, size: fontSize, color: rgb(0,0,0) });
-                        }
-                    }
-                    
-                    // 2. Draw Answer Row
-                    rowY -= cellH;
-                    currentPage.drawRectangle({ x: tableX, y: rowY, width: labelW, height: cellH, borderColor: rgb(0,0,0), borderWidth: 0.5 });
-                    currentPage.drawText("Ans", { x: tableX + 3, y: rowY + fontYOffset, font: fontBold, size: fontSize, color: rgb(0,0,0) });
-                    
-                    for(let j = 0; j < qPerBlock; j++) {
-                        const qIdx = (b * qPerBlock) + j;
-                        const cellX = tableX + labelW + (j * cellW);
-                        currentPage.drawRectangle({ x: cellX, y: rowY, width: cellW, height: cellH, borderColor: rgb(0,0,0), borderWidth: 0.5 });
-                        
-                        if (qIdx < totalQs) {
-                            const ansStr = allQuestions[qIdx].ans.toString();
-                            const textW = fontBold.widthOfTextAtSize(ansStr, fontSize);
-                            // Print the actual answer in dark blue for readability
-                            currentPage.drawText(ansStr, { x: cellX + (cellW-textW)/2, y: rowY + fontYOffset, font: fontBold, size: fontSize, color: rgb(0.1, 0.1, 0.7) });
-                        }
-                    }
-                    
-                    // Add a tiny 3px visual gap before starting the next block
-                    currentY -= (cellH * 2) + 3; 
-                }
-                
+                    const qX = x + 10 + (c * colWidth);
+                    const qY = startY - (r * dynamicLineHeight);
+
+                    currentPage.drawText(`${q.qNum}.`, { x: qX, y: qY, font: fontReg, size: fontSize, color: rgb(0.4, 0.4, 0.4) });
+                    currentPage.drawText(`${q.ans}`, { x: qX + ansOffsetX, y: qY, font: fontBold, size: fontSize, color: rgb(0, 0, 0) });
+                });
+
                 chitIndex++;
             }
         });
