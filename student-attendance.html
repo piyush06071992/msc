@@ -2890,16 +2890,43 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
                 let hasAttendanceMarked = false;
                 let markedCount = 0;
                 
+                const dObjDetect = new Date(dateStr);
+                const dayNameDetect = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dObjDetect.getDay()];
+                const snapshotSync = getScheduleSnapshotForDate(dateStr);
+                const activeSched = snapshotSync.isOverride ? snapshotSync.schedule : snapshotSync.schedule.filter(t => t.day === dayNameDetect);
+
                 let html = "";
                 seatedStudents.forEach((stu, index) => {
                     let status = "";
-                    for (let k of Object.keys(sectionAttendanceMap)) {
-                        if (k.startsWith(`${normMatch(stu.className)}|${normMatch(stu.section)}|`) && sectionAttendanceMap[k][stu.id]) {
-                            status = sectionAttendanceMap[k][stu.id];
-                            currentMonthDoc[dateStr][stu.id] = status;
-                            if (status) markedCount++;
-                            break;
+                    
+                    // 1. Find the exact exam subject for this student's class/sec from the day's schedule
+                    const examSlot = activeSched.find(slot => 
+                        normMatch(slot.className) === normMatch(stu.className) && 
+                        normMatch(slot.section || slot.sectionName) === normMatch(stu.section) &&
+                        (slot.subject || slot.title || "").toUpperCase().match(/EXAM|UT|OT|PREBOARD|TERMINAL/)
+                    );
+                    
+                    const expectedExamSub = examSlot ? (examSlot.subject || examSlot.title) : "EXAM";
+                    const exactKey = `${normMatch(stu.className)}|${normMatch(stu.section)}|${normMatch(expectedExamSub)}`;
+
+                    // 2. Try to fetch the exact exam record
+                    if (sectionAttendanceMap[exactKey] && sectionAttendanceMap[exactKey][stu.id]) {
+                        status = sectionAttendanceMap[exactKey][stu.id];
+                    } else {
+                        // 3. Fallback: Search for any subject containing EXAM/UT/OT, explicitly avoiding CLASS INCHARGE
+                        for (let k of Object.keys(sectionAttendanceMap)) {
+                            if (k.startsWith(`${normMatch(stu.className)}|${normMatch(stu.section)}|`) && k.match(/exam|ut|ot|preboard|terminal/) && !k.includes("classincharge")) {
+                                if (sectionAttendanceMap[k][stu.id]) {
+                                    status = sectionAttendanceMap[k][stu.id];
+                                    break;
+                                }
+                            }
                         }
+                    }
+                    
+                    if (status) {
+                        currentMonthDoc[dateStr][stu.id] = status;
+                        markedCount++;
                     }
                 });
                 
