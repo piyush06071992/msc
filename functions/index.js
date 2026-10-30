@@ -273,9 +273,9 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     const rightText = `${subLabel}COPY ${c+1}/${copiesNeeded}`;
                     
              const topY = height - 25;
-                    const bottomY = 25; 
+                    const bottomY = 12; 
 
-                    // Shifted X to 45 and Y to 25 to safely dodge printer margins AND black OMR corner dots
+                    // Shifted Y to 12 for the footer to print strictly below the black OMR corner dots
                     page.drawText(leftText, { x: 45, y: topY, size, font, color, opacity });
                     page.drawText(rightText, { x: width - font.widthOfTextAtSize(rightText, size) - 45, y: topY, size, font, color, opacity });
                     
@@ -316,9 +316,9 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 const bottomLeftText = `${stu.name.toUpperCase()}`;
                 const bottomRightText = `CLASS ${stu.className} - SEC ${stu.section}`;
                 
-             // Shifted X to 45 and Y to 25 to safely dodge printer margins AND black OMR corner dots
+            // Shifted Y to 12 for the footer to print strictly below the black OMR corner dots
                 const topY = height - 25;
-                const bottomY = 25; 
+                const bottomY = 12; 
 
                 if (task.layout === 'A3_BOOKLET' || task.layout === 'A5_BOOKLET') {
                     const halfWidth = width / 2;
@@ -341,7 +341,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 } else {
                         // BACK PAGE (Inverted / Rotated 180 degrees)
                         const invTopY = 25; 
-                        const invBottomY = height - 25; 
+                        const invBottomY = height - 12;
                         
                         // -- LEFT PAGE STAMPS (Physical left half) --
                         page.drawText(topLeftText, { x: halfWidth - 45, y: invTopY, size, font, color, opacity, rotate: degrees(180) });
