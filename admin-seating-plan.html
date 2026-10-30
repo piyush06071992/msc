@@ -3520,7 +3520,7 @@ async function printRoomAnswerKeys() {
             return;
         }
 
-        // --- NATIVE PDF GENERATION VIA PDF-LIB ---
+       // --- NATIVE PDF GENERATION VIA PDF-LIB ---
         const { PDFDocument, rgb, StandardFonts } = window.PDFLib;
         const pdfDoc = await PDFDocument.create();
         const fontReg = await pdfDoc.embedFont(StandardFonts.Helvetica);
@@ -3531,14 +3531,13 @@ async function printRoomAnswerKeys() {
         const pageHeight = 841.89;
         const margin = 20;
         const gap = 20;
-        
-        // 2x2 Grid (4 chits per page)
-        const chitW = (pageWidth - (margin * 2) - gap) / 2;
-        const chitH = (pageHeight - (margin * 2) - gap) / 2;
 
         let currentPage = pdfDoc.addPage([pageWidth, pageHeight]);
-        let chitIndex = 0; // Tracks position: 0 to 3
+        let chitIndex = 0; 
         let chitsFound = false;
+        
+        // Track the current page's grid capacity (to handle mixing sizes safely)
+        let currentGridCapacity = 6; 
 
         Object.values(printGroups).forEach(group => {
             const akData = akDatabase[group.groupKey];
@@ -3566,19 +3565,50 @@ async function printRoomAnswerKeys() {
             }
 
             let allQuestions = Array.from(uniqueMap.values()).sort((a, b) => a.qNum - b.qNum);
-            if (allQuestions.length === 0) return;
+            const totalQs = allQuestions.length;
+            if (totalQs === 0) return;
+
+            // --- DYNAMIC GRID & SPACING MATH ---
+            // 1. Choose Grid Size (6 chits for <= 90 Qs, 4 chits for > 90 Qs)
+            const chitsPerPage = totalQs <= 90 ? 6 : 4;
+            const chitRows = totalQs <= 90 ? 3 : 2;
+            
+            const chitW = (pageWidth - (margin * 2) - gap) / 2;
+            const chitH = (pageHeight - (margin * 2) - (gap * (chitRows - 1))) / chitRows;
+            
+            // 2. Determine Columns inside Chit to maximize readability
+            const headerHeight = 55;
+            const availableAnsHeight = chitH - headerHeight - 10;
+            
+            let cols = 2;
+            let itemsPerCol = Math.ceil(totalQs / cols);
+            let dynamicLineHeight = availableAnsHeight / itemsPerCol;
+            
+            // Push to more columns if the line height gets too squished (below 7.5px)
+            while (dynamicLineHeight < 7.5 && cols < 5) {
+                cols++;
+                itemsPerCol = Math.ceil(totalQs / cols);
+                dynamicLineHeight = availableAnsHeight / itemsPerCol;
+            }
+            
+            // Cap the line height so short exams (e.g., 20 Qs) don't get stretched ridiculously far apart
+            dynamicLineHeight = Math.min(14, dynamicLineHeight);
+            
+            const colWidth = (chitW - 20) / cols;
+            const fontSize = cols >= 5 ? 7.5 : (cols === 4 ? 8 : 9);
+            const ansOffsetX = cols >= 5 ? 14 : 16; 
 
             // Generate physical copies
             for (let i = 1; i <= group.count; i++) {
                 chitsFound = true;
                 
-                // Add new page if grid is full
-                if (chitIndex > 3) {
-                    currentPage = pdfDoc.addPage([pageWidth, pageHeight]);
+                // Add new page if the grid is full OR if the grid layout changes (e.g. 4-chit to 6-chit)
+                if (chitIndex >= currentGridCapacity || currentGridCapacity !== chitsPerPage) {
+                    if (chitIndex > 0) currentPage = pdfDoc.addPage([pageWidth, pageHeight]);
                     chitIndex = 0;
+                    currentGridCapacity = chitsPerPage;
                 }
 
-                // Calculate Chit X and Y coordinates
                 const col = chitIndex % 2;
                 const row = Math.floor(chitIndex / 2);
                 const x = margin + (col * (chitW + gap));
@@ -3591,23 +3621,23 @@ async function printRoomAnswerKeys() {
                 });
 
                 // Draw Headers
-                let currentY = y - 20;
+                let currentY = y - 16;
                 const titleText = `CLASS ${group.cls} - SEC ${group.sec}`;
-                const titleW = fontBold.widthOfTextAtSize(titleText, 12);
-                currentPage.drawText(titleText, { x: x + (chitW - titleW)/2, y: currentY, font: fontBold, size: 12, color: rgb(0.1, 0.1, 0.3) });
-                currentY -= 15;
+                const titleW = fontBold.widthOfTextAtSize(titleText, 11);
+                currentPage.drawText(titleText, { x: x + (chitW - titleW)/2, y: currentY, font: fontBold, size: 11, color: rgb(0.1, 0.1, 0.3) });
+                currentY -= 14;
 
                 const secKey = `${norm(group.cls)}|${norm(group.sec)}`;
                 if (subjectCountPerSection[secKey] && subjectCountPerSection[secKey].size > 1) {
-                    const subW = fontBold.widthOfTextAtSize(group.subject, 10);
-                    currentPage.drawText(group.subject, { x: x + (chitW - subW)/2, y: currentY, font: fontBold, size: 10, color: rgb(0.2, 0.2, 0.8) });
-                    currentY -= 15;
+                    const subW = fontBold.widthOfTextAtSize(group.subject, 9);
+                    currentPage.drawText(group.subject, { x: x + (chitW - subW)/2, y: currentY, font: fontBold, size: 9, color: rgb(0.2, 0.2, 0.8) });
+                    currentY -= 12;
                 }
 
                 const metaText = `ROOM: ${room.name.toUpperCase()} • COPY ${i} / ${group.count}`;
-                const metaW = fontBold.widthOfTextAtSize(metaText, 9);
-                currentPage.drawText(metaText, { x: x + (chitW - metaW)/2, y: currentY, font: fontBold, size: 9, color: rgb(0.4, 0.4, 0.4) });
-                currentY -= 15;
+                const metaW = fontBold.widthOfTextAtSize(metaText, 8);
+                currentPage.drawText(metaText, { x: x + (chitW - metaW)/2, y: currentY, font: fontBold, size: 8, color: rgb(0.4, 0.4, 0.4) });
+                currentY -= 12;
 
                 // Draw Header Divider Line
                 currentPage.drawLine({
@@ -3615,31 +3645,9 @@ async function printRoomAnswerKeys() {
                     end: { x: x + chitW - 10, y: currentY },
                     thickness: 1, color: rgb(0.8, 0.8, 0.8)
                 });
-                currentY -= 15;
+                currentY -= 8; // Small padding before answers
 
-               // --- DYNAMIC AUTO-SPACING MATH ---
-                const totalQs = allQuestions.length;
-                
-                // 1. Optimize column count based on exact question count
-                let cols = 3;
-                if (totalQs > 130) cols = 5;
-                else if (totalQs > 90) cols = 4;
-                else if (totalQs <= 40) cols = 2;
-                
-                const itemsPerCol = Math.ceil(totalQs / cols);
-                const colWidth = (chitW - 20) / cols;
-                
-                // 2. Dynamically expand line height to fill the empty vertical space
-                // Available height for answers is roughly 310 points. 
-                // We cap the max line height at 16 so a 10-question test isn't stretched ridiculously.
-                const availableHeight = 300; 
-                const dynamicLineHeight = Math.min(16, availableHeight / itemsPerCol);
-                
-                // 3. Adjust font size based on column crunch
-                const fontSize = cols >= 5 ? 8 : (cols === 4 ? 9 : 10);
-                const ansOffsetX = cols >= 5 ? 16 : 18; 
-                
-                const startY = currentY - 5; // Slight padding from header line
+                const startY = currentY;
 
                 // Draw Answer Grid
                 allQuestions.forEach((q, idx) => {
