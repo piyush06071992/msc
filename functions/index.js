@@ -271,7 +271,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                     const rightText = `${subLabel}COPY ${c+1}/${copiesNeeded}`;
                     
              const topY = height - 22;
-                    const bottomY = 10; // ⬇️ Moved down to print below OMR dots
+                    const bottomY = 18; // ⬆️ Adjusted to clear 6mm physical printer margins safely
 
                     // Simple admin stamps nestled neatly into the frontend margins
                     page.drawText(leftText, { x: 20, y: topY, size, font, color, opacity });
@@ -316,7 +316,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                 
              // Coordinates adjusted to stay safely within printer margins
                 const topY = height - 22;
-                const bottomY = 10; // ⬇️ Moved down to print below OMR dots
+                const bottomY = 18; // ⬆️ Adjusted to clear 6mm physical printer margins safely
 
                 if (task.layout === 'A3_BOOKLET' || task.layout === 'A5_BOOKLET') {
                     const halfWidth = width / 2;
@@ -338,8 +338,8 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
                         page.drawText(bottomRightText, { x: width - font.widthOfTextAtSize(bottomRightText, size) - 20, y: bottomY, size, font, color, opacity });
                 } else {
                         // BACK PAGE (Inverted / Rotated 180 degrees)
-                        const invTopY = 10; // ⬇️ Moved closer to physical edge
-                        const invBottomY = height - 10; // ⬇️ Moved closer to physical edge to bypass dots
+                        const invTopY = 18; // ⬆️ Clears hardware margin
+                        const invBottomY = height - 18; // ⬆️ Clears hardware margin below dots
                         
                         // -- LEFT PAGE STAMPS (Physical left half) --
                         // Logical Top-Left (SEAT): Placed at physical bottom-right
