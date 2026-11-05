@@ -573,26 +573,28 @@ exports.syncExamBlueprints = onRequest({
         
         const blueprints = await page.evaluate(() => {
             let list = [];
-            // Target elements that precisely house the blueprint name card headers
-            const headerElements = document.querySelectorAll('div, h3, h4');
-            headerElements.forEach(el => {
-                const text = el.innerText ? el.innerText.trim() : "";
-                // Look for cards containing exam indicators and pull the exact raw title line
-                if (text && text.includes("Details: Entrance Exam")) {
+            // Target all card blocks that contain entrance exam details
+            const cardElements = document.querySelectorAll('div');
+            cardElements.forEach(div => {
+                const text = div.innerText ? div.innerText.trim() : "";
+                if (text && (text.includes("Details: Entrance Exam") || text.includes("Entrance Exam"))) {
                     const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
                     if (lines.length > 0) {
-                        const rawTitle = lines[0];
-                        if (rawTitle.length < 40 && !rawTitle.toLowerCase().includes('details')) {
-                            list.push(rawTitle); // Grabs exact raw text without modifications
+                        const title = lines[0]; // Captures exact title including "(UG)"
+                        if (title.length > 0 && title.length < 40 && !title.toLowerCase().includes('details') && !title.toLowerCase().includes('created')) {
+                            if (!list.includes(title)) {
+                                list.push(title);
+                            }
                         }
                     }
                 }
             });
 
+            // Fallback direct check if elements are structured differently
             if (list.length === 0) {
-                document.querySelectorAll('span, div').forEach(el => {
+                document.querySelectorAll('h3, h4, div').forEach(el => {
                     const t = el.innerText ? el.innerText.trim() : "";
-                    if ((t === "NEET" || t === "JEE Mains") && !list.includes(t)) {
+                    if ((t === "NEET (UG)" || t === "NEET" || t === "JEE Mains") && !list.includes(t)) {
                         list.push(t);
                     }
                 });
