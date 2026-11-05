@@ -3,7 +3,6 @@ const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
 const crypto = require("crypto");
-const puppeteer = require("puppeteer");
 
 if (!admin.apps.length) {
     admin.initializeApp();
