@@ -711,38 +711,7 @@
     const db = firebase.firestore();
     // const storage = firebase.storage();
 
-        // --- Lightweight IndexedDB Helper ---
-        const IDB = {
-            dbName: "MinervaERP_Cache",
-            storeName: "MasterStore",
-            async open() {
-                return new Promise((resolve, reject) => {
-                    const req = indexedDB.open(this.dbName, 1);
-                    req.onupgradeneeded = () => req.result.createObjectStore(this.storeName);
-                    req.onsuccess = () => resolve(req.result);
-                    req.onerror = () => reject(req.error);
-                });
-            },
-            async get(key) {
-                const db = await this.open();
-                return new Promise((resolve) => {
-                    const tx = db.transaction(this.storeName, "readonly");
-                    const req = tx.objectStore(this.storeName).get(key);
-                    req.onsuccess = () => resolve(req.result);
-                    req.onerror = () => resolve(null);
-                });
-            },
-            async set(key, value) {
-                const db = await this.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction(this.storeName, "readwrite");
-                    const txStore = tx.objectStore(this.storeName);
-                    txStore.put(value, key);
-                    tx.oncomplete = () => resolve();
-                    tx.onerror = () => reject(tx.error);
-                });
-            }
-        };
+        // IDB Helper Removed. Firebase Native Cache is now managing Delta Syncs.
         
 // --- SECURITY GUARD & AUTO-ROUTER ---
         const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
@@ -1018,7 +987,6 @@ async function checkAndApplyFutureMaster() {
 
         // 3. Mark it as APPLIED so it never runs again
         batch.update(getCollection("timetable_history").doc(targetMaster.date), { type: "APPLIED_MASTER" });
-        batch.set(db.collection("system_metadata").doc("timetable"), { lastUpdated: Date.now() }, { merge: true });
 
         await batch.commit();
         sessionStorage.removeItem('minerva_timetable'); // Force fresh fetch
@@ -1028,23 +996,9 @@ async function checkAndApplyFutureMaster() {
     }
 }
     async function fetchStructure() {
-            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-            const metaDoc = await db.collection("system_metadata").doc("master_config_version").get();
-            const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
-            
-            const localVersion = await IDB.get(`${prefix}structure_last_version`);
-            const cachedData = await IDB.get(`${prefix}structure_data`);
-
-            if (cachedData && localVersion === serverVersion) {
-                console.log("⚡ Structure loaded instantly from local IndexedDB");
-                structureData = cachedData;
-            } else {
-                console.log("🔄 Structure updated. Fetching fresh config...");
-                const snap = await getCollection("institute_structure").orderBy("className").get();
-                structureData = snap.docs.map(d => d.data());
-                await IDB.set(`${prefix}structure_data`, structureData);
-                await IDB.set(`${prefix}structure_last_version`, serverVersion);
-            }
+            console.log("🔄 Fetching Structure via Firebase Native Cache...");
+            const snap = await getCollection("institute_structure").orderBy("className").get();
+            structureData = snap.docs.map(d => d.data());
             
             const pScope = document.getElementById('p-scope');
             if(pScope) {
@@ -1065,19 +1019,7 @@ async function checkAndApplyFutureMaster() {
         }
 
      async function fetchTeachers() {
-            const metaDoc = await db.collection("system_metadata").doc("master_config_version").get();
-            const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
-            
-            const localVersion = await IDB.get(`teachers_last_version`);
-            const cachedData = await IDB.get(`teachers_data`);
-
-            if (cachedData && localVersion === serverVersion) {
-                console.log("⚡ Teachers loaded instantly from local IndexedDB");
-                allTeachers = cachedData.filter(t => t.teacherCenter.includes(activeCenter.toUpperCase()));
-                return;
-            }
-
-            console.log("🔄 Teachers updated. Fetching fresh config...");
+            console.log("🔄 Fetching Teachers via Firebase Native Cache...");
             const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
             let tempTeachers = [];
             
@@ -1096,8 +1038,6 @@ async function checkAndApplyFutureMaster() {
                 });
             });
             
-            await IDB.set(`teachers_data`, tempTeachers);
-            await IDB.set(`teachers_last_version`, serverVersion);
             allTeachers = tempTeachers.filter(t => t.teacherCenter.includes(activeCenter.toUpperCase()));
         }
 
@@ -1122,7 +1062,7 @@ async function checkAndApplyFutureMaster() {
         }
 
      async function fetchTimetable() {
-            // 1. Context-Aware Draft Check - Bypasses Cache
+            // 1. Context-Aware Draft Check
             const draftKey = `draft_${activeCenter}_LIVE`;
             const draftSnap = await db.collection("timetable_drafts").doc(draftKey).get();
             
@@ -1133,37 +1073,17 @@ async function checkAndApplyFutureMaster() {
                 return;
             } 
 
-            // 2. Load Live Master via Smart Cache
-            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-            const metaDoc = await db.collection("system_metadata").doc("timetable").get();
-            const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
-            
-            const localVersion = await IDB.get(`${prefix}timetable_last_version`);
-            const cachedData = await IDB.get(`${prefix}timetable_data`);
-
-            if (cachedData && localVersion === serverVersion) {
-                console.log("⚡ Timetable loaded instantly from local IndexedDB");
-                globalTimetable = cachedData;
-            } else {
-                console.log("🔄 Timetable updated. Fetching fresh schedule...");
-                const snap = await getCollection("timetable").get();
-                globalTimetable = snap.docs.map(d => ({id: d.id, ...d.data()}));
-                await IDB.set(`${prefix}timetable_data`, globalTimetable);
-                await IDB.set(`${prefix}timetable_last_version`, serverVersion);
-            }
-            
+            // 2. Load Live Master via Native Cache
+            console.log("🔄 Fetching Timetable via Firebase Native Cache...");
+            const snap = await getCollection("timetable").get();
+            globalTimetable = snap.docs.map(d => ({id: d.id, ...d.data()}));
             oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
         }
+
     async function fetchLiveMasterCache() {
             try {
-                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                const cachedData = await IDB.get(`${prefix}timetable_data`);
-                if (cachedData) {
-                    liveMasterTimetable = cachedData;
-                } else {
-                    const snap = await getCollection("timetable").get();
-                    liveMasterTimetable = snap.docs.map(d => d.data());
-                }
+                const snap = await getCollection("timetable").get();
+                liveMasterTimetable = snap.docs.map(d => d.data());
             } catch(e) {
                 console.error("Master cache fetch error:", e);
             }
@@ -1171,25 +1091,11 @@ async function checkAndApplyFutureMaster() {
 
      // --- HOLIDAY OVERLAY ENGINE ---
         async function fetchHolidays() {
-            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-            const metaDoc = await db.collection("system_metadata").doc("master_config_version").get();
-            const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
-            
-            const localVersion = await IDB.get(`${prefix}holidays_last_version`);
-            const cachedData = await IDB.get(`${prefix}holidays_data`);
-
-            if (cachedData && localVersion === serverVersion) {
-                console.log("⚡ Holidays loaded instantly from local IndexedDB");
-                holidaysData = cachedData;
-            } else {
-                console.log("🔄 Holidays updated. Fetching fresh config...");
-                try {
-                    const snap = await getCollection("school_holidays").get();
-                    holidaysData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-                    await IDB.set(`${prefix}holidays_data`, holidaysData);
-                    await IDB.set(`${prefix}holidays_last_version`, serverVersion);
-                } catch(e) { console.error("Holiday Fetch Error:", e); }
-            }
+            console.log("🔄 Fetching Holidays via Firebase Native Cache...");
+            try {
+                const snap = await getCollection("school_holidays").get();
+                holidaysData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            } catch(e) { console.error("Holiday Fetch Error:", e); }
         }
 
      function openHolidayModal() {
@@ -1435,11 +1341,9 @@ async function saveHoliday() {
                         created_at: Date.now(),
                         type: "HOLIDAY_CREATED",
                         doc_id: docRef.id
-                    });
+                   });
                     alert("Holiday / Event Rule Saved!");
                 }
-                
-                await getCollection("system_metadata").doc("master_config_version").set({ lastUpdated: Date.now() }, { merge: true });
 
                 cancelEditHoliday();
                 
@@ -1510,9 +1414,6 @@ async function saveHoliday() {
                     type: "HOLIDAY_CANCELLED",
                     doc_id: id
                 });
-                
-                // Bump config version so Student Attendance drops the holiday
-                await getCollection("system_metadata").doc("master_config_version").set({ lastUpdated: Date.now() }, { merge: true });
 
                 await fetchHolidays();
                 renderActiveHolidays();
@@ -3739,9 +3640,6 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                 });
           // 🌟 FIX: CALCULATE DELTAS BEFORE WIPING MEMORY
                 const deltaChanges = getDeltaChanges(oldTimetableState, newSlots);
-
-           // --- LIVE UPDATE TRIGGER ---
-                await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
 
                 // CRITICAL FIX: Wipe ALL memory and states to force a clean fetch
                 sessionStorage.removeItem('minerva_timetable');
