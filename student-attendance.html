@@ -1037,46 +1037,75 @@
 
       async function getCachedStudentsRoster(prefix) {
             try {
-                // 1. Read only 1 document from Firestore to check version
-                const metaDoc = await db.collection("system_metadata").doc("students_version").get();
-                const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
-                
-                // 2. Read local version and stored roster from device IndexedDB
-                const localVersion = await IDB.get(`${prefix}students_last_version`);
-                const cachedRoster = await IDB.get(`${prefix}students_roster`);
-
-                // 3. If version matches and cache exists, bypass Firestore entirely (0 reads!)
-                if (cachedRoster && localVersion !== null && localVersion !== undefined && localVersion === serverVersion) {
-                    console.log("⚡ Roster loaded instantly from local IndexedDB");
-                    return cachedRoster;
-                }
-
-                // 4. If version changed, download the fresh collection and update IndexedDB
-                console.log("🔄 Roster updated on server. Refreshing local IndexedDB cache...");
-                const snap = await db.collection(prefix + "students").where("admissionStatus", "!=", "PENDING").get();
+                console.log("🔄 Fetching Students securely via Firebase Native Cache...");
                 let freshRoster = [];
-                snap.forEach(d => {
-                    const data = d.data();
-                    if (data.isActive !== false || (data.isActive === false && data.statusChangeDate)) {
-                         freshRoster.push({ id: d.id, ...data });
+                
+                // ADMIN VIEW: Full Access to all students
+                if (isAdmin) {
+                    const snap = await db.collection(prefix + "students").where("admissionStatus", "!=", "PENDING").get();
+                    snap.forEach(d => {
+                        const data = d.data();
+                        if (data.isActive !== false || (data.isActive === false && data.statusChangeDate)) {
+                             freshRoster.push({ id: d.id, ...data });
+                        }
+                    });
+                } 
+                // TEACHER VIEW: Targeted Access (Saves Massive Firebase Reads)
+                else {
+                    let targetClasses = new Set();
+                    
+                    // Add regular classes from teacher's schedule
+                    if (window.myRegistersCache) {
+                        window.myRegistersCache.forEach(reg => {
+                            if (reg.c && reg.s) targetClasses.add(`${reg.c}|${reg.s}`);
+                        });
                     }
-                });
+                    
+                    // Add the class of the currently opened register if not in schedule
+                    if (currentReg && currentReg.c && currentReg.s && currentReg.c !== 'EXAM_ROOM') {
+                        targetClasses.add(`${currentReg.c}|${currentReg.s}`);
+                    }
 
-                await IDB.set(`${prefix}students_roster`, freshRoster);
-                await IDB.set(`${prefix}students_last_version`, serverVersion);
+                    if (targetClasses.size > 0) {
+                        const classGroups = {};
+                        targetClasses.forEach(tc => {
+                            const [c, s] = tc.split('|');
+                            if (!classGroups[c]) classGroups[c] = new Set();
+                            classGroups[c].add(s);
+                        });
 
+                        for (const className of Object.keys(classGroups)) {
+                            const sections = Array.from(classGroups[className]);
+                            while (sections.length > 0) {
+                                const chunk = sections.splice(0, 10);
+                                const snap = await db.collection(prefix + "students")
+                                    .where("className", "==", className)
+                                    .where("section", "in", chunk)
+                                    .get();
+                                    
+                                snap.forEach(d => {
+                                    const data = d.data();
+                                    if ((data.isActive !== false || (data.isActive === false && data.statusChangeDate)) && data.admissionStatus !== 'PENDING') {
+                                        freshRoster.push({ id: d.id, ...data });
+                                    }
+                                });
+                            }
+                        }
+                    } else if (currentReg && currentReg.isExamRoom) {
+                         // Exam Room fallback
+                         const snap = await db.collection(prefix + "students").where("admissionStatus", "!=", "PENDING").get();
+                         snap.forEach(d => {
+                             const data = d.data();
+                             if (data.isActive !== false || (data.isActive === false && data.statusChangeDate)) {
+                                  freshRoster.push({ id: d.id, ...data });
+                             }
+                         });
+                    }
+                }
                 return freshRoster;
             } catch (e) {
                 console.warn("Fallback to network fetch:", e);
-                const snap = await db.collection(prefix + "students").get();
-                let fallbackRoster = [];
-                snap.forEach(d => {
-                    const data = d.data();
-                    if (data.admissionStatus !== 'PENDING') {
-                        fallbackRoster.push({ id: d.id, ...data });
-                    }
-                });
-                return fallbackRoster;
+                return [];
             }
         }
 
@@ -1135,6 +1164,10 @@
         }
 
       async function backgroundRefreshMasterConfig(prefix) {
+            // TEACHER OPTIMIZATION: Stop silent background massive-reads for teachers. 
+            // Teachers will rely on the initial load and native cache. This saves thousands of reads!
+            if (!isAdmin) return;
+
             try {
                 const [holSnap, histSnap, remSnap, splSnap] = await Promise.all([
                     getCollection("school_holidays").get(),
@@ -3407,9 +3440,10 @@ async function loadStudentPersonalView() {
         const classNorm = normMatch(currentReg.c);
         const secNorm = normMatch(currentReg.s);
 
-        // Fetch months using IndexedDB Caching (0 reads if unchanged!)
+       // Fetch months using IndexedDB Caching (0 reads if unchanged!)
         for (let mKey of monthKeys) {
-            const docsArray = await getCachedMonthAttendanceDocs(mKey);
+            // TEACHER OPTIMIZATION: Only fetch the specific class/section needed!
+            const docsArray = await getCachedMonthAttendanceDocs(mKey, currentReg.c, currentReg.s);
             docsArray.forEach(item => {
                 const data = item.data;
                 const matchesClass = normMatch(data.className) === classNorm;
@@ -5381,8 +5415,9 @@ async function loadLedger() {
             if (prevM === 0) { prevM = 12; prevY--; }
 
          try {
-                // Fetch ALL past attendance docs using IndexedDB caching to slash Firestore reads
-                const curDocsArray = await getCachedMonthAttendanceDocs(monthVal);
+               // Fetch targeted past attendance docs using IndexedDB caching to slash Firestore reads
+                // TEACHER OPTIMIZATION: Pass the specific class and section to prevent full-school download
+                const curDocsArray = await getCachedMonthAttendanceDocs(monthVal, currentReg.c, currentReg.s);
                 
                 let pastMonthKeys = [];
                 let [targetY, targetM] = monthVal.split('_').map(Number);
@@ -5393,7 +5428,8 @@ async function loadLedger() {
                     loopDate.setMonth(loopDate.getMonth() + 1);
                 }
 
-             let prevDocsArrays = await Promise.all(pastMonthKeys.map(mk => getCachedMonthAttendanceDocs(mk)));
+             // TEACHER OPTIMIZATION: Only fetch the specific class/section needed for this ledger!
+             let prevDocsArrays = await Promise.all(pastMonthKeys.map(mk => getCachedMonthAttendanceDocs(mk, currentReg.c, currentReg.s)));
                 let prevDocsArray = prevDocsArrays.flat();
 
                 let curRecords = {};
