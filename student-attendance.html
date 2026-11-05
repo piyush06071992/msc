@@ -947,93 +947,31 @@
       const normDoc = (val) => String(val || "").replace(/\s/g, '_').toUpperCase();
         const normMatch = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-        // --- Lightweight IndexedDB Helper ---
-        const IDB = {
-            dbName: "MinervaERP_Cache",
-            storeName: "MasterStore",
-            async open() {
-                return new Promise((resolve, reject) => {
-                    const req = indexedDB.open(this.dbName, 1);
-                    req.onupgradeneeded = () => req.result.createObjectStore(this.storeName);
-                    req.onsuccess = () => resolve(req.result);
-                    req.onerror = () => reject(req.error);
-                });
-            },
-            async get(key) {
-                const db = await this.open();
-                return new Promise((resolve) => {
-                    const tx = db.transaction(this.storeName, "readonly");
-                    const req = tx.objectStore(this.storeName).get(key);
-                    req.onsuccess = () => resolve(req.result);
-                    req.onerror = () => resolve(null);
-                });
-            },
-            async set(key, value) {
-                const db = await this.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction(this.storeName, "readwrite");
-                    tx.objectStore(this.storeName).put(value, key);
-                    tx.oncomplete = () => resolve();
-                    tx.onerror = () => reject(tx.error);
-                });
-            }
-        };
+        // Custom IDB Cache Deleted. Firebase Native Cache handles offline & Delta Syncs automatically.
 
- async function getCachedMonthAttendanceDocs(monthKey, className = null, sectionName = null) {
+async function getCachedMonthAttendanceDocs(monthKey, className = null, sectionName = null) {
     try {
-        // Create a unique cache key based on whether we are loading a specific class or the whole school
-        const scopeKey = (className && sectionName) ? `_${className}_${sectionName}` : "_GLOBAL";
-        
-        const metaDoc = await getCollection("attendance_metadata").doc(monthKey).get();
-        const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
-        
-        const localVersion = await IDB.get(`att_meta_${activeCenter}_${monthKey}${scopeKey}`);
-        const cachedDocs = await IDB.get(`att_docs_${activeCenter}_${monthKey}${scopeKey}`);
-
-        if (cachedDocs && localVersion !== null && localVersion !== undefined && localVersion === serverVersion) {
-            console.log(`⚡ Month ${monthKey} attendance loaded from local cache`);
-            return cachedDocs;
-        }
-
-        console.log(`🔄 Fetching fresh attendance records for month ${monthKey}...`);
-        
-        // LAZY LOADING: Only fetch the specific class/section if requested (Saves thousands of reads)
+        console.log(`🔄 Fetching attendance for ${monthKey} via Firebase Delta Sync...`);
         let query = getCollection("attendance_records").where("monthKey", "==", monthKey);
         if (className) query = query.where("className", "==", className);
         if (sectionName) query = query.where("section", "==", sectionName);
         
-        const snap = await query.get();
-        let docsArray = [];
-        snap.forEach(doc => {
-            docsArray.push({ id: doc.id, data: doc.data() });
-        });
-
-        await IDB.set(`att_docs_${activeCenter}_${monthKey}${scopeKey}`, docsArray);
-        await IDB.set(`att_meta_${activeCenter}_${monthKey}${scopeKey}`, serverVersion);
-
-        return docsArray;
-    } catch (e) {
-        console.warn("IDB attendance cache error, falling back to network:", e);
-        let query = getCollection("attendance_records").where("monthKey", "==", monthKey);
-        if (className) query = query.where("className", "==", className);
-        if (sectionName) query = query.where("section", "==", sectionName);
-        
+        // Firebase Native Cache automatically handles delta-syncing this query!
         const snap = await query.get();
         let docsArray = [];
         snap.forEach(doc => docsArray.push({ id: doc.id, data: doc.data() }));
         return docsArray;
+    } catch (e) {
+        console.error("Attendance fetch error:", e);
+        return [];
     }
 }
 
-        async function bumpAttendanceMetadata(monthKey) {
-            try {
-                await getCollection("attendance_metadata").doc(monthKey).set({
-                    lastUpdated: Date.now()
-                }, { merge: true });
-            } catch (e) {
-                console.warn("Failed to bump attendance metadata version:", e);
-            }
-        }
+async function bumpAttendanceMetadata(monthKey) {
+    // Deleted! Firebase native cache tracks document timestamps invisibly.
+    // No more manual version bumping required.
+    return Promise.resolve();
+}
 
       async function getCachedStudentsRoster(prefix) {
             try {
@@ -1111,15 +1049,10 @@
 
        async function getCachedMasterConfig(prefix) {
             try {
-                const cachedBundle = await IDB.get(`${prefix}master_config_bundle`);
-                if (cachedBundle) {
-                    console.log("⚡ Master Config loaded instantly from local IndexedDB");
-                    // Background sync fresh data so UI never blocks
-                    backgroundRefreshMasterConfig(prefix);
-                    return cachedBundle;
-                }
-
-             console.log("🔄 Fetching initial config bundle...");
+                console.log("🔄 Fetching configs via Firebase Native Cache Delta Sync...");
+                
+                // Firebase natively checks the cache for these documents first.
+                // It only downloads modified documents if the server timestamp is newer.
                 const [ttSnap, structSnap, holSnap, staffSnap, histSnap, remSnap, splSnap] = await Promise.all([
                     getCollection("timetable").get(),
                     getCollection("institute_structure").get(),
@@ -1130,7 +1063,7 @@
                     getCollection("special_leaves").where("status", "==", "ACTIVE").get()
                 ]);
 
-                const bundle = {
+                return {
                     timetable: ttSnap.docs.map(d => ({ id: d.id, ...d.data() })),
                     structures: structSnap.docs.map(d => ({ id: d.id, ...d.data() })),
                     holidays: holSnap.docs.map(d => d.data()),
@@ -1139,50 +1072,9 @@
                     remedial: remSnap.docs.map(d => ({ id: d.id, ...d.data() })),
                     specialLeaves: splSnap.docs.map(d => ({ id: d.id, ...d.data() }))
                 };
-
-                await IDB.set(`${prefix}master_config_bundle`, bundle);
-                
-                // Fetch secondary data silently in background
-                backgroundRefreshMasterConfig(prefix);
-                return bundle;
             } catch (e) {
-                console.warn("Master config cache fallback:", e);
-                const [ttSnap, structSnap] = await Promise.all([
-                    getCollection("timetable").get(),
-                    getCollection("institute_structure").get()
-                ]);
-                return {
-                    timetable: ttSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-                    structures: structSnap.docs.map(d => ({ id: d.id, ...d.data() })),
-                    holidays: [],
-                    timetableHistory: [],
-                    staff: [],
-                    remedial: [],
-                    specialLeaves: []
-                };
-            }
-        }
-
-      async function backgroundRefreshMasterConfig(prefix) {
-            // TEACHER OPTIMIZATION: Stop silent background massive-reads for teachers. 
-            // Teachers will rely on the initial load and native cache. This saves thousands of reads!
-            if (!isAdmin) return;
-
-            try {
-                const [holSnap, histSnap, remSnap, splSnap] = await Promise.all([
-                    getCollection("school_holidays").get(),
-                    getCollection("timetable_history").get(),
-                    getCollection("remedial_classes").get(),
-                    getCollection("special_leaves").where("status", "==", "ACTIVE").get()
-                ]);
-                const cached = await IDB.get(`${prefix}master_config_bundle`) || {};
-                cached.holidays = holSnap.docs.map(d => d.data());
-                cached.timetableHistory = histSnap.docs.map(d => d.data());
-                cached.remedial = remSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                cached.specialLeaves = splSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                await IDB.set(`${prefix}master_config_bundle`, cached);
-            } catch (err) {
-                console.warn("Background config refresh skipped:", err);
+                console.error("Master config fetch error:", e);
+                return { timetable: [], structures: [], holidays: [], timetableHistory: [], staff: [], remedial: [], specialLeaves: [] };
             }
         }
 
@@ -7043,7 +6935,7 @@ async function printLedgerPDF() {
                 // Instantly bump the global cache version so all devices pull the fresh duty roster
                 await getCollection("system_metadata").doc("master_config_version").set({ lastUpdated: Date.now() }, { merge: true });
 
-             alert(`✅ Record Authorized & Locked successfully for ${addedCount} day(s).`);
+            alert(`✅ Record Authorized & Locked successfully for ${addedCount} day(s).`);
                 
                 // Reset optional fields
                 document.getElementById('spl-end-date').value = "";
@@ -7052,13 +6944,6 @@ async function printLedgerPDF() {
              const splSnap = await getCollection("special_leaves").where("status", "==", "ACTIVE").get();
                 specialLeavesData = [];
                 splSnap.forEach(d => specialLeavesData.push({id: d.id, ...d.data()}));
-                
-                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                const cached = await IDB.get(`${prefix}master_config_bundle`);
-                if (cached) {
-                    cached.specialLeaves = specialLeavesData;
-                    await IDB.set(`${prefix}master_config_bundle`, cached);
-                }
 
                 loadSpecialLeavesView();
             } catch(e) {
@@ -7119,20 +7004,10 @@ async function printLedgerPDF() {
 
   async function cancelSpecialLeave(id) {
             if (!confirm("Are you sure you want to cancel this authorized leave?")) return;
-            try {
+           try {
                 await getCollection("special_leaves").doc(id).update({ status: "CANCELLED" });
-                
-                // Instantly bump the global cache version
-                await getCollection("system_metadata").doc("master_config_version").set({ lastUpdated: Date.now() }, { merge: true });
 
                 specialLeavesData = specialLeavesData.filter(s => s.id !== id);
-                
-                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                const cached = await IDB.get(`${prefix}master_config_bundle`);
-                if (cached) {
-                    cached.specialLeaves = specialLeavesData;
-                    await IDB.set(`${prefix}master_config_bundle`, cached);
-                }
 
                 loadSpecialLeavesView();
             } catch(e) {
@@ -7176,21 +7051,11 @@ async function printLedgerPDF() {
             const now = new Date();
             const timeStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
             
-       try {
+      try {
                 await getCollection("special_leaves").doc(id).update({ endTime: timeStr });
-                
-                // Instantly bump the global cache version
-                await getCollection("system_metadata").doc("master_config_version").set({ lastUpdated: Date.now() }, { merge: true });
 
                 const leave = specialLeavesData.find(s => s.id === id);
                 if (leave) leave.endTime = timeStr;
-                
-                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                const cached = await IDB.get(`${prefix}master_config_bundle`);
-                if (cached) {
-                    cached.specialLeaves = specialLeavesData;
-                    await IDB.set(`${prefix}master_config_bundle`, cached);
-                }
 
                 loadSpecialLeavesView();
             } catch(e) {
