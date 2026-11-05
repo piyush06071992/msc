@@ -520,19 +520,28 @@ exports.compileSingleRoomOnDemand = onRequest({
 });
 
 // =======================================================
-// --- EXTERNAL BLUEPRINT SYNC WIZARD (PUPPETEER) ---
+// --- EXTERNAL BLUEPRINT SYNC WIZARD (PUPPETEER-CORE) ---
 // =======================================================
+const chromium = require("@sparticuz/chromium");
+const puppeteerCore = require("puppeteer-core");
+
 exports.syncExamBlueprints = onRequest({
     region: "asia-south1",
-    memory: "2GiB", // Puppeteer requires higher memory
+    memory: "2GiB", // Headless browser memory allocation
     timeoutSeconds: 300,
     cors: true
 }, async (req, res) => {
     let browser = null;
     try {
-        browser = await puppeteer.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        // Launch using Sparticuz Chromium optimized for Firebase Functions
+        const executablePath = await chromium.executablePath();
+        
+        browser = await puppeteerCore.launch({
+            args: chromium.args,
+            defaultViewport: chromium.defaultViewport,
+            executablePath: executablePath,
+            headless: chromium.headless,
+            ignoreHTTPSErrors: true,
         });
         
         const page = await browser.newPage();
@@ -552,7 +561,6 @@ exports.syncExamBlueprints = onRequest({
         
         // 4. Click Exams Tab (4th element in sidebar list)
         await page.waitForSelector("li:nth-of-type(4)");
-        // Add a slight delay to ensure UI transitions are complete
         await new Promise(resolve => setTimeout(resolve, 1500));
         await page.click("li:nth-of-type(4)");
         
@@ -563,7 +571,7 @@ exports.syncExamBlueprints = onRequest({
         
         // 6. Wait for blueprints to load and extract them
         await page.waitForSelector(".exam-name-wrap");
-        await new Promise(resolve => setTimeout(resolve, 1500)); // Ensure DOM is fully painted
+        await new Promise(resolve => setTimeout(resolve, 1500));
         
         const blueprints = await page.evaluate(() => {
             const elements = document.querySelectorAll(".exam-name-wrap > div");
@@ -573,6 +581,7 @@ exports.syncExamBlueprints = onRequest({
         });
         
         await browser.close();
+        browser = null;
         
         // 7. Save to Firestore Master Config
         if (blueprints.length > 0) {
