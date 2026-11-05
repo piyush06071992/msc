@@ -572,29 +572,35 @@ exports.syncExamBlueprints = onRequest({
         await new Promise(resolve => setTimeout(resolve, 3000));
         
         const blueprints = await page.evaluate(() => {
-            // Target elements inside the blueprint list cards matching NEET / JEE titles
-            const elements = document.querySelectorAll("div[class*='exam'] div, h3, h4, span");
             let list = [];
-            document.querySelectorAll('*').forEach(el => {
-                // Look for text elements matching typical exam headers or grab container titles
-                if (el.className && typeof el.className === 'string' && el.className.includes('name')) {
-                    list.push(el.innerText.trim());
+            // Target the primary heading/title containers of the blueprint cards on Acadwin
+            // Typically the main title is the first bold line or inside a specific heading/title class
+            const cards = document.querySelectorAll('.bg-white, div');
+            cards.forEach(card => {
+                const text = card.innerText;
+                if (text && text.includes("Details: Entrance Exam")) {
+                    // Extract strictly the first line of the card, which is the exam title (e.g. "NEET", "JEE Mains")
+                    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                    if (lines.length > 0) {
+                        const title = lines[0];
+                        // Filter out UI clutter or metadata
+                        if (title.length < 40 && !title.toLowerCase().includes('details') && !title.toLowerCase().includes('created')) {
+                            list.push(title);
+                        }
+                    }
                 }
             });
-            
-            // Fallback: grab card header texts directly if specific class lookup is empty
+
+            // Fallback if structured cards aren't matched
             if (list.length === 0) {
-                document.querySelectorAll('.bg-white, div').forEach(card => {
-                    const text = card.innerText;
-                    if (text && (text.includes('NEET') || text.includes('JEE'))) {
-                        const firstLine = text.split('\n')[0].trim();
-                        if (firstLine.length < 30 && !list.includes(firstLine)) {
-                            list.push(firstLine);
-                        }
+                document.querySelectorAll('h1, h2, h3, h4').forEach(h => {
+                    const t = h.innerText.trim();
+                    if (t && (t.includes('NEET') || t.includes('JEE')) && t.length < 40) {
+                        list.push(t);
                     }
                 });
             }
-            
+
             return Array.from(new Set(list)).filter(t => t.length > 0);
         });
         
