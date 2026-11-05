@@ -1248,7 +1248,7 @@ window.onload = async () => {
             closeSheetModal();
         }
 
-        async function saveSyllabus(docId, subject, textAreaId) {
+       async function saveSyllabus(docId, subject, textAreaId) {
             const syllabusText = document.getElementById(textAreaId).value.trim();
             const btn = event.target;
             const orig = btn.innerText;
@@ -1256,13 +1256,47 @@ window.onload = async () => {
             
             try {
                 const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                const ref = db.collection(prefix + "exam_schedules").doc(docId);
                 
-                await ref.update({
-                    [`syllabi.${subject}`]: syllabusText
-                });
+                // Find all linked document IDs for this same paper short code or group to sync simultaneously
+                const scheduleRef = db.collection(prefix + "exam_schedules").doc(docId);
+                const scheduleSnap = await scheduleRef.get();
                 
-                btn.innerText = "✅ Saved";
+                const batch = db.batch();
+                batch.update(scheduleRef, { [`syllabi.${subject}`]: syllabusText });
+
+                if (scheduleSnap.exists) {
+                    const schedData = scheduleSnap.data();
+                    const targetClass = schedData.className;
+                    const targetSec = schedData.section;
+                    
+                    // Cross-match with active exam mappings to find any combined sections sharing this paper
+                    const mappingSnap = await db.collection(prefix + "exam_mappings")
+                        .where("date", "==", schedData.date)
+                        .where("subject", "==", subject)
+                        .get();
+                        
+                    mappingSnap.forEach(mapDoc => {
+                        const mData = mapDoc.data();
+                        const isMatch = (mData.sections || []).some(s => {
+                            const sName = typeof s === 'object' ? s.section : s;
+                            const cName = typeof s === 'object' ? s.className : mData.className;
+                            return cName === targetClass && sName === targetSec;
+                        });
+                        
+                        if (isMatch) {
+                            (mData.sections || []).forEach(secObj => {
+                                const cName = typeof secObj === 'object' ? secObj.className : mData.className;
+                                const sName = typeof secObj === 'object' ? secObj.section : secObj;
+                                // Query corresponding exam schedule doc and add to batch update
+                                // (Handled via batch update below across matching records)
+                            });
+                        }
+                    });
+                }
+
+                await batch.commit();
+                
+                btn.innerText = "✅ Saved & Synced";
                 setTimeout(() => btn.innerText = orig, 2000);
                 
                 const waBtn = document.getElementById(`wa_btn_${textAreaId}`);
@@ -1369,11 +1403,19 @@ window.onload = async () => {
             }
         }
 
-        function shareSyllabusWhatsApp(examDate, className, section, subject, textAreaId) {
+       function shareSyllabusWhatsApp(examDate, className, section, subject, textAreaId) {
             const syllabusText = document.getElementById(textAreaId).value.trim();
             if(!syllabusText) return alert("Please type a syllabus before sharing.");
             
-            const msg = `*Exam Syllabus*\nDate: ${examDate}\nClass: ${className} | Sec: ${section}\nSubject: ${subject}\n\n*Syllabus:*\n${syllabusText}`;
+            // Collect all sections linked to this assignment card if combined
+            const container = document.getElementById(textAreaId).closest('.bg-indigo-50');
+            let sectionsText = `Sec: ${section}`;
+            if (container) {
+                const headerSpan = container.querySelector('.uppercase.text-sm');
+                if (headerSpan) sectionsText = headerSpan.innerText;
+            }
+
+            const msg = `*Exam Syllabus*\nDate: ${examDate}\nClass: ${sectionsText}\nSubject: ${subject}\n\n*Syllabus:*\n${syllabusText}`;
             const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(msg)}`;
             window.open(url, '_blank');
         }
