@@ -3,6 +3,7 @@ const { onRequest } = require("firebase-functions/v2/https");
 const admin = require("firebase-admin");
 const { PDFDocument, rgb, StandardFonts } = require("pdf-lib");
 const crypto = require("crypto");
+const puppeteer = require("puppeteer");
 
 if (!admin.apps.length) {
     admin.initializeApp();
@@ -516,4 +517,76 @@ exports.compileSingleRoomOnDemand = onRequest({
         console.error(`[On-Demand Error] ${roomName || seatId}:`, err);
         res.status(500).send({ error: err.message });
     }
+});
+
+// =======================================================
+// --- EXTERNAL BLUEPRINT SYNC WIZARD (PUPPETEER) ---
+// =======================================================
+exports.syncExamBlueprints = onRequest({
+    region: "asia-south1",
+    memory: "2GiB", // Puppeteer requires higher memory
+    timeoutSeconds: 300,
+    cors: true
+}, async (req, res) => {
+    let browser = null;
+    try {
+        browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        });
+        
+        const page = await browser.newPage();
+        await page.setViewport({ width: 868, height: 593 });
+        
+        // 1. Navigate to Login
+        await page.goto("https://mp.minerva.academy/login", { waitUntil: "networkidle2" });
+        
+        // 2. Fill Credentials
+        await page.waitForSelector("#email");
+        await page.type("#email", "msccoaching20251@gmail.com");
+        await page.type("#password", "Minerva@2025");
+        
+        // 3. Click Sign In
+        await page.click("form > button");
+        await page.waitForNavigation({ waitUntil: "networkidle2" });
+        
+        // 4. Click Exams Tab (4th element in sidebar list)
+        await page.waitForSelector("li:nth-of-type(4)");
+        // Add a slight delay to ensure UI transitions are complete
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await page.click("li:nth-of-type(4)");
+        
+        // 5. Click Exam Blueprints Button (2nd nav button)
+        await page.waitForSelector("nav > button:nth-of-type(2)");
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        await page.click("nav > button:nth-of-type(2)");
+        
+        // 6. Wait for blueprints to load and extract them
+        await page.waitForSelector(".exam-name-wrap");
+        await new Promise(resolve => setTimeout(resolve, 1500)); // Ensure DOM is fully painted
+        
+        const blueprints = await page.evaluate(() => {
+            const elements = document.querySelectorAll(".exam-name-wrap > div");
+            return Array.from(elements)
+                .map(el => el.innerText.trim())
+                .filter(text => text.length > 0);
+        });
+        
+        await browser.close();
+        
+        // 7. Save to Firestore Master Config
+        if (blueprints.length > 0) {
+            await admin.firestore().collection("configs").doc("exam_blueprints").set({
+                names: blueprints,
+                lastUpdated: Date.now()
+            }, { merge: true });
+        }
+        
+        res.status(200).send({ success: true, count: blueprints.length, blueprints });
+    } catch (error) {
+        if (browser) await browser.close();
+        console.error("[Blueprint Sync] Error:", error);
+        res.status(500).send({ error: error.message });
+    }
+});
 });
