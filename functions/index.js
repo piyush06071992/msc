@@ -573,29 +573,26 @@ exports.syncExamBlueprints = onRequest({
         
         const blueprints = await page.evaluate(() => {
             let list = [];
-            // Target the primary heading/title containers of the blueprint cards on Acadwin
-            // Typically the main title is the first bold line or inside a specific heading/title class
-            const cards = document.querySelectorAll('.bg-white, div');
-            cards.forEach(card => {
-                const text = card.innerText;
+            // Target elements that precisely house the blueprint name card headers
+            const headerElements = document.querySelectorAll('div, h3, h4');
+            headerElements.forEach(el => {
+                const text = el.innerText ? el.innerText.trim() : "";
+                // Look for cards containing exam indicators and pull the exact raw title line
                 if (text && text.includes("Details: Entrance Exam")) {
-                    // Extract strictly the first line of the card, which is the exam title (e.g. "NEET", "JEE Mains")
                     const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
                     if (lines.length > 0) {
-                        const title = lines[0];
-                        // Filter out UI clutter or metadata
-                        if (title.length < 40 && !title.toLowerCase().includes('details') && !title.toLowerCase().includes('created')) {
-                            list.push(title);
+                        const rawTitle = lines[0];
+                        if (rawTitle.length < 40 && !rawTitle.toLowerCase().includes('details')) {
+                            list.push(rawTitle); // Grabs exact raw text without modifications
                         }
                     }
                 }
             });
 
-            // Fallback if structured cards aren't matched
             if (list.length === 0) {
-                document.querySelectorAll('h1, h2, h3, h4').forEach(h => {
-                    const t = h.innerText.trim();
-                    if (t && (t.includes('NEET') || t.includes('JEE')) && t.length < 40) {
+                document.querySelectorAll('span, div').forEach(el => {
+                    const t = el.innerText ? el.innerText.trim() : "";
+                    if ((t === "NEET" || t === "JEE Mains") && !list.includes(t)) {
                         list.push(t);
                     }
                 });
