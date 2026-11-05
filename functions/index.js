@@ -568,15 +568,34 @@ exports.syncExamBlueprints = onRequest({
         await new Promise(resolve => setTimeout(resolve, 1000));
         await page.click("nav > button:nth-of-type(2)");
         
-        // 6. Wait for blueprints to load and extract them
-        await page.waitForSelector(".exam-name-wrap");
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        // 6. Wait for blueprints to load and extract them safely
+        await new Promise(resolve => setTimeout(resolve, 3000));
         
         const blueprints = await page.evaluate(() => {
-            const elements = document.querySelectorAll(".exam-name-wrap > div");
-            return Array.from(elements)
-                .map(el => el.innerText.trim())
-                .filter(text => text.length > 0);
+            // Target elements inside the blueprint list cards matching NEET / JEE titles
+            const elements = document.querySelectorAll("div[class*='exam'] div, h3, h4, span");
+            let list = [];
+            document.querySelectorAll('*').forEach(el => {
+                // Look for text elements matching typical exam headers or grab container titles
+                if (el.className && typeof el.className === 'string' && el.className.includes('name')) {
+                    list.push(el.innerText.trim());
+                }
+            });
+            
+            // Fallback: grab card header texts directly if specific class lookup is empty
+            if (list.length === 0) {
+                document.querySelectorAll('.bg-white, div').forEach(card => {
+                    const text = card.innerText;
+                    if (text && (text.includes('NEET') || text.includes('JEE'))) {
+                        const firstLine = text.split('\n')[0].trim();
+                        if (firstLine.length < 30 && !list.includes(firstLine)) {
+                            list.push(firstLine);
+                        }
+                    }
+                });
+            }
+            
+            return Array.from(new Set(list)).filter(t => t.length > 0);
         });
         
         await browser.close();
