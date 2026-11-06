@@ -289,15 +289,20 @@
                     console.log("🔄 Fetching fresh planner data from server...");
                     const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
 
-                    const [holSnap, histSnap, ttSnap, plannerSnap, leaveSnap, lockDoc, structSnap] = await Promise.all([
-                        getCollection("school_holidays").get(),
-                        getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get(),
-                        getCollection("timetable").get(),
-                        getCollection("lesson_planners").get(),
-                        db.collection(prefix + "leave_requests").get(),
-                        getCollection("configs").doc("lesson_planner_settings").get(),
-                        getCollection("institute_structure").get()
-                    ]);
+                   const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
+                
+                // Target timetable directly to the logged-in teacher to eliminate heavy global reads
+                const timetableQuery = getCollection("timetable").where("teacherName", "==", safeName);
+
+                const [holSnap, histSnap, ttSnap, plannerSnap, leaveSnap, lockDoc, structSnap] = await Promise.all([
+                    getCollection("school_holidays").get(),
+                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get(),
+                    timetableQuery.get(),
+                    getCollection("lesson_planners").get(),
+                    db.collection(prefix + "leave_requests").get(),
+                    getCollection("configs").doc("lesson_planner_settings").get(),
+                    getCollection("institute_structure").get()
+                ]);
 
                     holidaysData = holSnap.docs.map(d => d.data());
                     window.historyOverrides = histSnap.docs.map(d => d.data());
@@ -621,21 +626,24 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 return; 
             }
 
-          try {
+         try {
                 const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
                 if (!window.teacherTimetable) {
                     const ttSnap = await getCollection("timetable").where("teacherName", "==", safeName).get();
                     window.teacherTimetable = ttSnap.docs.map(d => d.data());
                 }
 
-                const lockDoc = await getCollection("configs").doc("lesson_planner_settings").get();
+                // Fetch only the specific active planner document instead of loading a broad query
+                const [doc, assignDoc, lockDoc] = await Promise.all([
+                    getCollection("lesson_planners").doc(activeSubjectId).get(),
+                    getCollection("lesson_planner_assignments").doc(activeSubjectId).get(),
+                    getCollection("configs").doc("lesson_planner_settings").get()
+                ]);
+
                 if (lockDoc.exists) {
                     if (lockDoc.data().autoLockEnabled === false) globalAutoLock = false;
                     if (lockDoc.data().dailyComplianceBlockEnabled === true) enableDailyBlock = true;
                 }
-
-                const doc = await getCollection("lesson_planners").doc(activeSubjectId).get();
-                const assignDoc = await getCollection("lesson_planner_assignments").doc(activeSubjectId).get();
                 window.currentAssignment = assignDoc.exists ? assignDoc.data() : {};
                 
                 // Bypass lock logic if syllabus is completely empty
