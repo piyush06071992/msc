@@ -951,12 +951,13 @@
 
 async function getCachedMonthAttendanceDocs(monthKey, className = null, sectionName = null) {
     try {
-        console.log(`🔄 Fetching attendance for ${monthKey} via Firebase Delta Sync...`);
+        console.log(`🔄 Fetching attendance for ${monthKey} via optimized query...`);
         let query = getCollection("attendance_records").where("monthKey", "==", monthKey);
+        
+        // Enforce strict parameters to prevent unindexed full-collection scans
         if (className) query = query.where("className", "==", className);
         if (sectionName) query = query.where("section", "==", sectionName);
         
-        // Firebase Native Cache automatically handles delta-syncing this query!
         const snap = await query.get();
         let docsArray = [];
         snap.forEach(doc => docsArray.push({ id: doc.id, data: doc.data() }));
@@ -5320,9 +5321,9 @@ async function loadLedger() {
                     loopDate.setMonth(loopDate.getMonth() + 1);
                 }
 
-             // TEACHER OPTIMIZATION: Only fetch the specific class/section needed for this ledger!
-             let prevDocsArrays = await Promise.all(pastMonthKeys.map(mk => getCachedMonthAttendanceDocs(mk, currentReg.c, currentReg.s)));
-                let prevDocsArray = prevDocsArrays.flat();
+            // TEACHER OPTIMIZATION: Strictly scoped past month fetches matching current class and section
+            let prevDocsArrays = await Promise.all(pastMonthKeys.map(mk => getCachedMonthAttendanceDocs(mk, currentReg.c, currentReg.s)));
+            let prevDocsArray = prevDocsArrays.flat();
 
                 let curRecords = {};
        let curStats = {};
@@ -6017,11 +6018,17 @@ async function listenForMissingAttendance() {
                     dCur.setDate(dCur.getDate() + 1);
                 }
 
-             // 3. Fetch Attendance Records using IndexedDB Caching (0 reads if unchanged!)
-                let attRecords = {}; 
-                const attPromises = Array.from(monthsToFetch).map(mKey => 
-                    getCachedMonthAttendanceDocs(mKey)
-                );
+             // 3. Fetch Attendance Records scoped to active sections only (prevents full collection reads)
+            let attRecords = {}; 
+            const activeSectionsList = Object.keys(sectionCounts);
+            const attPromises = [];
+            
+            for (let mKey of monthsToFetch) {
+                for (let secKey of activeSectionsList) {
+                    const [cName, sName] = secKey.split('|');
+                    attPromises.push(getCachedMonthAttendanceDocs(mKey, cName, sName));
+                }
+            }
                 const attDocsArrays = await Promise.all(attPromises);
                 
                 attDocsArrays.forEach(docsArray => {
