@@ -132,37 +132,14 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
+        // Enable Firestore Native Offline Persistence & Cache
+        db.enablePersistence({ synchronizeTabs: true }).catch(err => {
+            console.warn("Firestore persistence note:", err.message);
+        });
+
      // --- MULTI-CENTER DYNAMIC DB ROUTER (TEACHER EDITION) ---
         const storedStaff = JSON.parse(localStorage.getItem('minervaActiveStaff')) || {};
         let activeCenter = "GHUMARWIN"; // Will automatically update based on profile
-
-        // --- INDEXED DB CACHE ENGINE ---
-        const IDB = {
-            dbName: "MinervaERP_Cache", storeName: "MasterStore",
-            async open() {
-                return new Promise((resolve, reject) => {
-                    const req = indexedDB.open(this.dbName, 1);
-                    req.onupgradeneeded = () => req.result.createObjectStore(this.storeName);
-                    req.onsuccess = () => resolve(req.result);
-                    req.onerror = () => reject(req.error);
-                });
-            },
-            async get(key) {
-                const db = await this.open();
-                return new Promise(resolve => {
-                    const req = db.transaction(this.storeName, "readonly").objectStore(this.storeName).get(key);
-                    req.onsuccess = () => resolve(req.result); req.onerror = () => resolve(null);
-                });
-            },
-            async set(key, value) {
-                const db = await this.open();
-                return new Promise((resolve, reject) => {
-                    const tx = db.transaction(this.storeName, "readwrite");
-                    tx.objectStore(this.storeName).put(value, key);
-                    tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
-                });
-            }
-        };
 
         async function bumpPlannerVersion() {
             if (!navigator.onLine) return;
@@ -259,41 +236,19 @@
             } else { fetchTodayData(); }
         }
 
-   async function fetchTodayData() {
+  async function fetchTodayData() {
             const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const todayName = days[new Date().getDay()];
             const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
             
             try {
-                const metaDoc = await db.collection("system_metadata").doc("planners_version").get();
-                const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
-                
-                const cachePrefix = `teacher_planner_${activeCenter}_`;
-                const localVersion = await IDB.get(cachePrefix + "version");
-                const cachedBundle = await IDB.get(cachePrefix + "bundle");
+                console.log("🔄 Fetching planner data via Firebase Native Cache & Targeted Queries...");
+                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
 
-                let structures = [];
-
-                if (cachedBundle && localVersion === serverVersion) {
-                    console.log("⚡ Planner Data loaded from IndexedDB cache");
-                    holidaysData = cachedBundle.holidaysData;
-                    window.historyOverrides = cachedBundle.historyOverrides;
-                    window.fullTimetable = cachedBundle.fullTimetable;
-                    window.allPlanners = cachedBundle.allPlanners;
-                    window.myAbsences = cachedBundle.myAbsences;
-                    window.mySubstitutions = cachedBundle.mySubstitutions;
-                    structures = cachedBundle.structures;
-                    globalAutoLock = cachedBundle.globalAutoLock;
-                    enableDailyBlock = cachedBundle.enableDailyBlock;
-                } else {
-                    console.log("🔄 Fetching fresh planner data from server...");
-                    const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-
-                   const safeName = activeStaff.name && activeStaff.name !== 'undefined' ? activeStaff.name : activeStaff.email;
-                
                 // Target timetable directly to the logged-in teacher to eliminate heavy global reads
                 const timetableQuery = getCollection("timetable").where("teacherName", "==", safeName);
 
+                let structures = [];
                 const [holSnap, histSnap, ttSnap, plannerSnap, leaveSnap, lockDoc, structSnap] = await Promise.all([
                     getCollection("school_holidays").get(),
                     getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get(),
@@ -304,68 +259,56 @@
                     getCollection("institute_structure").get()
                 ]);
 
-                    holidaysData = holSnap.docs.map(d => d.data());
-                    window.historyOverrides = histSnap.docs.map(d => d.data());
-                    window.fullTimetable = ttSnap.docs.map(d => d.data());
-                    window.allPlanners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
-                    structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                holidaysData = holSnap.docs.map(d => d.data());
+                window.historyOverrides = histSnap.docs.map(d => d.data());
+                window.fullTimetable = ttSnap.docs.map(d => d.data());
+                window.allPlanners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
 
-                    globalAutoLock = true;
-                    enableDailyBlock = false;
-                    if (lockDoc.exists) {
-                        if (lockDoc.data().autoLockEnabled === false) globalAutoLock = false;
-                        if (lockDoc.data().dailyComplianceBlockEnabled === true) enableDailyBlock = true;
+                globalAutoLock = true;
+                enableDailyBlock = false;
+                if (lockDoc.exists) {
+                    if (lockDoc.data().autoLockEnabled === false) globalAutoLock = false;
+                    if (lockDoc.data().dailyComplianceBlockEnabled === true) enableDailyBlock = true;
+                }
+
+                window.myAbsences = [];
+                window.mySubstitutions = [];
+                
+                leaveSnap.forEach(doc => {
+                    const leaveData = doc.data();
+                    
+                    if (leaveData.status === "APPROVED" && leaveData.teacherEmail === activeStaff.email) {
+                        if (leaveData.type === 'FULL') {
+                            let currDate = new Date(leaveData.startDate + "T00:00:00");
+                            let endObj = new Date((leaveData.endDate || leaveData.startDate) + "T00:00:00");
+                            while(currDate <= endObj) {
+                                const localY = currDate.getFullYear();
+                                const localM = String(currDate.getMonth() + 1).padStart(2, '0');
+                                const localD = String(currDate.getDate()).padStart(2, '0');
+                                const localDateStr = `${localY}-${localM}-${localD}`;
+                                window.myAbsences.push({ date: localDateStr, isFullDay: true });
+                                currDate.setDate(currDate.getDate() + 1);
+                            }
+                        } else if (leaveData.adjustments) {
+                            leaveData.adjustments.forEach(adj => {
+                                let cNameAdj = adj.className || (adj.sub ? adj.sub.split('|')[0].trim() : "");
+                                let sNameAdj = adj.section || (adj.sub && adj.sub.split('|')[1] ? adj.sub.split('|')[1].replace('Sec', '').trim() : "");
+                                window.myAbsences.push({ date: adj.date, isFullDay: false, className: cNameAdj, section: sNameAdj, subject: adj.title });
+                            });
+                        }
                     }
 
-                    window.myAbsences = [];
-                    window.mySubstitutions = [];
-                    
-                    leaveSnap.forEach(doc => {
-                        const leaveData = doc.data();
-                        
-                        // Parse Personal Absences
-                        if (leaveData.status === "APPROVED" && leaveData.teacherEmail === activeStaff.email) {
-                            if (leaveData.type === 'FULL') {
-                                let currDate = new Date(leaveData.startDate + "T00:00:00");
-                                let endObj = new Date((leaveData.endDate || leaveData.startDate) + "T00:00:00");
-                                while(currDate <= endObj) {
-                                    const localY = currDate.getFullYear();
-                                    const localM = String(currDate.getMonth() + 1).padStart(2, '0');
-                                    const localD = String(currDate.getDate()).padStart(2, '0');
-                                    const localDateStr = `${localY}-${localM}-${localD}`;
-                                    window.myAbsences.push({ date: localDateStr, isFullDay: true });
-                                    currDate.setDate(currDate.getDate() + 1);
+                    if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
+                        if (leaveData.adjustments) {
+                            leaveData.adjustments.forEach(adj => {
+                                if (adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
+                                    window.mySubstitutions.push(adj);
                                 }
-                            } else if (leaveData.adjustments) {
-                                leaveData.adjustments.forEach(adj => {
-                                    let cNameAdj = adj.className || (adj.sub ? adj.sub.split('|')[0].trim() : "");
-                                    let sNameAdj = adj.section || (adj.sub && adj.sub.split('|')[1] ? adj.sub.split('|')[1].replace('Sec', '').trim() : "");
-                                    window.myAbsences.push({ date: adj.date, isFullDay: false, className: cNameAdj, section: sNameAdj, subject: adj.title });
-                                });
-                            }
+                            });
                         }
-
-                        // Parse Incoming Substitute Duties
-                        if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
-                            if (leaveData.adjustments) {
-                                leaveData.adjustments.forEach(adj => {
-                                    if (adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
-                                        window.mySubstitutions.push(adj);
-                                    }
-                                });
-                            }
-                        }
-                    });
-
-                    // Save to IDB
-                    await IDB.set(cachePrefix + "bundle", {
-                        holidaysData, historyOverrides: window.historyOverrides,
-                        fullTimetable: window.fullTimetable, allPlanners: window.allPlanners,
-                        myAbsences: window.myAbsences, mySubstitutions: window.mySubstitutions,
-                        structures, globalAutoLock, enableDailyBlock
-                    });
-                    await IDB.set(cachePrefix + "version", serverVersion);
-                }
+                    }
+                });
 
                 const mySafeNameMatch = safeName.trim().toLowerCase();
 
