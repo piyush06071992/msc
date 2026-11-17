@@ -179,10 +179,15 @@
                 <div id="admin-clash-feed" class="space-y-6"></div>
             </div>
 
-            <div class="bg-white p-5 rounded-[2.5rem] shadow-sm border border-slate-200 mt-4">
-                <h4 class="text-slate-800 font-black uppercase text-[10px] tracking-widest flex items-center gap-2 mb-4 border-b border-slate-100 pb-3">
-                    <span class="text-emerald-500 text-lg leading-none">📢</span> Ready to Share (Active Leaves)
-                </h4>
+           <div class="bg-white p-5 rounded-[2.5rem] shadow-sm border border-slate-200 mt-4">
+                <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-2 mb-4 border-b border-slate-100 pb-3">
+                    <h4 class="text-slate-800 font-black uppercase text-[10px] tracking-widest flex items-center gap-2">
+                        <span class="text-emerald-500 text-lg leading-none">📢</span> Ready to Share (Active Leaves)
+                    </h4>
+                    <button onclick="shareAllTodayAdjustments()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[10px] uppercase tracking-widest px-4 py-2.5 rounded-xl shadow-md transition-all active:scale-95 flex items-center justify-center gap-2">
+                        💬 Share All Today's Adjustments
+                    </button>
+                </div>
                 <div id="incharge-share-feed" class="space-y-3">
                     <p class="text-xs font-bold text-slate-400 p-4 text-center bg-slate-50 rounded-xl border border-slate-200">No active leaves to share.</p>
                 </div>
@@ -1786,6 +1791,74 @@ async function loadDatabases() {
      function getStaffDept(email) {
             const st = staffData.find(s => s.email.toLowerCase() === (email || "").toLowerCase());
             return st ? st.dept : "General";
+        }
+
+        async function shareAllTodayAdjustments() {
+            const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
+            const d = new Date();
+            const todayIso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+            const prettyToday = new Date(todayIso).toLocaleDateString('en-GB', {weekday:'short', day:'2-digit', month:'short', year:'numeric'});
+
+            const snap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get();
+            let todayLeaves = [];
+
+            snap.forEach(doc => {
+                const req = doc.data();
+                const lStart = req.startDate;
+                const lEnd = req.endDate || req.startDate;
+                const hasTodayAdj = (req.adjustments || []).some(a => a.date === todayIso);
+                if ((todayIso >= lStart && todayIso <= lEnd) || hasTodayAdj) {
+                    todayLeaves.push({ id: doc.id, ...req });
+                }
+            });
+
+            if (todayLeaves.length === 0) {
+                return alert("No active leaves or adjustments found for today (" + prettyToday + ").");
+            }
+
+            let msg = `*📢 DAILY LEAVE & ADJUSTMENT REPORT*\n`;
+            msg += `*📍 Center:* ${activeStaff.center || "GHUMARWIN"}\n`;
+            msg += `*📅 Date:* ${prettyToday}\n`;
+            msg += `----------------------------------\n\n`;
+
+            todayLeaves.forEach((req, lIdx) => {
+                const tDept = getStaffDept(req.teacherEmail);
+                const leaveStatusBadge = req.status === 'APPROVED' ? '✅ Approved' : '⏳ Pending Approval';
+                let timeInfo = (req.startTime && req.endTime) ? ` (${minsTo12H(timeToMins(req.startTime))} - ${minsTo12H(timeToMins(req.endTime))})` : '';
+
+                msg += `*${lIdx + 1}. 👤 ${req.teacherName}* (${tDept})\n`;
+                msg += `   *Leave:* ${req.type}${timeInfo} [${leaveStatusBadge}]\n`;
+
+                const todayAdjs = (req.adjustments || []).filter(a => a.date === todayIso);
+                if (todayAdjs.length > 0) {
+                    msg += `   *📋 Adjustments (${todayAdjs.length}):*\n`;
+                    todayAdjs.sort((a,b) => (a.start || 0) - (b.start || 0)).forEach((adj) => {
+                        let timeWin = adj.assignedTimeWindow || `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`;
+                        let subDept = adj.adjustedEmail && adj.adjustedEmail !== 'ADMIN' ? ` (${getStaffDept(adj.adjustedEmail)})` : '';
+                        
+                        let assignTag = "By Teacher";
+                        if (adj.substituteMessage && adj.substituteMessage.includes("Force Assigned")) {
+                            assignTag = "⚡ Force Assigned";
+                        } else if (adj.isEmergency && adj.adjustedTo === "INCHARGE") {
+                            assignTag = "🚨 Needs Incharge Assign";
+                        }
+
+                        let subResp = "⏳ Pending";
+                        if (adj.substituteResponse === "ACCEPTED") subResp = "✅ Accepted";
+                        else if (adj.substituteResponse === "DECLINED") subResp = "❌ Declined";
+
+                        msg += `     • *${adj.title}* (${adj.sub})\n`;
+                        msg += `       🕒 ${timeWin}\n`;
+                        msg += `       👉 *Sub:* ${adj.adjustedTo}${subDept} [${subResp} | ${assignTag}]\n`;
+                    });
+                } else {
+                    msg += `   *📋 Adjustments:* None for today\n`;
+                }
+                msg += `\n`;
+            });
+
+            msg += `_Generated via Minerva ERP_`;
+            window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
         }
 
         async function shareLeaveToWhatsApp(reqId) {
