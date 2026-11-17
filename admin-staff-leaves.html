@@ -132,9 +132,14 @@
             </div>
         </div>
 
-        <div id="view-today" class="hidden mt-6">
+       <div id="view-today" class="hidden mt-6">
             <div class="bg-white p-4 sm:p-6 rounded-[2rem] border border-slate-200 shadow-sm">
-                <h3 class="font-black text-rose-600 uppercase text-sm sm:text-lg mb-4 flex items-center gap-2">🌴 Staff on Leave Today</h3>
+                <div class="flex flex-col sm:flex-row justify-between sm:items-center gap-2 mb-4">
+                    <h3 class="font-black text-rose-600 uppercase text-sm sm:text-lg flex items-center gap-2">🌴 Staff on Leave Today</h3>
+                    <button onclick="shareAllTodayAdjustments()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-black text-[10px] uppercase tracking-widest px-4 py-2.5 rounded-xl shadow-md transition-all active:scale-95 flex items-center justify-center gap-2">
+                        💬 Share Today's Adjustments (Pending & Approved)
+                    </button>
+                </div>
                 <div id="today-feed" class="space-y-4"></div>
             </div>
         </div>
@@ -2234,6 +2239,104 @@ function viewTeacherDay(teacherName, dateIso) {
             }
             
             openModal('teacher-schedule-modal');
+        }
+
+        function shareLeaveToWhatsApp(reqId) {
+            const req = allLeaves.find(l => l.id === reqId);
+            if (!req) return alert("Request not found.");
+            
+            let sDate = new Date(req.startDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric'});
+            let eDate = req.endDate ? new Date(req.endDate).toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric'}) : sDate;
+            let dateDisplay = sDate === eDate ? sDate : `${sDate} to ${eDate}`;
+            const staffObj = allStaff.find(s => s.email === req.teacherEmail);
+            const tDept = staffObj ? staffObj.dept : 'General';
+
+            let msg = `*📢 LEAVE & SUBSTITUTION NOTICE*\n\n`;
+            msg += `*Teacher:* ${req.teacherName} (${tDept})\n`;
+            msg += `*Date:* ${dateDisplay}\n`;
+            msg += `*Type:* ${req.type} Leave [${req.status}]\n`;
+            msg += `*Reason:* ${req.reason}\n\n`;
+
+            if (req.adjustments && req.adjustments.length > 0) {
+                msg += `*📋 SUBSTITUTION DETAILS:*\n`;
+                req.adjustments.forEach((adj, idx) => {
+                    let adjDate = new Date(adj.date).toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
+                    let status = adj.substituteResponse === 'ACCEPTED' ? '✅ Accepted' : '⏳ Pending';
+                    let assignBy = (adj.substituteMessage && adj.substituteMessage.includes("Force Assigned")) ? "⚡ Force Assigned" : "By Teacher";
+                    let timeWin = adj.assignedTimeWindow || `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`;
+                    msg += `${idx + 1}. *${adj.title}* (${adj.sub})\n   Date: ${adjDate} | Time: ${timeWin}\n   *Sub:* ${adj.adjustedTo} [${status} | ${assignBy}]\n\n`;
+                });
+            } else {
+                msg += `*📋 SUBSTITUTION DETAILS:*\nNo substitutions required.\n\n`;
+            }
+
+            msg += `_Generated via Minerva ERP_`;
+            window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+        }
+
+        function shareAllTodayAdjustments() {
+            const d = new Date();
+            const todayIso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+            const prettyToday = new Date(todayIso).toLocaleDateString('en-GB', {weekday:'short', day:'2-digit', month:'short', year:'numeric'});
+
+            const todayLeaves = allLeaves.filter(req => {
+                if (req.status !== "APPROVED" && req.status !== "PENDING") return false;
+                const lStart = req.startDate;
+                const lEnd = req.endDate || req.startDate;
+                const hasTodayAdj = (req.adjustments || []).some(a => a.date === todayIso);
+                return (todayIso >= lStart && todayIso <= lEnd) || hasTodayAdj;
+            });
+
+            if (todayLeaves.length === 0) {
+                return alert("No pending or approved leaves/adjustments found for today (" + prettyToday + ").");
+            }
+
+            let msg = `*📢 DAILY LEAVE & ADJUSTMENT REPORT*\n`;
+            msg += `*📍 Center:* ${activeCenter}\n`;
+            msg += `*📅 Date:* ${prettyToday}\n`;
+            msg += `----------------------------------\n\n`;
+
+            todayLeaves.forEach((req, lIdx) => {
+                const staffObj = allStaff.find(s => s.email === req.teacherEmail);
+                const tDept = staffObj ? staffObj.dept : 'General';
+                const leaveStatusBadge = req.status === 'APPROVED' ? '✅ Approved' : '⏳ Pending Approval';
+                let timeInfo = (req.startTime && req.endTime) ? ` (${minsTo12H(timeToMins(req.startTime))} - ${minsTo12H(timeToMins(req.endTime))})` : '';
+
+                msg += `*${lIdx + 1}. 👤 ${req.teacherName}* (${tDept})\n`;
+                msg += `   *Leave:* ${req.type}${timeInfo} [${leaveStatusBadge}]\n`;
+
+                const todayAdjs = (req.adjustments || []).filter(a => a.date === todayIso);
+                if (todayAdjs.length > 0) {
+                    msg += `   *📋 Adjustments (${todayAdjs.length}):*\n`;
+                    todayAdjs.sort((a,b) => (a.start || 0) - (b.start || 0)).forEach((adj) => {
+                        let timeWin = adj.assignedTimeWindow || `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`;
+                        const subObj = allStaff.find(s => s.email === adj.adjustedEmail);
+                        let subDept = subObj ? ` (${subObj.dept})` : '';
+                        
+                        let assignTag = "By Teacher";
+                        if (adj.substituteMessage && adj.substituteMessage.includes("Force Assigned")) {
+                            assignTag = "⚡ Force Assigned";
+                        } else if (adj.isEmergency && adj.adjustedTo === "INCHARGE") {
+                            assignTag = "🚨 Needs Incharge Assign";
+                        }
+
+                        let subResp = "⏳ Pending";
+                        if (adj.substituteResponse === "ACCEPTED") subResp = "✅ Accepted";
+                        else if (adj.substituteResponse === "BROKEN_BY_ADMIN") subResp = "⚠️ Needs Re-Assign";
+                        else if (adj.substituteResponse === "DECLINED") subResp = "❌ Declined";
+
+                        msg += `     • *${adj.title}* (${adj.sub})\n`;
+                        msg += `       🕒 ${timeWin}\n`;
+                        msg += `       👉 *Sub:* ${adj.adjustedTo}${subDept} [${subResp} | ${assignTag}]\n`;
+                    });
+                } else {
+                    msg += `   *📋 Adjustments:* None for today\n`;
+                }
+                msg += `\n`;
+            });
+
+            msg += `_Generated via Minerva ERP_`;
+            window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
         }
 
         function openPrintLeaveModal() {
