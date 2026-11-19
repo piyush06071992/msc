@@ -1061,14 +1061,23 @@ async function bumpAttendanceMetadata(monthKey) {
                     timetableQuery = timetableQuery.where("teacherName", "==", teacherName);
                 }
 
+               const nowObj = new Date();
+                const todayLocalIso = new Date(nowObj.getTime() - nowObj.getTimezoneOffset() * 60000).toISOString().split('T')[0];
+                const sessionStartIso = "2026-08-01";
+                const lookbackDate = new Date(nowObj.getTime() - nowObj.getTimezoneOffset() * 60000);
+                lookbackDate.setDate(lookbackDate.getDate() - 30);
+                const minHistoryIso = lookbackDate.toISOString().split('T')[0];
+
                 const [ttSnap, structSnap, holSnap, staffSnap, histSnap, remSnap, splSnap] = await Promise.all([
                     timetableQuery.get(),
                     getCollection("institute_structure").get(),
-                    getCollection("school_holidays").get(),
-                    db.collection("staff_applications").get(),
-                    getCollection("timetable_history").get(),
-                    getCollection("remedial_classes").get(),
-                    getCollection("special_leaves").where("status", "==", "ACTIVE").get()
+                    getCollection("school_holidays").where("endDate", ">=", sessionStartIso).get(),
+                    userIsAdmin
+                        ? db.collection("staff_applications").where("status", "==", "approved").get()
+                        : Promise.resolve({ docs: [] }),
+                    getCollection("timetable_history").where("date", ">=", minHistoryIso).get(),
+                    getCollection("remedial_classes").where("date", ">=", sessionStartIso).get(),
+                    getCollection("special_leaves").where("status", "==", "ACTIVE").where("date", ">=", minHistoryIso).get()
                 ]);
 
                 return {
@@ -1854,7 +1863,10 @@ function switchMainTab(tab) {
                     });
                 }
 
-                const leaveSnap = await getCollection("leave_requests").where("status", "in", ["APPROVED", "PENDING"]).get();
+               const leaveSnap = await getCollection("leave_requests")
+                    .where("status", "in", ["APPROVED", "PENDING"])
+                    .where("endDate", ">=", todayISO)
+                    .get();
                     leaveSnap.forEach(doc => {
                         const lData = doc.data();
                         if (lData.adjustments) {
@@ -6028,18 +6040,12 @@ async function listenForMissingAttendance() {
                     dCur.setDate(dCur.getDate() + 1);
                 }
 
-             // 3. Fetch Attendance Records scoped to active sections only (prevents full collection reads)
+             // 3. Fetch Attendance Records once per monthKey instead of repeating per section
             let attRecords = {}; 
-            const activeSectionsList = Object.keys(sectionCounts);
-            const attPromises = [];
-            
-            for (let mKey of monthsToFetch) {
-                for (let secKey of activeSectionsList) {
-                    const [cName, sName] = secKey.split('|');
-                    attPromises.push(getCachedMonthAttendanceDocs(mKey, cName, sName));
-                }
-            }
-                const attDocsArrays = await Promise.all(attPromises);
+            const attPromises = Array.from(monthsToFetch).map(mKey =>
+                getCachedMonthAttendanceDocs(mKey)
+            );
+            const attDocsArrays = await Promise.all(attPromises);
                 
                 attDocsArrays.forEach(docsArray => {
                     docsArray.forEach(item => {
