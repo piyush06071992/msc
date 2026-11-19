@@ -1286,6 +1286,7 @@ function listenForUnconfiguredExams() {
               .onSnapshot(snap => { latestLeaveSnap = snap; evaluateDuties(); }, err => console.error(err));
 
             db.collection(prefix + "duty_rosters")
+              .where("endDate", ">=", todayIsoStr)
               .onSnapshot(snap => { latestRosterSnap = snap; evaluateDuties(); }, err => console.error(err));
         }
 
@@ -1480,11 +1481,14 @@ async function checkMissingManualGradesTeacher(safeName) {
                     return;
                 }
 
-                // 3. Match exams to this teacher's subject footprint
-                const ttSnap = await db.collection(prefix + "timetable").where("teacherName", "==", safeName).get();
+               // 3. Match exams to this teacher's subject footprint (reuses window.fullTimetable when available)
+                let ttRows = window.fullTimetable;
+                if (!ttRows || ttRows.length === 0) {
+                    const ttSnap = await db.collection(prefix + "timetable").where("teacherName", "==", safeName).get();
+                    ttRows = ttSnap.docs.map(d => d.data());
+                }
                 let myClasses = [];
-                ttSnap.docs.forEach(d => {
-                    const data = d.data();
+                ttRows.forEach(data => {
                     if(!myClasses.some(c => norm(c.c)===norm(data.className) && norm(c.s)===norm(data.section) && norm(c.sub)===norm(data.subject))) {
                         myClasses.push({ c: data.className, s: data.section, sub: data.subject });
                     }
@@ -1908,21 +1912,27 @@ async function checkMissingAttendanceTeacher(safeName) {
                 lookbackDate.setDate(lookbackDate.getDate() - 30);
                 const minHistoryDate = lookbackDate.toISOString().split('T')[0];
 
-                const [ttSnap, structSnap, holSnap, plannerSnap, histSnap] = await Promise.all([
+                const structCacheKey = `minerva_struct_${activeStaff.center || "GHUMARWIN"}`;
+                const cachedStruct = JSON.parse(sessionStorage.getItem(structCacheKey) || "null");
+
+                const [ttSnap, structSnap, holSnap, histSnap] = await Promise.all([
                     db.collection(prefix + "timetable").where("teacherName", "==", safeName).get(),
-                    getCollection("institute_structure").get(),
+                    cachedStruct
+                        ? Promise.resolve({ docs: cachedStruct.map(s => ({ id: s.id, data: () => s })) })
+                        : getCollection("institute_structure").get(),
                     window.holidaysData && window.holidaysData.length > 0
                         ? Promise.resolve({ docs: window.holidaysData.map(h => ({ data: () => h })) })
                         : getCollection("school_holidays").where("startDate", "<=", todayISO).get(),
-                    getCollection("lesson_planners").get(),
                     getCollection("timetable_history").where("date", ">=", minHistoryDate).get()
                 ]);
 
                 let myClasses = [];
                 const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                if (!cachedStruct && structures.length > 0) {
+                    sessionStorage.setItem(structCacheKey, JSON.stringify(structures));
+                }
                 window.holidaysData = holSnap.docs.map(d => d.data());
                 const holidays = window.holidaysData;
-                const allPlanners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
                 window.historyOverrides = histSnap.docs.map(d => d.data());
                 const historyOverrides = window.historyOverrides;
                 window.fullTimetable = ttSnap.docs.map(d => d.data());
@@ -1936,7 +1946,7 @@ async function checkMissingAttendanceTeacher(safeName) {
                     }
                 });
 
-               const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                 let missingLogs = [];
 
                 let uniqueAssignments = new Map();
@@ -1957,6 +1967,17 @@ async function checkMissingAttendanceTeacher(safeName) {
                         });
                     }
                 });
+
+                const assignmentIds = Array.from(uniqueAssignments.keys());
+                let allPlanners = [];
+                if (assignmentIds.length > 0) {
+                    const plannerDocs = await Promise.all(
+                        assignmentIds.map(id => getCollection("lesson_planners").doc(id).get())
+                    );
+                    plannerDocs.forEach(doc => {
+                        if (doc.exists) allPlanners.push({ id: doc.id, ...doc.data() });
+                    });
+                }
 
                 uniqueAssignments.forEach((classInfo, assignmentId) => {
                     const planner = allPlanners.find(p => p.id === assignmentId);
@@ -2325,7 +2346,8 @@ async function checkMissingAttendanceTeacher(safeName) {
                     await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
                 }
 
-                const todayIso = new Date().toISOString().split('T')[0];
+                const nowObj = new Date();
+                const todayIso = new Date(nowObj.getTime() - nowObj.getTimezoneOffset() * 60000).toISOString().split('T')[0];
                 const histSnap = await getCollection("timetable_history").where("date", ">=", todayIso).get();
                 let updatedFutureSchedulesCount = 0;
                 let updatedFutureSlotsCount = 0;
