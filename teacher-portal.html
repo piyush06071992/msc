@@ -1141,9 +1141,9 @@ function listenForUnconfiguredExams() {
                     
                     let rosterDate = "";
                     if (docId.startsWith('exam_duty_')) {
-                        rosterDate = docId.replace('exam_duty_', '');
+                        rosterDate = docId.replace('exam_duty_', '').split('_')[0];
                     } else if (docId.startsWith('lunch_duty_')) {
-                        rosterDate = docId.replace('lunch_duty_', '');
+                        rosterDate = docId.replace('lunch_duty_', '').split('_')[0];
                     }
 
                     if (rosterDate >= todayIsoStr) {
@@ -1194,22 +1194,24 @@ function listenForUnconfiguredExams() {
                     }
                 });
                 
-                upcomingDuties.sort((a, b) => a.date.localeCompare(b.date));
+                upcomingDuties.sort((a, b) => a.date.localeCompare(b.date) || (a.start || 0) - (b.start || 0));
 
-           globalSystemAlerts = globalSystemAlerts.filter(a => !['upcoming_duty', 'pending_subs'].includes(a.id));
+                globalSystemAlerts = globalSystemAlerts.filter(a => !a.id.startsWith('upcoming_duty') && a.id !== 'pending_subs');
 
                 if (upcomingDuties.length > 0) {
-                    const nextDuty = upcomingDuties[0];
-                    const prettyDate = new Date(nextDuty.date + "T00:00:00").toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-                    globalSystemAlerts.push({
-                        id: 'upcoming_duty',
-                        icon: '📅',
-                        title: nextDuty.type === 'EXAM' ? 'Upcoming Exam Duty' : (nextDuty.type === 'LUNCH' ? 'Upcoming Lunch Duty' : 'Upcoming Substitution Duty'),
-                        text: `On ${prettyDate} (${nextDuty.sub} | ${minsTo12H(nextDuty.start)} - ${minsTo12H(nextDuty.end)})`,
-                        link: 'teacher-leave.html'
+                    const nearestDate = upcomingDuties[0].date;
+                    const nearestDuties = upcomingDuties.filter(d => d.date === nearestDate);
+                    nearestDuties.forEach((nextDuty, idx) => {
+                        const prettyDate = new Date(nextDuty.date + "T00:00:00").toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+                        globalSystemAlerts.push({
+                            id: `upcoming_duty_${idx}`,
+                            icon: '📅',
+                            title: nextDuty.type === 'EXAM' ? 'Upcoming Exam Duty' : (nextDuty.type === 'LUNCH' ? 'Upcoming Lunch Duty' : 'Upcoming Substitution Duty'),
+                            text: `On ${prettyDate} (${nextDuty.sub} | ${minsTo12H(nextDuty.start)} - ${minsTo12H(nextDuty.end)})`,
+                            link: nextDuty.type === 'SUB' ? 'teacher-leave.html' : 'teacher-duties.html'
+                        });
                     });
                 }
-
                 const pendingBanner = document.getElementById('pending-subs-banner');
                 const pendingCountEl = document.getElementById('pending-subs-count');
                 const menuBadge = document.getElementById('leave-badge-menu');
@@ -1285,9 +1287,27 @@ function listenForUnconfiguredExams() {
               .where("status", "in", ["PENDING", "APPROVED"])
               .onSnapshot(snap => { latestLeaveSnap = snap; evaluateDuties(); }, err => console.error(err));
 
+            const weekStartObj = new Date(Date.now() - offset);
+            weekStartObj.setDate(weekStartObj.getDate() - 6);
+            const minLunchDateStr = weekStartObj.toISOString().split('T')[0];
+
+            let examRosterSnap = null;
+            let lunchRosterSnap = null;
+            const mergeRosters = () => {
+                if (!examRosterSnap || !lunchRosterSnap) return;
+                latestRosterSnap = [...examRosterSnap.docs, ...lunchRosterSnap.docs];
+                evaluateDuties();
+            };
+
             db.collection(prefix + "duty_rosters")
-              .where("endDate", ">=", todayIsoStr)
-              .onSnapshot(snap => { latestRosterSnap = snap; evaluateDuties(); }, err => console.error(err));
+              .where(firebase.firestore.FieldPath.documentId(), ">=", "exam_duty_" + todayIsoStr)
+              .where(firebase.firestore.FieldPath.documentId(), "<=", "exam_duty_\uf8ff")
+              .onSnapshot(snap => { examRosterSnap = snap; mergeRosters(); }, err => console.error(err));
+
+            db.collection(prefix + "duty_rosters")
+              .where(firebase.firestore.FieldPath.documentId(), ">=", "lunch_duty_" + minLunchDateStr)
+              .where(firebase.firestore.FieldPath.documentId(), "<=", "lunch_duty_\uf8ff")
+              .onSnapshot(snap => { lunchRosterSnap = snap; mergeRosters(); }, err => console.error(err));
         }
 
 window.ackDuty = function(dutyId) {
