@@ -1,4 +1,50 @@
 // minerva-core.js - Optimized for Android WebViews
+(async function enforcePortalVersion() {
+    const APP_VERSION = "2026.11.19.2"; // Bump this whenever you want all devices to clear old caches
+    const savedVersion = localStorage.getItem("minerva_app_version");
+
+    if (savedVersion !== APP_VERSION) {
+        const activeStaff = localStorage.getItem("minervaActiveStaff");
+        const adminAuth = sessionStorage.getItem("minervaAdminAuth");
+        const adminCenter = sessionStorage.getItem("minervaAdminCenter");
+
+        localStorage.clear();
+        sessionStorage.clear();
+
+        if (activeStaff) localStorage.setItem("minervaActiveStaff", activeStaff);
+        if (adminAuth) sessionStorage.setItem("minervaAdminAuth", adminAuth);
+        if (adminCenter) sessionStorage.setItem("minervaAdminCenter", adminCenter);
+
+        if ("caches" in window) {
+            try {
+                const keys = await caches.keys();
+                await Promise.all(keys.map((k) => caches.delete(k)));
+            } catch (e) {}
+        }
+
+        if (window.indexedDB && indexedDB.databases) {
+            try {
+                const dbs = await indexedDB.databases();
+                await Promise.all(
+                    dbs.map((dbInfo) => {
+                        if (!dbInfo.name) return Promise.resolve();
+                        return new Promise((resolve) => {
+                            const req = indexedDB.deleteDatabase(dbInfo.name);
+                            req.onsuccess = resolve;
+                            req.onerror = resolve;
+                            req.onblocked = resolve;
+                        });
+                    })
+                );
+            } catch (e) {}
+        }
+
+        localStorage.setItem("minerva_app_version", APP_VERSION);
+        window.location.reload();
+        return;
+    }
+})();
+
 document.addEventListener('DOMContentLoaded', () => {
     if (!document.getElementById('ptr-spinner')) {
         const spinnerDiv = document.createElement('div');
@@ -27,8 +73,8 @@ document.addEventListener('DOMContentLoaded', () => {
     window.addEventListener('touchend', e => {
         if (pStartY > 0) {
             const pEndY = e.changedTouches[0].pageY;
-            if (pEndY > pStartY + 100) { 
-                if (ptrSpinner) ptrSpinner.style.height = '45px'; 
+            if (pEndY > pStartY + 100) {
+                if (ptrSpinner) ptrSpinner.style.height = '45px';
 
                 // Wipe all session storage caches across the app
                 sessionStorage.clear();
