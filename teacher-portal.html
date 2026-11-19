@@ -752,11 +752,12 @@ try {
                 const todayDayName = daysOfWeek[now.getDay()];
                 const todayDateIso = now.toISOString().split('T')[0];
 
-                // Check Holidays first
-                const holSnap = await getCollection("school_holidays").get();
+                // Check Holidays that started on or before today (avoids downloading future/past-only holiday docs)
+                const holSnap = await getCollection("school_holidays")
+                    .where("startDate", "<=", todayDateIso)
+                    .get();
                 const holidays = holSnap.docs.map(d => d.data());
-                const todayDateOnly = new Date(todayDateIso);
-                todayDateOnly.setHours(0,0,0,0);
+                const todayDateOnly = new Date(todayDateIso + "T00:00:00");
 
                 let isHolidayToday = false;
                 let holidayReason = "Scheduled Holiday";
@@ -1003,9 +1004,13 @@ function listenForUnconfiguredExams() {
                 const SPECIAL_EXAMS = ['EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM'];
                 const norm = str => (str||"").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
+              const historyCache = {};
                 for (const date of Object.keys(examsByDate)) {
                     try {
-                        const historyDoc = await db.collection(prefix + "timetable_history").doc(date).get();
+                        if (!historyCache[date]) {
+                            historyCache[date] = await db.collection(prefix + "timetable_history").doc(date).get();
+                        }
+                        const historyDoc = historyCache[date];
                         let historySchedule = [];
                         if (historyDoc.exists) {
                             historySchedule = historyDoc.data().schedule || [];
@@ -1332,7 +1337,9 @@ window.ackDuty = function(dutyId) {
             nextWeek.setDate(d.getDate() + 7);
             const nextWeekIso = `${nextWeek.getFullYear()}-${String(nextWeek.getMonth()+1).padStart(2,'0')}-${String(nextWeek.getDate()).padStart(2,'0')}`;
 
-            db.collection(prefix + "leave_requests").onSnapshot(snap => {
+            db.collection(prefix + "leave_requests")
+                .where("endDate", ">=", todayIso)
+                .onSnapshot(snap => {
                 const board = document.getElementById('leave-notice-board');
                 if (!board) return;
 
@@ -1454,11 +1461,13 @@ async function checkMissingManualGradesTeacher(safeName) {
         try {
                 const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-                // 1. Setup Validation Dates
-                const START_DATE = "2026-09-01"; // Scans only for exams scheduled AFTER 01 Sep 2026
+                // 1. Setup Validation Dates (rolling 30-day window so reads stay bounded over time)
                 const today = new Date();
                 const offset = today.getTimezoneOffset() * 60000;
                 const todayIso = new Date(today.getTime() - offset).toISOString().split('T')[0];
+                const startObj = new Date(today.getTime() - offset);
+                startObj.setDate(startObj.getDate() - 30);
+                const START_DATE = startObj.toISOString().split('T')[0];
 
                 // 2. Fetch Exams past date but after START_DATE
                 const examsSnap = await db.collection(prefix + "exam_schedules")
@@ -1887,17 +1896,26 @@ async function checkMissingAttendanceTeacher(safeName) {
                 normLocal(t.subject) === normLocal(subjectName)
             );
         }
-        async function checkLessonCompliance(safeName) {
+       async function checkLessonCompliance(safeName) {
             try {
                 const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
                 const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
-                
+
+                const today = new Date();
+                const offset = today.getTimezoneOffset() * 60000;
+                const todayISO = new Date(today - offset).toISOString().split('T')[0];
+                const lookbackDate = new Date(today.getTime() - offset);
+                lookbackDate.setDate(lookbackDate.getDate() - 30);
+                const minHistoryDate = lookbackDate.toISOString().split('T')[0];
+
                 const [ttSnap, structSnap, holSnap, plannerSnap, histSnap] = await Promise.all([
                     db.collection(prefix + "timetable").where("teacherName", "==", safeName).get(),
                     getCollection("institute_structure").get(),
-                    getCollection("school_holidays").get(),
+                    window.holidaysData && window.holidaysData.length > 0
+                        ? Promise.resolve({ docs: window.holidaysData.map(h => ({ data: () => h })) })
+                        : getCollection("school_holidays").where("startDate", "<=", todayISO).get(),
                     getCollection("lesson_planners").get(),
-                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get()
+                    getCollection("timetable_history").where("date", ">=", minHistoryDate).get()
                 ]);
 
                 let myClasses = [];
@@ -1918,10 +1936,7 @@ async function checkMissingAttendanceTeacher(safeName) {
                     }
                 });
 
-                const today = new Date();
-                const offset = today.getTimezoneOffset() * 60000;
-                const todayISO = new Date(today - offset).toISOString().split('T')[0];
-                const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+               const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                 let missingLogs = [];
 
                 let uniqueAssignments = new Map();
