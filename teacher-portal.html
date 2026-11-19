@@ -1776,42 +1776,116 @@ async function checkMissingAttendanceTeacher(safeName) {
             } catch (e) { console.error("Error scanning missing attendance:", e); }
         }
 
-        function checkDateExclusion(dateObj, className, sectionName, subjectName) {
-            const offset = dateObj.getTimezoneOffset() * 60000;
-            const dateStr = new Date(dateObj.getTime() - offset).toISOString().split('T')[0];
-            const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-            const dayName = dayNames[dateObj.getDay()];
-            
-            if (dateObj.getDay() === 0) return { isExcluded: true, reason: "Sunday" };
+        function getScheduleSnapshotForDate(dateIso) {
+            if (!window.historyOverrides || window.historyOverrides.length === 0) {
+                return window.fullTimetable || [];
+            }
 
-            // Check holidays data if loaded, otherwise default to included
-            if (typeof holidaysData !== 'undefined' && holidaysData.length > 0) {
-                for (let h of holidaysData) {
-                    if (h.status === 'CANCELLED' || h.suspendClasses === false || !h.startDate) continue;
-                    const [sy, sm, sd] = h.startDate.split('-');
-                    let hs = new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd));
-                    let he = h.endDate ? new Date(...h.endDate.split('-').map((v,i)=>i===1?v-1:v), 23, 59, 59) : new Date(parseInt(sy), parseInt(sm)-1, parseInt(sd), 23, 59, 59);
-                    
-                    if (dateObj >= hs && dateObj <= he) {
-                        const targetCls = `${norm(className)}|${norm(sectionName)}`;
-                        const matchesClass = h.targetClasses.some(tc => {
-                            if (tc === 'ALL') return true;
-                            const parts = tc.split('|');
-                            const tcNorm = norm(parts[0]) + (parts[1] ? '|' + norm(parts[1]) : '');
-                            return tcNorm === targetCls || norm(parts[0]) === norm(className);
-                        });
-                        if (matchesClass && h.isFullDay) return { isExcluded: true, reason: h.reason };
+            const exactOverride = window.historyOverrides.find(h => h.date === dateIso && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE"));
+            if (exactOverride && exactOverride.schedule) return exactOverride.schedule;
+
+            const masterSnapshots = window.historyOverrides.filter(h => h.type === "LIVE_MASTER_UPDATE" || h.type === "APPLIED_MASTER" || h.type === "FUTURE_MASTER");
+            const sortedMasters = masterSnapshots.sort((a, b) => b.date.localeCompare(a.date));
+
+            const validMaster = sortedMasters.find(h => h.date <= dateIso);
+            if (validMaster && validMaster.schedule) return validMaster.schedule;
+
+            return window.fullTimetable || [];
+        }
+
+        function checkDateExclusion(dateObj, className, sectionName, subjectName) {
+            if (dateObj.getDay() === 0) return { isExcluded: true, reason: "Sunday (Weekly Off)" };
+
+            const normLocal = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const offset = dateObj.getTimezoneOffset() * 60000;
+            const curStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
+            const checkDate = new Date(curStr + "T00:00:00");
+            const activeHolidays = window.holidaysData || [];
+
+            for (let h of activeHolidays) {
+                if (h.status === 'CANCELLED' || h.suspendClasses === false || !h.startDate) continue;
+                const hStart = new Date(h.startDate + "T00:00:00");
+                const hEnd = new Date((h.endDate || h.startDate) + "T23:59:59");
+
+                if (checkDate >= hStart && checkDate <= hEnd) {
+                    const targetCls = `${normLocal(className)}|${normLocal(sectionName)}`;
+                    const matchesClass = (h.targetClasses || []).some(tc => {
+                        if (tc === 'ALL') return true;
+                        const parts = tc.split('|');
+                        const tcNorm = normLocal(parts[0]) + (parts[1] ? '|' + normLocal(parts[1]) : '');
+                        if (parts.length > 1) return tcNorm === targetCls;
+                        return normLocal(parts[0]) === normLocal(className);
+                    });
+
+                    if (matchesClass) {
+                        if (h.isFullDay) {
+                            return { isExcluded: true, reason: h.reason || "Holiday" };
+                        } else if (h.startTime && h.endTime) {
+                            const scheduleToCheck = getScheduleSnapshotForDate(curStr);
+                            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                            const dayName = daysArr[dateObj.getDay()];
+                            const classSlots = scheduleToCheck.filter(t =>
+                                t.day === dayName &&
+                                normLocal(t.className) === normLocal(className) &&
+                                normLocal(t.section) === normLocal(sectionName) &&
+                                normLocal(t.subject) === normLocal(subjectName)
+                            );
+
+                            const [hsh, hsm] = h.startTime.split(':').map(Number);
+                            const [heh, hem] = h.endTime.split(':').map(Number);
+                            const hStartMins = hsh * 60 + hsm;
+                            const hEndMins = heh * 60 + hem;
+
+                            const isOverlapping = classSlots.some(slot => {
+                                if (slot.start24 && slot.end24) {
+                                    const [sh, sm] = slot.start24.split(':').map(Number);
+                                    const [eh, em] = slot.end24.split(':').map(Number);
+                                    const cStartMins = sh * 60 + sm;
+                                    const cEndMins = eh * 60 + em;
+                                    return (cStartMins < hEndMins && cEndMins > hStartMins);
+                                }
+                                return false;
+                            });
+
+                            if (isOverlapping) return { isExcluded: true, reason: (h.reason || "Holiday") + " (Half Day)" };
+                        }
                     }
                 }
             }
-            return { isExcluded: false };
+
+            const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+            const dayName = daysArr[checkDate.getDay()];
+            const scheduleToCheck = getScheduleSnapshotForDate(curStr);
+
+            const masterSlot = scheduleToCheck.find(t =>
+                t.day === dayName &&
+                normLocal(t.className) === normLocal(className) &&
+                normLocal(t.section) === normLocal(sectionName) &&
+                normLocal(t.subject) === normLocal(subjectName)
+            );
+
+            if (!masterSlot) return { isExcluded: true, reason: "Class Not Scheduled" };
+            if (masterSlot.remark && masterSlot.remark.toLowerCase().includes("doubt session")) return { isExcluded: true, reason: "Doubt Session" };
+
+            return { isExcluded: false, reason: "" };
         }
 
         function isTimetableWorkingDay(dateObj, className, sectionName, subjectName) {
+            if (dateObj.getDay() === 0) return false;
+
+            const normLocal = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const offset = dateObj.getTimezoneOffset() * 60000;
+            const curStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
+            const scheduleToCheck = getScheduleSnapshotForDate(curStr);
             const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
             const dayName = daysArr[dateObj.getDay()];
-            // If it's a weekday and not explicitly excluded, count as a working day
-            return dateObj.getDay() !== 0;
+
+            return scheduleToCheck.some(t =>
+                t.day === dayName &&
+                normLocal(t.className) === normLocal(className) &&
+                normLocal(t.section) === normLocal(sectionName) &&
+                normLocal(t.subject) === normLocal(subjectName)
+            );
         }
         async function checkLessonCompliance(safeName) {
             try {
@@ -1828,10 +1902,13 @@ async function checkMissingAttendanceTeacher(safeName) {
 
                 let myClasses = [];
                 const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
-                const holidays = holSnap.docs.map(d => d.data());
+                window.holidaysData = holSnap.docs.map(d => d.data());
+                const holidays = window.holidaysData;
                 const allPlanners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
-                const historyOverrides = histSnap.docs.map(d => d.data());
-                const myFullTimetable = ttSnap.docs.map(d => d.data());
+                window.historyOverrides = histSnap.docs.map(d => d.data());
+                const historyOverrides = window.historyOverrides;
+                window.fullTimetable = ttSnap.docs.map(d => d.data());
+                const myFullTimetable = window.fullTimetable;
                 const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
                 ttSnap.docs.forEach(d => {
