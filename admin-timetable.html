@@ -911,6 +911,19 @@ function updateUndoButtons() {
       let activeCenter = (sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN").toUpperCase();
         sessionStorage.setItem('minervaAdminCenter', activeCenter);
 
+        async function switchAdminCenter(centerName) {
+            activeCenter = String(centerName || "GHUMARWIN").toUpperCase();
+            sessionStorage.setItem('minervaAdminCenter', activeCenter);
+            const wm = document.getElementById('center-watermark');
+            if (wm) wm.innerHTML = activeCenter;
+            document.getElementById('timetable-container').innerHTML = `<div class="text-center py-12 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Switching to ${activeCenter}...</div>`;
+            await loadBranchesAndSessions();
+            subscribeLiveTables();
+            await Promise.all([fetchStructure(), fetchRooms(), fetchHolidays(), fetchTeachers()]);
+            populateFilterDropdowns();
+            await loadTodayScheduleForActiveContext();
+        }
+
         async function switchSessionContext(sessionId) {
             const sObj = branchSessions.find(s => s.id === sessionId);
             if (!sObj) return;
@@ -1145,40 +1158,34 @@ async function checkAndApplyFutureMaster() {
      async function fetchTeachers() {
             const { data, error } = await supabaseClient
                 .from("staff_applications")
-                .select("*")
+                .select("id, email, status, branch_id, details")
                 .eq("status", "approved");
             if (error) { console.error("Teachers fetch error:", error); return; }
 
             let tempTeachers = (data || []).map(row => {
                 const det = parseDetails(row.details);
-                const branchObj = allBranches.find(b => b.id === row.branch_id);
-                const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent') || k.toLowerCase().includes('branch'));
-                const teacherCenter = branchObj
-                    ? branchObj.name.trim().toUpperCase()
-                    : (centerKey ? String(det[centerKey]).trim().toUpperCase() : "");
+                const centreVal = det["Centre"] ?? det["centre"] ?? det["Center"] ?? det["center"] ?? det["Branch"] ?? det["branch"] ?? "";
+                const nameVal = det["Full Name"] ?? det["full name"] ?? det["Name"] ?? det["name"] ?? row.email;
+                const deptVal = det["Department"] ?? det["department"] ?? det["Subject"] ?? det["subject"] ?? "General";
 
-                const nameKey = Object.keys(det).find(k => k.toLowerCase().includes('name'));
-                const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
                 return {
                     branchId: row.branch_id,
-                    name: nameKey ? String(det[nameKey]).trim() : row.email,
-                    email: row.email || '',
-                    dept: deptKey ? det[deptKey] : (row.department || 'General'),
-                    teacherCenter
+                    name: String(nameVal || row.email || '').trim(),
+                    email: String(row.email || '').trim(),
+                    dept: deptVal,
+                    teacherCenter: String(centreVal || '').trim().toUpperCase()
                 };
             });
 
-            const byBranchOrCenter = tempTeachers.filter(t =>
+            allTeachers = tempTeachers.filter(t =>
                 (activeBranchId && t.branchId === activeBranchId) ||
-                (t.teacherCenter && (t.teacherCenter.includes(activeCenter) || activeCenter.includes(t.teacherCenter)))
+                (t.teacherCenter && t.teacherCenter === activeCenter)
             );
-            allTeachers = byBranchOrCenter.length > 0 ? byBranchOrCenter : tempTeachers;
 
-            // Refresh any already-rendered teacher dropdowns if teachers finished after initial paint
             document.querySelectorAll('.ent-row').forEach(row => {
                 const tSel = row.querySelector('.ent-tea');
-                if (tSel && allTeachers.length > 0 && tSel.options.length <= 1) {
-                    const curVal = tSel.value || tSel.getAttribute('data-selected') || 'NONE';
+                if (tSel) {
+                    const curVal = tSel.getAttribute('data-selected') || tSel.value || 'NONE';
                     tSel.setAttribute('data-selected', curVal);
                     const blockId = row.closest('.time-block')?.id;
                     if (blockId) handleEntrySubject(blockId, row.id);
