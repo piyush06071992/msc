@@ -408,9 +408,12 @@ exports.compileSingleRoomOnDemand = onRequest({
                     
                     const baseRoomName = roomName.split(' [')[0].toUpperCase();
                     
+                    const normRoom = (s) => String(s || "").trim().replace(/\s+/g, " ").toLowerCase();
+                    const reqNorm = normRoom(roomName);
+
                     const match = snap.docs.find(d => {
-                        const dbRoom = (d.data().roomName || "").toUpperCase();
-                        return dbRoom === roomName.toUpperCase() || dbRoom === baseRoomName;
+                        const dbNorm = normRoom(d.data().roomName);
+                        return dbNorm === reqNorm;
                     });
                     
                     if (match) {
