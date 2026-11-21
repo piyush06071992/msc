@@ -452,10 +452,10 @@ exports.compileSingleRoomOnDemand = onRequest({
                 }
 
    if (Object.keys(allocations).length === 0) {
+            console.warn(`[404 Lookup Miss] center=${center}, date=${date}, requestedRoom=${roomName}, triedDocId=${docId}`);
             res.status(404).send({ error: `Seating allocations not found for room: ${roomName} on ${date}.` });
             return;
         }
-
         let filteredAllocations = allocations;
         if (seatId && allocations[seatId]) {
             filteredAllocations = { [seatId]: allocations[seatId] };
