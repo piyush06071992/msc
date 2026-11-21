@@ -1184,14 +1184,11 @@ async function checkAndApplyFutureMaster() {
                 return;
             }
 
-            // Lazy-load today's weekday rows first for fast initial paint
-            const todayDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
             const { data, error } = await supabaseClient
                 .from("timetable")
                 .select("*")
                 .eq("branch_id", activeBranchId)
-                .eq("session_id", activeSessionId)
-                .eq("day", todayDay);
+                .eq("session_id", activeSessionId);
 
             if (error) { console.error("Timetable fetch error:", error); return; }
 
@@ -2365,15 +2362,15 @@ async function saveHoliday() {
             if (changes.length === 0) return false;
 
             try {
-                const snap = await getCollection("timetable_history").get();
-                let affectedDates = [];
-                
-                snap.docs.forEach(doc => {
-                    const data = doc.data();
-                    if ((data.type === "DAILY_OVERRIDE" || data.type === "EXAM_OVERRIDE") && data.date >= effectiveDate) {
-                        affectedDates.push(data);
-                    }
-                });
+                const { data: rows } = await supabaseClient
+                    .from("timetable_history")
+                    .select("*")
+                    .eq("branch_id", activeBranchId)
+                    .eq("session_id", activeSessionId)
+                    .neq("status", "CANCELLED");
+                let affectedDates = (rows || []).filter(data =>
+                    (data.entry_type === "DAILY_OVERRIDE" || data.entry_type === "EXAM_OVERRIDE") && data.date >= effectiveDate
+                );
 
                 if (affectedDates.length === 0) return false;
 
@@ -2429,20 +2426,17 @@ async function saveHoliday() {
             btn.innerHTML = "⏳ Syncing Cosmos..."; btn.disabled = true;
 
             const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-            const batch = db.batch();
             let syncCount = 0;
 
             try {
                 for (let dateObj of pendingSyncDates) {
                     let scheduleChanged = false;
-                    let schedule = dateObj.schedule;
+                    let schedule = Array.isArray(dateObj.schedule) ? dateObj.schedule : [];
 
-                    // Scan the special date's schedule
                     schedule.forEach(slot => {
-                        // See if this slot matches one of our changes
-                        const change = pendingSyncChanges.find(c => 
-                            norm(c.className) === norm(slot.className) && 
-                            norm(c.section) === norm(slot.section) && 
+                        const change = pendingSyncChanges.find(c =>
+                            norm(c.className) === norm(slot.className) &&
+                            norm(c.section) === norm(slot.section) &&
                             norm(c.subject) === norm(slot.subject)
                         );
 
@@ -2459,12 +2453,14 @@ async function saveHoliday() {
                     });
 
                     if (scheduleChanged) {
-                        batch.update(getCollection("timetable_history").doc(dateObj.date), { schedule: schedule });
+                        const { error: upErr } = await supabaseClient
+                            .from("timetable_history")
+                            .update({ schedule, updated_at: new Date().toISOString() })
+                            .eq("id", dateObj.id);
+                        if (upErr) throw upErr;
                         syncCount++;
                     }
                 }
-
-                if (syncCount > 0) await batch.commit();
                 
                 alert(`✨ Cosmos Aligned! Successfully synced teacher/room changes across ${syncCount} upcoming special dates.`);
                 closeSmartSync();
@@ -2535,22 +2531,28 @@ async function saveHoliday() {
                     effective_from: currentContextDate
                 }));
 
-                await getCollection("timetable_history").doc(currentContextDate).set({
+               const nowMs = Date.now();
+                await supabaseClient.from("timetable_history").upsert([{
+                    firestore_id: `ui_${activeCenter.toLowerCase()}_future_${currentContextDate}`,
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
+                    doc_key: currentContextDate,
                     date: currentContextDate,
-                    lastUpdated: Date.now(),
-                    schedule: taggedSlots, 
-                    type: "FUTURE_MASTER",
-                    version_id: versionId
-                }, { merge: true });
+                    last_updated_ms: nowMs,
+                    schedule: taggedSlots,
+                    entry_type: "FUTURE_MASTER",
+                    status: "ACTIVE",
+                    version_id: versionId,
+                    updated_at: new Date().toISOString()
+                }], { onConflict: 'firestore_id' });
 
                 alert(`✅ Future Master for ${currentContextDate} updated successfully!`);
 
-                // Reset back to Live seamlessly
                 currentContextMode = 'LIVE';
                 currentContextDate = null;
                 document.getElementById('view-label').innerHTML = `Showing: Live Master Schedule`;
-                sessionStorage.removeItem('minerva_timetable');
-                fetchTimetable().then(() => renderDirectDashboard());
+                await fetchTimetable();
+                renderDirectDashboard(true);
 
             } catch (err) {
                 alert("Error updating: " + err.message);
@@ -3788,90 +3790,92 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
             btn.innerHTML = "⌛ Saving..."; btn.disabled = true;
 
            try {
-                const teachersToNotify = detectTeacherChanges(oldTimetableState, newSlots);
-                const snap = await getCollection("timetable").get();
-                
-                // HIGH-SPEED CHUNKED BATCHING
-                const CHUNK_SIZE = 400;
-                let currentBatch = db.batch();
-                let operationCount = 0;
-                const batchPromises = [];
+                const fullOldWeek = oldTimetableState.length > 0 ? oldTimetableState : await fetchFullWeekTimetable();
+                const teachersToNotify = detectTeacherChanges(fullOldWeek, newSlots);
 
-                function commitAndResetIfNeeded() {
-                    if (operationCount >= CHUNK_SIZE) {
-                        batchPromises.push(currentBatch.commit());
-                        currentBatch = db.batch(); // Create a fresh batch
-                        operationCount = 0;
-                    }
-                }
+                const { error: delErr } = await supabaseClient
+                    .from("timetable")
+                    .delete()
+                    .eq("branch_id", activeBranchId)
+                    .eq("session_id", activeSessionId);
+                if (delErr) throw delErr;
 
-                // 1. Pack Deletions
-                snap.docs.forEach(doc => {
-                    currentBatch.delete(doc.ref);
-                    operationCount++;
-                    commitAndResetIfNeeded();
-                });
-                
                 const todayIso = new Date().toISOString().split('T')[0];
-                const versionId = "v_master_" + Date.now(); // Creates a unique version stamp
+                const nowMs = Date.now();
+                const versionId = "v_master_" + nowMs;
 
-                // 2. Pack New Additions (Now tagged with Temporal Versioning)
-                newSlots.forEach(slot => {
-                    const { sMins, eMins, ...cleanSlot } = slot;
-                    cleanSlot.version_id = versionId;
-                    cleanSlot.effective_from = todayIso;
-                    
-                    currentBatch.set(getCollection("timetable").doc(), cleanSlot);
-                    operationCount++;
-                    commitAndResetIfNeeded();
-                });
+                const dbRows = newSlots.map((slot, idx) => ({
+                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}_${idx}`,
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
+                    day: slot.day,
+                    class_name: slot.className,
+                    section: slot.section,
+                    start24: slot.start24,
+                    end24: slot.end24,
+                    time_range: slot.timeRange,
+                    duration: slot.duration,
+                    subject: slot.subject,
+                    teacher: slot.teacher || "NONE",
+                    teacher_name: slot.teacherName || slot.teacher || "NONE",
+                    teacher_email: slot.teacherEmail || "",
+                    room: slot.room || "",
+                    remark: slot.remark || "",
+                    version_id: versionId,
+                    effective_from: todayIso,
+                    updated_at: new Date().toISOString()
+                }));
 
-                // 3. Ship any remaining items in the final box
-                if (operationCount > 0) {
-                    batchPromises.push(currentBatch.commit());
+                for (let i = 0; i < dbRows.length; i += 200) {
+                    const { error: insErr } = await supabaseClient.from("timetable").insert(dbRows.slice(i, i + 200));
+                    if (insErr) throw insErr;
                 }
-
-               await Promise.all(batchPromises);
 
                 if (teachersToNotify.length > 0) {
-                    await db.collection("instant_alerts").add({
-                        timestamp: Date.now(),
-                        type: "TIMETABLE_UPDATE",
-                        teachers: teachersToNotify
-                    });
+                    await supabaseClient.from("instant_alerts").insert([{
+                        firestore_id: `ui_${activeCenter.toLowerCase()}_alert_${nowMs}`,
+                        branch_id: activeBranchId,
+                        session_id: activeSessionId,
+                        timestamp_ms: nowMs,
+                        alert_type: "TIMETABLE_UPDATE",
+                        teachers: teachersToNotify,
+                        raw_data: { timestamp: nowMs, type: "TIMETABLE_UPDATE", teachers: teachersToNotify }
+                    }]);
                 }
 
-                // 4. --- TEMPORAL VERSION REGISTRY ---
-                // We log this version permanently. It will NEVER be overwritten.
-                await getCollection("timetable_versions").doc(versionId).set({
+                await supabaseClient.from("timetable_versions").insert([{
+                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
                     version_id: versionId,
                     start_date: todayIso,
-                    created_at: Date.now(),
-                    type: "LIVE_MASTER_UPDATE"
-                });
-                
-               // Keep the daily history sync for backward compatibility with your planner
-                const existingTodaySnap = await getCollection("timetable_history").doc(todayIso).get();
-                let snapshotDocId = todayIso; // Default to saving in the YYYY-MM-DD folder for the planner
+                    created_at_ms: nowMs,
+                    version_type: "LIVE_MASTER_UPDATE"
+                }]);
 
-                if (existingTodaySnap.exists) {
-                    const existingType = existingTodaySnap.data().type;
-                    if (existingType === "EXAM_OVERRIDE" || existingType === "DAILY_OVERRIDE") {
-                        // An override exists! We cannot overwrite the YYYY-MM-DD folder without breaking the exam schedule.
-                        // Instead, save the Master Snapshot under its unique version ID.
-                        // The planner will read the override today, but the Admin Editor will still detect this master update for tomorrow!
-                        snapshotDocId = versionId; 
-                    }
-                }
+                const { data: existingTodayRows } = await supabaseClient
+                    .from("timetable_history")
+                    .select("id, doc_key, entry_type")
+                    .eq("branch_id", activeBranchId)
+                    .eq("session_id", activeSessionId)
+                    .eq("date", todayIso);
 
-                // Save the snapshot. It either goes to YYYY-MM-DD (for the planner) or versionId (if blocked by an override)
-                await getCollection("timetable_history").doc(snapshotDocId).set({
+                const hasOverrideToday = (existingTodayRows || []).some(r => r.entry_type === "EXAM_OVERRIDE" || r.entry_type === "DAILY_OVERRIDE");
+                const snapshotDocKey = hasOverrideToday ? versionId : todayIso;
+
+                await supabaseClient.from("timetable_history").upsert([{
+                    firestore_id: `ui_${activeCenter.toLowerCase()}_hist_${snapshotDocKey}`,
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
+                    doc_key: snapshotDocKey,
                     date: todayIso,
-                    lastUpdated: Date.now(),
+                    last_updated_ms: nowMs,
                     schedule: newSlots,
-                    type: "LIVE_MASTER_UPDATE",
-                    version_id: versionId
-                });
+                    entry_type: "LIVE_MASTER_UPDATE",
+                    status: "ACTIVE",
+                    version_id: versionId,
+                    updated_at: new Date().toISOString()
+                }], { onConflict: 'firestore_id' });
           // 🌟 FIX: CALCULATE DELTAS BEFORE WIPING MEMORY
                 const deltaChanges = getDeltaChanges(oldTimetableState, newSlots);
 
@@ -3930,15 +3934,19 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                 body: JSON.stringify(payload)
             }).catch(e => console.error("Email trigger failed:", e));
             
-         // --- CRITICAL FIX: AWAIT PUSH NOTIFICATIONS ---
-            if (teachers && teachers.length > 0) {
+        if (teachers && teachers.length > 0 && activeBranchId && activeSessionId) {
                 try {
-                    await db.collection("instant_alerts").add({
-                        timestamp: Date.now(),
-                        type: "TIMETABLE_UPDATE",
-                        teachers: teachers
-                    });
-                } catch(e) {
+                    const ts = Date.now();
+                    await supabaseClient.from("instant_alerts").insert([{
+                        firestore_id: `ui_${activeCenter.toLowerCase()}_alert_${ts}`,
+                        branch_id: activeBranchId,
+                        session_id: activeSessionId,
+                        timestamp_ms: ts,
+                        alert_type: "TIMETABLE_UPDATE",
+                        teachers: teachers,
+                        raw_data: { timestamp: ts, type: "TIMETABLE_UPDATE", teachers: teachers }
+                    }]);
+                } catch (e) {
                     console.error("Instant push trigger failed:", e);
                 }
             }
@@ -3977,28 +3985,30 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                 let allData = [];
                 let displayDateStr = "";
 
-                // 1. SMART FETCHING LOGIC
                 if (timeframe === "DATE") {
                     if (!selectedDate) throw new Error("Please select a specific date first.");
-                    
-                    // Check if an override (like an Exam Day) exists for this date
-                    const historySnap = await getCollection("timetable_history").doc(selectedDate).get();
-                    if (historySnap.exists && historySnap.data().schedule) {
-                        allData = historySnap.data().schedule;
+                    const { data: hRows } = await supabaseClient
+                        .from("timetable_history")
+                        .select("*")
+                        .eq("branch_id", activeBranchId)
+                        .eq("session_id", activeSessionId)
+                        .eq("date", selectedDate)
+                        .neq("status", "CANCELLED");
+                    const ov = (hRows || []).find(r => Array.isArray(r.schedule) && r.schedule.length > 0);
+                    if (ov) {
+                        allData = ov.schedule;
                     } else {
-                        // Fall back to the normal Live Master schedule for that specific weekday
-                        const dayName = new Date(selectedDate).toLocaleDateString('en-US', { weekday: 'long' });
-                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                        allData = masterSnap.docs.map(d => d.data());
+                        const [yy, mm, dd] = selectedDate.split('-').map(Number);
+                        const dayName = new Date(yy, (mm || 1) - 1, dd || 1).toLocaleDateString('en-US', { weekday: 'long' });
+                        const weekRows = await fetchFullWeekTimetable();
+                        allData = weekRows.filter(d => d.day === dayName);
                     }
                     displayDateStr = new Date(selectedDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-                    
                 } else if (timeframe === "DAY") {
-                    const snap = await getCollection("timetable").where("day", "==", selectedDay).get();
-                    allData = snap.docs.map(d => d.data());
+                    const weekRows = await fetchFullWeekTimetable();
+                    allData = weekRows.filter(d => d.day === selectedDay);
                 } else {
-                    const snap = await getCollection("timetable").get();
-                    allData = snap.docs.map(d => d.data());
+                    allData = await fetchFullWeekTimetable();
                 }
 
                let targetStructures = structureData;
@@ -4260,79 +4270,92 @@ async function confirmDateContext() {
             }
 
             (leaveRows || []).forEach(lRow => {
-                const leaveData = { ...(lRow.raw_data || {}), teacherName: lRow.teacher_name, status: lRow.status, adjustments: lRow.adjustments };
+                const raw = parseDetails(lRow.raw_data);
+                const leaveData = {
+                    ...raw,
+                    teacherName: lRow.teacher_name || raw.teacherName || raw.teacher_name || '',
+                    status: lRow.status || raw.status || '',
+                    adjustments: Array.isArray(lRow.adjustments) && lRow.adjustments.length > 0
+                        ? lRow.adjustments
+                        : (Array.isArray(raw.adjustments) ? raw.adjustments : [])
+                };
                 if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
-                    if (leaveData.adjustments) {
+                    if (Array.isArray(leaveData.adjustments)) {
                         leaveData.adjustments.forEach(adj => {
-                            if (adj.date === dateVal && adj.substituteResponse === "ACCEPTED") {
-                    const parts = (adj.sub || "").split('|');
-                                    const cName = parts[0] ? parts[0].trim() : "";
-                                    const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : "";
-                                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                            const adjDate = adj.date || adj.leaveDate || '';
+                            const resp = String(adj.substituteResponse || adj.substitute_response || adj.status || '').toUpperCase();
+                            const adjTo = adj.adjustedTo || adj.adjusted_to || adj.substituteName || adj.substitute_name || '';
+                            const adjEmail = adj.adjustedEmail || adj.adjusted_email || adj.substituteEmail || '';
+                            const adjTitle = adj.title || adj.subject || '';
+                            const adjStart = Number(adj.start ?? adj.startMins ?? adj.start_mins ?? 0);
+                            const adjEnd = Number(adj.end ?? adj.endMins ?? adj.end_mins ?? 0);
 
-                                    // Try to find the exact class in globalTimetable
-                                    const targetSlot = globalTimetable.find(slot => {
-                                        if (slot.day !== dayName) return false; // STRICT DAY LOCK
-                                        if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adj.title)) return false;
-                                        if (slot.start24 && slot.end24) {
-                                            const [sh, sm] = slot.start24.split(':').map(Number);
-                                            const [eh, em] = slot.end24.split(':').map(Number);
-                                            const slotStartMins = sh * 60 + sm;
-                                            const slotEndMins = eh * 60 + em;
-                                            
-                                            // Check if substitution time overlaps with the class time block
-                                            if (adj.end <= slotStartMins - 15 || adj.start >= slotEndMins + 15) return false;
-                                        }
-                                        return true;
-                                    });
+                            if (adjDate === dateVal && resp === "ACCEPTED" && adjTo) {
+                                const parts = String(adj.sub || adj.classSection || '').split('|');
+                                const cName = parts[0] ? parts[0].trim() : (adj.className || adj.class_name || '');
+                                const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : (adj.section || '');
+                                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+                                const targetSlot = globalTimetable.find(slot => {
+                                    if (slot.day !== dayName) return false;
+                                    const classOk = !cName || norm(slot.className) === norm(cName);
+                                    const secOk = !sName || norm(slot.section) === norm(sName);
+                                    const subOk = !adjTitle || norm(slot.subject) === norm(adjTitle);
+                                    if (!classOk || !secOk || !subOk) return false;
+                                    if (slot.start24 && slot.end24 && (adjStart || adjEnd)) {
+                                        const [sh, sm] = slot.start24.split(':').map(Number);
+                                        const [eh, em] = slot.end24.split(':').map(Number);
+                                        const slotStartMins = sh * 60 + sm;
+                                        const slotEndMins = eh * 60 + em;
+                                        if (adjEnd <= slotStartMins - 15 || adjStart >= slotEndMins + 15) return false;
+                                    }
+                                    return true;
+                                });
 
                                 if (targetSlot) {
-                                        // Backup the original data so it isn't permanently saved if cloned!
-                                        targetSlot.origTeacher = targetSlot.teacher;
-                                        targetSlot.origTeacherName = targetSlot.teacherName;
-                                        targetSlot.origTeacherEmail = targetSlot.teacherEmail;
-                                        targetSlot.origRemark = targetSlot.remark;
-                                        targetSlot.isTemporarySub = true;
+                                    targetSlot.origTeacher = targetSlot.teacher;
+                                    targetSlot.origTeacherName = targetSlot.teacherName;
+                                    targetSlot.origTeacherEmail = targetSlot.teacherEmail;
+                                    targetSlot.origRemark = targetSlot.remark;
+                                    targetSlot.isTemporarySub = true;
 
-                                        // Override Teacher Name to the Substitute!
-                                        targetSlot.teacher = adj.adjustedTo;
-                                        targetSlot.teacherName = adj.adjustedTo;
-                                        targetSlot.teacherEmail = adj.adjustedEmail;
-                                        
-                                        let subNote = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
-                                        if (adj.assignedTimeWindow) subNote += ` [${adj.assignedTimeWindow}]`;
-                                        targetSlot.remark = subNote;
-                                    } else {
-                                        // Catch-all Failsafe: Render as Extra Duty if standard class match fails
-                                        const existingDuty = globalTimetable.find(slot => 
-                                            norm(slot.className) === "extraduty" && 
-                                            norm(slot.subject) === norm(adj.title) && 
-                                            norm(slot.teacher) === norm(adj.adjustedTo) &&
-                                            slot.start24 === minsTo24(adj.start)
-                                        );
-                                        
-                                        if (!existingDuty) {
-                                            // Inject Extra Duty into the Timetable view!
-                                            globalTimetable.push({
-                                                day: dayName,
-                                                className: "Extra Duty",
-                                                section: "Task",
-                                                subject: adj.title || "Substitution",
-                                                teacher: adj.adjustedTo,
-                                                teacherName: adj.adjustedTo,
-                                                teacherEmail: adj.adjustedEmail,
-                                                start24: minsTo24(adj.start),
-                                                end24: minsTo24(adj.end),
-                                                remark: adj.sub || "(Assigned to " + adj.adjustedTo.split(' ')[0] + ")",
-                                                room: "TBD",
-                                                isTemporaryDuty: true
-                                            });
-                                            // Force structure injection so it renders on screen
-                                            if (!structureData.some(s => s.className === "Extra Duty")) {
-                                                structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adj.title || "Substitution"] });
-                                            }
+                                    targetSlot.teacher = adjTo;
+                                    targetSlot.teacherName = adjTo;
+                                    targetSlot.teacherEmail = adjEmail;
+
+                                    let subNote = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
+                                    if (adj.assignedTimeWindow || adj.assigned_time_window) {
+                                        subNote += ` [${adj.assignedTimeWindow || adj.assigned_time_window}]`;
+                                    }
+                                    targetSlot.remark = subNote;
+                                } else {
+                                    const existingDuty = globalTimetable.find(slot =>
+                                        norm(slot.className) === "extraduty" &&
+                                        norm(slot.subject) === norm(adjTitle) &&
+                                        norm(slot.teacher) === norm(adjTo) &&
+                                        slot.start24 === minsTo24(adjStart)
+                                    );
+
+                                    if (!existingDuty) {
+                                        globalTimetable.push({
+                                            day: dayName,
+                                            className: "Extra Duty",
+                                            section: "Task",
+                                            subject: adjTitle || "Substitution",
+                                            teacher: adjTo,
+                                            teacherName: adjTo,
+                                            teacherEmail: adjEmail,
+                                            start24: minsTo24(adjStart),
+                                            end24: minsTo24(adjEnd),
+                                            remark: adj.sub || "(Assigned to " + adjTo.split(' ')[0] + ")",
+                                            room: "TBD",
+                                            isTemporaryDuty: true
+                                        });
+                                        if (!structureData.some(s => s.className === "Extra Duty")) {
+                                            structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adjTitle || "Substitution"] });
                                         }
                                     }
+                                }
                             }
                         });
                     }
@@ -4489,29 +4512,42 @@ function processSave(type) {
                     effective_from: dateVal
                 }));
 
-             await getCollection("timetable_history").doc(dateVal).set({
+            const nowMs = Date.now();
+                await supabaseClient.from("timetable_history").upsert([{
+                    firestore_id: `ui_${activeCenter.toLowerCase()}_future_${dateVal}`,
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
+                    doc_key: dateVal,
                     date: dateVal,
-                    lastUpdated: Date.now(),
-                    schedule: taggedSlots, 
-                    type: "FUTURE_MASTER",
-                    version_id: versionId
-                });
+                    last_updated_ms: nowMs,
+                    schedule: taggedSlots,
+                    entry_type: "FUTURE_MASTER",
+                    status: "ACTIVE",
+                    version_id: versionId,
+                    updated_at: new Date().toISOString()
+                }], { onConflict: 'firestore_id' });
 
                 if (teachersToNotify.length > 0) {
-                    await db.collection("instant_alerts").add({
-                        timestamp: Date.now(),
-                        type: "TIMETABLE_UPDATE",
-                        teachers: teachersToNotify
-                    });
+                    await supabaseClient.from("instant_alerts").insert([{
+                        firestore_id: `ui_${activeCenter.toLowerCase()}_alert_${nowMs}`,
+                        branch_id: activeBranchId,
+                        session_id: activeSessionId,
+                        timestamp_ms: nowMs,
+                        alert_type: "TIMETABLE_UPDATE",
+                        teachers: teachersToNotify,
+                        raw_data: { timestamp: nowMs, type: "TIMETABLE_UPDATE", teachers: teachersToNotify }
+                    }]);
                 }
 
-                // Register the Future Version in the registry
-                await getCollection("timetable_versions").doc(versionId).set({
+                await supabaseClient.from("timetable_versions").insert([{
+                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
                     version_id: versionId,
                     start_date: dateVal,
-                    created_at: Date.now(),
-                    type: "FUTURE_MASTER"
-                });
+                    created_at_ms: nowMs,
+                    version_type: "FUTURE_MASTER"
+                }]);
 
             // 🌟 FIX: CALCULATE DELTAS BEFORE WIPING MEMORY
                 const deltaChanges = getDeltaChanges(oldTimetableState, newSlots);
@@ -4671,14 +4707,12 @@ async function confirmMultiDates() {
             return `${norm(c)}|${norm(s)}`;
         });
 
-     // --- LIVE MASTER DISCREPANCY AUDIT ---
-        const masterSnapAll = await getCollection("timetable").get();
-        const allMasterSlots = masterSnapAll.docs.map(doc => doc.data());
+     const allMasterSlots = await fetchFullWeekTimetable();
         let allMismatches = [];
 
-const batch = db.batch();
-            const auditPayloads = [];
-            const versionId = "v_override_" + Date.now(); // Version stamp for these overrides
+        const auditPayloads = [];
+        const nowMs = Date.now();
+        const versionId = "v_override_" + nowMs;
             
             for (const dateIso of selectedDates) {
                 const [y, m_val, d_val] = dateIso.split('-');
@@ -4796,24 +4830,8 @@ const batch = db.batch();
                 effective_from: dateIso
             }));
 
-            batch.set(getCollection("timetable_history").doc(dateIso), {
-                date: dateIso,
-                lastUpdated: Date.now(),
-                schedule: finalMergedSchedule,
-                type: "DAILY_OVERRIDE",
-                tag: schedName,
-                version_id: versionId
-            });
-            auditPayloads.push({ date: dateIso, schedule: finalMergedSchedule });
+            auditPayloads.push({ date: dateIso, schedule: finalMergedSchedule, tag: schedName });
         }
-        
-        // Log the version registry
-        batch.set(getCollection("timetable_versions").doc(versionId), {
-            version_id: versionId,
-            created_at: Date.now(),
-            type: "DAILY_OVERRIDE",
-            dates_affected: selectedDates
-        });
 
         if (allMismatches.length > 0) {
             let warningText = "⚠️ Master Schedule Discrepancies Detected:\nThe following slots differ from the Live Master Schedule:\n\n";
@@ -4824,40 +4842,79 @@ const batch = db.batch();
             });
             if (allMismatches.length > 10) warningText += `\n...and ${allMismatches.length - 10} more discrepancies.`;
             warningText += "\n\nDo you want to continue saving this schedule with these changes?";
-            
+
             if (!confirm(warningText)) {
                 btn.disabled = false; btn.innerText = "🚀 Execute Replication";
                 return;
             }
         }
 
-        await batch.commit();
-        await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
-        
+        for (const payload of auditPayloads) {
+            const { error: hErr } = await supabaseClient.from("timetable_history").upsert([{
+                firestore_id: `ui_${activeCenter.toLowerCase()}_ov_${payload.date}`,
+                branch_id: activeBranchId,
+                session_id: activeSessionId,
+                doc_key: payload.date,
+                date: payload.date,
+                last_updated_ms: Date.now(),
+                schedule: payload.schedule,
+                entry_type: "DAILY_OVERRIDE",
+                status: "ACTIVE",
+                tag: payload.tag || "Daily Override",
+                version_id: versionId,
+                updated_at: new Date().toISOString()
+            }], { onConflict: 'firestore_id' });
+            if (hErr) throw hErr;
+        }
+
+        await supabaseClient.from("timetable_versions").insert([{
+            firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
+            branch_id: activeBranchId,
+            session_id: activeSessionId,
+            version_id: versionId,
+            created_at_ms: nowMs,
+            version_type: "DAILY_OVERRIDE",
+            dates_affected: selectedDates
+        }]);
+
+        await supabaseClient.from("system_metadata").upsert([{
+            firestore_id: `ui_${activeCenter.toLowerCase()}_meta_timetable`,
+            branch_id: activeBranchId,
+            session_id: activeSessionId,
+            meta_key: "timetable",
+            last_updated_ms: Date.now(),
+            meta_value: { lastUpdated: Date.now() },
+            updated_at: new Date().toISOString()
+        }], { onConflict: 'firestore_id' });
+
         let allAffectedTeachersMap = new Map();
 
         for (const payload of auditPayloads) {
-            const dayName = new Date(payload.date).toLocaleDateString('en-US', { weekday: 'long' });
-            const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-            const masterSlots = masterSnap.docs.map(d => d.data());
+            const [yy, mm, dd] = payload.date.split('-').map(Number);
+            const dayName = new Date(yy, (mm || 1) - 1, dd || 1).toLocaleDateString('en-US', { weekday: 'long' });
+            const masterSlots = allMasterSlots.filter(d => d.day === dayName);
             const affected = detectTeacherChanges(masterSlots, payload.schedule);
-            
+
             if (affected.length > 0) {
                 await sendEmailNotification(affected);
                 affected.forEach(t => allAffectedTeachersMap.set(t.name, t));
             }
         }
 
-      const combinedAffected = Array.from(allAffectedTeachersMap.values());
+        const combinedAffected = Array.from(allAffectedTeachersMap.values());
         if (combinedAffected.length > 0) {
             const dateList = auditPayloads.map(p => p.date).join(', ');
             openWhatsAppAlert(combinedAffected, `Specific Dates / Exam Override (${dateList})`);
 
-            await db.collection("instant_alerts").add({
-                timestamp: Date.now(),
-                type: "TIMETABLE_UPDATE",
-                teachers: combinedAffected
-            });
+            await supabaseClient.from("instant_alerts").insert([{
+                firestore_id: `ui_${activeCenter.toLowerCase()}_alert_${Date.now()}`,
+                branch_id: activeBranchId,
+                session_id: activeSessionId,
+                timestamp_ms: Date.now(),
+                alert_type: "TIMETABLE_UPDATE",
+                teachers: combinedAffected,
+                raw_data: { timestamp: Date.now(), type: "TIMETABLE_UPDATE", teachers: combinedAffected }
+            }]);
         }
 
         alert(`✅ Successfully Replicated and notified affected teachers!`);
@@ -5056,25 +5113,44 @@ async function executeImport() {
     const btn = event.target;
     btn.disabled = true; btn.innerText = "Importing...";
 
-    try {
-        // 1. Fetch Source Data
-        const historySnap = await getCollection("timetable_history").doc(importDate).get();
+   try {
+        const { data: histRows } = await supabaseClient
+            .from("timetable_history")
+            .select("*")
+            .eq("branch_id", activeBranchId)
+            .eq("session_id", activeSessionId)
+            .eq("date", importDate)
+            .neq("status", "CANCELLED");
+
         let sourceSlots = [];
-        if (historySnap.exists) {
-            sourceSlots = historySnap.data().schedule || [];
+        const histMatch = (histRows || []).find(r => Array.isArray(r.schedule) && r.schedule.length > 0);
+        if (histMatch) {
+            sourceSlots = histMatch.schedule;
         } else {
-            const dayName = new Date(importDate).toLocaleDateString('en-US', { weekday: 'long' });
-            const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-            sourceSlots = masterSnap.docs.map(d => d.data());
+            const [yy, mm, dd] = importDate.split('-').map(Number);
+            const dayName = new Date(yy, (mm || 1) - 1, dd || 1).toLocaleDateString('en-US', { weekday: 'long' });
+            const weekRows = await fetchFullWeekTimetable();
+            sourceSlots = weekRows.filter(d => d.day === dayName);
         }
-        
-     const importedData = sourceSlots.filter(s => s.className === className && s.section === sectionName);
+
+        const importedData = sourceSlots.filter(s => s.className === className && s.section === sectionName);
         if (importedData.length === 0) throw new Error("No data found for this class on that date.");
 
-        // --- NEW: FETCH LEAVES AND AUTO-APPLY SUBSTITUTIONS TO IMPORTED DATA ---
-        const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-        const leaveSnap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get();
-        const activeLeaves = leaveSnap.docs.map(d => d.data());
+        const { data: leaveRows } = await supabaseClient
+            .from("leave_requests")
+            .select("*")
+            .eq("branch_id", activeBranchId)
+            .eq("session_id", activeSessionId)
+            .in("status", ["PENDING", "APPROVED"]);
+
+        const activeLeaves = (leaveRows || []).map(lRow => ({
+            ...parseDetails(lRow.raw_data),
+            teacherName: lRow.teacher_name || '',
+            status: lRow.status,
+            adjustments: Array.isArray(lRow.adjustments) && lRow.adjustments.length > 0
+                ? lRow.adjustments
+                : (parseDetails(lRow.raw_data).adjustments || [])
+        }));
         const targetDate = currentContextDate || new Date().toISOString().split('T')[0];
         const normStr = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
@@ -5384,9 +5460,9 @@ async function executeImport() {
 
         async function updateSingleDispatcherTime(cName, sName) {
             const type = document.getElementById(`type_${cName}_${sName}`).value;
-            const bellDoc = await getCollection("configs").doc("bell_schedules").get();
-            if (bellDoc.exists && bellDoc.data()[type.toLowerCase()]) {
-                const rules = bellDoc.data()[type.toLowerCase()];
+            const bellRow = await getBellConfigFromSupabase();
+            if (bellRow && bellRow[type.toLowerCase()]) {
+                const rules = bellRow[type.toLowerCase()];
                 document.getElementById(`es_${cName}_${sName}`).value = rules.examStart || "09:00";
                 document.getElementById(`ee_${cName}_${sName}`).value = rules.examEnd || "10:30";
             }
@@ -5394,7 +5470,7 @@ async function executeImport() {
 
         async function generateExamSchedule() {
             const date = document.getElementById('ed-date').value;
-            
+
             const targetClassesData = Array.from(document.querySelectorAll('.ed-class-cb:checked')).map(cb => {
                 const [cName, sName] = cb.value.split('|');
                 const groupSelect = document.getElementById(`lg_${cName}_${sName}`);
@@ -5404,10 +5480,10 @@ async function executeImport() {
                 const eStart = document.getElementById(`es_${cName}_${sName}`).value;
                 const eEnd = document.getElementById(`ee_${cName}_${sName}`).value;
                 const sectionSubs = Array.from(document.querySelectorAll(`.ed-section-sub-cb[data-cls="${cName}"][data-sec="${sName}"]:checked`)).map(scb => scb.value.toUpperCase());
-                
-                return { 
-                    className: cName, sectionName: sName, 
-                    lunchGroup: groupSelect ? parseInt(groupSelect.value) : 1, 
+
+                return {
+                    className: cName, sectionName: sName,
+                    lunchGroup: groupSelect ? parseInt(groupSelect.value) : 1,
                     breakMode: breakModeSelect ? breakModeSelect.value : 'SPREAD',
                     examType: typeSelect ? typeSelect.value : 'UT',
                     examTitle: titleInput ? titleInput.value : 'Exam Day',
@@ -5416,27 +5492,35 @@ async function executeImport() {
                 };
             });
 
-            if(!date) return alert("Please select a target date.");
-            if(targetClassesData.length === 0) return alert("Select at least one class.");
+            if (!date) return alert("Please select a target date.");
+            if (targetClassesData.length === 0) return alert("Select at least one class.");
 
             const btn = document.getElementById('ed-generate-btn');
             const origBtnText = btn.innerHTML;
             btn.innerHTML = "⏳ Calibrating Grid..."; btn.disabled = true;
 
             try {
-                const bellDoc = await getCollection("configs").doc("bell_schedules").get();
-                if (!bellDoc.exists) throw new Error("Bell Schedules not configured.");
-                const allBellRules = bellDoc.data();
+                const bellRow = await getBellConfigFromSupabase();
+                if (!bellRow) throw new Error("Bell Schedules not configured.");
+                const allBellRules = { ut: bellRow.ut || {}, ot: bellRow.ot || {} };
 
-                const dayName = new Date(date).toLocaleDateString('en-US', { weekday: 'long' });
-                const historySnap = await getCollection("timetable_history").doc(date).get();
+                const [yy, mm, dd] = date.split('-').map(Number);
+                const dayName = new Date(yy, (mm || 1) - 1, dd || 1).toLocaleDateString('en-US', { weekday: 'long' });
+                const { data: histRows } = await supabaseClient
+                    .from("timetable_history")
+                    .select("*")
+                    .eq("branch_id", activeBranchId)
+                    .eq("session_id", activeSessionId)
+                    .eq("date", date)
+                    .neq("status", "CANCELLED");
+
                 let masterDayData = [];
-                
-                if (historySnap.exists && historySnap.data().schedule) {
-                    masterDayData = historySnap.data().schedule;
+                const histMatch = (histRows || []).find(r => Array.isArray(r.schedule) && r.schedule.length > 0);
+                if (histMatch) {
+                    masterDayData = histMatch.schedule;
                 } else {
-                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
-                    masterDayData = masterSnap.docs.map(d => d.data());
+                    const weekRows = await fetchFullWeekTimetable();
+                    masterDayData = weekRows.filter(d => d.day === dayName);
                 }
 
                let transformedSchedule = [];
