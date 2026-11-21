@@ -1205,10 +1205,11 @@ async function checkAndApplyFutureMaster() {
                 };
             });
 
-            allTeachers = tempTeachers.filter(t =>
+           allTeachers = tempTeachers.filter(t =>
                 (activeBranchId && t.branchId === activeBranchId) ||
                 (t.teacherCenter && t.teacherCenter === activeCenter)
             );
+            teachersByDeptCache = null;
 
             document.querySelectorAll('.ent-row').forEach(row => {
                 const tSel = row.querySelector('.ent-tea');
@@ -2871,8 +2872,8 @@ async function saveHoliday() {
             const addBtn = document.getElementById('add-btn-' + secId);
             grid.insertBefore(div, addBtn);
             
-            blockData.entries.forEach(ent => {
-                addEntryToBlock(blockId, className, sectionName, ent);
+           blockData.entries.forEach(ent => {
+                addEntryToBlock(blockId, className, sectionName, ent, true);
             });
         }
 function generateReadHTML(blockData, className, sectionName) {
@@ -2968,7 +2969,26 @@ function generateReadHTML(blockData, className, sectionName) {
             return html;
         }
 
-  function addEntryToBlock(blockId, className, sectionName, entryData = null) {
+  let teachersByDeptCache = null;
+        function getTeachersByDept() {
+            if (teachersByDeptCache) return teachersByDeptCache;
+            const map = new Map();
+            (allTeachers || []).forEach(t => {
+                const depts = Array.isArray(t.dept) ? t.dept : String(t.dept || 'General').split(',');
+                const seenDepts = new Set();
+                depts.forEach(d => {
+                    const key = d.trim().toLowerCase();
+                    if (!key || seenDepts.has(key)) return;
+                    seenDepts.add(key);
+                    if (!map.has(key)) map.set(key, []);
+                    map.get(key).push(t);
+                });
+            });
+            teachersByDeptCache = map;
+            return map;
+        }
+
+        function addEntryToBlock(blockId, className, sectionName, entryData = null, deferClash = false) {
             const wrapper = document.querySelector(`#${blockId} .entries-wrapper`);
             const entId = 'ent_' + Math.random().toString(36).substr(2, 9);
             
@@ -3099,22 +3119,19 @@ function generateReadHTML(blockData, className, sectionName) {
                 <div class="ent-warn hidden absolute top-0 right-0 w-2 h-2 rounded-full bg-red-600 animate-ping z-30"></div>
             `;
             wrapper.appendChild(div);
-            handleEntrySubject(blockId, entId);
+            handleEntrySubject(blockId, entId, deferClash);
         }
 
-function handleEntrySubject(blockId, entId) {
+function handleEntrySubject(blockId, entId, deferClash = false) {
             const row = document.getElementById(entId);
+            if (!row) return;
             const sub = row.querySelector('.ent-sub').value;
             const tWrap = row.querySelector('.ent-tea-wrap');
-            const roomInp = row.querySelector('.ent-room');
-            const remInp = row.querySelector('.ent-rem'); 
-           const tSel = row.querySelector('.ent-tea');
+            const tSel = row.querySelector('.ent-tea');
             const showAllCb = row.querySelector('.ent-showall');
             const showAll = showAllCb ? showAllCb.checked : false;
-            const prevSel = tSel ? tSel.getAttribute('data-selected') : "";
-            // --- IMMEDIATE UI SYNC ---
-            // If this block is set to OT, find all other regular blocks in this section
-            // and label them as "Doubt Session" immediately on screen.
+            const prevSel = tSel ? (tSel.getAttribute('data-selected') || '') : '';
+
             if (sub === 'OT') {
                 const grid = row.closest('.tt-grid');
                 if (grid) {
@@ -3122,56 +3139,67 @@ function handleEntrySubject(blockId, entId) {
                     const allSubs = grid.querySelectorAll('.ent-sub');
                     allSubs.forEach((sInp, idx) => {
                         const upperVal = sInp.value.toUpperCase();
-                        // If it's a regular teaching subject (not a break or OT itself)
-                        if (!SPECIAL_SUBJECTS.includes(upperVal)) {
+                        if (!SPECIAL_SUBJECTS.includes(upperVal) && allRemarks[idx]) {
                             allRemarks[idx].value = "Doubt Session";
                         }
                     });
                 }
             }
 
-         const upperSub = sub.toUpperCase();
+            const upperSub = sub.toUpperCase();
             if (SPECIAL_SUBJECTS.includes(upperSub)) {
-                tWrap.classList.add('hidden'); 
+                tWrap.classList.add('hidden');
                 tSel.innerHTML = '<option value="NONE">NONE</option>';
                 tSel.value = "NONE";
             } else {
-                tWrap.classList.remove('hidden'); 
-                tSel.innerHTML = '<option value="NONE">- Teacher -</option>';
-               let foundPrev = false;
-                allTeachers.forEach(t => {
-                    const deptStr = Array.isArray(t.dept) ? t.dept.join(',').toLowerCase() : t.dept.toLowerCase();
-                    if (showAll || deptStr.includes(sub.toLowerCase())) {
-                        const isSelected = (t.name === prevSel) ? 'selected' : '';
-                        if (isSelected) foundPrev = true;
-                        tSel.innerHTML += `<option value="${t.name}" ${isSelected}>${t.name}</option>`;
-                    }
-                });
-                
-                // Force substitute teacher into the dropdown even if their department doesn't match
-                if (prevSel && prevSel !== "NONE" && !foundPrev) {
-                    tSel.innerHTML += `<option value="${prevSel}" selected>${prevSel}</option>`;
+                tWrap.classList.remove('hidden');
+                const subKey = String(sub || '').trim().toLowerCase();
+                let candidates = [];
+
+                if (showAll) {
+                    candidates = allTeachers;
+                } else {
+                    const deptMap = getTeachersByDept();
+                    const matched = new Set();
+                    deptMap.forEach((list, deptKey) => {
+                        if (subKey && (deptKey.includes(subKey) || subKey.includes(deptKey))) {
+                            list.forEach(t => matched.add(t));
+                        }
+                    });
+                    candidates = Array.from(matched);
                 }
-                
-                tSel.setAttribute('data-selected', ''); 
+
+                let foundPrev = false;
+                const opts = ['<option value="NONE">- Teacher -</option>'];
+                candidates.forEach(t => {
+                    const isSelected = t.name === prevSel;
+                    if (isSelected) foundPrev = true;
+                    opts.push(`<option value="${t.name}" ${isSelected ? 'selected' : ''}>${t.name}</option>`);
+                });
+
+                if (prevSel && prevSel !== "NONE" && !foundPrev) {
+                    opts.push(`<option value="${prevSel}" selected>${prevSel}</option>`);
+                }
+
+                tSel.innerHTML = opts.join('');
+                tSel.setAttribute('data-selected', '');
             }
 
-         // --- DYNAMIC COLOR ASSIGNMENT ---
             row.setAttribute('data-sub', upperSub);
             row.setAttribute('data-tea', tSel ? tSel.value : '');
-            
+
             const subInp = row.querySelector('.ent-sub');
             if (subInp) {
-                subInp.classList.remove('text-rose-600'); // Remove default red
+                subInp.classList.remove('text-rose-600');
                 subInp.style.color = getDynamicColor(upperSub);
             }
-            
+
             if (tSel) {
-                tSel.classList.remove('text-slate-500'); // Remove default gray
+                tSel.classList.remove('text-slate-500');
                 tSel.style.color = getDynamicColor(tSel.value);
             }
 
-            checkGlobalClash();
+            if (!deferClash) checkGlobalClash();
         }
 
         function toggleEditMode(blockId, isEditing) {
