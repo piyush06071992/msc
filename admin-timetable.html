@@ -1295,7 +1295,7 @@ async function checkAndApplyFutureMaster() {
             while (true) {
                 const { data, error } = await supabaseClient
                     .from("timetable")
-                    .select("*")
+                    .select("id, day, class_name, section, start24, end24, time_range, duration, subject, teacher, teacher_name, teacher_email, room, remark")
                     .eq("branch_id", activeBranchId)
                     .eq("session_id", activeSessionId)
                     .range(from, from + pageSize - 1);
@@ -4303,9 +4303,26 @@ async function confirmDateContext() {
        const todayISO = new Date().toISOString().split('T')[0];
 
             const [{ data: histDateRows }, { data: dayMasterRows }, { data: leaveRows }] = await Promise.all([
-                supabaseClient.from("timetable_history").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).eq("date", dateVal),
-                supabaseClient.from("timetable").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).eq("day", dayName),
-                supabaseClient.from("leave_requests").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).in("status", ["PENDING", "APPROVED"])
+                supabaseClient
+                    .from("timetable_history")
+                    .select("id, date, entry_type, status, tag, schedule")
+                    .eq("branch_id", activeBranchId)
+                    .eq("session_id", activeSessionId)
+                    .lte("date", dateVal)
+                    .neq("status", "CANCELLED")
+                    .order("date", { ascending: false }),
+                supabaseClient
+                    .from("timetable")
+                    .select("id, day, class_name, section, start24, end24, time_range, duration, subject, teacher, teacher_name, teacher_email, room, remark")
+                    .eq("branch_id", activeBranchId)
+                    .eq("session_id", activeSessionId)
+                    .eq("day", dayName),
+                supabaseClient
+                    .from("leave_requests")
+                    .select("id, teacher_name, status, adjustments")
+                    .eq("branch_id", activeBranchId)
+                    .eq("session_id", activeSessionId)
+                    .in("status", ["PENDING", "APPROVED"])
             ]);
 
             const dayLiveSlots = (dayMasterRows || []).map(r => {
@@ -4332,7 +4349,8 @@ async function confirmDateContext() {
             });
             liveMasterTimetable = dayLiveSlots;
 
-            const activeOverride = (histDateRows || []).find(h => h.status !== "CANCELLED" && (h.entry_type === "DAILY_OVERRIDE" || h.entry_type === "EXAM_OVERRIDE"));
+            const exactDateHist = (histDateRows || []).filter(h => h.date === dateVal);
+            const activeOverride = exactDateHist.find(h => h.status !== "CANCELLED" && (h.entry_type === "DAILY_OVERRIDE" || h.entry_type === "EXAM_OVERRIDE"));
 
             if (activeOverride) {
                 globalTimetable = (activeOverride.schedule || []).filter(slot => slot.day === dayName);
@@ -4340,20 +4358,14 @@ async function confirmDateContext() {
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
             } else {
                 if (dateVal < todayISO) {
-                    const { data: pastRows } = await supabaseClient
-                        .from("timetable_history")
-                        .select("*")
-                        .eq("branch_id", activeBranchId)
-                        .eq("session_id", activeSessionId)
-                        .in("entry_type", ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"])
-                        .neq("status", "CANCELLED")
-                        .lte("date", dateVal)
-                        .order("date", { ascending: false })
-                        .limit(1);
+                    const pastMatch = (histDateRows || []).find(h =>
+                        ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"].includes(h.entry_type) &&
+                        Array.isArray(h.schedule)
+                    );
 
-                    if (pastRows && pastRows[0] && Array.isArray(pastRows[0].schedule)) {
-                        globalTimetable = pastRows[0].schedule.filter(slot => slot.day === dayName);
-                        document.getElementById('view-label').innerHTML = `<span class="text-slate-600 font-bold">🕰️ HISTORICAL MASTER (From ${pastRows[0].date}):</span> ${dayName}, ${prettyDate}`;
+                    if (pastMatch) {
+                        globalTimetable = pastMatch.schedule.filter(slot => slot.day === dayName);
+                        document.getElementById('view-label').innerHTML = `<span class="text-slate-600 font-bold">🕰️ HISTORICAL MASTER (From ${pastMatch.date}):</span> ${dayName}, ${prettyDate}`;
                     } else {
                         globalTimetable = dayLiveSlots;
                         document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
@@ -4365,14 +4377,10 @@ async function confirmDateContext() {
             }
 
             (leaveRows || []).forEach(lRow => {
-                const raw = parseDetails(lRow.raw_data);
                 const leaveData = {
-                    ...raw,
-                    teacherName: lRow.teacher_name || raw.teacherName || raw.teacher_name || '',
-                    status: lRow.status || raw.status || '',
-                    adjustments: Array.isArray(lRow.adjustments) && lRow.adjustments.length > 0
-                        ? lRow.adjustments
-                        : (Array.isArray(raw.adjustments) ? raw.adjustments : [])
+                    teacherName: lRow.teacher_name || '',
+                    status: lRow.status || '',
+                    adjustments: Array.isArray(lRow.adjustments) ? lRow.adjustments : []
                 };
                 if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
                     if (Array.isArray(leaveData.adjustments)) {
