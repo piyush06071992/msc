@@ -1023,37 +1023,65 @@ function updateTeacherDropdown(skipRender = false) {
 }
 
 async function checkAndApplyFutureMaster() {
+    if (!activeBranchId || !activeSessionId) return;
     const todayIso = new Date().toISOString().split('T')[0];
     try {
-        const histSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
-        if (histSnap.empty) return;
+        const { data: rows, error } = await supabaseClient
+            .from('timetable_history')
+            .select('*')
+            .eq('branch_id', activeBranchId)
+            .eq('session_id', activeSessionId)
+            .eq('entry_type', 'FUTURE_MASTER')
+            .neq('status', 'CANCELLED');
 
-        let pendingMasters = [];
-        histSnap.forEach(doc => { if (doc.id <= todayIso) pendingMasters.push(doc.data()); });
+        if (error || !rows || rows.length === 0) return;
+
+        const pendingMasters = rows
+            .filter(r => r.date && r.date <= todayIso && Array.isArray(r.schedule))
+            .sort((a, b) => b.date.localeCompare(a.date));
+
         if (pendingMasters.length === 0) return;
-
-        // Get the most recent valid future master
-        pendingMasters.sort((a, b) => b.date.localeCompare(a.date));
         const targetMaster = pendingMasters[0];
 
-        const batch = db.batch();
-        
-        // 1. Wipe the old Live Master
-        const liveSnap = await getCollection("timetable").get();
-        liveSnap.forEach(doc => batch.delete(doc.ref));
+        await supabaseClient
+            .from('timetable')
+            .delete()
+            .eq('branch_id', activeBranchId)
+            .eq('session_id', activeSessionId);
 
-        // 2. Apply the new Live Master
-        targetMaster.schedule.forEach(slot => {
-            const { sMins, eMins, ...cleanSlot } = slot;
-            batch.set(getCollection("timetable").doc(), cleanSlot);
-        });
+        const cleanSlots = (targetMaster.schedule || []).map(slot => ({
+            branch_id: activeBranchId,
+            session_id: activeSessionId,
+            day: slot.day || '',
+            class_name: slot.className || slot.class_name || '',
+            section: slot.section || '',
+            start24: slot.start24 || '',
+            end24: slot.end24 || '',
+            time_range: slot.timeRange || slot.time_range || '',
+            duration: slot.duration || '',
+            subject: slot.subject || '',
+            teacher: slot.teacher || 'NONE',
+            teacher_name: slot.teacherName || slot.teacher_name || slot.teacher || 'NONE',
+            teacher_email: slot.teacherEmail || slot.teacher_email || '',
+            room: slot.room || '',
+            remark: slot.remark || '',
+            version_id: slot.version_id || targetMaster.version_id || '',
+            effective_from: todayIso
+        }));
 
-        // 3. Mark it as APPLIED so it never runs again
-        batch.update(getCollection("timetable_history").doc(targetMaster.date), { type: "APPLIED_MASTER" });
+        for (let i = 0; i < cleanSlots.length; i += 200) {
+            const { error: insErr } = await supabaseClient.from('timetable').insert(cleanSlots.slice(i, i + 200));
+            if (insErr) throw insErr;
+        }
 
-        await batch.commit();
-        sessionStorage.removeItem('minerva_timetable'); // Force fresh fetch
-        console.log("✅ Auto-Promoted Future Master to Live Schedule!");
+        await supabaseClient
+            .from('timetable_history')
+            .update({ entry_type: 'APPLIED_MASTER', updated_at: new Date().toISOString() })
+            .eq('id', targetMaster.id);
+
+        await fetchTimetable();
+        renderDirectDashboard(true);
+        console.log("✅ Auto-Promoted Future Master to Live Schedule in Supabase!");
     } catch (e) {
         console.error("Auto-Promote Failed:", e);
     }
@@ -1440,81 +1468,90 @@ async function checkAndApplyFutureMaster() {
 
 async function saveHoliday() {
             const startDate = document.getElementById('hol-start-date').value;
-            const endDate = document.getElementById('hol-end-date').value || startDate; 
+            const endDate = document.getElementById('hol-end-date').value || startDate;
             const reason = document.getElementById('hol-reason').value.trim();
             const eventType = document.getElementById('hol-type').value;
             const staffStatus = document.getElementById('hol-staff-status').value;
             const suspendClasses = document.getElementById('hol-suspend-classes').checked;
-            
+
             const isFullDay = document.getElementById('hol-is-full-day').checked;
             const startTime = document.getElementById('hol-start-time').value;
             const endTime = document.getElementById('hol-end-time').value;
 
-            if(!startDate || !reason) return alert("Start Date and Title/Reason are mandatory!");
-            if(!isFullDay && (!startTime || !endTime)) return alert("Please specify Start and End times for partial-day events.");
-            
+            if (!startDate || !reason) return alert("Start Date and Title/Reason are mandatory!");
+            if (!isFullDay && (!startTime || !endTime)) return alert("Please specify Start and End times for partial-day events.");
+
             const isAllClasses = document.getElementById('hol-all-classes').checked;
             const targetClasses = isAllClasses ? ['ALL'] : Array.from(document.querySelectorAll('.hol-section-cb:checked')).map(cb => cb.value);
-            
-            if(targetClasses.length === 0) return alert("Select at least one target class/section.");
+            if (targetClasses.length === 0) return alert("Select at least one target class/section.");
 
             let targetStaff = ['ALL'];
             if (staffStatus === 'CUSTOM') {
                 const isAllStaff = document.getElementById('hol-all-staff').checked;
                 targetStaff = isAllStaff ? ['ALL'] : Array.from(document.querySelectorAll('.hol-staff-cb:checked')).map(cb => cb.value);
             }
-            
-            const btn = document.getElementById('hol-save-btn') || event.target; 
-            const origText = btn.innerText;
-            btn.innerText = "Saving..."; btn.disabled = true;
-            
-          try {
-                const versionId = "v_hol_" + Date.now();
-                const data = {
-                    type: eventType,
-                    staffStatus: staffStatus,
-                    suspendClasses: suspendClasses,
-                    startDate, endDate, reason,
-                    isFullDay: isFullDay,
-                    startTime: isFullDay ? null : startTime,
-                    endTime: isFullDay ? null : endTime,
-                    targetClasses,
-                    targetStaff,
-                    timestamp: Date.now(),
+
+            const btn = document.getElementById('hol-save-btn');
+            btn.innerText = "Saving...";
+            btn.disabled = true;
+
+            try {
+                const nowMs = Date.now();
+                const versionId = "v_hol_" + nowMs;
+                const payload = {
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
+                    event_type: eventType,
+                    staff_status: staffStatus,
+                    suspend_classes: suspendClasses,
+                    start_date: startDate,
+                    end_date: endDate,
+                    reason,
+                    is_full_day: isFullDay,
+                    start_time: isFullDay ? null : startTime,
+                    end_time: isFullDay ? null : endTime,
+                    target_classes: targetClasses,
+                    target_staff: targetStaff,
+                    timestamp_ms: nowMs,
                     version_id: versionId,
                     status: "ACTIVE",
-                    cancelled_at: null
+                    cancelled_at_ms: null,
+                    updated_at: new Date().toISOString()
                 };
-                
+
+                let savedDocId = editingHolidayId;
                 if (editingHolidayId) {
-                    await getCollection("school_holidays").doc(editingHolidayId).update(data);
-                    await getCollection("timetable_versions").doc(versionId).set({
-                        version_id: versionId,
-                        start_date: startDate,
-                        created_at: Date.now(),
-                        type: "HOLIDAY_UPDATED",
-                        doc_id: editingHolidayId
-                    });
-                    alert("Holiday / Event Rule Updated!");
+                    const { error } = await supabaseClient.from('school_holidays').update(payload).eq('id', editingHolidayId);
+                    if (error) throw error;
                 } else {
-                    const docRef = await getCollection("school_holidays").add(data);
-                    await getCollection("timetable_versions").doc(versionId).set({
-                        version_id: versionId,
-                        start_date: startDate,
-                        created_at: Date.now(),
-                        type: "HOLIDAY_CREATED",
-                        doc_id: docRef.id
-                   });
-                    alert("Holiday / Event Rule Saved!");
+                    payload.firestore_id = `ui_${activeCenter.toLowerCase()}_hol_${nowMs}_${Math.random().toString(36).slice(2, 6)}`;
+                    const { data: ins, error } = await supabaseClient.from('school_holidays').insert([payload]).select('id').single();
+                    if (error) throw error;
+                    savedDocId = ins.id;
                 }
 
+                await supabaseClient.from('timetable_versions').insert([{
+                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
+                    version_id: versionId,
+                    start_date: startDate,
+                    created_at_ms: nowMs,
+                    version_type: editingHolidayId ? "HOLIDAY_UPDATED" : "HOLIDAY_CREATED",
+                    doc_id: String(savedDocId || '')
+                }]);
+
+                alert(editingHolidayId ? "Holiday / Event Rule Updated!" : "Holiday / Event Rule Saved!");
                 cancelEditHoliday();
-                
                 await fetchHolidays();
                 renderActiveHolidays();
-                renderDirectDashboard();
-            } catch(e) { alert("Error saving rule: " + e.message); }
-            finally { btn.innerText = editingHolidayId ? "💾 Update Exception" : "➕ Add Exception"; btn.disabled = false; }
+                renderDirectDashboard(true);
+            } catch (e) {
+                alert("Error saving rule: " + e.message);
+            } finally {
+                btn.innerText = editingHolidayId ? "💾 Update Exception" : "➕ Add Exception";
+                btn.disabled = false;
+            }
         }
 
        function renderActiveHolidays() {
@@ -1560,28 +1597,37 @@ async function saveHoliday() {
         }
 
     async function deleteHoliday(id) {
-            if(!confirm("Remove this holiday? The original timetable will be restored immediately.")) return;
+            if (!confirm("Remove this holiday? The original timetable will be restored immediately.")) return;
             try {
-                const versionId = "v_hol_cancel_" + Date.now();
-                
-                await getCollection("school_holidays").doc(id).update({ 
-                    status: "CANCELLED", 
-                    cancelled_at: Date.now(),
-                    cancel_version_id: versionId
-                });
+                const nowMs = Date.now();
+                const versionId = "v_hol_cancel_" + nowMs;
+                const { error } = await supabaseClient
+                    .from('school_holidays')
+                    .update({
+                        status: "CANCELLED",
+                        cancelled_at_ms: nowMs,
+                        cancel_version_id: versionId,
+                        updated_at: new Date().toISOString()
+                    })
+                    .eq('id', id);
+                if (error) throw error;
 
-                // Log the cancellation to the registry
-                await getCollection("timetable_versions").doc(versionId).set({
+                await supabaseClient.from('timetable_versions').insert([{
+                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
                     version_id: versionId,
-                    created_at: Date.now(),
-                    type: "HOLIDAY_CANCELLED",
-                    doc_id: id
-                });
+                    created_at_ms: nowMs,
+                    version_type: "HOLIDAY_CANCELLED",
+                    doc_id: String(id)
+                }]);
 
                 await fetchHolidays();
                 renderActiveHolidays();
-                renderDirectDashboard();
-            } catch(e) { alert("Error removing."); }
+                renderDirectDashboard(true);
+            } catch (e) {
+                alert("Error removing holiday: " + e.message);
+            }
         }
 
         // ============================================================================
@@ -2014,11 +2060,10 @@ async function saveHoliday() {
             checkGlobalClash();
         }
 
-        // --- MANUAL NAMED DRAFT ENGINE ---
         async function saveNamedDraft() {
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             if (allBlocks.length === 0) return alert("Nothing to save!");
-            
+
             const draftName = prompt("Enter a name for this draft (e.g., 'Winter Update V2'):");
             if (!draftName || draftName.trim() === "") return;
 
@@ -2026,30 +2071,31 @@ async function saveHoliday() {
             const originalText = btnText ? btnText.innerHTML : "Save Changes";
             if (btnText) btnText.innerHTML = "⏳ Saving Draft...";
 
-            let draftSlots = []; 
+            let draftSlots = [];
             for (let b of allBlocks) {
                 const className = b.getAttribute('data-class');
                 const sectionName = b.getAttribute('data-section');
-                const s24 = b.querySelector('.tb-s24').value; 
+                const s24 = b.querySelector('.tb-s24').value;
                 const e24 = b.querySelector('.tb-e24').value;
                 const entries = Array.from(b.querySelectorAll('.ent-row'));
                 if (!s24 || !e24) continue;
-                
-                const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
-                const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
+
+                const [sh, sm] = s24.split(':').map(Number);
+                const [eh, em] = e24.split(':').map(Number);
+                const sMins = sh * 60 + sm;
+                const eMins = eh * 60 + em;
                 const dur = `${eMins - sMins} MINS`;
                 const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
 
-                for(let ent of entries) {
+                for (let ent of entries) {
                     if (ent.classList.contains('temp-duty-row')) continue;
                     const sub = ent.querySelector('.ent-sub').value;
-                    let teacher = ent.querySelector('.ent-tea').value || "NONE"; 
+                    let teacher = ent.querySelector('.ent-tea').value || "NONE";
                     const room = ent.querySelector('.ent-room').value.trim();
                     let remark = ent.querySelector('.ent-rem').value.trim();
-                    
+
                     let teacherEmail = "";
                     let teacherName = teacher;
-                    
                     if (ent.getAttribute('data-temp-sub') === 'true') {
                         teacher = ent.getAttribute('data-orig-tea') || "NONE";
                         teacherName = ent.getAttribute('data-orig-tea-name') || teacher;
@@ -2057,60 +2103,66 @@ async function saveHoliday() {
                         remark = ent.getAttribute('data-orig-rem') || "";
                     } else if (teacher !== "NONE") {
                         const tObj = allTeachers.find(t => t.name === teacher);
-                        if (tObj) teacherEmail = tObj.email || ""; 
+                        if (tObj) teacherEmail = tObj.email || "";
                     }
 
                     const activeDays = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
-
                     activeDays.forEach(day => {
                         draftSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName, teacherEmail, room, remark, sMins, eMins });
                     });
                 }
             }
-            
+
             try {
-                // Generates a clean URL-friendly ID for Firebase
                 const draftKey = `draft_${activeCenter}_${draftName.replace(/[^a-zA-Z0-9]/g, '_')}`;
-                
-                await db.collection("timetable_drafts").doc(draftKey).set({
-                    name: draftName,
-                    lastEdited: Date.now(),
-                    schedule: draftSlots,
-                    mode: currentContextMode,
-                    date: currentContextDate
-                });
-                
-                alert(`✅ Draft "${draftName}" saved successfully to the cloud!`);
-           } catch(e) { 
-                console.error("Draft save failed", e); 
-                alert("Error saving draft.");
+                const nowMs = Date.now();
+                const { error } = await supabaseClient
+                    .from('timetable_drafts')
+                    .upsert([{
+                        firestore_id: `ui_${activeCenter.toLowerCase()}_${draftKey}`,
+                        branch_id: activeBranchId,
+                        session_id: activeSessionId,
+                        draft_key: draftKey,
+                        name: draftName.trim(),
+                        last_edited_ms: nowMs,
+                        schedule: draftSlots,
+                        mode: currentContextMode,
+                        date: currentContextDate || '',
+                        updated_at: new Date().toISOString()
+                    }], { onConflict: 'firestore_id' });
+                if (error) throw error;
+                alert(`✅ Draft "${draftName}" saved to Supabase!`);
+            } catch (e) {
+                console.error("Draft save failed", e);
+                alert("Error saving draft: " + e.message);
             } finally {
                 if (btnText) btnText.innerHTML = originalText;
             }
         }
 
-        // --- MANAGE FUTURE MASTERS ENGINE ---
         async function manageFutureMasters() {
             document.getElementById('future-masters-modal').classList.replace('hidden', 'flex');
             const listContainer = document.getElementById('future-masters-list');
             listContainer.innerHTML = '<p class="text-xs text-slate-400 font-bold italic text-center py-10">Loading...</p>';
 
             try {
-                const snap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
-                let masters = [];
+                const { data, error } = await supabaseClient
+                    .from('timetable_history')
+                    .select('*')
+                    .eq('branch_id', activeBranchId)
+                    .eq('session_id', activeSessionId)
+                    .eq('entry_type', 'FUTURE_MASTER');
+                if (error) throw error;
+
                 const todayStr = new Date().toISOString().split('T')[0];
-                
-                snap.docs.forEach(doc => {
-                    const data = doc.data();
-                    if (data.date >= todayStr) masters.push(data);
-                });
+                const masters = (data || [])
+                    .filter(d => d.status !== 'CANCELLED' && d.date >= todayStr)
+                    .sort((a, b) => a.date.localeCompare(b.date));
 
                 if (masters.length === 0) {
                     listContainer.innerHTML = '<p class="text-[11px] font-black tracking-widest text-slate-400 uppercase text-center py-10">No pending Future Masters.</p>';
                     return;
                 }
-
-                masters.sort((a, b) => a.date.localeCompare(b.date));
 
                 listContainer.innerHTML = masters.map(m => {
                     const prettyDate = new Date(m.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
@@ -2126,77 +2178,80 @@ async function saveHoliday() {
                         </div>
                     </div>`;
                 }).join('');
-
             } catch (e) {
                 console.error(e);
                 listContainer.innerHTML = '<p class="text-xs text-rose-500 font-bold italic text-center py-10">Error loading Future Masters.</p>';
             }
         }
 
-      function editFutureMaster(date) {
+        async function editFutureMaster(date) {
             document.getElementById('future-masters-modal').classList.replace('flex', 'hidden');
-            
-            // Clear the screen immediately so the scraper has nothing to copy!
             document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Loading Future Master...</div>`;
 
-            getCollection("timetable_history").doc(date).get().then(doc => {
-                if(doc.exists) {
-                    globalTimetable = doc.data().schedule || [];
-                    currentContextDate = date;
-                    currentContextMode = 'EDIT_FUTURE';
-                    
-                    const prettyDate = new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-                    document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 animate-pulse font-bold">🟡 EDITING FUTURE MASTER (Effective: ${prettyDate})</span>`;
-                    
-                    // CRITICAL FIX: Pass 'true' to completely skip scraping the background!
-                    renderDirectDashboard(true);
-                }
-            });
+            const { data } = await supabaseClient
+                .from('timetable_history')
+                .select('*')
+                .eq('branch_id', activeBranchId)
+                .eq('session_id', activeSessionId)
+                .eq('date', date)
+                .limit(1);
+
+            if (data && data[0]) {
+                globalTimetable = Array.isArray(data[0].schedule) ? data[0].schedule : [];
+                currentContextDate = date;
+                currentContextMode = 'EDIT_FUTURE';
+                const prettyDate = new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 animate-pulse font-bold">🟡 EDITING FUTURE MASTER (Effective: ${prettyDate})</span>`;
+                renderDirectDashboard(true);
+            }
         }
-       async function deleteFutureMaster(date) {
-            if(!confirm(`Are you sure you want to completely cancel the Future Master scheduled for ${date}?`)) return;
+
+        async function deleteFutureMaster(date) {
+            if (!confirm(`Are you sure you want to completely cancel the Future Master scheduled for ${date}?`)) return;
             try {
-                await getCollection("timetable_history").doc(date).delete();
+                const { error } = await supabaseClient
+                    .from('timetable_history')
+                    .delete()
+                    .eq('branch_id', activeBranchId)
+                    .eq('session_id', activeSessionId)
+                    .eq('date', date);
+                if (error) throw error;
                 alert(`Future Master for ${date} cancelled successfully.`);
-                manageFutureMasters(); // Refresh list automatically
-            } catch(e) {
+                manageFutureMasters();
+            } catch (e) {
                 alert("Error cancelling: " + e.message);
             }
         }
 
-        // --- MANAGE SPECIAL DATES ENGINE ---
         async function manageSpecialDates() {
             document.getElementById('special-dates-modal').classList.replace('hidden', 'flex');
             const listContainer = document.getElementById('special-dates-list');
             listContainer.innerHTML = '<p class="text-xs text-slate-400 font-bold italic text-center py-10">Loading...</p>';
 
             try {
-                // Fetch the overrides from timetable_history
-                const snap = await getCollection("timetable_history").get();
-                let overrides = [];
+                const { data, error } = await supabaseClient
+                    .from('timetable_history')
+                    .select('*')
+                    .eq('branch_id', activeBranchId)
+                    .eq('session_id', activeSessionId);
+                if (error) throw error;
+
                 const todayStr = new Date().toISOString().split('T')[0];
-                
-               snap.docs.forEach(doc => {
-                    const data = doc.data();
-                    // Show both past and future overrides so Admin has a full record (Ignore cancelled ones)
-                    if ((data.type === "DAILY_OVERRIDE" || data.type === "EXAM_OVERRIDE") && data.status !== "CANCELLED") {
-                        overrides.push(data);
-                    }
-                });
+                const overrides = (data || [])
+                    .filter(d => (d.entry_type === 'DAILY_OVERRIDE' || d.entry_type === 'EXAM_OVERRIDE') && d.status !== 'CANCELLED' && d.date)
+                    .sort((a, b) => b.date.localeCompare(a.date));
 
                 if (overrides.length === 0) {
                     listContainer.innerHTML = '<p class="text-[11px] font-black tracking-widest text-slate-400 uppercase text-center py-10">No upcoming special dates saved.</p>';
                     return;
                 }
 
-                // Sort newest to oldest so upcoming ones are at the top
-                overrides.sort((a, b) => b.date.localeCompare(a.date));
-
                 listContainer.innerHTML = overrides.map(o => {
                     const isPast = o.date < todayStr;
-                    const prettyDate = new Date(o.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
-                    const badgeColor = o.type === "EXAM_OVERRIDE" ? "rose" : "amber";
-                    const tagName = o.tag || (o.type === "EXAM_OVERRIDE" ? "Exam Day" : "Daily Override");
+                    const [yy, mm, dd] = String(o.date).split('-').map(Number);
+                    const prettyDate = new Date(yy, (mm || 1) - 1, dd || 1).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+                    const badgeColor = o.entry_type === "EXAM_OVERRIDE" ? "rose" : "amber";
+                    const tagName = o.tag || (o.entry_type === "EXAM_OVERRIDE" ? "Exam Day" : "Daily Override");
 
                     return `
                     <div class="bg-${isPast ? 'slate' : badgeColor}-50 border border-${isPast ? 'slate' : badgeColor}-200 p-4 rounded-xl flex flex-col sm:flex-row justify-between sm:items-center gap-4 ${isPast ? 'opacity-70' : ''}">
@@ -2210,7 +2265,6 @@ async function saveHoliday() {
                         </div>
                     </div>`;
                 }).join('');
-
             } catch (e) {
                 console.error(e);
                 listContainer.innerHTML = '<p class="text-xs text-rose-500 font-bold italic text-center py-10">Error loading Special Dates.</p>';
@@ -2220,39 +2274,42 @@ async function saveHoliday() {
         function viewSpecialDate(date) {
             document.getElementById('special-dates-modal').classList.replace('flex', 'hidden');
             document.getElementById('context-date-input').value = date;
-            
-            // Re-use the existing logic to load that specific date!
-            pendingMode = 'OVERRIDE'; 
+            pendingMode = 'OVERRIDE';
             confirmDateContext();
         }
 
-       async function deleteSpecialDate(date) {
-            if(!confirm(`⚠️ REVERT DATE: Are you sure you want to delete the override for ${date}?\n\nThis will instantly revert that day back to the standard Live Master schedule.`)) return;
-          try {
-                const versionId = "v_override_revert_" + Date.now();
-                
-                // Hard Delete: Completely erase the document from the database
-                await getCollection("timetable_history").doc(date).delete();
+        async function deleteSpecialDate(date) {
+            if (!confirm(`⚠️ REVERT DATE: Are you sure you want to delete the override for ${date}?\n\nThis will instantly revert that day back to the standard Live Master schedule.`)) return;
+            try {
+                const nowMs = Date.now();
+                const versionId = "v_override_revert_" + nowMs;
+                const { error } = await supabaseClient
+                    .from('timetable_history')
+                    .delete()
+                    .eq('branch_id', activeBranchId)
+                    .eq('session_id', activeSessionId)
+                    .eq('date', date);
+                if (error) throw error;
 
-                await getCollection("timetable_versions").doc(versionId).set({
+                await supabaseClient.from('timetable_versions').insert([{
+                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
                     version_id: versionId,
-                    created_at: Date.now(),
-                    type: "OVERRIDE_REVERTED",
+                    created_at_ms: nowMs,
+                    version_type: "OVERRIDE_REVERTED",
                     date_affected: date
-                });
+                }]);
 
                 alert(`✅ Special schedule for ${date} removed successfully. Restored to Live Master.`);
-                
-                manageSpecialDates(); // Refresh list automatically
-                
-                // If they are currently looking at the date they just deleted, force a refresh!
+                manageSpecialDates();
                 if (currentContextDate === date) {
                     currentContextDate = null;
-                  currentContextMode = 'LIVE';
-                    document.getElementById('context-date-input').value = new Date().toISOString().split('T')[0];
-                    confirmDateContext();
+                    currentContextMode = 'LIVE';
+                    await fetchTimetable();
+                    renderDirectDashboard(true);
                 }
-            } catch(e) {
+            } catch (e) {
                 alert("Error reverting: " + e.message);
             }
         }
@@ -2504,9 +2561,13 @@ async function saveHoliday() {
 
         async function loadNamedDraft() {
             try {
-                const snap = await db.collection("timetable_drafts").get();
-                // Filter drafts so Ghumarwin only sees Ghumarwin drafts, etc.
-                const branchDrafts = snap.docs.filter(d => d.id.startsWith(`draft_${activeCenter}_`)).map(d => d.data());
+                const { data, error } = await supabaseClient
+                    .from("timetable_drafts")
+                    .select("*")
+                    .eq("branch_id", activeBranchId)
+                    .eq("session_id", activeSessionId);
+                if (error) throw error;
+                const branchDrafts = (data || []).filter(d => String(d.draft_key || '').startsWith(`draft_${activeCenter}_`));
                 
                 if (branchDrafts.length === 0) return alert("No drafts found for this branch.");
                 
@@ -2540,11 +2601,15 @@ async function saveHoliday() {
 
         async function manageDrafts() {
             try {
-                const snap = await db.collection("timetable_drafts").get();
-                // Map the document ID along with the data so we can delete it
-                const branchDrafts = snap.docs
-                    .filter(d => d.id.startsWith(`draft_${activeCenter}_`))
-                    .map(d => ({ docId: d.id, ...d.data() }));
+                const { data, error } = await supabaseClient
+                    .from("timetable_drafts")
+                    .select("*")
+                    .eq("branch_id", activeBranchId)
+                    .eq("session_id", activeSessionId);
+                if (error) throw error;
+                const branchDrafts = (data || [])
+                    .filter(d => String(d.draft_key || '').startsWith(`draft_${activeCenter}_`))
+                    .map(d => ({ docId: d.id, ...d }));
                 
                 if (branchDrafts.length === 0) return alert("✨ Clean slate! There are no saved drafts in the cloud for this branch.");
                 
@@ -2566,9 +2631,11 @@ async function saveHoliday() {
                 const selectedDraft = branchDrafts[draftIndex];
                 const draftName = selectedDraft.name || (selectedDraft.mode === 'LIVE' ? 'Live Master Draft' : `Date Override: ${selectedDraft.date}`);
 
-                if (confirm(`⚠️ WARNING: Are you sure you want to permanently delete the draft: "${draftName}"?`)) {
-                    await db.collection("timetable_drafts").doc(selectedDraft.docId).delete();
+               if (confirm(`⚠️ WARNING: Are you sure you want to permanently delete the draft: "${draftName}"?`)) {
+                    const { error: delErr } = await supabaseClient.from("timetable_drafts").delete().eq("id", selectedDraft.docId);
+                    if (delErr) throw delErr;
                     alert(`✅ Draft "${draftName}" deleted successfully.`);
+                }
                 }
             } catch(e) {
                 console.error(e);
@@ -2607,11 +2674,16 @@ async function saveHoliday() {
             }
             
             try {
-                // Save safely to a parallel 'drafts' collection tied specifically to the active branch
-                await db.collection("timetable_drafts").doc(activeCenter).set({
-                    lastEdited: Date.now(),
-                    schedule: draftSlots
-                });
+                await supabaseClient.from("timetable_drafts").upsert([{
+                    firestore_id: `ui_${activeCenter.toLowerCase()}_draft_${activeCenter}`,
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
+                    draft_key: activeCenter,
+                    name: `${activeCenter} Auto Draft`,
+                    last_edited_ms: Date.now(),
+                    schedule: draftSlots,
+                    updated_at: new Date().toISOString()
+                }], { onConflict: 'firestore_id' });
                 
                 const btnText = document.getElementById('btn-text');
                 if (btnText) {
@@ -4138,72 +4210,58 @@ async function confirmDateContext() {
                 nameTagInp.value = ""; // Reset first
             }
 
-       // High-Speed Parallel Query Execution
-            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-            const draftKey = `draft_${activeCenter}_${dateVal}`;
-            
-            const [draftSnap, historySnap, masterSnap, leaveSnap] = await Promise.all([
-                db.collection("timetable_drafts").doc(draftKey).get(),
-                getCollection("timetable_history").doc(dateVal).get(),
-                getCollection("timetable_history").where("type", "in", ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"]).get(),
-                db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get()
+       const draftKey = `draft_${activeCenter}_${dateVal}`;
+            const [{ data: draftRows }, { data: histDateRows }, { data: masterRows }, { data: leaveRows }, weekMaster] = await Promise.all([
+                supabaseClient.from("timetable_drafts").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).eq("draft_key", draftKey).limit(1),
+                supabaseClient.from("timetable_history").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).eq("date", dateVal),
+                supabaseClient.from("timetable_history").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).in("entry_type", ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"]),
+                supabaseClient.from("leave_requests").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).in("status", ["PENDING", "APPROVED"]),
+                fetchFullWeekTimetable()
             ]);
-            
-         if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
-                globalTimetable = draftSnap.data().schedule;
+            liveMasterTimetable = weekMaster;
+
+            const activeOverride = (histDateRows || []).find(h => h.status !== "CANCELLED" && (h.entry_type === "DAILY_OVERRIDE" || h.entry_type === "EXAM_OVERRIDE"));
+
+            if (draftRows && draftRows[0] && Array.isArray(draftRows[0].schedule) && draftRows[0].schedule.length > 0) {
+                globalTimetable = draftRows[0].schedule;
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED OVERRIDE DRAFT:</span> ${prettyDate}`;
+            } else if (activeOverride) {
+                globalTimetable = (activeOverride.schedule || []).filter(slot => slot.day === dayName);
+                if (nameTagInp) nameTagInp.value = activeOverride.tag || "";
+                document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
             } else {
-                if (historySnap.exists && historySnap.data().status !== "CANCELLED" && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
-                    const hData = historySnap.data();
-                    globalTimetable = (hData.schedule || []).filter(slot => slot.day === dayName);
-                    if (nameTagInp) nameTagInp.value = hData.tag || "";
-                    document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
-            } else {
-                    const todayISO = new Date().toISOString().split('T')[0];
-                    
-                    if (dateVal >= todayISO) {
-                        // FOR TODAY & FUTURE: Always use the current Live Master as baseline
-                        let futureMasters = [];
-                        masterSnap.docs.forEach(doc => { 
-                            const d = doc.data();
-                            if (d.type === "FUTURE_MASTER" && d.status !== "CANCELLED" && d.date > todayISO && d.date <= dateVal) {
-                                futureMasters.push(d);
-                            }
-                        });
+                const todayISO = new Date().toISOString().split('T')[0];
+                const allMasters = (masterRows || []).filter(d => d.status !== "CANCELLED");
 
-                        if (futureMasters.length > 0) {
-                            // If a Future Master kicks in before the selected date, use it
-                            futureMasters.sort((a, b) => b.date.localeCompare(a.date));
-                            globalTimetable = (futureMasters[0].schedule || []).filter(slot => slot.day === dayName);
-                            document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 font-bold">📅 FUTURE MASTER (From ${futureMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
-                        } else {
-                            // Default to exactly what the Live Master currently holds
-                            globalTimetable = liveMasterTimetable.filter(t => t.day === dayName);
-                            document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
-                        }
+                if (dateVal >= todayISO) {
+                    const futureMasters = allMasters
+                        .filter(d => d.entry_type === "FUTURE_MASTER" && d.date > todayISO && d.date <= dateVal)
+                        .sort((a, b) => b.date.localeCompare(a.date));
+
+                    if (futureMasters.length > 0) {
+                        globalTimetable = (futureMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                        document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 font-bold">📅 FUTURE MASTER (From ${futureMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
                     } else {
-                        // FOR PAST DATES: Look for historical snapshots
-                        let pastMasters = [];
-                        masterSnap.docs.forEach(doc => { 
-                            const d = doc.data();
-                            if (d.date <= dateVal && d.status !== "CANCELLED") pastMasters.push(d); 
-                        });
+                        globalTimetable = liveMasterTimetable.filter(t => t.day === dayName);
+                        document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
+                    }
+                } else {
+                    const pastMasters = allMasters
+                        .filter(d => d.date && d.date <= dateVal)
+                        .sort((a, b) => b.date.localeCompare(a.date));
 
-                        if (pastMasters.length > 0) {
-                            pastMasters.sort((a, b) => b.date.localeCompare(a.date));
-                            globalTimetable = (pastMasters[0].schedule || []).filter(slot => slot.day === dayName);
-                            document.getElementById('view-label').innerHTML = `<span class="text-slate-600 font-bold">🕰️ HISTORICAL MASTER (From ${pastMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
-                        } else {
-                            globalTimetable = liveMasterTimetable.filter(t => t.day === dayName);
-                            document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
-                        }
+                    if (pastMasters.length > 0) {
+                        globalTimetable = (pastMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                        document.getElementById('view-label').innerHTML = `<span class="text-slate-600 font-bold">🕰️ HISTORICAL MASTER (From ${pastMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
+                    } else {
+                        globalTimetable = liveMasterTimetable.filter(t => t.day === dayName);
+                        document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
                     }
                 }
             }
-            // --- THE LIVE LEAVE PATCHER FOR ADMIN ---
 
-            leaveSnap.forEach(doc => {
-                const leaveData = doc.data();
+            (leaveRows || []).forEach(lRow => {
+                const leaveData = { ...(lRow.raw_data || {}), teacherName: lRow.teacher_name, status: lRow.status, adjustments: lRow.adjustments };
                 if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
                     if (leaveData.adjustments) {
                         leaveData.adjustments.forEach(adj => {
@@ -5552,36 +5610,45 @@ async function executeImport() {
             document.getElementById('bell-config-modal').classList.replace('flex', 'hidden');
         }
 
-        async function fetchBellTemplates() {
-            try {
-                const doc = await getCollection("configs").doc("bell_schedules").get();
-                if (doc.exists) {
-                    const data = doc.data();
-                    if(data.ut) {
-                        document.getElementById('tpl-ut-start').value = data.ut.examStart || "09:00";
-                        document.getElementById('tpl-ut-end').value = data.ut.examEnd || "10:30";
-                        document.getElementById('tpl-ut-lunch-s').value = data.ut.lunchStart || "12:00";
-                        document.getElementById('tpl-ut-lunch-e').value = data.ut.lunchEnd || "13:30";
-                        document.getElementById('tpl-ut-lunch-dur').value = data.ut.lunchDuration || 30;
-                    }
-                    if(data.ot) {
-                        document.getElementById('tpl-ot-start').value = data.ot.examStart || "09:00";
-                        document.getElementById('tpl-ot-end').value = data.ot.examEnd || "12:30";
-                        document.getElementById('tpl-ot-lunch-s').value = data.ot.lunchStart || "12:30";
-                        document.getElementById('tpl-ot-lunch-e').value = data.ot.lunchEnd || "13:30";
-                        document.getElementById('tpl-ot-lunch-dur').value = data.ot.lunchDuration || 30;
-                    }
-                }
-            } catch(e) { console.error("Error loading bell templates", e); }
+        async function getBellConfigFromSupabase() {
+            const { data } = await supabaseClient
+                .from('bell_schedules')
+                .select('*')
+                .eq('branch_id', activeBranchId)
+                .eq('session_id', activeSessionId)
+                .eq('config_key', 'bell_schedules')
+                .limit(1);
+            return data && data[0] ? data[0] : null;
         }
 
-       async function saveBellTemplates() {
-            const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
-            if (!isAdmin) return alert("You don't have authorization. Admin access required.");
+        async function fetchBellTemplates() {
+            try {
+                const row = await getBellConfigFromSupabase();
+                if (row) {
+                    const ut = row.ut || {};
+                    const ot = row.ot || {};
+                    document.getElementById('tpl-ut-start').value = ut.examStart || "09:00";
+                    document.getElementById('tpl-ut-end').value = ut.examEnd || "10:30";
+                    document.getElementById('tpl-ut-lunch-s').value = ut.lunchStart || "12:00";
+                    document.getElementById('tpl-ut-lunch-e').value = ut.lunchEnd || "13:30";
+                    document.getElementById('tpl-ut-lunch-dur').value = ut.lunchDuration || 30;
+
+                    document.getElementById('tpl-ot-start').value = ot.examStart || "09:00";
+                    document.getElementById('tpl-ot-end').value = ot.examEnd || "12:30";
+                    document.getElementById('tpl-ot-lunch-s').value = ot.lunchStart || "12:30";
+                    document.getElementById('tpl-ot-lunch-e').value = ot.lunchEnd || "13:30";
+                    document.getElementById('tpl-ot-lunch-dur').value = ot.lunchDuration || 30;
+                }
+            } catch (e) { console.error("Error loading bell templates", e); }
+        }
+
+        async function saveBellTemplates() {
+            if (sessionStorage.getItem('minervaAdminAuth') !== 'true') return alert("You don't have authorization. Admin access required.");
             const btn = document.getElementById('bell-save-btn');
             const orig = btn.innerHTML;
-            btn.innerHTML = "⌛ Saving..."; btn.disabled = true;
-            
+            btn.innerHTML = "⌛ Saving...";
+            btn.disabled = true;
+
             const config = {
                 ut: {
                     examStart: document.getElementById('tpl-ut-start').value,
@@ -5598,21 +5665,35 @@ async function executeImport() {
                     lunchDuration: parseInt(document.getElementById('tpl-ot-lunch-dur').value) || 30
                 }
             };
-            
-          try {
-                // --- HARD STOP: Branch Specific Confirmation ---
-                if(!confirm(`🚨 SETTINGS SAVE: Update the Master Bell/Exam Timings for the ${activeCenter} branch?`)) {
-                    btn.innerHTML = orig; btn.disabled = false;
+
+            try {
+                if (!confirm(`🚨 SETTINGS SAVE: Update the Master Bell/Exam Timings for ${activeCenter} (${activeSessionLabel})?`)) {
+                    btn.innerHTML = orig;
+                    btn.disabled = false;
                     return;
                 }
 
-                await getCollection("configs").doc("bell_schedules").set(config, {merge: true});
+                const { error } = await supabaseClient
+                    .from('bell_schedules')
+                    .upsert([{
+                        firestore_id: `ui_${activeCenter.toLowerCase()}_bell_schedules`,
+                        branch_id: activeBranchId,
+                        session_id: activeSessionId,
+                        config_key: 'bell_schedules',
+                        ut: config.ut,
+                        ot: config.ot,
+                        raw_config: config,
+                        updated_at: new Date().toISOString()
+                    }], { onConflict: 'firestore_id' });
+                if (error) throw error;
+
                 alert(`✅ ${activeCenter} Bell Schedules Saved Successfully.`);
                 closeBellConfig();
-            } catch(e) {
+            } catch (e) {
                 alert("Error saving: " + e.message);
             } finally {
-                btn.innerHTML = orig; btn.disabled = false;
+                btn.innerHTML = orig;
+                btn.disabled = false;
             }
         }
         // --- FLOATING MODAL DRAG SCRIPT ---
