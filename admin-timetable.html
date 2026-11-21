@@ -1008,22 +1008,22 @@ function updateTeacherDropdown(skipRender = false) {
 
     subscribeLiveTables();
 
-    // Load structure, rooms, holidays, and full week baseline first so today's date view has everything it needs
-    await Promise.all([fetchStructure(), fetchRooms(), fetchHolidays(), fetchLiveMasterCache()]);
-    populateFilterDropdowns();
-
-    const todayIso = new Date().toISOString().split('T')[0];
+   const todayIso = new Date().toISOString().split('T')[0];
     const dateInput = document.getElementById('context-date-input');
     if (dateInput) dateInput.value = todayIso;
     currentContextMode = 'OVERRIDE';
+
+    // Load structure first, then render today's schedule immediately
+    await fetchStructure();
+    populateFilterDropdowns();
     await confirmDateContext();
 
-    // Defer non-blocking secondary tasks until after today's schedule renders
-    setTimeout(() => {
+    // Fetch rooms, holidays, teachers, and bell config right after first paint
+    Promise.all([fetchRooms(), fetchHolidays(), fetchTeachers(), fetchBellTemplates()]).then(() => {
+        populateFilterDropdowns();
+        renderDirectDashboard(true);
         checkAndApplyFutureMaster();
-        fetchTeachers().then(() => populateFilterDropdowns());
-        fetchBellTemplates();
-    }, 50);
+    });
 }
 
 async function checkAndApplyFutureMaster() {
@@ -4224,14 +4224,38 @@ async function confirmDateContext() {
             }
 
        const draftKey = `draft_${activeCenter}_${dateVal}`;
-            const [{ data: draftRows }, { data: histDateRows }, { data: masterRows }, { data: leaveRows }, weekMaster] = await Promise.all([
+            const todayISO = new Date().toISOString().split('T')[0];
+
+            const [{ data: draftRows }, { data: histDateRows }, { data: dayMasterRows }, { data: leaveRows }] = await Promise.all([
                 supabaseClient.from("timetable_drafts").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).eq("draft_key", draftKey).limit(1),
                 supabaseClient.from("timetable_history").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).eq("date", dateVal),
-                supabaseClient.from("timetable_history").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).in("entry_type", ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"]),
-                supabaseClient.from("leave_requests").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).in("status", ["PENDING", "APPROVED"]),
-                fetchFullWeekTimetable()
+                supabaseClient.from("timetable").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).eq("day", dayName),
+                supabaseClient.from("leave_requests").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).in("status", ["PENDING", "APPROVED"])
             ]);
-            liveMasterTimetable = weekMaster;
+
+            const dayLiveSlots = (dayMasterRows || []).map(r => {
+                const [sh, sm] = String(r.start24 || '0:0').split(':').map(Number);
+                const [eh, em] = String(r.end24 || '0:0').split(':').map(Number);
+                return {
+                    id: r.id,
+                    day: r.day,
+                    className: r.class_name,
+                    section: r.section,
+                    start24: r.start24,
+                    end24: r.end24,
+                    timeRange: r.time_range,
+                    duration: r.duration,
+                    subject: r.subject,
+                    teacher: r.teacher || 'NONE',
+                    teacherName: r.teacher_name || r.teacher || 'NONE',
+                    teacherEmail: r.teacher_email || '',
+                    room: r.room || '',
+                    remark: r.remark || '',
+                    sMins: (sh || 0) * 60 + (sm || 0),
+                    eMins: (eh || 0) * 60 + (em || 0)
+                };
+            });
+            liveMasterTimetable = dayLiveSlots;
 
             const activeOverride = (histDateRows || []).find(h => h.status !== "CANCELLED" && (h.entry_type === "DAILY_OVERRIDE" || h.entry_type === "EXAM_OVERRIDE"));
 
@@ -4243,37 +4267,28 @@ async function confirmDateContext() {
                 if (nameTagInp) nameTagInp.value = activeOverride.tag || "";
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
             } else {
-                const todayISO = new Date().toISOString().split('T')[0];
-                const allMasters = (masterRows || []).filter(d => d.status !== "CANCELLED");
+                if (dateVal < todayISO) {
+                    const { data: pastRows } = await supabaseClient
+                        .from("timetable_history")
+                        .select("*")
+                        .eq("branch_id", activeBranchId)
+                        .eq("session_id", activeSessionId)
+                        .in("entry_type", ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"])
+                        .neq("status", "CANCELLED")
+                        .lte("date", dateVal)
+                        .order("date", { ascending: false })
+                        .limit(1);
 
-                if (dateVal >= todayISO) {
-                    const futureMasters = allMasters
-                        .filter(d => d.entry_type === "FUTURE_MASTER" && d.date > todayISO && d.date <= dateVal)
-                        .sort((a, b) => b.date.localeCompare(a.date));
-
-                    if (futureMasters.length > 0) {
-                        globalTimetable = (futureMasters[0].schedule || []).filter(slot => slot.day === dayName);
-                        document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 font-bold">📅 FUTURE MASTER (From ${futureMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
+                    if (pastRows && pastRows[0] && Array.isArray(pastRows[0].schedule)) {
+                        globalTimetable = pastRows[0].schedule.filter(slot => slot.day === dayName);
+                        document.getElementById('view-label').innerHTML = `<span class="text-slate-600 font-bold">🕰️ HISTORICAL MASTER (From ${pastRows[0].date}):</span> ${dayName}, ${prettyDate}`;
                     } else {
-                        const baseWeek = liveMasterTimetable.length > 0 ? liveMasterTimetable : await fetchFullWeekTimetable();
-                        liveMasterTimetable = baseWeek;
-                        globalTimetable = baseWeek.filter(t => t.day === dayName);
+                        globalTimetable = dayLiveSlots;
                         document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
                     }
                 } else {
-                    const pastMasters = allMasters
-                        .filter(d => d.date && d.date <= dateVal)
-                        .sort((a, b) => b.date.localeCompare(a.date));
-
-                    if (pastMasters.length > 0) {
-                        globalTimetable = (pastMasters[0].schedule || []).filter(slot => slot.day === dayName);
-                        document.getElementById('view-label').innerHTML = `<span class="text-slate-600 font-bold">🕰️ HISTORICAL MASTER (From ${pastMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
-                    } else {
-                        const baseWeek = liveMasterTimetable.length > 0 ? liveMasterTimetable : await fetchFullWeekTimetable();
-                        liveMasterTimetable = baseWeek;
-                        globalTimetable = baseWeek.filter(t => t.day === dayName);
-                        document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
-                    }
+                    globalTimetable = dayLiveSlots;
+                    document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
                 }
             }
 
