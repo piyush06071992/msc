@@ -779,9 +779,9 @@
             activeSessionId = sObj.id;
             activeSessionLabel = sObj.session_name;
             sessionStorage.setItem(`minerva_session_${activeBranchId}`, activeSessionId);
-            await Promise.all([fetchStructure(), fetchTimetable()]);
+            await Promise.all([fetchStructure(), fetchHolidays()]);
             populateFilterDropdowns();
-            renderDirectDashboard(true);
+            await loadTodayScheduleForActiveContext();
         }
 
         function subscribeLiveTables() {
@@ -904,9 +904,9 @@ function updateUndoButtons() {
             activeSessionId = sObj.id;
             activeSessionLabel = sObj.session_name;
             sessionStorage.setItem(`minerva_session_${activeBranchId}`, activeSessionId);
-            await Promise.all([fetchStructure(), fetchTimetable()]);
+            await Promise.all([fetchStructure(), fetchHolidays()]);
             populateFilterDropdowns();
-            renderDirectDashboard(true);
+            await loadTodayScheduleForActiveContext();
         }
 
     let structureData = [];
@@ -1139,14 +1139,15 @@ async function checkAndApplyFutureMaster() {
             let tempTeachers = (data || []).map(row => {
                 const det = parseDetails(row.details);
                 const branchObj = allBranches.find(b => b.id === row.branch_id);
-                const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
+                const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent') || k.toLowerCase().includes('branch'));
                 const teacherCenter = branchObj
                     ? branchObj.name.trim().toUpperCase()
-                    : (centerKey ? String(det[centerKey]).trim().toUpperCase() : "GHUMARWIN");
+                    : (centerKey ? String(det[centerKey]).trim().toUpperCase() : "");
 
                 const nameKey = Object.keys(det).find(k => k.toLowerCase().includes('name'));
                 const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
                 return {
+                    branchId: row.branch_id,
                     name: nameKey ? String(det[nameKey]).trim() : row.email,
                     email: row.email || '',
                     dept: deptKey ? det[deptKey] : (row.department || 'General'),
@@ -1154,7 +1155,22 @@ async function checkAndApplyFutureMaster() {
                 };
             });
 
-            allTeachers = tempTeachers.filter(t => t.teacherCenter.includes(activeCenter));
+            const byBranchOrCenter = tempTeachers.filter(t =>
+                (activeBranchId && t.branchId === activeBranchId) ||
+                (t.teacherCenter && (t.teacherCenter.includes(activeCenter) || activeCenter.includes(t.teacherCenter)))
+            );
+            allTeachers = byBranchOrCenter.length > 0 ? byBranchOrCenter : tempTeachers;
+
+            // Refresh any already-rendered teacher dropdowns if teachers finished after initial paint
+            document.querySelectorAll('.ent-row').forEach(row => {
+                const tSel = row.querySelector('.ent-tea');
+                if (tSel && allTeachers.length > 0 && tSel.options.length <= 1) {
+                    const curVal = tSel.value || tSel.getAttribute('data-selected') || 'NONE';
+                    tSel.setAttribute('data-selected', curVal);
+                    const blockId = row.closest('.time-block')?.id;
+                    if (blockId) handleEntrySubject(blockId, row.id);
+                }
+            });
         }
 
         async function fetchRooms() {
@@ -4225,11 +4241,9 @@ async function confirmDateContext() {
                 nameTagInp.value = ""; // Reset first
             }
 
-       const draftKey = `draft_${activeCenter}_${dateVal}`;
-            const todayISO = new Date().toISOString().split('T')[0];
+       const todayISO = new Date().toISOString().split('T')[0];
 
-            const [{ data: draftRows }, { data: histDateRows }, { data: dayMasterRows }, { data: leaveRows }] = await Promise.all([
-                supabaseClient.from("timetable_drafts").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).eq("draft_key", draftKey).limit(1),
+            const [{ data: histDateRows }, { data: dayMasterRows }, { data: leaveRows }] = await Promise.all([
                 supabaseClient.from("timetable_history").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).eq("date", dateVal),
                 supabaseClient.from("timetable").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).eq("day", dayName),
                 supabaseClient.from("leave_requests").select("*").eq("branch_id", activeBranchId).eq("session_id", activeSessionId).in("status", ["PENDING", "APPROVED"])
@@ -4261,10 +4275,7 @@ async function confirmDateContext() {
 
             const activeOverride = (histDateRows || []).find(h => h.status !== "CANCELLED" && (h.entry_type === "DAILY_OVERRIDE" || h.entry_type === "EXAM_OVERRIDE"));
 
-            if (draftRows && draftRows[0] && Array.isArray(draftRows[0].schedule) && draftRows[0].schedule.length > 0) {
-                globalTimetable = draftRows[0].schedule;
-                document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED OVERRIDE DRAFT:</span> ${prettyDate}`;
-            } else if (activeOverride) {
+            if (activeOverride) {
                 globalTimetable = (activeOverride.schedule || []).filter(slot => slot.day === dayName);
                 if (nameTagInp) nameTagInp.value = activeOverride.tag || "";
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
