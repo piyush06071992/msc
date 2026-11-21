@@ -5,8 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva | Master Timetable</title>
   <script src="tailwind-engine.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
     <style>
         /* Clean Details Dropdown Arrow */
@@ -76,7 +75,6 @@
                     <button onclick="manageSpecialDates(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-amber-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-amber-50 transition-all">🎯 Manage Special Dates</button>
                     <button onclick="openHolidayModal(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-rose-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-rose-50 transition-all">🗓️ Holidays / Events</button>
                     <button onclick="openPrintModal(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-emerald-800 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-emerald-50 transition-all">🖨️ Export / Print</button>
-                    <button onclick="forceSync(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-sky-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-sky-50 transition-all">↻ Force Sync</button>
                     <button id="auth-btn" onclick="window.location.href='admin-timetable-auth.html'; document.getElementById('top-menu-dropdown').classList.add('hidden')" class="hidden w-full text-left flex items-center gap-3 text-indigo-800 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-indigo-50 transition-all">🔐 Delegations</button>
                 </div>
             </div>
@@ -85,11 +83,13 @@
                 <svg class="w-5 h-5 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
             </button>
             <div class="flex flex-col">
-                <div class="flex items-center gap-3">
+                <div class="flex items-center gap-2 flex-wrap">
                     <h1 class="text-lg sm:text-xl font-black text-slate-800 uppercase tracking-tighter leading-none">Timetable Editor</h1>
                     <select id="global-center-switch" onchange="switchAdminCenter(this.value)" class="text-[10px] font-black text-sky-700 bg-sky-50 border border-sky-200 outline-none rounded px-2 py-0.5 cursor-pointer uppercase tracking-widest shadow-sm">
-                        <option value="GHUMARWIN">📍 Ghumarwin</option>
-                        <option value="DHARAMSHALA">📍 Dharamshala</option>
+                        <option value="">📍 Loading...</option>
+                    </select>
+                    <select id="global-session-switch" onchange="switchSessionContext(this.value)" class="text-[10px] font-black text-indigo-700 bg-indigo-50 border border-indigo-200 outline-none rounded px-2 py-0.5 cursor-pointer uppercase tracking-widest shadow-sm">
+                        <option value="">📅 Session...</option>
                     </select>
                 </div>
                 <div class="flex items-center gap-2 mt-1">
@@ -699,66 +699,161 @@
         </div>
     </div>
     <script>
-        const firebaseConfig = {
-            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
-            authDomain: "shop-portal-bbbbb.firebaseapp.com",
-            projectId: "shop-portal-bbbbb",
-            storageBucket: "shop-portal-bbbbb.firebasestorage.app",
-            messagingSenderId: "701377739976",
-            appId: "1:701377739976:web:99998220272090e56e79fd"
-        };
-        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-    const db = firebase.firestore();
-    // const storage = firebase.storage();
+        const SUPABASE_URL = "https://lpccpiozrqgxgusculbs.supabase.co";
+        const SUPABASE_ANON_KEY = "sb_publishable_1q3Xilxs8lSK_dyWwbfvzQ_7zJOQV6v";
+        const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-        // IDB Helper Removed. Firebase Native Cache is now managing Delta Syncs.
-        
-// --- SECURITY GUARD & AUTO-ROUTER ---
+        let allBranches = [];
+        let branchSessions = [];
+        let activeBranchId = null;
+        let activeSessionId = null;
+        let activeSessionLabel = "2026–2027";
+        let realtimeChannel = null;
+
+        function parseDetails(rawDetails) {
+            if (!rawDetails) return {};
+            if (typeof rawDetails === 'object' && !Array.isArray(rawDetails)) return rawDetails;
+            if (typeof rawDetails === 'string') {
+                try { return JSON.parse(rawDetails); } catch (_) { return {}; }
+            }
+            return {};
+        }
+
+        function normalizeSessionKey(lbl) {
+            return String(lbl || '').replace(/\s+/g, '').replace(/[–—-]/g, '-');
+        }
+
+        async function loadBranchesAndSessions() {
+            const { data: bRows, error: bErr } = await supabaseClient
+                .from('branches')
+                .select('id, name, is_active')
+                .order('created_at', { ascending: true });
+            if (bErr) throw bErr;
+
+            allBranches = (bRows || []).filter(b => b.is_active !== false && b.name && b.name.trim() !== '');
+            if (allBranches.length === 0) return;
+
+            const matchedBranch = allBranches.find(b => b.name.trim().toUpperCase() === String(activeCenter).toUpperCase()) || allBranches[0];
+            activeCenter = matchedBranch.name.trim().toUpperCase();
+            activeBranchId = matchedBranch.id;
+            sessionStorage.setItem('minervaAdminCenter', activeCenter);
+
+            const branchSelect = document.getElementById('global-center-switch');
+            if (branchSelect) {
+                branchSelect.innerHTML = allBranches.map(b =>
+                    `<option value="${b.name.trim().toUpperCase()}" ${b.id === activeBranchId ? 'selected' : ''}>📍 ${b.name.trim()}</option>`
+                ).join('');
+            }
+
+            const { data: sRows, error: sErr } = await supabaseClient
+                .from('branch_sessions')
+                .select('id, branch_id, session_name, is_active')
+                .eq('branch_id', activeBranchId)
+                .order('session_name', { ascending: false });
+            if (sErr) throw sErr;
+
+            branchSessions = (sRows || []).filter(s => s.is_active !== false && s.session_name);
+            const savedSessionId = sessionStorage.getItem(`minerva_session_${activeBranchId}`);
+            const default2627 = branchSessions.find(s => normalizeSessionKey(s.session_name) === '2026-2027');
+            const chosenSession =
+                branchSessions.find(s => s.id === savedSessionId) ||
+                default2627 ||
+                branchSessions[0] ||
+                null;
+
+            activeSessionId = chosenSession ? chosenSession.id : null;
+            activeSessionLabel = chosenSession ? chosenSession.session_name : "2026–2027";
+            if (activeSessionId) sessionStorage.setItem(`minerva_session_${activeBranchId}`, activeSessionId);
+
+            const sessionSelect = document.getElementById('global-session-switch');
+            if (sessionSelect) {
+                sessionSelect.innerHTML = branchSessions.map(s =>
+                    `<option value="${s.id}" ${s.id === activeSessionId ? 'selected' : ''}>📅 ${s.session_name}</option>`
+                ).join('');
+            }
+        }
+
+        async function switchSessionContext(sessionId) {
+            const sObj = branchSessions.find(s => s.id === sessionId);
+            if (!sObj) return;
+            activeSessionId = sObj.id;
+            activeSessionLabel = sObj.session_name;
+            sessionStorage.setItem(`minerva_session_${activeBranchId}`, activeSessionId);
+            await Promise.all([fetchStructure(), fetchTimetable()]);
+            populateFilterDropdowns();
+            renderDirectDashboard(true);
+        }
+
+        function subscribeLiveTables() {
+            if (realtimeChannel) {
+                supabaseClient.removeChannel(realtimeChannel);
+                realtimeChannel = null;
+            }
+            if (!activeBranchId) return;
+
+            realtimeChannel = supabaseClient
+                .channel(`tt_live_${activeBranchId}_${activeSessionId || 'none'}`)
+                .on('postgres_changes', {
+                    event: '*',
+                    schema: 'public',
+                    table: 'institute_structure',
+                    filter: `branch_id=eq.${activeBranchId}`
+                }, async () => {
+                    await fetchStructure();
+                    populateFilterDropdowns();
+                    renderDirectDashboard(true);
+                })
+                .on('postgres_changes', {
+                    event: '*',
+                    schema: 'public',
+                    table: 'infrastructure_rooms',
+                    filter: `branch_id=eq.${activeBranchId}`
+                }, async () => {
+                    await fetchRooms();
+                })
+                .subscribe();
+        }
+
         const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
         async function checkPermission() {
-            if (isAdmin) return; // Full Admins are free to roam between branches
-            
-            const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
-            if (!activeStaff) return window.location.replace('staff-login.html');
-            
+            if (isAdmin) return;
+
+            const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff') || 'null');
+            if (!activeStaff || !activeStaff.email) return window.location.replace('staff-login.html');
+
             try {
-                const snap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
-                if (snap.empty) throw new Error("No profile");
-                
-                const staffData = snap.docs[0].data();
-                const authLevel = staffData.canEditTimetable;
-                
+                const { data: rows, error } = await supabaseClient
+                    .from("staff_applications")
+                    .select("*")
+                    .eq("email", activeStaff.email)
+                    .limit(1);
+                if (error || !rows || rows.length === 0) throw new Error("No profile");
+
+                const staffData = rows[0];
+                const authLevel = staffData.can_edit_timetable ?? staffData.canEditTimetable;
+
                 if (!authLevel) {
                     alert("Unauthorized Access. Redirecting...");
                     return window.location.replace('teacher-portal.html');
                 }
 
-                // If teacher is restricted to a specific branch and it's NOT the one currently loaded
-                if (authLevel !== true && authLevel !== activeCenter) {
-                    // Auto-route them to THEIR branch instead of kicking them out!
-                    sessionStorage.setItem('minervaAdminCenter', authLevel);
-                    // Clear memory to force fresh fetch for their correct branch
-                    sessionStorage.removeItem('minerva_struct');
-                    sessionStorage.removeItem('minerva_timetable');
-                    sessionStorage.removeItem('minerva_teachers');
-                    window.location.reload(); 
-                    return; // Stop execution while it reloads
+                if (typeof authLevel === 'string' && authLevel.toUpperCase() !== activeCenter) {
+                    sessionStorage.setItem('minervaAdminCenter', authLevel.toUpperCase());
+                    window.location.reload();
+                    return;
                 }
 
-                // Lock the dropdown so they can't change it manually and break their view
                 const dropdown = document.getElementById('global-center-switch');
-                if (dropdown && authLevel !== true) {
+                if (dropdown && typeof authLevel === 'string') {
                     dropdown.disabled = true;
                     dropdown.className = "text-[10px] font-black text-slate-400 bg-slate-100 border border-slate-200 outline-none rounded px-2 py-0.5 uppercase tracking-widest cursor-not-allowed";
                     dropdown.title = "Restricted to your authorized branch";
                 }
-
             } catch (e) {
                 alert("Auth Error. Redirecting...");
                 window.location.replace('teacher-portal.html');
             }
         }
-        checkPermission();
 // --- UNDO/REDO ENGINE ---
 let historyStack = [];
 let redoStack = [];
@@ -800,35 +895,19 @@ function updateUndoButtons() {
     if(uBtn) uBtn.classList.toggle('text-slate-400', historyStack.length === 0);
     if(rBtn) rBtn.classList.toggle('text-slate-400', redoStack.length === 0);
 }
-       // --- MULTI-CENTER DYNAMIC DB ROUTER ---
-        let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
+      let activeCenter = (sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN").toUpperCase();
         sessionStorage.setItem('minervaAdminCenter', activeCenter);
-        
-        // --- CROSS-PAGE CACHE PROTECTOR ---
-        // If the Admin switched branches from the Main Dashboard or Leave Portal, the browser 
-        // might still be holding the old branch's data in memory. This instantly forces a clean slate!
-        if (sessionStorage.getItem('minerva_cache_center') !== activeCenter) {
-            sessionStorage.removeItem('minerva_struct');
-            sessionStorage.removeItem('minerva_timetable');
-            sessionStorage.removeItem('minerva_teachers');
-            sessionStorage.removeItem('minerva_rooms');
-            sessionStorage.setItem('minerva_cache_center', activeCenter);
-        }
 
-   function getCollection(name) {
-            // Only Staff remains global. Settings (configs) are now branch-specific.
-            const globalCollections = ['staff_applications'];
-            if (globalCollections.includes(name)) return db.collection(name);
-            
-            if (activeCenter === "GHUMARWIN") return db.collection(name);
-            return db.collection(`${activeCenter.toLowerCase()}_${name}`);
+        async function switchAdminCenter(centerName) {
+            activeCenter = String(centerName || "GHUMARWIN").toUpperCase();
+            sessionStorage.setItem('minervaAdminCenter', activeCenter);
+            document.getElementById('timetable-container').innerHTML = `<div class="text-center py-12 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Switching to ${activeCenter}...</div>`;
+            await loadBranchesAndSessions();
+            subscribeLiveTables();
+            await Promise.all([fetchStructure(), fetchRooms(), fetchTimetable()]);
+            populateFilterDropdowns();
+            renderDirectDashboard(true);
         }
-function switchAdminCenter(centerName) {
-            sessionStorage.setItem('minervaAdminCenter', centerName);
-            // The cache prefixes handle the isolation automatically, so we just reload.
-            window.location.reload();
-        }
-        // --------------------------------------
 
     let structureData = [];
         let allTeachers = [];
@@ -906,57 +985,41 @@ function updateTeacherDropdown(skipRender = false) {
         }
 
  async function init() {
-    // Set the dropdown to match the active session storage
-    const dropdown = document.getElementById('global-center-switch');
-    if (dropdown) dropdown.value = activeCenter;
+    await checkPermission();
+    await loadBranchesAndSessions();
 
-    // --- SAFETY UI: Theme & Watermark ---
-    if (activeCenter === "DHARAMSHALA") {
-        document.querySelector('header').classList.replace('bg-white', 'bg-purple-50');
-        document.querySelector('header').classList.replace('border-b', 'border-purple-200');
-        document.body.classList.replace('bg-slate-200', 'bg-purple-100');
-    }
-    // Add Background Watermark
     const watermark = document.createElement('div');
+    watermark.id = 'center-watermark';
     watermark.innerHTML = activeCenter;
     watermark.className = "fixed inset-0 pointer-events-none flex items-center justify-center text-[10vw] font-black opacity-5 text-slate-900 z-[1] tracking-widest uppercase overflow-hidden whitespace-nowrap";
-    if(activeCenter === "DHARAMSHALA") watermark.classList.replace('text-slate-900', 'text-purple-900');
     document.body.appendChild(watermark);
 
-   // 1. Smart Back Button (Routes based on Role)
     const backBtn = document.getElementById('dynamic-back-btn');
-    if(backBtn) {
+    if (backBtn) {
         backBtn.onclick = () => {
-            const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
-            if (isAdmin) {
-                window.location.href = 'admin.html'; // Admin goes to Admin Hub
-            } else {
-                window.location.href = 'teacher-portal.html'; // Teacher goes to Teacher Hub
-            }
+            window.location.href = sessionStorage.getItem('minervaAdminAuth') === 'true' ? 'admin.html' : 'teacher-portal.html';
         };
     }
 
-    // 2. Show Delegations button ONLY if it is the Admin
-    const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
     const authBtn = document.getElementById('auth-btn');
-    if (isAdmin && authBtn) {
+    if (sessionStorage.getItem('minervaAdminAuth') === 'true' && authBtn) {
         authBtn.classList.remove('hidden');
     }
-// 3. Load the rest of the timetable
-   await checkAndApplyFutureMaster(); 
-    await Promise.all([fetchStructure(), fetchTeachers(), fetchRooms()]);
-    await fetchTimetable();
-    await fetchLiveMasterCache(); // Cache pure master for audit checks
-   await fetchHolidays();
-    await fetchBellTemplates();
-    
-    // Auto-load Today's Schedule by default
-    const todayIso = new Date().toISOString().split('T')[0];
-    document.getElementById('context-date-input').value = todayIso;
-    await confirmDateContext(); // This internally renders the dashboard
 
-    // Run this AFTER the context is confirmed so it doesn't trigger a double-render loop
-    populateFilterDropdowns(); 
+    subscribeLiveTables();
+
+    // Fast initial load: only structure, rooms, and today's day slots from Supabase
+    await Promise.all([fetchStructure(), fetchRooms(), fetchTimetable()]);
+    populateFilterDropdowns();
+    renderDirectDashboard(true);
+
+    // Defer non-blocking secondary lookups until after first paint
+    setTimeout(() => {
+        checkAndApplyFutureMaster();
+        fetchTeachers().then(() => populateFilterDropdowns());
+        fetchHolidays();
+        fetchBellTemplates();
+    }, 50);
 }
 
 async function checkAndApplyFutureMaster() {
@@ -996,19 +1059,33 @@ async function checkAndApplyFutureMaster() {
     }
 }
     async function fetchStructure() {
-            console.log("🔄 Fetching Structure via Firebase Native Cache...");
-            const snap = await getCollection("institute_structure").orderBy("className").get();
-            structureData = snap.docs.map(d => d.data());
-            
+            if (!activeBranchId) return;
+            let q = supabaseClient
+                .from('institute_structure')
+                .select('*')
+                .eq('branch_id', activeBranchId)
+                .order('class_name', { ascending: true });
+            if (activeSessionId) q = q.eq('session_id', activeSessionId);
+
+            const { data, error } = await q;
+            if (error) { console.error("Structure fetch error:", error); return; }
+
+            structureData = (data || []).map(row => ({
+                id: row.id,
+                className: String(row.class_name || '').trim(),
+                sectionName: String(row.section_name || '').trim(),
+                subjects: Array.isArray(row.subjects) ? row.subjects : []
+            }));
+
             const pScope = document.getElementById('p-scope');
-            if(pScope) {
+            if (pScope) {
                 pScope.innerHTML = '<option value="ALL">Entire Institute</option>';
                 const grouped = {};
                 structureData.forEach(s => {
-                    if(!grouped[s.className]) grouped[s.className] = [];
+                    if (!grouped[s.className]) grouped[s.className] = [];
                     grouped[s.className].push(s.sectionName);
                 });
-                Object.keys(grouped).forEach(c => {
+                Object.keys(grouped).sort().forEach(c => {
                     let optGroup = `<optgroup label="${c}">`;
                     optGroup += `<option value="CLASS|${c}">Entire ${c}</option>`;
                     grouped[c].sort().forEach(sec => { optGroup += `<option value="SEC|${c}|${sec}">Section ${sec} Only</option>`; });
@@ -1019,83 +1096,169 @@ async function checkAndApplyFutureMaster() {
         }
 
      async function fetchTeachers() {
-            console.log("🔄 Fetching Teachers via Firebase Native Cache...");
-            const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
-            let tempTeachers = [];
-            
-            snap.docs.forEach(doc => {
-                const data = doc.data();
-                const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
-                const teacherCenter = centerKey ? String(data.details[centerKey]).toUpperCase() : "GHUMARWIN";
-                
-                const nameKey = Object.keys(data.details).find(k => k.toLowerCase().includes('name'));
-                const deptKey = Object.keys(data.details).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                tempTeachers.push({ 
-                    name: nameKey ? data.details[nameKey] : data.email, 
-                    email: data.email, 
-                    dept: deptKey ? data.details[deptKey] : 'General',
-                    teacherCenter: teacherCenter
-                });
+            const { data, error } = await supabaseClient
+                .from("staff_applications")
+                .select("*")
+                .eq("status", "approved");
+            if (error) { console.error("Teachers fetch error:", error); return; }
+
+            let tempTeachers = (data || []).map(row => {
+                const det = parseDetails(row.details);
+                const branchObj = allBranches.find(b => b.id === row.branch_id);
+                const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
+                const teacherCenter = branchObj
+                    ? branchObj.name.trim().toUpperCase()
+                    : (centerKey ? String(det[centerKey]).trim().toUpperCase() : "GHUMARWIN");
+
+                const nameKey = Object.keys(det).find(k => k.toLowerCase().includes('name'));
+                const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                return {
+                    name: nameKey ? String(det[nameKey]).trim() : row.email,
+                    email: row.email || '',
+                    dept: deptKey ? det[deptKey] : (row.department || 'General'),
+                    teacherCenter
+                };
             });
-            
-            allTeachers = tempTeachers.filter(t => t.teacherCenter.includes(activeCenter.toUpperCase()));
+
+            allTeachers = tempTeachers.filter(t => t.teacherCenter.includes(activeCenter));
         }
 
-     // --- LIVE REAL-TIME ROOM SYNC LISTENER ---
-        function fetchRooms() {
-            return new Promise((resolve) => {
-                const cached = sessionStorage.getItem('minerva_rooms');
-                if (cached) {
-                    allRooms = JSON.parse(cached);
-                    resolve(); // Resolve instantly using cache
-                }
-                getCollection("infrastructure_rooms").onSnapshot(snapshot => {
-                    allRooms = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                    allRooms.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base', numeric: true }));
-                    sessionStorage.setItem('minerva_rooms', JSON.stringify(allRooms));
-                    if (!cached) resolve();
-                }, error => {
-                    console.error("Live room sync error:", error);
-                    if (!cached) { allRooms = []; resolve(); }
-                });
-            });
-        }
-
-     async function fetchTimetable() {
-            // 1. Context-Aware Draft Check
-            const draftKey = `draft_${activeCenter}_LIVE`;
-            const draftSnap = await db.collection("timetable_drafts").doc(draftKey).get();
-            
-            if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
-                globalTimetable = draftSnap.data().schedule;
-                document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED MASTER DRAFT</span>`;
-                oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
-                return;
-            } 
-
-            // 2. Load Live Master via Native Cache
-            console.log("🔄 Fetching Timetable via Firebase Native Cache...");
-            const snap = await getCollection("timetable").get();
-            globalTimetable = snap.docs.map(d => ({id: d.id, ...d.data()}));
-            oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
-        }
-
-    async function fetchLiveMasterCache() {
+        async function fetchRooms() {
+            if (!activeBranchId) return;
             try {
-                const snap = await getCollection("timetable").get();
-                liveMasterTimetable = snap.docs.map(d => d.data());
-            } catch(e) {
-                console.error("Master cache fetch error:", e);
+                const { data, error } = await supabaseClient
+                    .from("infrastructure_rooms")
+                    .select("id, name, capacity, extra_seats, rows")
+                    .eq("branch_id", activeBranchId);
+                if (error) throw error;
+                allRooms = (data || []).sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base', numeric: true }));
+            } catch (e) {
+                console.error("Room fetch error:", e);
+                allRooms = [];
             }
         }
 
-     // --- HOLIDAY OVERLAY ENGINE ---
+     async function fetchTimetable() {
+            if (!activeBranchId || !activeSessionId) return;
+            const draftKey = `draft_${activeCenter}_LIVE`;
+            const { data: draftRows } = await supabaseClient
+                .from("timetable_drafts")
+                .select("*")
+                .eq("branch_id", activeBranchId)
+                .eq("session_id", activeSessionId)
+                .eq("draft_key", draftKey)
+                .limit(1);
+
+            if (draftRows && draftRows[0] && Array.isArray(draftRows[0].schedule) && draftRows[0].schedule.length > 0) {
+                globalTimetable = draftRows[0].schedule;
+                document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED MASTER DRAFT</span>`;
+                oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
+                return;
+            }
+
+            // Lazy-load today's weekday rows first for fast initial paint
+            const todayDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
+            const { data, error } = await supabaseClient
+                .from("timetable")
+                .select("*")
+                .eq("branch_id", activeBranchId)
+                .eq("session_id", activeSessionId)
+                .eq("day", todayDay);
+
+            if (error) { console.error("Timetable fetch error:", error); return; }
+
+            globalTimetable = (data || []).map(r => {
+                const [sh, sm] = String(r.start24 || '0:0').split(':').map(Number);
+                const [eh, em] = String(r.end24 || '0:0').split(':').map(Number);
+                return {
+                    id: r.id,
+                    day: r.day,
+                    className: r.class_name,
+                    section: r.section,
+                    start24: r.start24,
+                    end24: r.end24,
+                    timeRange: r.time_range,
+                    duration: r.duration,
+                    subject: r.subject,
+                    teacher: r.teacher || 'NONE',
+                    teacherName: r.teacher_name || r.teacher || 'NONE',
+                    teacherEmail: r.teacher_email || '',
+                    room: r.room || '',
+                    remark: r.remark || '',
+                    sMins: (sh || 0) * 60 + (sm || 0),
+                    eMins: (eh || 0) * 60 + (em || 0)
+                };
+            });
+            oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
+        }
+
+        async function fetchFullWeekTimetable() {
+            if (!activeBranchId || !activeSessionId) return [];
+            const { data, error } = await supabaseClient
+                .from("timetable")
+                .select("*")
+                .eq("branch_id", activeBranchId)
+                .eq("session_id", activeSessionId);
+            if (error) return [];
+            return (data || []).map(r => {
+                const [sh, sm] = String(r.start24 || '0:0').split(':').map(Number);
+                const [eh, em] = String(r.end24 || '0:0').split(':').map(Number);
+                return {
+                    id: r.id,
+                    day: r.day,
+                    className: r.class_name,
+                    section: r.section,
+                    start24: r.start24,
+                    end24: r.end24,
+                    timeRange: r.time_range,
+                    duration: r.duration,
+                    subject: r.subject,
+                    teacher: r.teacher || 'NONE',
+                    teacherName: r.teacher_name || r.teacher || 'NONE',
+                    teacherEmail: r.teacher_email || '',
+                    room: r.room || '',
+                    remark: r.remark || '',
+                    sMins: (sh || 0) * 60 + (sm || 0),
+                    eMins: (eh || 0) * 60 + (em || 0)
+                };
+            });
+        }
+
+        async function fetchLiveMasterCache() {
+            if (liveMasterTimetable.length > 0) return liveMasterTimetable;
+            liveMasterTimetable = await fetchFullWeekTimetable();
+            return liveMasterTimetable;
+        }
+
         async function fetchHolidays() {
-            console.log("🔄 Fetching Holidays via Firebase Native Cache...");
+            if (!activeBranchId || !activeSessionId) return;
             try {
-                const snap = await getCollection("school_holidays").get();
-                holidaysData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-            } catch(e) { console.error("Holiday Fetch Error:", e); }
+                const { data, error } = await supabaseClient
+                    .from("school_holidays")
+                    .select("*")
+                    .eq("branch_id", activeBranchId)
+                    .eq("session_id", activeSessionId);
+                if (error) throw error;
+                holidaysData = (data || []).map(h => ({
+                    id: h.id,
+                    type: h.event_type || 'HOLIDAY',
+                    staffStatus: h.staff_status || 'OFF',
+                    suspendClasses: h.suspend_classes !== false,
+                    startDate: h.start_date,
+                    endDate: h.end_date,
+                    reason: h.reason || '',
+                    isFullDay: h.is_full_day !== false,
+                    startTime: h.start_time,
+                    endTime: h.end_time,
+                    targetClasses: Array.isArray(h.target_classes) ? h.target_classes : ['ALL'],
+                    targetStaff: Array.isArray(h.target_staff) ? h.target_staff : ['ALL'],
+                    status: h.status || 'ACTIVE',
+                    version_id: h.version_id || '',
+                    cancel_version_id: h.cancel_version_id || '',
+                    cancelled_at: h.cancelled_at_ms || null,
+                    timestamp: h.timestamp_ms || 0
+                }));
+            } catch (e) { console.error("Holiday Fetch Error:", e); }
         }
 
      function openHolidayModal() {
@@ -3896,17 +4059,7 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                handlePrimaryAction();
            }
        });
-function forceSync() {
-            // 1. Tell the browser to forget all the memorized versions to force a hard cloud fetch
-            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-            IDB.set(`${prefix}structure_last_version`, 0);
-            IDB.set(`teachers_last_version`, 0);
-            IDB.set(`${prefix}timetable_last_version`, 0);
-            IDB.set(`${prefix}holidays_last_version`, 0);
-            
-            // 2. Refresh the page instantly
-            window.location.reload();
-        }
+// Force sync removed; structure & rooms update live via Supabase Realtime.
        // --- CALENDAR ENGINE STATE ---
         let currentContextMode = 'LIVE'; // LIVE, FUTURE_MASTER, OVERRIDE, HISTORY
         let currentContextDate = null; 
