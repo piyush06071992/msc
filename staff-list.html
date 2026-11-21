@@ -343,15 +343,24 @@
 
        async function fetchConfig() {
             try {
-                // Force fetch from the root "configs" collection (not branch-specific)
-                const doc = await db.collection("configs").doc("staff_registration_form").get();
-                if (doc.exists) {
-                    formConfig = doc.data();
+                const { data, error } = await supabaseClient
+                    .from("form_configs")
+                    .select("config_key, org_code, fields")
+                    .eq("config_key", "staff_registration_form")
+                    .maybeSingle();
+
+                if (error) throw error;
+
+                if (data) {
+                    formConfig = {
+                        orgCode: data.org_code,
+                        fields: Array.isArray(data.fields) ? data.fields : []
+                    };
                     setupSearchAndFilters();
                 } else {
                     formConfig = { fields: [] };
                 }
-            } catch(e) {
+            } catch (e) {
                 console.error("Config fetch error:", e);
                 formConfig = { fields: [] };
             }
@@ -359,7 +368,8 @@
 
         function getPrimaryDept(rawDeptStr) {
             if (!rawDeptStr) return 'General';
-            const parts = rawDeptStr.split(',');
+            if (Array.isArray(rawDeptStr)) rawDeptStr = rawDeptStr.join(',');
+            const parts = String(rawDeptStr).split(',');
             const primary = parts[0].trim();
             return (primary && primary !== 'undefined') ? primary : 'General';
         }
@@ -367,18 +377,21 @@
         function setupSearchAndFilters() {
             const filterArea = document.getElementById('filter-container');
             const searchArea = document.getElementById('search-container');
-            const hasSearch = formConfig.fields.some(f => f.searchable);
+            filterArea.innerHTML = '';
+
+            const hasSearch = (formConfig.fields || []).some(f => f.searchable);
             if (hasSearch) searchArea.classList.remove('hidden');
 
-            formConfig.fields.filter(f => f.filterable).forEach(f => {
+            (formConfig.fields || []).filter(f => f.filterable).forEach(f => {
                 const select = document.createElement('select');
                 select.className = "p-4 bg-white border-2 border-slate-200 rounded-xl text-xs font-black uppercase tracking-widest outline-none focus:border-blue-500 cursor-pointer shadow-sm";
                 select.id = `filter-${f.label}`;
                 select.onchange = applyFilters;
-                
+
                 let options = `<option value="">All ${f.label}s</option>`;
-                f.options.split(',').forEach(opt => {
-                    options += `<option value="${opt.trim()}">${opt.trim()}</option>`;
+                String(f.options || '').split(',').forEach(opt => {
+                    const cleanOpt = opt.trim();
+                    if (cleanOpt) options += `<option value="${cleanOpt}">${cleanOpt}</option>`;
                 });
                 select.innerHTML = options;
                 filterArea.appendChild(select);
@@ -386,30 +399,33 @@
         }
 
         async function fetchStaff() {
-            const snapshot = await getCollection("staff_applications").where("status", "==", "approved").get();
-            
-           let rawStaff = snapshot.docs.map(doc => {
-                const d = doc.data();
-                const det = d.details || {};
+            const { data: rows, error } = await supabaseClient
+                .from("staff_applications")
+                .select("*")
+                .eq("status", "approved");
 
-                // Logic to isolate staff by their assigned Center
-                const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
-                const staffCenter = centerKey ? String(det[centerKey]).toUpperCase() : "GHUMARWIN";
+            if (error) {
+                console.error("Fetch staff error:", error);
+                allStaff = [];
+                document.getElementById('staff-count').innerText = '0';
+                renderStaffGrouped([]);
+                return;
+            }
 
-                const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject') || k.toLowerCase().includes('branch'));
-                let rawDept = deptKey ? det[deptKey] : 'General';
-                if (rawDept === undefined || rawDept === null) rawDept = 'General';
-                rawDept = rawDept.toString();
-                
-                return { id: doc.id, email: d.email, mobile: d.mobile, center: staffCenter, status: d.status, details: det, rawDept: rawDept, isHOD: d.isHOD, hodDept: d.hodDept, isLeaveIncharge: d.isLeaveIncharge === true };
-            }).filter(s => s.center === activeCenter); // Only include staff belonging to the active branch
+            let rawStaff = (rows || []).map(mapStaffRow).filter(s => {
+                if (activeBranchObj && s.branch_id) {
+                    return s.branch_id === activeBranchObj.id || s.center === activeCenter;
+                }
+                return s.center === activeCenter;
+            });
+
             if (currentUserRole === 'HOD') {
                 rawStaff = rawStaff.filter(s => s.rawDept.includes(currentUserDept));
             }
 
             allStaff = rawStaff;
             document.getElementById('staff-count').innerText = allStaff.length;
-            
+
             renderStaffGrouped(allStaff);
         }
 
@@ -620,8 +636,7 @@
                 repSheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
                 repSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF047857' } }; // Emerald-700
 
-                const repSnap = await getCollection("daily_reports").get();
-                let reports = repSnap.docs.map(d => d.data());
+                let reports = [];
                 reports.sort((a,b) => new Date(b.date) - new Date(a.date));
 
                 reports.forEach(r => {
