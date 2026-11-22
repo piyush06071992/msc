@@ -5,8 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva | Lesson Planner Delegation</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; }
@@ -20,7 +19,7 @@
         </button>
         <div>
             <h1 class="text-lg sm:text-xl font-black tracking-widest uppercase">Planner Delegation</h1>
-            <p class="text-[10px] text-indigo-300 font-bold uppercase tracking-widest mt-1">Manage Planner & Summary Permissions</p>
+            <p class="text-[10px] text-indigo-300 font-bold uppercase tracking-widest mt-1">Manage Planner & Summary Permissions • Supabase</p>
         </div>
     </header>
 
@@ -35,8 +34,6 @@
                     <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">1. Select Center</label>
                     <select id="center-select" onchange="populateDepartments()" class="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold text-slate-700 outline-none focus:border-indigo-500 cursor-pointer">
                         <option value="">-- Choose Center --</option>
-                        <option value="GHUMARWIN">Ghumarwin</option>
-                        <option value="DHARAMSHALA">Dharamshala</option>
                     </select>
                 </div>
 
@@ -70,7 +67,7 @@
                     </label>
                 </div>
 
-                <button onclick="grantAccess()" class="w-full py-4 mt-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-black uppercase tracking-widest text-[11px] shadow-lg shadow-indigo-500/30 transition-all active:scale-95">
+                <button id="grant-btn" onclick="grantAccess()" class="w-full py-4 mt-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-black uppercase tracking-widest text-[11px] shadow-lg shadow-indigo-500/30 transition-all active:scale-95">
                     Grant Selected Permissions
                 </button>
             </div>
@@ -88,61 +85,104 @@
     </main>
 
     <script>
-        const firebaseConfig = { 
-            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", 
-            authDomain: "shop-portal-bbbbb.firebaseapp.com", 
-            projectId: "shop-portal-bbbbb", 
-            storageBucket: "shop-portal-bbbbb.firebasestorage.app", 
-            messagingSenderId: "701377739976", 
-            appId: "1:701377739976:web:99998220272090e56e79fd" 
-        };
-        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-        const db = firebase.firestore();
+        const SUPABASE_URL = "https://lpccpiozrqgxgusculbs.supabase.co";
+        const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwY2NwaW96cnFneGd1c2N1bGJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM5NzMzNzQsImV4cCI6MjEwOTU0OTM3NH0.b2cNwu7y-uoFTOOK-Qy2-XX7QbrSMYzJ5Ja2EBO98Hc";
+        const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
         let allStaff = [];
+        let branchList = [];
+
+        function parseJsonField(raw) {
+            if (!raw) return {};
+            if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+            try { return JSON.parse(raw); } catch (_) { return {}; }
+        }
 
         window.onload = async () => {
             if (sessionStorage.getItem('minervaAdminAuth') !== 'true') {
                 window.location.replace('admin-login.html');
                 return;
             }
+            await loadBranches();
             await fetchStaffData();
         };
 
-async function fetchStaffData() {
+        async function loadBranches() {
+            const sel = document.getElementById('center-select');
             try {
-                const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
-                allStaff = snap.docs.map(doc => {
-                    const data = doc.data();
-                    const det = data.details || {};
-                    let n = data.email;
-                    for (let k in det) { if (k.toLowerCase().includes('name')) n = det[k]; }
-                    
-                    const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                    let d = deptKey ? det[deptKey] : 'General';
-                    
-                    // Identify which center the teacher belongs to
-                    const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
-                    const teacherCenter = centerKey ? String(det[centerKey]).toUpperCase() : "GHUMARWIN";
+                const { data, error } = await sb.from("branches").select("*").order("created_at", { ascending: true });
+                if (error) throw error;
+                branchList = (data || []).filter(b => b.is_active !== false);
 
-                    return { 
-                        id: doc.id, 
-                        name: n, 
-                        dept: d,
-                        center: teacherCenter,
-                        canEditPlanner: data.canEditLessonPlanner || false,
-                        canViewSummary: data.canViewLessonPlannerSummary || false,
-                        canUnlockPlanner: data.canUnlockLessonPlanner || false
-                    };
-                });
-                
+                const names = branchList.length
+                    ? branchList.map(b => String(b.name || '').trim().toUpperCase()).filter(Boolean)
+                    : ["GHUMARWIN", "DHARAMSHALA"];
+
+                const uniqueNames = [...new Set(names)];
+                sel.innerHTML = '<option value="">-- Choose Center --</option>' +
+                    uniqueNames.map(n => `<option value="${n}">${n.charAt(0) + n.slice(1).toLowerCase()}</option>`).join('');
+            } catch (e) {
+                console.warn("Branch load fallback:", e);
+                sel.innerHTML = '<option value="">-- Choose Center --</option><option value="GHUMARWIN">Ghumarwin</option><option value="DHARAMSHALA">Dharamshala</option>';
+            }
+        }
+
+        async function fetchStaffData() {
+            try {
+                const { data: rows, error } = await sb.from("staff_applications").select("*");
+                if (error) throw error;
+
+                allStaff = (rows || [])
+                    .filter(doc => {
+                        const det = parseJsonField(doc.details);
+                        const st = String(doc.status ?? det.status ?? 'approved').toLowerCase();
+                        return st === 'approved';
+                    })
+                    .map(doc => {
+                        const det = parseJsonField(doc.details);
+                        let n = doc.email;
+                        for (let k in det) {
+                            if (k.toLowerCase().includes('name')) { n = det[k]; break; }
+                        }
+
+                        const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                        const rawDept = deptKey ? det[deptKey] : (doc.department ?? 'General');
+                        const d = Array.isArray(rawDept) ? rawDept.join(', ') : String(rawDept || 'General');
+
+                        let teacherCenter = "GHUMARWIN";
+                        if (doc.branch_id && branchList.length) {
+                            const bObj = branchList.find(b => b.id === doc.branch_id);
+                            if (bObj && bObj.name) teacherCenter = String(bObj.name).trim().toUpperCase();
+                        } else {
+                            const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
+                            if (centerKey) teacherCenter = String(det[centerKey]).trim().toUpperCase();
+                        }
+
+                        const editVal = doc.can_edit_lesson_planner ?? doc.canEditLessonPlanner ?? det.canEditLessonPlanner ?? false;
+                        const summaryVal = doc.can_view_lesson_planner_summary ?? doc.canViewLessonPlannerSummary ?? det.canViewLessonPlannerSummary ?? false;
+                        const unlockVal = doc.can_unlock_lesson_planner ?? doc.canUnlockLessonPlanner ?? det.canUnlockLessonPlanner ?? false;
+
+                        return {
+                            id: doc.id,
+                            email: doc.email,
+                            name: n,
+                            dept: d,
+                            center: teacherCenter,
+                            canEditPlanner: editVal,
+                            canViewSummary: summaryVal,
+                            canUnlockPlanner: unlockVal
+                        };
+                    });
+
                 renderAuthorizedList();
-                
-                // Repopulate if center is already selected
-                if (document.getElementById('center-select') && document.getElementById('center-select').value) {
+
+                if (document.getElementById('center-select').value) {
                     populateDepartments();
                 }
-            } catch (e) { console.error(e); }
+            } catch (e) {
+                console.error("Failed to fetch staff from Supabase:", e);
+                document.getElementById('authorized-list').innerHTML = `<div class="text-center py-10 text-rose-500 font-bold text-xs uppercase">Error loading staff data</div>`;
+            }
         }
 
         function populateDepartments() {
@@ -160,15 +200,12 @@ async function fetchStaffData() {
             }
             deptSelect.disabled = false;
             
-            let depts = new Set();
-            
+            const depts = new Set();
             allStaff.forEach(s => {
-                // Only pull departments for teachers inside the selected center
                 if (s.center.includes(centerVal)) {
-                    const subList = s.dept.toString().split(',');
-                    subList.forEach(item => {
+                    s.dept.toString().split(',').forEach(item => {
                         const cleanItem = item.trim();
-                        if(cleanItem && cleanItem !== 'undefined' && cleanItem !== 'General') {
+                        if (cleanItem && cleanItem !== 'undefined' && cleanItem !== 'General') {
                             depts.add(cleanItem);
                         }
                     });
@@ -188,14 +225,15 @@ async function fetchStaffData() {
             
             staffSelect.innerHTML = '<option value="">-- Choose Faculty --</option>';
             
-            if(!deptVal || !centerVal) { staffSelect.disabled = true; return; }
+            if (!deptVal || !centerVal) { staffSelect.disabled = true; return; }
             staffSelect.disabled = false;
 
-            allStaff.filter(s => s.center.includes(centerVal) && s.dept.toString().includes(deptVal))
-                    .sort((a,b) => a.name.localeCompare(b.name))
-                    .forEach(s => {
-                        staffSelect.innerHTML += `<option value="${s.id}">${s.name}</option>`;
-                    });
+            allStaff
+                .filter(s => s.center.includes(centerVal) && s.dept.toString().includes(deptVal))
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .forEach(s => {
+                    staffSelect.innerHTML += `<option value="${s.id}">${s.name}</option>`;
+                });
         }
 
         async function grantAccess() {
@@ -203,34 +241,64 @@ async function fetchStaffData() {
             const staffId = document.getElementById('staff-select').value;
             const editRight = document.getElementById('check-edit').checked;
             const summaryRight = document.getElementById('check-summary').checked;
-            const unlockRight = document.getElementById('check-unlock').checked; 
+            const unlockRight = document.getElementById('check-unlock').checked;
 
-            if(!centerVal) return alert("Please select a center.");
-            if(!staffId) return alert("Please select a faculty member.");
-            if(!editRight && !summaryRight && !unlockRight) return alert("Please select at least one permission.");
+            if (!centerVal) return alert("Please select a center.");
+            if (!staffId) return alert("Please select a faculty member.");
+            if (!editRight && !summaryRight && !unlockRight) return alert("Please select at least one permission.");
+
+            const btn = document.getElementById('grant-btn');
+            const origText = btn.innerText;
+            btn.innerText = "Saving...";
+            btn.disabled = true;
 
             try {
-                // Save branch name if checked, else save false
-                await db.collection("staff_applications").doc(staffId).update({
+                const payload = {
+                    can_edit_lesson_planner: editRight ? centerVal : false,
+                    can_view_lesson_planner_summary: summaryRight ? centerVal : false,
+                    can_unlock_lesson_planner: unlockRight ? centerVal : false,
                     canEditLessonPlanner: editRight ? centerVal : false,
                     canViewLessonPlannerSummary: summaryRight ? centerVal : false,
-                    canUnlockLessonPlanner: unlockRight ? centerVal : false 
-                });
-                alert("Permissions updated!");
-                location.reload();
-            } catch (e) { alert("Error: " + e.message); }
+                    canUnlockLessonPlanner: unlockRight ? centerVal : false,
+                    updated_at: new Date().toISOString()
+                };
+
+                const { error } = await sb.from("staff_applications").update(payload).eq("id", staffId);
+                if (error) throw error;
+
+                alert("Permissions updated in Supabase!");
+                document.getElementById('check-edit').checked = false;
+                document.getElementById('check-summary').checked = false;
+                document.getElementById('check-unlock').checked = false;
+                await fetchStaffData();
+            } catch (e) {
+                alert("Error: " + e.message);
+            } finally {
+                btn.innerText = origText;
+                btn.disabled = false;
+            }
         }
 
         async function revokeAccess(staffId) {
-            if(!confirm("Revoke all Lesson Planner access for this member?")) return;
+            if (!confirm("Revoke all Lesson Planner access for this member?")) return;
             try {
-                await db.collection("staff_applications").doc(staffId).update({
+                const payload = {
+                    can_edit_lesson_planner: false,
+                    can_view_lesson_planner_summary: false,
+                    can_unlock_lesson_planner: false,
                     canEditLessonPlanner: false,
                     canViewLessonPlannerSummary: false,
-                    canUnlockLessonPlanner: false 
-                });
-                location.reload();
-            } catch (e) { alert("Error: " + e.message); }
+                    canUnlockLessonPlanner: false,
+                    updated_at: new Date().toISOString()
+                };
+
+                const { error } = await sb.from("staff_applications").update(payload).eq("id", staffId);
+                if (error) throw error;
+
+                await fetchStaffData();
+            } catch (e) {
+                alert("Error: " + e.message);
+            }
         }
 
         function renderAuthorizedList() {
@@ -243,11 +311,10 @@ async function fetchStaffData() {
             }
 
             listArea.innerHTML = authorized.map(s => {
-                // Determine branch text dynamically based on what permission they hold
                 let branchText = 'Global';
-                if (typeof s.canEditPlanner === 'string') branchText = s.canEditPlanner;
-                else if (typeof s.canViewSummary === 'string') branchText = s.canViewSummary;
-                else if (typeof s.canUnlockPlanner === 'string') branchText = s.canUnlockPlanner;
+                if (typeof s.canEditPlanner === 'string' && s.canEditPlanner) branchText = s.canEditPlanner;
+                else if (typeof s.canViewSummary === 'string' && s.canViewSummary) branchText = s.canViewSummary;
+                else if (typeof s.canUnlockPlanner === 'string' && s.canUnlockPlanner) branchText = s.canUnlockPlanner;
 
                 return `
                 <div class="bg-white border border-slate-200 p-4 rounded-xl flex justify-between items-center shadow-sm">
@@ -266,9 +333,9 @@ async function fetchStaffData() {
                         Revoke
                     </button>
                 </div>
-            `}).join('');
+            `;
+            }).join('');
         }
     </script>
 </body>
 </html>
-
