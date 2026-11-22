@@ -56,9 +56,6 @@
         </div>
         
         <div class="flex gap-2">
-            <button onclick="forceSync()" class="bg-indigo-900 hover:bg-indigo-800 text-indigo-200 px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[9px] transition-all shadow-inner border border-indigo-700" title="Fetch latest database changes">
-                ↻ Sync
-            </button>
             <button id="edit-master-btn" onclick="window.location.href='admin-timetable.html'" class="hidden bg-emerald-500 hover:bg-emerald-400 text-[#1e1b4b] px-5 py-2.5 rounded-xl font-black uppercase tracking-widest text-[10px] transition-all shadow-[0_0_15px_rgba(16,185,129,0.4)] active:scale-95">
                 ✏️ Edit Master
             </button>
@@ -137,11 +134,13 @@
         let allTeachers = [];
         let holidaysData = [];
 
-        let allBranches = [];
+       let allBranches = [];
         let allSessions = [];
         let activeBranch = null;
         let activeSession = null;
         let activeCenter = "GHUMARWIN";
+        let ttRealtimeChannel = null;
+        let realtimeRefreshTimer = null;
 
         let myTimetableData = [];
         let allTimetableData = [];
@@ -244,8 +243,9 @@
             sessionStorage.setItem('minervaAdminCenter', activeCenter);
             sessionStorage.setItem('minervaAdminBranchId', chosen.id);
 
-            const refDate = isDateViewActive && viewDateIso ? viewDateIso : getLocalTodayIso();
+            cconst refDate = isDateViewActive && viewDateIso ? viewDateIso : getLocalTodayIso();
             await refreshSessionForReferenceDate(refDate);
+            subscribeLiveTimetableUpdates();
 
             document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Loading Schedule...</div>`;
             await fetchStructure();
@@ -495,6 +495,7 @@
                 }
 
                 await refreshSessionForReferenceDate(getLocalTodayIso());
+                subscribeLiveTimetableUpdates();
             } catch (err) {
                 console.error("Auth & Center check failed:", err);
             }
@@ -1059,8 +1060,52 @@
             modal.classList.replace('hidden', 'flex');
         }
 
-        function forceSync() {
-            window.location.reload();
+        async function reloadTimetableLive() {
+            if (!activeBranch) return;
+            await fetchStructure();
+            if (isDateViewActive && viewDateIso) {
+                await loadDateView();
+            } else {
+                await loadAllData();
+                const nameMatch = safeName.toLowerCase();
+                myTimetableData = allTimetableData.filter(t =>
+                    (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) ||
+                    (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
+                );
+                if (currentMode === 'ALL') {
+                    populateFilterDropdowns();
+                } else {
+                    renderDashboard();
+                }
+            }
+        }
+
+        function subscribeLiveTimetableUpdates() {
+            if (ttRealtimeChannel) {
+                sb.removeChannel(ttRealtimeChannel);
+                ttRealtimeChannel = null;
+            }
+            if (!activeBranch) return;
+
+            const scheduleDebouncedReload = () => {
+                clearTimeout(realtimeRefreshTimer);
+                realtimeRefreshTimer = setTimeout(() => {
+                    reloadTimetableLive().catch(err => console.error("Live refresh error:", err));
+                }, 150);
+            };
+
+            const tables = ['institute_structure', 'timetable', 'timetable_history', 'school_holidays', 'leave_requests'];
+            ttRealtimeChannel = sb.channel(`teacher_tt_live_${activeBranch.id}`);
+
+            tables.forEach(tbl => {
+                ttRealtimeChannel.on(
+                    'postgres_changes',
+                    { event: '*', schema: 'public', table: tbl, filter: `branch_id=eq.${activeBranch.id}` },
+                    scheduleDebouncedReload
+                );
+            });
+
+            ttRealtimeChannel.subscribe();
         }
 
         function format12Hour(time24) {
