@@ -5,8 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva | Timetable Authorization</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; }
@@ -72,9 +71,9 @@
     </main>
 
     <script>
-        const firebaseConfig = { apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", authDomain: "shop-portal-bbbbb.firebaseapp.com", projectId: "shop-portal-bbbbb", storageBucket: "shop-portal-bbbbb.firebasestorage.app", messagingSenderId: "701377739976", appId: "1:701377739976:web:99998220272090e56e79fd" };
-        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
-        const db = firebase.firestore();
+        const SUPABASE_URL = "https://lpccpiozrqgxgusculbs.supabase.co";
+        const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwY2NwaW96cnFneGd1c2N1bGJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM5NzMzNzQsImV4cCI6MjEwOTU0OTM3NH0.b2cNwu7y-uoFTOOK-Qy2-XX7QbrSMYzJ5Ja2EBO98Hc";
+        const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
         let allStaff = [];
 
@@ -84,44 +83,62 @@
 
         async function fetchStaffData() {
             try {
-                const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
-                
-                allStaff = snap.docs.map(doc => {
-                    const data = doc.data();
-                    const nameKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('name'));
-                    const deptKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                    
-                    // Identify which center the teacher belongs to
-                    const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
-                    const teacherCenter = centerKey ? String(data.details[centerKey]).toUpperCase() : "GHUMARWIN";
-                    
-                    return { 
-                        id: doc.id, 
-                        name: nameKey ? data.details[nameKey] : data.email, 
-                        dept: deptKey ? data.details[deptKey] : 'General',
-                        center: teacherCenter,
-                        canEditTimetable: data.canEditTimetable || false
+                const { data, error } = await supabaseClient
+                    .from("staff_applications")
+                    .select("*");
+
+                if (error) throw error;
+
+                const approvedRows = (data || []).filter(row => {
+                    const details = (row.details && typeof row.details === "object") ? row.details : {};
+                    const statusVal = String(row.status || details.status || "").toLowerCase();
+                    // Keep approved rows, or rows where status isn't explicitly rejected/pending if status column isn't used
+                    return statusVal === "approved" || (!row.status && !details.status);
+                });
+
+                allStaff = approvedRows.map(row => {
+                    const details = (row.details && typeof row.details === "object") ? row.details : {};
+                    const nameKey = Object.keys(details).find(k => k.toLowerCase().includes("name"));
+                    const deptKey = Object.keys(details).find(k => k.toLowerCase().includes("department") || k.toLowerCase().includes("subject"));
+                    const centerKey = Object.keys(details).find(k => k.toLowerCase().includes("cent"));
+
+                    const branchMap = { "1": "GHUMARWIN", "2": "DHARAMSHALA" };
+                    const rawBranch = centerKey ? details[centerKey] : (row.branch_id ?? row.center ?? "GHUMARWIN");
+                    const mappedBranch = branchMap[String(rawBranch)] || String(rawBranch).toUpperCase();
+
+                    const permissionVal =
+                        row.canEditTimetable !== undefined ? row.canEditTimetable :
+                        row.can_edit_timetable !== undefined ? row.can_edit_timetable :
+                        (details.canEditTimetable !== undefined ? details.canEditTimetable : false);
+
+                    return {
+                        id: String(row.id),
+                        name: nameKey ? details[nameKey] : (row.name || row.email || "Unknown Staff"),
+                        dept: deptKey ? details[deptKey] : (row.hod_dept || row.department || "General"),
+                        center: mappedBranch,
+                        canEditTimetable: permissionVal || false,
+                        rawDetails: details,
+                        hasTopLevelCamel: Object.prototype.hasOwnProperty.call(row, "canEditTimetable"),
+                        hasTopLevelSnake: Object.prototype.hasOwnProperty.call(row, "can_edit_timetable")
                     };
                 });
 
                 renderAuthorizedList();
-                
-                // If a center is currently selected when data refreshes, repopulate the cascades
-                if (document.getElementById('center-select').value) {
+
+                if (document.getElementById("center-select").value) {
                     populateDepartments();
                 }
             } catch (e) {
-                console.error("Error fetching staff:", e);
-                alert("Failed to load staff data.");
+                console.error("Error fetching staff from Supabase:", e);
+                alert("Failed to load staff data from Supabase.");
             }
         }
 
         function populateDepartments() {
-            const centerVal = document.getElementById('center-select').value;
-            const deptSelect = document.getElementById('dept-select');
-            const staffSelect = document.getElementById('staff-select');
-            
-            // Reset dropdowns
+            const centerVal = document.getElementById("center-select").value;
+            const deptSelect = document.getElementById("dept-select");
+            const staffSelect = document.getElementById("staff-select");
+
             deptSelect.innerHTML = '<option value="">-- Choose Department --</option>';
             staffSelect.innerHTML = '<option value="">-- Choose Faculty --</option>';
             staffSelect.disabled = true;
@@ -131,13 +148,12 @@
                 return;
             }
             deptSelect.disabled = false;
-            
-            let departments = new Set();
+
+            const departments = new Set();
             allStaff.forEach(s => {
-                // Only pull departments for teachers inside the selected center
                 if (s.center.includes(centerVal)) {
-                    if (Array.isArray(s.dept)) s.dept.forEach(d => departments.add(d.trim()));
-                    else departments.add(s.dept.trim());
+                    if (Array.isArray(s.dept)) s.dept.forEach(d => departments.add(String(d).trim()));
+                    else departments.add(String(s.dept).trim());
                 }
             });
 
@@ -147,24 +163,26 @@
         }
 
         function populateStaff() {
-            const centerVal = document.getElementById('center-select').value;
-            const deptVal = document.getElementById('dept-select').value;
-            const staffSelect = document.getElementById('staff-select');
-            
+            const centerVal = document.getElementById("center-select").value;
+            const deptVal = document.getElementById("dept-select").value;
+            const staffSelect = document.getElementById("staff-select");
+
             staffSelect.innerHTML = '<option value="">-- Choose Faculty --</option>';
-            
-            if(!deptVal || !centerVal) { staffSelect.disabled = true; return; }
+
+            if (!deptVal || !centerVal) {
+                staffSelect.disabled = true;
+                return;
+            }
             staffSelect.disabled = false;
 
             const availableStaff = allStaff.filter(s => {
                 const matchesCenter = s.center.includes(centerVal);
                 const matchesDept = Array.isArray(s.dept) ? s.dept.includes(deptVal) : s.dept === deptVal;
-                // Check if they already have permission for this exact center
-                const hasPermission = s.canEditTimetable === centerVal || s.canEditTimetable === true; 
+                const hasPermission = s.canEditTimetable === centerVal || s.canEditTimetable === true;
                 return matchesCenter && matchesDept && !hasPermission;
             }).sort((a, b) => a.name.localeCompare(b.name));
 
-            if(availableStaff.length === 0) {
+            if (availableStaff.length === 0) {
                 staffSelect.innerHTML = '<option value="">No eligible staff found</option>';
                 staffSelect.disabled = true;
                 return;
@@ -175,50 +193,65 @@
             });
         }
 
+        async function updateTimetablePermission(staffId, value) {
+            const staffObj = allStaff.find(s => s.id === String(staffId));
+            let updatePayload = {};
+
+            if (staffObj && staffObj.hasTopLevelSnake) {
+                updatePayload = { can_edit_timetable: value };
+            } else if (staffObj && staffObj.hasTopLevelCamel) {
+                updatePayload = { canEditTimetable: value };
+            } else {
+                const updatedDetails = { ...(staffObj ? staffObj.rawDetails : {}), canEditTimetable: value };
+                updatePayload = { details: updatedDetails };
+            }
+
+            const { error } = await supabaseClient
+                .from("staff_applications")
+                .update(updatePayload)
+                .eq("id", staffId);
+
+            if (error) throw error;
+        }
+
         async function grantAccess() {
-            const centerVal = document.getElementById('center-select').value;
-            const staffId = document.getElementById('staff-select').value;
-            if(!centerVal) return alert("Please select a center first.");
-            if(!staffId) return alert("Please select a staff member first.");
+            const centerVal = document.getElementById("center-select").value;
+            const staffId = document.getElementById("staff-select").value;
+            if (!centerVal) return alert("Please select a center first.");
+            if (!staffId) return alert("Please select a staff member first.");
 
             try {
-                // Save the actual branch name (e.g. "DHARAMSHALA") so the system knows what they control
-                await db.collection("staff_applications").doc(staffId).update({
-                    canEditTimetable: centerVal
-                });
-                
+                await updateTimetablePermission(staffId, centerVal);
+
                 alert(`Authorization granted for ${centerVal}!`);
-                
-                // Reset dropdowns and refresh
-                document.getElementById('center-select').value = "";
-                document.getElementById('dept-select').innerHTML = '<option value="">-- Choose Department --</option>';
-                document.getElementById('dept-select').disabled = true;
-                document.getElementById('staff-select').innerHTML = '<option value="">-- Choose Faculty --</option>';
-                document.getElementById('staff-select').disabled = true;
-                
+
+                document.getElementById("center-select").value = "";
+                document.getElementById("dept-select").innerHTML = '<option value="">-- Choose Department --</option>';
+                document.getElementById("dept-select").disabled = true;
+                document.getElementById("staff-select").innerHTML = '<option value="">-- Choose Faculty --</option>';
+                document.getElementById("staff-select").disabled = true;
+
                 await fetchStaffData();
             } catch (e) {
                 console.error(e);
-                alert("Error updating permissions.");
+                alert("Error updating permissions in Supabase.");
             }
         }
 
         async function revokeAccess(staffId, staffName) {
-            if(!confirm(`Are you sure you want to revoke timetable editing rights from ${staffName}?`)) return;
+            if (!confirm(`Are you sure you want to revoke timetable editing rights from ${staffName}?`)) return;
 
             try {
-                await db.collection("staff_applications").doc(staffId).update({
-                    canEditTimetable: false
-                });
+                await updateTimetablePermission(staffId, false);
                 await fetchStaffData();
             } catch (e) {
                 console.error(e);
-                alert("Error revoking permissions.");
+                alert("Error revoking permissions in Supabase.");
             }
         }
 
         function renderAuthorizedList() {
-            const listArea = document.getElementById('authorized-list');
+            const listArea = document.getElementById("authorized-list");
             const authorizedStaff = allStaff.filter(s => s.canEditTimetable).sort((a, b) => a.name.localeCompare(b.name));
 
             if (authorizedStaff.length === 0) {
@@ -226,9 +259,9 @@
                 return;
             }
 
-            // We now show a little badge next to their name showing WHICH branch they control
             listArea.innerHTML = authorizedStaff.map(s => {
-                const branchText = (typeof s.canEditTimetable === 'string') ? s.canEditTimetable : 'Global';
+                const branchText = (typeof s.canEditTimetable === "string") ? s.canEditTimetable : "Global";
+                const safeName = String(s.name).replace(/'/g, "\\'");
                 return `
                 <div class="bg-white border border-slate-200 p-4 rounded-xl flex justify-between items-center shadow-sm">
                     <div>
@@ -236,13 +269,13 @@
                             <h3 class="font-black text-slate-800 text-sm uppercase tracking-tighter">${s.name}</h3>
                             <span class="bg-indigo-100 text-indigo-700 text-[8px] px-1.5 py-0.5 rounded font-black uppercase">${branchText}</span>
                         </div>
-                        <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">${Array.isArray(s.dept) ? s.dept.join(', ') : s.dept}</p>
+                        <p class="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">${Array.isArray(s.dept) ? s.dept.join(", ") : s.dept}</p>
                     </div>
-                    <button onclick="revokeAccess('${s.id}', '${s.name}')" class="bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white px-4 py-2 rounded-lg font-black text-[9px] uppercase tracking-widest transition-colors shadow-sm border border-rose-100">
+                    <button onclick="revokeAccess('${s.id}', '${safeName}')" class="bg-rose-50 text-rose-600 hover:bg-rose-600 hover:text-white px-4 py-2 rounded-lg font-black text-[9px] uppercase tracking-widest transition-colors shadow-sm border border-rose-100">
                         Revoke
                     </button>
                 </div>
-            `}).join('');
+            `}).join("");
         }
     </script>
 </body>
