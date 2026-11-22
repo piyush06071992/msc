@@ -871,6 +871,7 @@
             const curStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
             const checkDate = new Date(curStr); checkDate.setHours(0, 0, 0, 0);
             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const dayName = DAYS_OF_WEEK[dateObj.getDay()];
 
             for (let h of holidaysData) {
                 if (!h.startDate || h.suspendClasses === false) continue;
@@ -884,8 +885,36 @@
                         const tcNorm = norm(parts[0]) + (parts[1] ? '|' + norm(parts[1]) : '');
                         return parts.length > 1 ? tcNorm === targetCls : norm(parts[0]) === norm(className);
                     });
-                    if (matchesClass && h.isFullDay) {
-                        return { isExcluded: true, reason: h.reason || "Holiday" };
+                    if (matchesClass) {
+                        if (h.isFullDay) {
+                            return { isExcluded: true, reason: h.reason || "Holiday" };
+                        } else if (h.startTime && h.endTime) {
+                            const sourceSlots = liveMasterRowsCache || mySessions;
+                            const classSlots = sourceSlots.filter(t =>
+                                (!t.day || t.day === dayName) &&
+                                norm(t.className) === norm(className) &&
+                                norm(t.section) === norm(sectionName) &&
+                                norm(t.subject) === norm(subjectName)
+                            );
+                            if (classSlots.length > 0) {
+                                const [hsh, hsm] = String(h.startTime).split(':').map(Number);
+                                const [heh, hem] = String(h.endTime).split(':').map(Number);
+                                const hStartMins = hsh * 60 + hsm;
+                                const hEndMins = heh * 60 + hem;
+
+                                const isOverlapping = classSlots.some(slot => {
+                                    if (slot.start24 && slot.end24) {
+                                        const [sh, sm] = String(slot.start24).split(':').map(Number);
+                                        const [eh, em] = String(slot.end24).split(':').map(Number);
+                                        return ((sh * 60 + sm) < hEndMins && (eh * 60 + em) > hStartMins);
+                                    }
+                                    return false;
+                                });
+                                if (isOverlapping) {
+                                    return { isExcluded: true, reason: (h.reason || "Holiday") + " (Half Day)" };
+                                }
+                            }
+                        }
                     }
                 }
             }
