@@ -772,7 +772,7 @@
                 }
 
                 let histOverrideQ = sb.from("timetable_history")
-                    .select("date, day, schedule, status, type")
+                    .select("date, day, schedule, status, type, entry_type")
                     .eq("branch_id", activeBranchId);
                 if (activeSessionId) histOverrideQ = histOverrideQ.eq("session_id", activeSessionId);
                 const { data: histOverrideRows } = await histOverrideQ;
@@ -780,6 +780,7 @@
                     .filter(h => h.status !== "CANCELLED")
                     .map(h => ({
                         ...h,
+                        type: h.type ?? h.entry_type ?? '',
                         schedule: Array.isArray(h.schedule) ? h.schedule.map(normalizeSlot) : []
                     }));
 
@@ -1200,14 +1201,19 @@
                     });
                 }
 
-                if (chStart) {
+               if (chStart) {
                     const scanDate = new Date(chStart.getFullYear(), chStart.getMonth(), chStart.getDate());
                     const finalLimitDate = chEnd ? new Date(chEnd.getFullYear(), chEnd.getMonth(), chEnd.getDate()) : new Date();
                     finalLimitDate.setHours(23, 59, 59, 999);
+                    const validTickDates = new Set(doneR.map(r => r.completedDate).filter(d => d));
+                    const normStr2 = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
                     while (scanDate <= finalLimitDate) {
                         const scanIso = scanDate.getFullYear() + '-' + String(scanDate.getMonth() + 1).padStart(2, '0') + '-' + String(scanDate.getDate()).padStart(2, '0');
+                        const hasTickToday = validTickDates.has(scanIso);
+                        const hasActivityToday = (window.currentActivityLogs || []).some(log => String(log.date || '').split('T')[0] === scanIso);
                         const exclusion = checkDateExclusion(scanDate, cName, sName, subName);
+
                         if (exclusion.isExcluded) {
                             timelineEvents.push({
                                 sortKey: scanIso + "_0_0000",
@@ -1217,6 +1223,51 @@
                                         <span class="text-rose-500 font-black">🛑 EXCLUDED DAY:</span> ${exclusion.reason}
                                     </div>`
                             });
+                        } else if (!hasTickToday && !hasActivityToday) {
+                            const wasOnLeaveScan = (leaveRowsCache || []).some(rawLeave => {
+                                const rawObj = parseJsonField(rawLeave.raw_data);
+                                const leaveData = {
+                                    ...rawObj,
+                                    ...rawLeave,
+                                    adjustments: Array.isArray(rawLeave.adjustments) && rawLeave.adjustments.length > 0
+                                        ? rawLeave.adjustments
+                                        : (Array.isArray(rawObj.adjustments) ? rawObj.adjustments : [])
+                                };
+                                if (leaveData.status !== "APPROVED") return false;
+                                const sDate = leaveData.start_date ?? leaveData.startDate;
+                                const eDate = leaveData.end_date ?? leaveData.endDate ?? sDate;
+                                if (leaveData.type === 'FULL' && sDate && scanIso >= sDate && scanIso <= eDate) {
+                                    return true;
+                                }
+                                return leaveData.adjustments.some(adj => {
+                                    if ((adj.date || adj.leaveDate) !== scanIso) return false;
+                                    const cNameAdj = adj.className || (adj.sub ? String(adj.sub).split('|')[0].trim() : "");
+                                    const sNameAdj = adj.section || (adj.sub && String(adj.sub).split('|')[1] ? String(adj.sub).split('|')[1].replace(/sec/gi, '').trim() : "");
+                                    return normStr2(cNameAdj) === normStr2(cName) &&
+                                        normStr2(sNameAdj) === normStr2(sName) &&
+                                        normStr2(adj.title || adj.subject) === normStr2(subName);
+                                });
+                            });
+
+                            if (wasOnLeaveScan) {
+                                timelineEvents.push({
+                                    sortKey: scanIso + "_0_0001",
+                                    html: `
+                                        <div class="flex items-center gap-4 p-3 bg-amber-50/40 text-amber-700 border-b border-amber-100 text-xs font-bold uppercase tracking-widest pl-6">
+                                            <span class="bg-white border border-amber-200 text-amber-600 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                            <span class="text-amber-500 font-black">⏸️ ON LEAVE:</span> Substitute Did Not Log Activity
+                                        </div>`
+                                });
+                            } else if (isTimetableWorkingDay(scanDate, cName, sName, subName)) {
+                                timelineEvents.push({
+                                    sortKey: scanIso + "_0_0002",
+                                    html: `
+                                        <div class="flex items-center gap-4 p-3 bg-orange-50/50 text-orange-800 border-b border-orange-100 text-xs font-bold uppercase tracking-widest pl-6">
+                                            <span class="bg-white border border-orange-200 text-orange-700 text-[9px] font-black px-2.5 py-1 rounded-md shadow-sm">${formatDateString(scanIso)}</span>
+                                            <span class="text-orange-600 font-black">❗ NOT FILLED:</span> Class Scheduled, No Entry Logged
+                                        </div>`
+                                });
+                            }
                         }
                         scanDate.setDate(scanDate.getDate() + 1);
                     }
