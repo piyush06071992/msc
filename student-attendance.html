@@ -602,6 +602,7 @@
             <div class="flex items-center gap-3">
 <!-- Hidden by default since Roll Call is the initial view -->
                 <button id="btn-download-pdf" onclick="printLedgerPDF()" style="display: none;" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all items-center gap-1.5"><span>🖨️</span> Print Ledger</button>
+                <button id="btn-modal-admin-view" onclick="switchToAdminGodMode()" class="hidden bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-2 rounded-xl text-[10px] sm:text-xs font-black uppercase tracking-widest shadow-md transition-all">👑 Switch to Admin View</button>
                 <div class="flex bg-slate-800 p-1 rounded-xl">
                     <button id="tab-daily" onclick="switchTab('daily')" class="px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg bg-white text-slate-900 shadow-sm transition-all">📝 Roll Call</button>
                     <button id="tab-ledger" onclick="switchTab('ledger')" class="px-4 py-2 text-[10px] sm:text-xs font-black uppercase tracking-widest rounded-lg text-slate-400 hover:text-white transition-all hidden sm:block">📊 Ledger</button>
@@ -1076,7 +1077,16 @@ async function bumpAttendanceMetadata(monthKey) {
                     structures: structSnap.docs.map(d => ({ id: d.id, ...d.data() })),
                     holidays: holSnap.docs.map(d => d.data()),
                     timetableHistory: histSnap.docs.map(d => d.data()),
-                    staff: staffSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    staff: staffSnap.docs.map(d => {
+                        const row = d.data();
+                        const det = typeof row.details === 'string' ? (() => { try { return JSON.parse(row.details); } catch (_) { return {}; } })() : (row.details || {});
+                        return {
+                            id: d.id,
+                            ...row,
+                            details: det,
+                            attendancePermission: row.attendancePermission ?? row.attendance_permission ?? det.attendancePermission ?? null
+                        };
+                    }),
                     remedial: remSnap.docs.map(d => ({ id: d.id, ...d.data() })),
                     specialLeaves: splSnap.docs.map(d => ({ id: d.id, ...d.data() }))
                 };
@@ -1316,13 +1326,33 @@ function getActiveStudentsForDate(c, s, dateStr) {
             return rawDept.toString();
         }
 
-    function switchBranch() {
-            activeCenter = document.getElementById('branch-selector').value;
-            sessionStorage.setItem('minervaAdminCenter', activeCenter);
-            document.getElementById('user-badge').innerText = `God Mode (${activeCenter}) - Read Only`;
-            fetchData("Admin");
-        }
+    async function switchBranch() {
+            const chosenCenter = document.getElementById('branch-selector').value;
+            activeCenter = chosenCenter;
+            window.activeCenter = chosenCenter;
+            sessionStorage.setItem('minervaAdminCenter', chosenCenter);
 
+            const matchedBranch = (window.allBranchesList || []).find(b =>
+                String(b.name || '').trim().toUpperCase() === chosenCenter ||
+                String(b.name || '').trim().toUpperCase().includes(chosenCenter)
+            );
+            if (matchedBranch) {
+                window.activeBranchId = matchedBranch.id;
+                sessionStorage.setItem('minervaAdminBranchId', matchedBranch.id);
+                const chosenSess = resolveCurrentSessionForBranch(matchedBranch.id, getLocalDateIso());
+                window.activeSessionId = chosenSess ? chosenSess.id : null;
+                window.activeSessionName = chosenSess ? chosenSess.session_name : "2026 - 2027";
+                if (window.activeSessionId) {
+                    sessionStorage.setItem(`minerva_att_session_${matchedBranch.id}`, window.activeSessionId);
+                }
+            }
+
+            studentsData = [];
+            populateBranchAndSessionDropdowns();
+            document.getElementById('user-badge').innerText = `God Mode (${activeCenter}) • ${window.activeSessionName}`;
+            await fetchData("Admin");
+            await refreshEditRequestBadge();
+        }
         function toggleAdminInchargeFilter() {
             window.adminShowInchargeOnly = !window.adminShowInchargeOnly;
             fetchData("Admin");
@@ -2760,7 +2790,10 @@ function updateAuditSectionFilter() {
 
         function renderAuthorizedFaculty() {
             const container = document.getElementById('authorized-faculty-list');
-            const authStaff = staffList.filter(s => s.attendancePermission === 'VIEW_ALL');
+            const authStaff = staffList.filter(s => {
+                const det = parseJson(s.details);
+                return (s.attendancePermission || s.attendance_permission || det.attendancePermission) === 'VIEW_ALL';
+            });
             
             if(authStaff.length === 0) {
                 container.innerHTML = `<div class="text-xs font-bold text-slate-400 bg-slate-50 p-4 rounded-xl text-center border border-slate-100 uppercase tracking-widest">No faculty has global access.</div>`;
@@ -3113,6 +3146,10 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             
             const tabDailyBtn = document.getElementById('tab-daily');
             const tabLedgerBtn = document.getElementById('tab-ledger');
+            const modalAdminBtn = document.getElementById('btn-modal-admin-view');
+            if (modalAdminBtn) {
+                modalAdminBtn.classList.toggle('hidden', !(!activeStudent && !isAdmin && window.hasViewAllAttendancePermission));
+            }
 
             // Default to hidden
    if (saveBar) saveBar.style.display = 'none'; 
