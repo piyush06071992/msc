@@ -1915,6 +1915,9 @@ function switchMainTab(tab) {
                 
                 if (window.hasViewAllAttendancePermission) {
                     html += `
+                        <button onclick="toggleAttendanceViewMode()" class="bg-purple-100 text-purple-800 hover:bg-purple-200 border border-purple-300 px-4 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest shadow-sm transition-all cursor-pointer shrink-0">
+                            ${window.showAllAttendanceRegisters ? 'My Registers Only' : 'All Branch Registers'}
+                        </button>
                         <button onclick="switchToAdminGodMode()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all cursor-pointer flex items-center gap-2 shrink-0">
                             👑 Switch to Admin View
                         </button>
@@ -1924,7 +1927,9 @@ function switchMainTab(tab) {
                 toggleArea.innerHTML = html;
             }
 
-       const activeList = window.myRegistersCache; // Always show their own registers initially
+       const activeList = (window.hasViewAllAttendancePermission && window.showAllAttendanceRegisters)
+           ? window.allRegistersCache
+           : window.myRegistersCache;
 
             if (!activeList || activeList.length === 0) {
                 container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest border-2 border-dashed border-slate-200 rounded-3xl bg-white">No Assigned Registers Found</div>`; 
@@ -2731,15 +2736,22 @@ function updateAuditSectionFilter() {
             renderAuthorizedFaculty();
         }
 
-        function populateFacultyDropdown() {
+       function populateFacultyDropdown() {
             const dept = document.getElementById('perm-dept-select').value;
             const facSelect = document.getElementById('perm-faculty-select');
-            if(!dept) { facSelect.innerHTML = `<option value="">-- Select Dept First --</option>`; return; }
+            if (!dept) { facSelect.innerHTML = `<option value="">-- Select Dept First --</option>`; return; }
 
-            const filtered = staffList.filter(s => getRawDept(s).includes(dept));
+            const targetBranch = String(activeCenter || "").trim().toUpperCase();
+            const filtered = staffList.filter(s => {
+                if (!getRawDept(s).includes(dept)) return false;
+                const det = s.details || {};
+                const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
+                const staffCenter = String(s.center || (centerKey ? det[centerKey] : '') || '').trim().toUpperCase();
+                return !staffCenter || !targetBranch || staffCenter.includes(targetBranch);
+            });
             let opts = `<option value="">-- Choose Faculty --</option>`;
             filtered.forEach(f => {
-                const nameKey = Object.keys(f.details || {}).find(k=>k.toLowerCase().includes('name'));
+                const nameKey = Object.keys(f.details || {}).find(k => k.toLowerCase().includes('name'));
                 const name = nameKey ? f.details[nameKey] : f.email;
                 opts += `<option value="${f.email}">${name} (${f.email})</option>`;
             });
@@ -2762,21 +2774,27 @@ function updateAuditSectionFilter() {
             }).join('');
         }
 
-        async function grantFacultyPermission(mode) {
+       async function grantFacultyPermission(mode) {
             const email = document.getElementById('perm-faculty-select').value;
             const msgEl = document.getElementById('perm-status-msg');
-            if(!email) { alert("Please select a faculty member."); return; }
+            if (!email) { alert("Please select a faculty member."); return; }
 
             msgEl.innerText = "⏳ Updating permission...";
             try {
                 const staffDoc = staffList.find(s => s.email === email);
-                if(staffDoc) {
-                    await db.collection("staff_applications").doc(staffDoc.id).update({ attendancePermission: mode });
+                if (staffDoc) {
+                    const nextDetails = { ...(staffDoc.details || {}), attendancePermission: mode };
+                    const { error } = await window.sb
+                        .from("staff_applications")
+                        .update({ details: nextDetails })
+                        .eq("id", staffDoc._uuid || staffDoc.id);
+                    if (error) throw error;
+                    staffDoc.details = nextDetails;
                     staffDoc.attendancePermission = mode;
                     msgEl.innerText = mode === 'VIEW_ALL' ? `✅ Access Granted Successfully!` : `✅ Access Revoked Successfully!`;
                     renderAuthorizedFaculty();
                 }
-            } catch(e) {
+            } catch (e) {
                 console.error(e);
                 msgEl.innerText = "❌ Failed to update permission.";
             }
@@ -4904,25 +4922,26 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
                 batch.set(secDocRef, mergeData, { merge: true });
             }
 
-// FIX: Await full cloud batch commit AND background sync before declaring success
+let savedToSupabase = false;
     try {
         await batch.commit();
         await bumpAttendanceMetadata(monthKey);
-        
-        // Ensure background Incharge sync finishes and confirms before UI locks
-        // DO NOT trigger background sync if the teacher is manually saving the Incharge register itself!
+
         if (navigator.onLine && currentReg.sub !== 'CLASS INCHARGE') {
-            let syncPromises = Object.keys(recordsBySection).map(secName => 
+            let syncPromises = Object.keys(recordsBySection).map(secName =>
                 backgroundSyncClassIncharge(dateStr, monthKey, currentReg.c, secName)
             );
             await Promise.all(syncPromises);
         }
 
-        btn.innerHTML = "✅ Cloud Synced Successfully!";
-    } catch (firebaseErr) {
-        console.warn("Cloud commit delayed, queuing offline:", firebaseErr);
-        btn.innerHTML = "💾 Saved Locally (Will Sync Online)";
+        savedToSupabase = true;
+        btn.innerHTML = "✅ Saved to Supabase Cloud!";
+    } catch (sbErr) {
+        console.warn("Supabase cloud save failed, kept locally only:", sbErr);
+        savedToSupabase = false;
+        btn.innerHTML = "⚠️ Not Saved to Cloud (Local Only)";
     }
+    window.lastAttendanceSavedToCloud = savedToSupabase;
 
     if(!currentMonthDoc) currentMonthDoc = {};
     currentMonthDoc[dateStr] = todaysData;
@@ -4963,8 +4982,25 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
                 listContainer.classList.add('hidden');
             }
 
-            const modal = document.getElementById('wa-modal');
-            modal.classList.replace('hidden', 'flex'); 
+          const modal = document.getElementById('wa-modal');
+            const modalTitle = modal.querySelector('h3');
+            const modalHeader = modalTitle ? modalTitle.parentElement : null;
+            const modalSub = modal.querySelector('p');
+            const waSendBtn = document.getElementById('wa-send-btn');
+
+            if (window.lastAttendanceSavedToCloud) {
+                if (modalTitle) modalTitle.innerText = "Saved to Supabase Cloud!";
+                if (modalHeader) { modalHeader.classList.remove('bg-rose-600'); modalHeader.classList.add('bg-[#25D366]'); }
+                if (modalSub) modalSub.innerText = "Confirmed in Supabase. Send notification to WhatsApp group?";
+                if (waSendBtn) waSendBtn.classList.remove('hidden');
+            } else {
+                if (modalTitle) modalTitle.innerText = "Not Saved to Cloud!";
+                if (modalHeader) { modalHeader.classList.remove('bg-[#25D366]'); modalHeader.classList.add('bg-rose-600'); }
+                if (modalSub) modalSub.innerText = "Saved locally on this device only. Not synced to Supabase. WhatsApp share is disabled until cloud save succeeds.";
+                if (waSendBtn) waSendBtn.classList.add('hidden');
+            }
+
+            modal.classList.replace('hidden', 'flex');
             setTimeout(() => document.getElementById('wa-modal-content').classList.replace('scale-95', 'scale-100'), 10);
             
             loadDailyAttendance();
