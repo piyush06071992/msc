@@ -1356,6 +1356,28 @@ function getActiveStudentsForDate(c, s, dateStr) {
             await fetchData("Admin");
             await refreshEditRequestBadge();
         }
+
+        async function refreshEditRequestBadge() {
+            const badge = document.getElementById('edit-req-badge');
+            if (!badge || !window.sb) return;
+            try {
+                const { data, error } = await window.sb
+                    .from("attendance_edit_requests")
+                    .select("id")
+                    .eq("center", activeCenter)
+                    .eq("status", "PENDING");
+                if (error) throw error;
+                const count = (data || []).length;
+                if (count > 0) {
+                    badge.innerText = count;
+                    badge.classList.remove('hidden');
+                } else {
+                    badge.classList.add('hidden');
+                }
+            } catch (e) {
+                console.warn("Could not refresh edit request badge:", e);
+            }
+        }
         function toggleAdminInchargeFilter() {
             window.adminShowInchargeOnly = !window.adminShowInchargeOnly;
             fetchData("Admin");
@@ -4111,29 +4133,70 @@ function getActiveTeacherName() {
                 targetSubject = examSlot ? (examSlot.subject || examSlot.title) : "EXAM";
             }
 
-            const docId = `att_${activeCenter}_${normDoc(targetClass)}_${normDoc(targetSection)}_${normDoc(targetSubject)}_${monthKey}`;
-            const docRef = getCollection("attendance_records").doc(docId);
+           const docId = `att_${activeCenter}_${normDoc(targetClass)}_${normDoc(targetSection)}_${normDoc(targetSubject)}_${monthKey}`;
 
-         try {
-                const snap = await docRef.get();
-                if (!snap.exists) return alert("No attendance record found for this month.");
-                let data = snap.data();
-                if (!data.records[dateStr]) data.records[dateStr] = {};
-                
-                const oldStatus = data.records[dateStr][stuId] || "P";
-                data.records[dateStr][stuId] = newStatus;
-                
-                await getCollection("attendance_corrections").add({
-                    center: activeCenter, className: currentReg.c, section: currentReg.s, subject: currentReg.sub,
-                    studentId: stuId, date: dateStr, oldStatus, newStatus, reason, author: activeStaff ? activeStaff.email : 'Admin', timestamp: Date.now()
-                });
+            try {
+                if (window.sb) {
+                    let q = window.sb
+                        .from("attendance_records")
+                        .select("id, records")
+                        .eq("firestore_id", docId);
+                    if (window.activeBranchId) q = q.eq("branch_id", window.activeBranchId);
+                    if (window.activeSessionId) q = q.eq("session_id", window.activeSessionId);
 
-              await docRef.set(data);
+                    const { data: rows, error: fetchErr } = await q.limit(1);
+                    if (fetchErr) throw fetchErr;
+                    if (!rows || !rows.length) return alert("No attendance record found for this month.");
+
+                    const targetRow = rows[0];
+                    const records = { ...(typeof targetRow.records === "string" ? JSON.parse(targetRow.records || "{}") : (targetRow.records || {})) };
+                    const dayRecs = { ...(records[dateStr] || {}) };
+                    const oldStatus = dayRecs[stuId] || "P";
+                    dayRecs[stuId] = newStatus;
+                    records[dateStr] = dayRecs;
+
+                    const { error: updErr } = await window.sb
+                        .from("attendance_records")
+                        .update({ records, last_updated_ms: Date.now() })
+                        .eq("id", targetRow.id);
+                    if (updErr) throw updErr;
+
+                    const { error: corrErr } = await window.sb
+                        .from("attendance_corrections")
+                        .insert({
+                            center: activeCenter,
+                            class_name: targetClass,
+                            section: targetSection,
+                            subject: targetSubject,
+                            student_id: stuId,
+                            date: dateStr,
+                            old_status: oldStatus,
+                            new_status: newStatus,
+                            reason,
+                            author: activeStaff ? activeStaff.email : 'Admin',
+                            timestamp_ms: Date.now()
+                        });
+                    if (corrErr) throw corrErr;
+                } else {
+                    const docRef = getCollection("attendance_records").doc(docId);
+                    const snap = await docRef.get();
+                    if (!snap.exists) return alert("No attendance record found for this month.");
+                    let data = snap.data();
+                    if (!data.records) data.records = {};
+                    if (!data.records[dateStr]) data.records[dateStr] = {};
+                    const oldStatus = data.records[dateStr][stuId] || "P";
+                    data.records[dateStr][stuId] = newStatus;
+                    await getCollection("attendance_corrections").add({
+                        center: activeCenter, className: targetClass, section: targetSection, subject: targetSubject,
+                        studentId: stuId, date: dateStr, oldStatus, newStatus, reason, author: activeStaff ? activeStaff.email : 'Admin', timestamp: Date.now()
+                    });
+                    await docRef.set(data);
+                }
+
                 await bumpAttendanceMetadata(monthKey);
 
-        // --- AUTO-SYNC CLASS INCHARGE ON CORRECTION ---
                 if (targetSubject !== 'CLASS INCHARGE') {
-                    backgroundSyncClassIncharge(dateStr, monthKey, targetClass, targetSection);
+                    await backgroundSyncClassIncharge(dateStr, monthKey, targetClass, targetSection);
                 }
 
                 document.getElementById('correction-modal').style.display = 'none';
@@ -5182,33 +5245,67 @@ async function requestUnmarkAttendance() {
             if (document.getElementById('unmark-timer')) document.getElementById('unmark-timer').innerText = "10";
         }
 
-        async function executeAdminUnmark() {
+       async function executeAdminUnmark() {
             if (!activeUnmarkReq) return;
             const { reqId, dateStr, c, s, sub } = activeUnmarkReq;
             const [y, m] = dateStr.split('-');
             const monthKey = `${y}_${m}`;
             const docId = `att_${activeCenter}_${normDoc(c)}_${normDoc(s)}_${normDoc(sub)}_${monthKey}`;
-            const docRef = getCollection("attendance_records").doc(docId);
 
             const timerContainerText = document.getElementById('unmark-countdown-container').querySelector('p');
             if (timerContainerText) timerContainerText.innerHTML = "Deleting from Cloud... <span class='loader border-rose-500 border-top-transparent w-4 h-4 inline-block ml-2'></span>";
 
-         try {
-              await docRef.update({
-                    [`records.${dateStr}`]: firebase.firestore.FieldValue.delete()
-                });
-                await db.collection("attendance_edit_requests").doc(reqId).update({ status: "APPROVED_AND_UNMARKED", approvedAt: Date.now() });
+            try {
+                if (window.sb) {
+                    let q = window.sb
+                        .from("attendance_records")
+                        .select("id, records")
+                        .eq("firestore_id", docId);
+                    if (window.activeBranchId) q = q.eq("branch_id", window.activeBranchId);
+                    if (window.activeSessionId) q = q.eq("session_id", window.activeSessionId);
+
+                    const { data: rows, error: fetchErr } = await q.limit(1);
+                    if (fetchErr) throw fetchErr;
+
+                    if (rows && rows.length) {
+                        const targetRow = rows[0];
+                        const nextRecords = { ...(typeof targetRow.records === "string" ? JSON.parse(targetRow.records || "{}") : (targetRow.records || {})) };
+                        delete nextRecords[dateStr];
+
+                        const { error: updErr } = await window.sb
+                            .from("attendance_records")
+                            .update({ records: nextRecords, last_updated_ms: Date.now() })
+                            .eq("id", targetRow.id);
+                        if (updErr) throw updErr;
+                    }
+
+                    if (reqId) {
+                        const { error: reqErr } = await window.sb
+                            .from("attendance_edit_requests")
+                            .update({ status: "APPROVED_AND_UNMARKED", approved_at_ms: Date.now() })
+                            .eq("id", reqId);
+                        if (reqErr) throw reqErr;
+                    }
+                } else {
+                    const docRef = getCollection("attendance_records").doc(docId);
+                    const snap = await docRef.get();
+                    if (snap.exists) {
+                        const current = snap.data().records || {};
+                        delete current[dateStr];
+                        await docRef.update({ records: current, lastUpdated: Date.now() });
+                    }
+                    await db.collection("attendance_edit_requests").doc(reqId).update({ status: "APPROVED_AND_UNMARKED", approvedAt: Date.now() });
+                }
+
                 await bumpAttendanceMetadata(monthKey);
-                
-                // --- CRITICAL FIX: TRIGGER BACKGROUND SYNC UPON UNMARK ---
-                // If this was the only subject marked, the incharge register will auto-delete the day.
-                // If other subjects are still marked, it will recalculate the P/L status accurately.
+
                 if (sub !== 'CLASS INCHARGE') {
                     await backgroundSyncClassIncharge(dateStr, monthKey, c, s);
                 }
-                
+
                 closeUnmarkModal();
                 alert("✅ Attendance successfully unmarked by Admin.");
+                await refreshEditRequestBadge();
                 loadAttendanceEditRequests();
             } catch(e) {
                 console.error(e);
