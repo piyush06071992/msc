@@ -393,7 +393,7 @@
                             }
                             const { error } = await sbClient.from(table).upsert([mapped], { onConflict: "firestore_id" });
                             if (error) throw error;
-                        }
+                        } else {
                             if (isUuid && !mapped.id) mapped.id = docId;
                             const { error } = isUuid
                                 ? await sbClient.from(table).upsert([mapped], { onConflict: "id" })
