@@ -1896,23 +1896,7 @@ function switchMainTab(tab) {
                 let subs = [];
                 if (matchedStruct) {
                     subs = [...(matchedStruct.subjects || [])];
-                    subs.unasync function fetchData(safeName) {
-            const container = document.getElementById('bookshelf-container');
-            try {
-                const masterBundle = await getMasterConfig(safeName, isAdmin);
-
-                timetableData = masterBundle.timetable;
-                window.fullBranchTimetable = masterBundle.allBranchTimetable || masterBundle.timetable;
-                const structures = masterBundle.structures;
-                holidaysData = masterBundle.holidays;
-                timetableHistoryData = masterBundle.timetableHistory;
-                staffList = masterBundle.staff;
-
-                remedialDataMap = {};
-                masterBundle.remedial.forEach(d => { remedialDataMap[d.id] = d; });
-
-                specialLeavesData = masterBundle.specialLeaves;
-                if (isAdmin) loadStaffListForPerms();shift("CLASS INCHARGE");
+                    subs.unshift("CLASS INCHARGE");
                 }
 
                 // Populate Class dropdown from structures instead of downloading all students
@@ -3167,10 +3151,8 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             document.getElementById('register-modal').style.display = 'flex';
             document.getElementById('daily-date-picker').value = targetDate;
 
-            // LAZY LOAD STUDENTS NOW
             if (!studentsData || studentsData.length === 0) {
-                const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                studentsData = await getCachedStudentsRoster(centerPrefix);
+                studentsData = await getStudentsRoster();
             }
 
             const saveBar = document.getElementById('save-bar-container');
@@ -3191,33 +3173,44 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             const listContainer = document.getElementById('daily-students-list');
             listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
 
-       try {
-              // 1. Try fetching the exact room name (including tags if they came from seating plan)
-                const exactSafeName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
-                const exactDocId = `${activeCenter}_${dateStr}_${exactSafeName}`;
-                let roomSnap = await db.collection("exam_seating_rooms").doc(exactDocId).get();
-                
-                // 2. If exact match is missing or empty, fallback to the stripped base room name
-                const baseRoomName = roomName.split(' [')[0]; 
-                if (!roomSnap.exists || Object.keys(roomSnap.data()?.allocations || {}).length === 0) {
-                    const baseSafeName = baseRoomName.replace(/[^a-zA-Z0-9]/g, '_');
-                    const baseDocId = `${activeCenter}_${dateStr}_${baseSafeName}`;
-                    roomSnap = await db.collection("exam_seating_rooms").doc(baseDocId).get();
-                }
+       async function fetchExamRoomRowFromSupabase(roomName, dateStr) {
+            const exactSafeName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+            const exactFsId = `${activeCenter}_${dateStr}_${exactSafeName}`;
+            const baseRoomName = roomName.split(' [')[0];
+            const baseSafeName = baseRoomName.replace(/[^a-zA-Z0-9]/g, '_');
+            const baseFsId = `${activeCenter}_${dateStr}_${baseSafeName}`;
+
+            let q = sb.from("exam_seating_rooms").select("*").eq("branch_id", activeBranchId).eq("date", dateStr);
+            if (activeSessionId) q = q.eq("session_id", activeSessionId);
+            const { data: rows } = await q;
+            const list = rows || [];
+
+            const exactMatch = list.find(r => r.firestore_id === exactFsId || r.room_name === roomName);
+            if (exactMatch && Object.keys(parseJsonObj(exactMatch.allocations)).length > 0) return exactMatch;
+
+            const baseMatch = list.find(r => r.firestore_id === baseFsId || r.room_name === baseRoomName);
+            if (baseMatch && Object.keys(parseJsonObj(baseMatch.allocations)).length > 0) return baseMatch;
+
+            return exactMatch || baseMatch || null;
+        }
+
+        try {
+                const baseRoomName = roomName.split(' [')[0];
+                const roomRow = await fetchExamRoomRowFromSupabase(roomName, dateStr);
 
                 let seatedStudents = [];
-                if (roomSnap.exists && Object.keys(roomSnap.data()?.allocations || {}).length > 0) {
-                    const allocs = roomSnap.data().allocations || {};
+                if (roomRow && Object.keys(parseJsonObj(roomRow.allocations)).length > 0) {
+                    const allocs = parseJsonObj(roomRow.allocations);
                     Object.keys(allocs).forEach(seatId => {
                         const stu = allocs[seatId];
                         if (stu) seatedStudents.push({ seatId, ...stu });
                     });
                 } else {
-                    // 3. Legacy Fallback to exam_seating_allocations
-                    const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
-                    const allocSnap = await allocDocRef.get();
-                    if (allocSnap.exists) {
-                        const allocs = allocSnap.data().allocations || {};
+                    let aQuery = sb.from("exam_seating_allocations").select("*").eq("branch_id", activeBranchId).eq("date", dateStr).limit(1);
+                    if (activeSessionId) aQuery = aQuery.eq("session_id", activeSessionId);
+                    const { data: aRows } = await aQuery;
+                    if (aRows && aRows[0]) {
+                        const allocs = parseJsonObj(aRows[0].allocations);
                         Object.keys(allocs).forEach(seatId => {
                             if (seatId.startsWith(`${baseRoomName}-`)) {
                                 const stu = allocs[seatId];
@@ -3227,7 +3220,7 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
                     }
                 }
 
-                seatedStudents.sort((a,b) => String(a.seatId).localeCompare(String(b.seatId)));
+                seatedStudents.sort((a, b) => String(a.seatId).localeCompare(String(b.seatId)));
 
                 if (seatedStudents.length === 0) {
                     listContainer.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs border-2 border-dashed border-slate-300 rounded-2xl">No students allocated to this room for ${dateStr}.</div>`;
@@ -3236,11 +3229,11 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
 
                 const [y, m, d] = dateStr.split('-');
                 const monthKey = `${y}_${m}`;
-                const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).get();
-                
-            let sectionAttendanceMap = {};
-                querySnap.forEach(doc => {
-                    const data = doc.data();
+                const roomAttDocs = await fetchMonthAttendanceDocs(monthKey);
+
+                let sectionAttendanceMap = {};
+                roomAttDocs.forEach(doc => {
+                    const data = doc.data;
                     if (data.records && data.records[dateStr]) {
                         const key = `${normMatch(data.className)}|${normMatch(data.section)}|${normMatch(data.subject)}`;
                         sectionAttendanceMap[key] = data.records[dateStr];
@@ -3436,10 +3429,8 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             document.getElementById('register-modal').style.display = 'flex';
             document.getElementById('daily-date-picker').value = todayISO; 
 
-            // LAZY LOAD STUDENTS NOW (Only fetches once per session)
             if (!studentsData || studentsData.length === 0) {
-                const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                studentsData = await getCachedStudentsRoster(centerPrefix);
+                studentsData = await getStudentsRoster();
             }
 
         const saveBar = document.getElementById('save-bar-container');
@@ -3680,9 +3671,11 @@ async function loadStudentPersonalView() {
     try {
         let stuId = activeStudent.id || activeStudent.uid || activeStudent.docId;
         if (!stuId && activeStudent.rollNo) {
-            const stuSnap = await getCollection("students").where("rollNo", "==", activeStudent.rollNo).get();
-            if (!stuSnap.empty) {
-                stuId = stuSnap.docs[0].id;
+            let sQuery = sb.from("students").select("*").eq("branch_id", activeBranchId).eq("roll_no", String(activeStudent.rollNo));
+            if (activeSessionId) sQuery = sQuery.eq("session_id", activeSessionId);
+            const { data: sRows } = await sQuery.limit(1);
+            if (sRows && sRows[0]) {
+                stuId = sRows[0].firestore_id || sRows[0].id;
                 activeStudent.id = stuId;
                 sessionStorage.setItem('minervaStudentData', JSON.stringify(activeStudent));
             }
@@ -3692,22 +3685,19 @@ async function loadStudentPersonalView() {
         let stats = { P: 0, L: 0, Total: 0 };
         let historyLog = [];
 
-        // Generate exact month keys for the past 6 months
         let monthKeys = [];
         let d = new Date();
-        for(let i=0; i<6; i++) {
+        for (let i = 0; i < 6; i++) {
             let mDate = new Date(d.getFullYear(), d.getMonth() - i, 1);
-            monthKeys.push(`${mDate.getFullYear()}_${String(mDate.getMonth()+1).padStart(2,'0')}`);
+            monthKeys.push(`${mDate.getFullYear()}_${String(mDate.getMonth() + 1).padStart(2, '0')}`);
         }
 
         const subNorm = normMatch(currentReg.sub);
         const classNorm = normMatch(currentReg.c);
         const secNorm = normMatch(currentReg.s);
 
-       // Fetch months using IndexedDB Caching (0 reads if unchanged!)
         for (let mKey of monthKeys) {
-            // TEACHER OPTIMIZATION: Only fetch the specific class/section needed!
-            const docsArray = await getCachedMonthAttendanceDocs(mKey, currentReg.c, currentReg.s);
+            const docsArray = await fetchMonthAttendanceDocs(mKey, currentReg.c, currentReg.s);
             docsArray.forEach(item => {
                 const data = item.data;
                 const matchesClass = normMatch(data.className) === classNorm;
@@ -3832,8 +3822,7 @@ async function loadDailyAttendance() {
             }
 
             try {
-            // Robust Fetch using IndexedDB Cache: ONLY get data for this specific Class and Section
-                const docsArray = await getCachedMonthAttendanceDocs(monthKey, currentReg.c, currentReg.s);
+                const docsArray = await fetchMonthAttendanceDocs(monthKey, currentReg.c, currentReg.s);
                 let mergedRecords = {};
                 let anySubjectPresentStatus = {}; // Tracks if student was present in ANY subject
                 let allSubjectsAttendance = {}; // NEW: Tracks the exact status for every individual subject
@@ -3901,25 +3890,27 @@ async function loadDailyAttendance() {
                 let editUnlocked = !isPastDate || isAdmin;
                 if (isFutureDate) editUnlocked = false;
 
-                // Check if an approved/pending request exists SPECIFICALLY for this past date
-                if (isPastDate && !isAdmin && activeStaff) {
-                    const reqSnap = await getCollection("attendance_edit_requests")
-                        .where("date", "==", dateStr)
-                        .where("className", "==", currentReg.c)
-                        .where("section", "==", currentReg.s)
-                        .where("subject", "==", currentReg.sub)
-                        .where("teacherEmail", "==", activeStaff.email)
-                        .get();
+                if (isPastDate && !isAdmin && activeStaff && activeStaff.email) {
+                    let rQuery = sb.from("attendance_edit_requests")
+                        .select("*")
+                        .eq("branch_id", activeBranchId)
+                        .eq("date", dateStr)
+                        .eq("class_name", currentReg.c)
+                        .eq("section", currentReg.s)
+                        .eq("subject", currentReg.sub)
+                        .ilike("teacher_email", activeStaff.email.trim());
+                    if (activeSessionId) rQuery = rQuery.eq("session_id", activeSessionId);
+                    const { data: reqRows } = await rQuery;
 
-                    if (!reqSnap.empty) {
-                        const approvedDoc = reqSnap.docs.find(d => d.data().status === "APPROVED");
+                    if (reqRows && reqRows.length > 0) {
+                        const approvedDoc = reqRows.find(r => r.status === "APPROVED");
                         if (approvedDoc) {
                             window.activeEditTokenId = approvedDoc.id;
                             window.approvedEditUnlocked = true;
                             editUnlocked = true;
                         } else {
-                            const pendingDoc = reqSnap.docs.find(d => d.data().status === "PENDING");
-                            if (pendingDoc) editUnlocked = false; 
+                            const pendingDoc = reqRows.find(r => r.status === "PENDING");
+                            if (pendingDoc) editUnlocked = false;
                         }
                     }
                 }
@@ -4256,32 +4247,21 @@ function getActiveTeacherName() {
       if (currentReg.isExamRoom) {
                 try {
                     const roomName = currentReg.s;
-                    
-                    // 1. Try exact match first (handles multi-shift rooms with tags like [08:15 - 09:20])
-                    const exactSafeName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
-                    const exactDocId = `${activeCenter}_${dateStr}_${exactSafeName}`;
-                    let roomSnap = await db.collection("exam_seating_rooms").doc(exactDocId).get();
-                    
-                    // 2. Fallback to base room name if exact match fails
                     const baseRoomName = roomName.split(' [')[0];
-                    if (!roomSnap.exists || Object.keys(roomSnap.data()?.allocations || {}).length === 0) {
-                        const baseSafeName = baseRoomName.replace(/[^a-zA-Z0-9]/g, '_');
-                        const baseDocId = `${activeCenter}_${dateStr}_${baseSafeName}`;
-                        roomSnap = await db.collection("exam_seating_rooms").doc(baseDocId).get();
-                    }
-                    
+                    const roomRow = await fetchExamRoomRowFromSupabase(roomName, dateStr);
+
                     let seatedStudents = [];
-                    if (roomSnap.exists && Object.keys(roomSnap.data()?.allocations || {}).length > 0) {
-                        const allocs = roomSnap.data().allocations || {};
+                    if (roomRow && Object.keys(parseJsonObj(roomRow.allocations)).length > 0) {
+                        const allocs = parseJsonObj(roomRow.allocations);
                         Object.values(allocs).forEach(stu => {
                             if (stu) seatedStudents.push(stu);
                         });
                     } else {
-                        // 3. Legacy Fallback
-                        const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
-                        const allocSnap = await allocDocRef.get();
-                        if (allocSnap.exists) {
-                            const allocs = allocSnap.data().allocations || {};
+                        let aQuery = sb.from("exam_seating_allocations").select("*").eq("branch_id", activeBranchId).eq("date", dateStr).limit(1);
+                        if (activeSessionId) aQuery = aQuery.eq("session_id", activeSessionId);
+                        const { data: aRows } = await aQuery;
+                        if (aRows && aRows[0]) {
+                            const allocs = parseJsonObj(aRows[0].allocations);
                             Object.keys(allocs).forEach(seatId => {
                                 if (seatId.startsWith(`${baseRoomName}-`)) {
                                     const stu = allocs[seatId];
@@ -4346,7 +4326,28 @@ function getActiveTeacherName() {
                     if (!confirm("Direct correction for past dates is locked.\n\nDo you want to send an Edit Request to the Admin to unlock this date?")) return;
                     
                     try {
-                      const reqPayload = {
+                        const nowMs = Date.now();
+                        const dbPayload = {
+                            branch_id: activeBranchId,
+                            session_id: activeSessionId,
+                            center: activeCenter,
+                            class_name: currentReg.c,
+                            section: currentReg.s,
+                            subject: currentReg.sub,
+                            date: dateStr,
+                            teacher_email: activeStaff.email,
+                            teacher_name: getActiveTeacherName(),
+                            reason: `[Correction Request] ${reason}`,
+                            status: "PENDING",
+                            request_type: "EDIT",
+                            teacher_acknowledged: false,
+                            timestamp_ms: nowMs
+                        };
+
+                        const { error: insErr } = await sb.from("attendance_edit_requests").insert([dbPayload]);
+                        if (insErr) throw insErr;
+                        sendEditRequestEmailNotification({
+                            type: "ATTENDANCE_EDIT_REQUEST",
                             center: activeCenter,
                             className: currentReg.c,
                             section: currentReg.s,
@@ -4356,16 +4357,13 @@ function getActiveTeacherName() {
                             teacherName: getActiveTeacherName(),
                             reason: `[Correction Request] ${reason}`,
                             status: "PENDING",
-                            timestamp: Date.now()
-                        };
-
-                        await getCollection("attendance_edit_requests").add(reqPayload);
-                        sendEditRequestEmailNotification({ type: "ATTENDANCE_EDIT_REQUEST", ...reqPayload });
+                            timestamp: nowMs
+                        });
 
                         document.getElementById('correction-modal').style.display = 'none';
                         return alert("✅ Edit request sent to Admin successfully! Notifications have been emailed.");
-                    } catch(err) {
-                        return alert("Failed to submit request.");
+                    } catch (err) {
+                        return alert("Failed to submit request: " + err.message);
                     }
                 }
             }
@@ -4402,24 +4400,44 @@ function getActiveTeacherName() {
             }
 
             const docId = `att_${activeCenter}_${normDoc(targetClass)}_${normDoc(targetSection)}_${normDoc(targetSubject)}_${monthKey}`;
-            const docRef = getCollection("attendance_records").doc(docId);
 
-         try {
-                const snap = await docRef.get();
-                if (!snap.exists) return alert("No attendance record found for this month.");
-                let data = snap.data();
-                if (!data.records[dateStr]) data.records[dateStr] = {};
-                
-                const oldStatus = data.records[dateStr][stuId] || "P";
-                data.records[dateStr][stuId] = newStatus;
-                
-                await getCollection("attendance_corrections").add({
-                    center: activeCenter, className: currentReg.c, section: currentReg.s, subject: currentReg.sub,
-                    studentId: stuId, date: dateStr, oldStatus, newStatus, reason, author: activeStaff ? activeStaff.email : 'Admin', timestamp: Date.now()
-                });
+            try {
+                let qRec = sb.from("attendance_records").select("*").eq("branch_id", activeBranchId).eq("firestore_id", docId).limit(1);
+                if (activeSessionId) qRec = qRec.eq("session_id", activeSessionId);
+                const { data: recRows, error: fErr } = await qRec;
+                if (fErr) throw fErr;
+                if (!recRows || recRows.length === 0) return alert("No attendance record found for this month.");
 
-              await docRef.set(data);
-                await bumpAttendanceMetadata(monthKey);
+                const recRow = recRows[0];
+                const recordsObj = parseJsonObj(recRow.records);
+                if (!recordsObj[dateStr]) recordsObj[dateStr] = {};
+
+                const oldStatus = recordsObj[dateStr][stuId] || "P";
+                recordsObj[dateStr][stuId] = newStatus;
+
+                const { error: corrErr } = await sb.from("attendance_corrections").insert([{
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
+                    center: activeCenter,
+                    class_name: currentReg.c,
+                    section: currentReg.s,
+                    subject: currentReg.sub,
+                    student_id: stuId,
+                    date: dateStr,
+                    old_status: oldStatus,
+                    new_status: newStatus,
+                    reason,
+                    author: activeStaff ? activeStaff.email : 'Admin',
+                    timestamp_ms: Date.now()
+                }]);
+                if (corrErr) throw corrErr;
+
+                const { error: upErr } = await sb.from("attendance_records").update({
+                    records: recordsObj,
+                    last_updated_ms: Date.now(),
+                    updated_at: new Date().toISOString()
+                }).eq("id", recRow.id);
+                if (upErr) throw upErr;
 
         // --- AUTO-SYNC CLASS INCHARGE ON CORRECTION ---
                 if (targetSubject !== 'CLASS INCHARGE') {
@@ -4828,77 +4846,82 @@ function shareWholeClassWhatsApp() {
         }
 
 async function backgroundSyncClassIncharge(dateStr, monthKey, className, sectionName) {
-    try {
-        const snap = await getCollection("attendance_records")
-            .where("monthKey", "==", monthKey)
-            .where("className", "==", className)
-            .get();
-        
-        let aggregated = {};
-        let existingInchargeStatus = {}; // <--- NEW: Memory to protect Incharge's manual marks
+            try {
+                const docsArray = await fetchMonthAttendanceDocs(monthKey, className, sectionName);
+                let aggregated = {};
+                let existingInchargeStatus = {};
 
-        snap.forEach(doc => {
-            const data = doc.data();
-            if (normMatch(data.section) === normMatch(sectionName)) {
-                
-                // 1. Capture the existing Incharge record so we don't wipe it out
-                if (normMatch(data.subject) === "classincharge") {
-                    if (data.records && data.records[dateStr]) {
-                        existingInchargeStatus = data.records[dateStr];
-                    }
-                } 
-                // 2. Aggregate all other normal subjects
-                else if (normMatch(data.subject) !== "classincharge") {
-                    if (data.records && data.records[dateStr]) {
-                        Object.keys(data.records[dateStr]).forEach(stuId => {
-                            const status = data.records[dateStr][stuId];
-                            if (status === 'P') {
-                                aggregated[stuId] = 'P';
-                            } else if ((status === 'L' || status === 'A') && aggregated[stuId] !== 'P') {
-                                aggregated[stuId] = 'L';
+                docsArray.forEach(item => {
+                    const data = item.data;
+                    if (normMatch(data.section) === normMatch(sectionName)) {
+                        if (normMatch(data.subject) === "classincharge") {
+                            if (data.records && data.records[dateStr]) {
+                                existingInchargeStatus = { ...data.records[dateStr] };
                             }
-                        });
+                        } else {
+                            if (data.records && data.records[dateStr]) {
+                                Object.keys(data.records[dateStr]).forEach(stuId => {
+                                    const status = data.records[dateStr][stuId];
+                                    if (status === 'P') {
+                                        aggregated[stuId] = 'P';
+                                    } else if ((status === 'L' || status === 'A') && aggregated[stuId] !== 'P') {
+                                        aggregated[stuId] = 'L';
+                                    }
+                                });
+                            }
+                        }
                     }
+                });
+
+                if (dateStr < "2026-10-12") {
+                    Object.keys(existingInchargeStatus).forEach(stuId => {
+                        if (existingInchargeStatus[stuId] === 'P') {
+                            aggregated[stuId] = 'P';
+                        }
+                    });
                 }
+
+                const inchargeDocId = `att_${activeCenter}_${normDoc(className)}_${normDoc(sectionName)}_CLASS_INCHARGE_${monthKey}`;
+                let qInc = sb.from("attendance_records").select("*").eq("branch_id", activeBranchId).eq("firestore_id", inchargeDocId).limit(1);
+                if (activeSessionId) qInc = qInc.eq("session_id", activeSessionId);
+                const { data: incRows } = await qInc;
+                const existingIncRow = incRows && incRows[0] ? incRows[0] : null;
+                const mergedRecs = existingIncRow ? parseJsonObj(existingIncRow.records) : {};
+
+                if (Object.keys(aggregated).length > 0) {
+                    mergedRecs[dateStr] = aggregated;
+                    if (existingIncRow) {
+                        await sb.from("attendance_records").update({
+                            records: mergedRecs,
+                            last_updated_ms: Date.now(),
+                            updated_at: new Date().toISOString()
+                        }).eq("id", existingIncRow.id);
+                    } else {
+                        await sb.from("attendance_records").insert([{
+                            firestore_id: inchargeDocId,
+                            branch_id: activeBranchId,
+                            session_id: activeSessionId,
+                            class_name: className,
+                            section: sectionName,
+                            subject: "CLASS INCHARGE",
+                            month_key: monthKey,
+                            records: mergedRecs,
+                            last_updated_ms: Date.now(),
+                            updated_at: new Date().toISOString()
+                        }]);
+                    }
+                } else if (existingIncRow && mergedRecs[dateStr]) {
+                    delete mergedRecs[dateStr];
+                    await sb.from("attendance_records").update({
+                        records: mergedRecs,
+                        last_updated_ms: Date.now(),
+                        updated_at: new Date().toISOString()
+                    }).eq("id", existingIncRow.id);
+                }
+            } catch (err) {
+                console.warn("Background Class Incharge auto-sync failed:", err);
             }
-        });
-
-        // --- THE IRONCLAD INCHARGE RULE ---
-        // For dates before 12-Oct-2026: Never let background sync downgrade a 'P' to an 'L'.
-        // For dates >= 2026-10-12: Exam records are separated, so allow dynamic downgrading to 'L' if all subjects/exams are marked 'L'.
-        if (dateStr < "2026-10-12") {
-            Object.keys(existingInchargeStatus).forEach(stuId => {
-                if (existingInchargeStatus[stuId] === 'P') {
-                    aggregated[stuId] = 'P'; 
-                }
-            });
         }
-
-        const inchargeDocId = `att_${activeCenter}_${normDoc(className)}_${normDoc(sectionName)}_CLASS_INCHARGE_${monthKey}`;
-        const inchargeDocRef = getCollection("attendance_records").doc(inchargeDocId);
-
-    if (Object.keys(aggregated).length > 0) {
-            await inchargeDocRef.set({
-                className: className,
-                section: sectionName,
-                subject: "CLASS INCHARGE",
-                monthKey: monthKey,
-                lastUpdated: Date.now(),
-                records: {
-                    [dateStr]: aggregated
-                }
-            }, { merge: true });
-            await bumpAttendanceMetadata(monthKey);
-        } else {
-            // If all other subjects are unmarked/deleted, automatically clean up the Incharge record too
-            await inchargeDocRef.update({
-                [`records.${dateStr}`]: firebase.firestore.FieldValue.delete()
-            }).catch(() => {});
-        }
-    } catch (err) {
-        console.warn("Background Class Incharge auto-sync failed:", err);
-    }
-}
 
 async function saveDailyAttendance() {
     if(!currentReg.canEdit || activeStudent || isAdmin) return;
