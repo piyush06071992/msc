@@ -560,7 +560,37 @@
         window.hasUnlockRights = false;
         const REQUIRED_HEADERS = ["CHAPTER NAME", "LECTURE NUMBER", "SUBTOPICS", "Target days for chapter", "Standard Class Duration", "Target Minutes For Chapter"];
         let structureData = [], assignments = [], planners = [], staffList = [], timetableData = [], holidaysData = [];
-        let isDemoMode = false, isDrillEditMode = false, currentUploadId = "", pendingSyllabusRows = [];
+       let isDemoMode = false, isDrillEditMode = false, currentUploadId = "", pendingSyllabusRows = [];
+
+        function findPlannerForSubject(st, sub, expectedId) {
+            const subSlug = String(sub || '').replace(/\s+/g, '_').toLowerCase();
+            const clsNorm = String(st?.className || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+            const secNorm = String(st?.sectionName || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+
+            return planners.find(p => {
+                if (p.id === expectedId) return true;
+                const pid = String(p.id || '').toLowerCase();
+                if (st?.id && pid === `${String(st.id).toLowerCase()}_${subSlug}`) return true;
+                if (st?.dbId && pid === `${String(st.dbId).toLowerCase()}_${subSlug}`) return true;
+                if (clsNorm && secNorm && pid.includes(clsNorm) && pid.includes(secNorm) && pid.endsWith(`_${subSlug}`)) return true;
+                return false;
+            }) || null;
+        }
+
+        function findAssignmentForSubject(st, sub, expectedId) {
+            const subSlug = String(sub || '').replace(/\s+/g, '_').toLowerCase();
+            const clsNorm = String(st?.className || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+            const secNorm = String(st?.sectionName || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+
+            return assignments.find(a => {
+                if (a.id === expectedId) return true;
+                const aid = String(a.id || '').toLowerCase();
+                if (st?.id && aid === `${String(st.id).toLowerCase()}_${subSlug}`) return true;
+                if (st?.dbId && aid === `${String(st.dbId).toLowerCase()}_${subSlug}`) return true;
+                if (clsNorm && secNorm && aid.includes(clsNorm) && aid.includes(secNorm) && aid.endsWith(`_${subSlug}`)) return true;
+                return false;
+            }) || {};
+        }
         let lastDrillParams = {}, activeUploadRowIndex = null;
         let summaryGroupBy = 'CLASS';
         
@@ -708,6 +738,7 @@
 
                 structureData = (structRes.data || []).map(s => ({
                     ...s,
+                    dbId: s.id,
                     id: s.firestore_id || s.id,
                     className: s.class_name ?? s.className ?? '',
                     sectionName: s.section_name ?? s.sectionName ?? '',
@@ -715,7 +746,20 @@
                 }));
                 structureData.sort((a, b) => String(a.className).localeCompare(String(b.className)) || String(a.sectionName).localeCompare(String(b.sectionName)));
 
-                assignments = (assignRes.data || []).map(a => {
+                let rawAssignRows = assignRes.data || [];
+                let rawPlannerRows = plannerRes.data || [];
+
+                // Fallback: if session_id filter returned no rows for this branch, load branch-level rows so legacy/null-session rows are not missed
+                if (activeSessionId && rawAssignRows.length === 0) {
+                    const { data: allBranchAssigns } = await sb.from("lesson_planner_assignments").select("*").eq("branch_id", activeBranchId);
+                    rawAssignRows = allBranchAssigns || [];
+                }
+                if (activeSessionId && rawPlannerRows.length === 0) {
+                    const { data: allBranchPlanners } = await sb.from("lesson_planners").select("*").eq("branch_id", activeBranchId);
+                    rawPlannerRows = allBranchPlanners || [];
+                }
+
+                assignments = rawAssignRows.map(a => {
                     const raw = parseJsonField(a.raw_data);
                     return {
                         ...raw,
@@ -726,7 +770,7 @@
                     };
                 });
 
-                planners = (plannerRes.data || []).map(normalizePlannerRow);
+                planners = rawPlannerRows.map(normalizePlannerRow);
 
                 staffList = (staffRes.data || [])
                     .filter(doc => String(doc.status ?? parseJsonField(doc.details).status ?? 'approved').toLowerCase() === 'approved')
@@ -781,12 +825,16 @@
                             });
                         }
 
-                        if (lastLogged && lastLogged < todayISO) {
-                            const struct = structureData.find(st => planner.id.startsWith(st.id + '_'));
+                       if (lastLogged && lastLogged < todayISO) {
+                            const struct = structureData.find(st =>
+                                planner.id.startsWith(st.id + '_') ||
+                                (st.dbId && planner.id.startsWith(st.dbId + '_'))
+                            );
                             if (struct) {
                                 const className = struct.className;
                                 const sectionName = struct.sectionName;
-                                const subIdPart = planner.id.substring(struct.id.length + 1);
+                                const matchedPrefix = planner.id.startsWith(st.id + '_') ? st.id : st.dbId;
+                                const subIdPart = planner.id.substring(String(matchedPrefix).length + 1);
                                 const subject = struct.subjects.find(s => s.replace(/\s+/g, '_') === subIdPart) || subIdPart.replace(/_/g, ' ');
 
                                 let missedWorkingDays = 0;
@@ -870,7 +918,12 @@
                     let sectionHtml = '';
                     st.subjects.filter(s => !['BREAK','EVENT','EXAM','ASSEMBLY'].includes(s.toUpperCase())).forEach((sub, i) => {
                         const id = `${st.id}_${sub}`.replace(/\s+/g, '_');
-                        const data = assignments.find(a => a.id === id) || {};
+                        const matchedAssign = findAssignmentForSubject(st, sub, id);
+                        const matchedPlan = findPlannerForSubject(st, sub, id);
+                        const data = {
+                            ...matchedAssign,
+                            isUploaded: Boolean(matchedAssign.isUploaded || (matchedPlan && Array.isArray(matchedPlan.syllabusData) && matchedPlan.syllabusData.length > 0))
+                        };
                         const hasDate = data.targetDate && data.targetDate !== "";
                         
                         const actionBtn = hasDate 
@@ -1425,8 +1478,8 @@ function getScheduleSnapshotForDate(dateIso) {
             list.forEach(st => {
                 st.subjects.filter(s => !['BREAK','EVENT','EXAM','ASSEMBLY'].includes(s.toUpperCase())).forEach((sub, i) => {
                     const id = `${st.id}_${sub}`.replace(/\s+/g, '_');
-                    const assign = assignments.find(a => a.id === id) || {};
-                    const planner = planners.find(p => p.id === id);
+                    const assign = findAssignmentForSubject(st, sub, id);
+                    const planner = findPlannerForSubject(st, sub, id);
 
                     let sPct = 0, tPct = 0, chDone = 0, chTotal = 0, remainingTargetDays = 0;
                     let totalDayGap = 0, totalMinGap = 0;
@@ -1835,8 +1888,14 @@ function getScheduleSnapshotForDate(dateIso) {
             document.getElementById('drill-subtitle').innerText = `${cls} | ${sec}`;
             
             const container = document.getElementById('drill-chapter-container'); container.innerHTML = '';
-            const assign = assignments.find(a => a.id === fullId) || {};
-            const planner = planners.find(p => p.id === fullId);
+           const matchedStruct = structureData.find(st =>
+                st.subjects.some(s => {
+                    const candidateId = `${st.id}_${s}`.replace(/\s+/g, '_');
+                    return candidateId === fullId || fullId.startsWith(`${st.id}_`) || fullId.startsWith(`${st.dbId}_`);
+                })
+            );
+            const assign = matchedStruct ? findAssignmentForSubject(matchedStruct, sub, fullId) : (assignments.find(a => a.id === fullId) || {});
+            const planner = matchedStruct ? findPlannerForSubject(matchedStruct, sub, fullId) : (planners.find(p => p.id === fullId) || null);
 
             const unlockBtn = document.getElementById('admin-unlock-btn');
             if (window.hasUnlockRights) {
