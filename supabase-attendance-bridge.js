@@ -314,16 +314,27 @@
                         };
                     },
                     set: async (payload) => {
-                        await ensureContext();
-                        const row = { ...payload };
-                        if (!globalTables.has(table)) {
-                            if (!row.branch_id && window.activeBranchId) row.branch_id = window.activeBranchId;
-                            if (!row.session_id && window.activeSessionId) row.session_id = window.activeSessionId;
-                        }
-                        if (!row.firestore_id) row.firestore_id = docId;
-                        const { error } = await sbClient.from(table).upsert([row], { onConflict: "firestore_id" });
-                        if (error) throw error;
-                    },
+                    await ensureContext();
+                    const mapped = {};
+                    Object.entries(payload || {}).forEach(([k, v]) => {
+                        mapped[mapCol(table, k)] = v;
+                    });
+                    if (!globalTables.has(table)) {
+                        if (!mapped.branch_id && window.activeBranchId) mapped.branch_id = window.activeBranchId;
+                        if (!mapped.session_id && window.activeSessionId) mapped.session_id = window.activeSessionId;
+                    }
+                    if (!mapped.firestore_id) mapped.firestore_id = docId;
+                    const { error } = await sbClient.from(table).upsert([mapped], { onConflict: "firestore_id" });
+                    if (error) throw error;
+                },
+                update: async (payload) => {
+                    const mapped = {};
+                    Object.entries(payload || {}).forEach(([k, v]) => {
+                        mapped[mapCol(table, k)] = v;
+                    });
+                    const { error } = await applyKeyFilter(sbClient.from(table).update(mapped));
+                    if (error) throw error;
+                },
                     update: async (payload) => {
                         const { error } = await applyKeyFilter(sbClient.from(table).update(payload));
                         if (error) throw error;
