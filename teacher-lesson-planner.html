@@ -171,6 +171,20 @@
             try { return JSON.parse(raw); } catch (_) { return {}; }
         }
 
+        async function fetchAllSupabaseRows(buildQueryFn, pageSize = 1000) {
+            let from = 0;
+            const all = [];
+            while (true) {
+                const { data, error } = await buildQueryFn().range(from, from + pageSize - 1);
+                if (error) throw error;
+                const batch = data || [];
+                all.push(...batch);
+                if (batch.length < pageSize) break;
+                from += pageSize;
+            }
+            return all;
+        }
+
         function isTruthyPermission(val) {
             if (val === true) return true;
             if (typeof val === 'string') {
@@ -762,19 +776,23 @@
                     }
                 });
 
-                {
-                    let ttFallbackQ = sb.from("timetable")
-                        .select("id, day, class_name, section, subject, teacher_name, teacher_email, start24, end24, time_range, duration, remark")
-                        .eq("branch_id", activeBranchId);
-                    if (activeSessionId) ttFallbackQ = ttFallbackQ.eq("session_id", activeSessionId);
-                    const { data: ttFallbackRows } = await ttFallbackQ;
-                    if (ttFallbackRows && ttFallbackRows.length > 0) {
-                        liveMasterRowsCache = ttFallbackRows.map(normalizeSlot);
-                    } else if (!liveMasterRowsCache) {
-                        const { data: allBranchTt } = await sb.from("timetable")
+               {
+                    let ttFallbackRows = await fetchAllSupabaseRows(() => {
+                        let q = sb.from("timetable")
                             .select("id, day, class_name, section, subject, teacher_name, teacher_email, start24, end24, time_range, duration, remark")
                             .eq("branch_id", activeBranchId);
-                        liveMasterRowsCache = (allBranchTt || []).map(normalizeSlot);
+                        if (activeSessionId) q = q.eq("session_id", activeSessionId);
+                        return q;
+                    });
+                    if (ttFallbackRows.length === 0 && !liveMasterRowsCache) {
+                        ttFallbackRows = await fetchAllSupabaseRows(() =>
+                            sb.from("timetable")
+                                .select("id, day, class_name, section, subject, teacher_name, teacher_email, start24, end24, time_range, duration, remark")
+                                .eq("branch_id", activeBranchId)
+                        );
+                    }
+                    if (ttFallbackRows.length > 0 || !liveMasterRowsCache) {
+                        liveMasterRowsCache = ttFallbackRows.map(normalizeSlot);
                     }
                 }
 
