@@ -291,44 +291,49 @@
                 if (error) throw error;
                 return { id: data.id, data: () => normalizeRowForApp(table, data) };
             },
-            doc: (docId) => ({
-                id: docId,
-                get: async () => {
-                    await ensureContext();
-                    let q = sbClient.from(table).select("*");
-                    if (!globalTables.has(table) && window.activeBranchId) {
-                        q = q.eq("branch_id", window.activeBranchId);
-                        if (window.activeSessionId) q = q.eq("session_id", window.activeSessionId);
+           doc: (docId) => {
+                const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(docId || ""));
+                const applyKeyFilter = (query) => isUuid ? query.or(`id.eq.${docId},firestore_id.eq.${docId}`) : query.eq("firestore_id", docId);
+
+                return {
+                    id: docId,
+                    get: async () => {
+                        await ensureContext();
+                        let q = sbClient.from(table).select("*");
+                        if (!globalTables.has(table) && window.activeBranchId) {
+                            q = q.eq("branch_id", window.activeBranchId);
+                            if (window.activeSessionId) q = q.eq("session_id", window.activeSessionId);
+                        }
+                        const { data, error } = await applyKeyFilter(q).limit(1);
+                        if (error) throw error;
+                        const found = data && data[0];
+                        return {
+                            exists: Boolean(found),
+                            id: found ? (found.firestore_id || found.id) : docId,
+                            data: () => (found ? normalizeRowForApp(table, found) : {})
+                        };
+                    },
+                    set: async (payload) => {
+                        await ensureContext();
+                        const row = { ...payload };
+                        if (!globalTables.has(table)) {
+                            if (!row.branch_id && window.activeBranchId) row.branch_id = window.activeBranchId;
+                            if (!row.session_id && window.activeSessionId) row.session_id = window.activeSessionId;
+                        }
+                        if (!row.firestore_id) row.firestore_id = docId;
+                        const { error } = await sbClient.from(table).upsert([row], { onConflict: "firestore_id" });
+                        if (error) throw error;
+                    },
+                    update: async (payload) => {
+                        const { error } = await applyKeyFilter(sbClient.from(table).update(payload));
+                        if (error) throw error;
+                    },
+                    delete: async () => {
+                        const { error } = await applyKeyFilter(sbClient.from(table).delete());
+                        if (error) throw error;
                     }
-                    const { data, error } = await q.or(`id.eq.${docId},firestore_id.eq.${docId}`).limit(1);
-                    if (error) throw error;
-                    const found = data && data[0];
-                    return {
-                        exists: Boolean(found),
-                        id: found ? (found.firestore_id || found.id) : docId,
-                        data: () => (found ? normalizeRowForApp(table, found) : {})
-                    };
-                },
-                set: async (payload) => {
-                    await ensureContext();
-                    const row = { ...payload };
-                    if (!globalTables.has(table)) {
-                        if (!row.branch_id && window.activeBranchId) row.branch_id = window.activeBranchId;
-                        if (!row.session_id && window.activeSessionId) row.session_id = window.activeSessionId;
-                    }
-                    if (!row.firestore_id) row.firestore_id = docId;
-                    const { error } = await sbClient.from(table).upsert([row], { onConflict: "firestore_id" });
-                    if (error) throw error;
-                },
-                update: async (payload) => {
-                    const { error } = await sbClient.from(table).update(payload).or(`id.eq.${docId},firestore_id.eq.${docId}`);
-                    if (error) throw error;
-                },
-                delete: async () => {
-                    const { error } = await sbClient.from(table).delete().or(`id.eq.${docId},firestore_id.eq.${docId}`);
-                    if (error) throw error;
-                }
-            })
+                };
+            }
         };
         return chain;
     }
