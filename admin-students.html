@@ -825,6 +825,13 @@
         }
 
         function fromDbStudentRow(row) {
+            const rawAddl = row.additional_sections ?? row.additionalSections ?? [];
+            const addlList = Array.isArray(rawAddl)
+                ? rawAddl
+                : (typeof rawAddl === "string" && rawAddl.trim()
+                    ? rawAddl.split(",").map(s => s.trim()).filter(Boolean)
+                    : []);
+
             return {
                 id: row.firestore_id || row.id,
                 _uuid: row.id,
@@ -833,6 +840,9 @@
                 sessionId: row.session_id,
                 className: row.class_name || row.className || "",
                 section: row.section || row.section_name || "",
+                additionalSections: addlList,
+                optionalSubject: row.optional_subject || row.optionalSubject || "",
+                optSubEffectiveDate: row.opt_sub_effective_date || row.optSubEffectiveDate || "",
                 rollNo: row.roll_no || "",
                 admNo: row.adm_no || "",
                 name: row.name || "",
@@ -845,16 +855,36 @@
                 whatsapp1: row.whatsapp1 || "",
                 whatsapp2: row.whatsapp2 || "",
                 category: row.category || "",
+                prevSchool: row.prev_school || row.prevSchool || "",
+                station: row.station || "",
+                remarks: row.remarks || "",
                 admissionStatus: row.admission_status || row.admissionStatus || "APPROVED",
-                isActive: row.is_active !== false && row.isActive !== false
+                isActive: row.is_active !== false && row.isActive !== false,
+                statusChangeDate: row.status_change_date || row.statusChangeDate || "",
+                statusRemark: row.status_remark || row.statusRemark || "",
+                prevClass: row.prev_class || row.prevClass || "",
+                prevSection: row.prev_section || row.prevSection || "",
+                prevCenter: row.prev_center || row.prevCenter || "",
+                transferDate: row.transfer_date || row.transferDate || ""
             };
         }
 
         function toDbStudentRow(stu, branchId, sessionId, docId) {
+            const addlList = Array.isArray(stu.additionalSections)
+                ? stu.additionalSections
+                : (typeof stu.additionalSections === "string" && stu.additionalSections.trim()
+                    ? stu.additionalSections.split(",").map(s => s.trim()).filter(Boolean)
+                    : []);
+
             return {
                 firestore_id: docId || stu.firestoreId || stu.id,
                 branch_id: branchId || activeBranchId,
                 session_id: sessionId || activeSessionId,
+                class_name: stu.className != null ? String(stu.className).trim() : null,
+                section: stu.section != null ? String(stu.section).trim() : null,
+                additional_sections: addlList,
+                optional_subject: stu.optionalSubject ? String(stu.optionalSubject) : null,
+                opt_sub_effective_date: stu.optSubEffectiveDate ? String(stu.optSubEffectiveDate) : null,
                 roll_no: stu.rollNo != null ? String(stu.rollNo) : null,
                 adm_no: stu.admNo != null ? String(stu.admNo) : null,
                 name: stu.name != null ? String(stu.name) : null,
@@ -866,7 +896,18 @@
                 m_mobile: stu.mMobile != null ? String(stu.mMobile) : null,
                 whatsapp1: stu.whatsapp1 != null ? String(stu.whatsapp1) : null,
                 whatsapp2: stu.whatsapp2 != null ? String(stu.whatsapp2) : null,
-                category: stu.category != null ? String(stu.category) : null
+                category: stu.category != null ? String(stu.category) : null,
+                prev_school: stu.prevSchool != null ? String(stu.prevSchool) : null,
+                station: stu.station != null ? String(stu.station) : null,
+                remarks: stu.remarks != null ? String(stu.remarks) : null,
+                admission_status: stu.admissionStatus ? String(stu.admissionStatus) : "APPROVED",
+                is_active: stu.isActive !== false,
+                status_change_date: stu.statusChangeDate ? String(stu.statusChangeDate) : null,
+                status_remark: stu.statusRemark ? String(stu.statusRemark) : null,
+                prev_class: stu.prevClass ? String(stu.prevClass) : null,
+                prev_section: stu.prevSection ? String(stu.prevSection) : null,
+                prev_center: stu.prevCenter ? String(stu.prevCenter) : null,
+                transfer_date: stu.transferDate ? String(stu.transferDate) : null
             };
         }
 
@@ -1442,7 +1483,11 @@
 
             try {
                 const targetStu = globalPendingData.find(s => s.id === stuId) || globalStudentsData.find(s => s.id === stuId);
-                let q = sb.from("students").update({ roll_no: rollToAssign.toUpperCase() })
+                let q = sb.from("students").update({
+                    roll_no: rollToAssign.toUpperCase(),
+                    admission_status: "APPROVED",
+                    is_active: true
+                })
                     .eq("branch_id", activeBranchId)
                     .eq("session_id", activeSessionId);
                 q = (targetStu && targetStu._uuid) ? q.eq("id", targetStu._uuid) : q.eq("firestore_id", stuId);
@@ -1504,14 +1549,17 @@
                 const CHUNK_SIZE = 200;
                 for (let i = 0; i < filtered.length; i += CHUNK_SIZE) {
                     const chunk = filtered.slice(i, i + CHUNK_SIZE);
-                    const ids = chunk.map(s => s._uuid || s.id);
-                    const col = chunk[0] && chunk[0]._uuid ? "id" : "firestore_id";
-                    const { error } = await sb.from("students")
-                        .update({ roll_no: chunk[0].rollNo || null })
-                        .in(col, ids)
-                        .eq("branch_id", activeBranchId)
-                        .eq("session_id", activeSessionId);
-                    if (error) throw error;
+                    for (const stu of chunk) {
+                        let q = sb.from("students").update({
+                            admission_status: "APPROVED",
+                            is_active: true
+                        })
+                            .eq("branch_id", activeBranchId)
+                            .eq("session_id", activeSessionId);
+                        q = stu._uuid ? q.eq("id", stu._uuid) : q.eq("firestore_id", stu.id);
+                        const { error } = await q;
+                        if (error) throw error;
+                    }
                 }
                 await loadAllSupabaseData();
                 alert(`✅ Successfully processed ${filtered.length} student(s)!`);
@@ -2346,7 +2394,11 @@ document.getElementById('sp-class').innerText = stu.className || "N/A";
 
             try {
                 const targetStu = globalStudentsData.find(s => s.id === studentId);
-                let q = sb.from("students").update({ roll_no: targetStu ? targetStu.rollNo : null })
+                let q = sb.from("students").update({
+                    is_active: targetState,
+                    status_change_date: date,
+                    status_remark: remark
+                })
                     .eq("branch_id", activeBranchId)
                     .eq("session_id", activeSessionId);
                 q = (targetStu && targetStu._uuid) ? q.eq("id", targetStu._uuid) : q.eq("firestore_id", studentId);
@@ -2457,13 +2509,14 @@ document.getElementById('sp-class').innerText = stu.className || "N/A";
                     transferDate: transferDate
                 };
 
+                const updatedStu = { ...stu, ...transferPayload };
                 if (transferBranch !== activeCenter) {
                     const targetCtx = getBranchSessionForCenter(transferBranch);
                     const cleanRoll = stu.rollNo ? stu.rollNo.replace(/[^a-zA-Z0-9]/g, '_') : Math.random().toString(36).substr(2, 9);
                     const newDocId = `${transferBranch}_${newClass.replace(/[^a-zA-Z0-9]/g, '')}_${newSec.replace(/[^a-zA-Z0-9]/g, '')}_${cleanRoll}`;
 
                     const { error: insErr } = await sb.from("students").insert([
-                        toDbStudentRow(stu, targetCtx.branch_id, targetCtx.session_id, newDocId)
+                        toDbStudentRow(updatedStu, targetCtx.branch_id, targetCtx.session_id, newDocId)
                     ]);
                     if (insErr) throw insErr;
 
@@ -2478,7 +2531,14 @@ document.getElementById('sp-class').innerText = stu.className || "N/A";
                     alert(`✅ Student transferred to ${transferBranch} successfully!`);
                     closeStudentProfile();
                 } else {
-                    let updQ = sb.from("students").update({ roll_no: stu.rollNo || null })
+                    let updQ = sb.from("students").update({
+                        class_name: newClass,
+                        section: newSec,
+                        prev_class: stu.className,
+                        prev_section: stu.section,
+                        prev_center: activeCenter,
+                        transfer_date: transferDate
+                    })
                         .eq("branch_id", activeBranchId)
                         .eq("session_id", activeSessionId);
                     updQ = stu._uuid ? updQ.eq("id", stu._uuid) : updQ.eq("firestore_id", activeProfileStudentId);
@@ -2569,14 +2629,20 @@ async function saveStudentProfileInline(e) {
                     roll_no: updates.rollNo,
                     adm_no: updates.admNo,
                     gender: updates.gender,
+                    optional_subject: updates.optionalSubject || null,
+                    opt_sub_effective_date: updates.optSubEffectiveDate || null,
                     add_date: updates.addDate,
+                    remarks: updates.remarks,
+                    category: updates.category,
+                    prev_school: updates.prevSchool,
+                    station: updates.station,
+                    additional_sections: updates.additionalSections,
                     father_name: updates.fatherName,
                     mother_name: updates.motherName,
                     f_mobile: updates.fMobile,
                     m_mobile: updates.mMobile,
                     whatsapp1: updates.whatsapp1,
-                    whatsapp2: updates.whatsapp2,
-                    category: updates.category
+                    whatsapp2: updates.whatsapp2
                 }).eq("branch_id", activeBranchId).eq("session_id", activeSessionId);
                 updQ = (stu && stu._uuid) ? updQ.eq("id", stu._uuid) : updQ.eq("firestore_id", activeProfileStudentId);
                 const { error: updErr } = await updQ;
@@ -3103,7 +3169,7 @@ async function saveStudentProfileInline(e) {
             }
 
             const checkboxes = document.querySelectorAll('.bo-stu-cb');
-            let updateCount = 0;
+            const pendingUpdates = [];
 
             checkboxes.forEach(cb => {
                 const stuId = cb.value;
@@ -3115,18 +3181,28 @@ async function saveStudentProfileInline(e) {
                 const currentOpt = stu.optionalSubject || "";
 
                 if (targetSub !== "SKIP" && currentOpt !== targetSub) {
-                    stu.optionalSubject = targetSub;
-                    stu.optSubEffectiveDate = effectiveDate;
-                    updateCount++;
+                    pendingUpdates.push({ stu, targetSub });
                 }
             });
 
-            if (updateCount > 0) {
+            if (pendingUpdates.length > 0) {
                 try {
                     const btn = document.querySelector('button[onclick="saveBulkOptionalAssignments()"]');
                     const orig = btn.innerText;
                     btn.innerText = "⏳ Saving Database...";
                     btn.disabled = true;
+
+                    for (const item of pendingUpdates) {
+                        let q = sb.from("students").update({
+                            optional_subject: item.targetSub,
+                            opt_sub_effective_date: effectiveDate
+                        })
+                            .eq("branch_id", activeBranchId)
+                            .eq("session_id", activeSessionId);
+                        q = item.stu._uuid ? q.eq("id", item.stu._uuid) : q.eq("firestore_id", item.stu.id);
+                        const { error } = await q;
+                        if (error) throw error;
+                    }
 
                     await loadAllSupabaseData();
 
