@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva | Unified Attendance Hub</title>
     <script src="tailwind-engine.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
@@ -167,14 +168,11 @@
         </div>
 
         <div class="flex items-center gap-3 flex-wrap justify-end w-full sm:w-auto">
-            <div id="admin-branch-container" class="hidden items-center gap-2 bg-slate-800 p-1.5 rounded-xl border border-slate-700 flex-wrap">
+            <div id="admin-branch-container" class="hidden items-center gap-2 bg-slate-800 p-1.5 rounded-xl border border-slate-700">
                 <span class="text-[10px] font-black text-purple-300 uppercase tracking-widest px-2">Branch:</span>
                 <select id="branch-selector" onchange="switchBranch()" class="bg-slate-900 text-white text-xs font-black px-3 py-1.5 rounded-lg outline-none cursor-pointer border border-slate-700">
-                    <option value="">Loading Branch...</option>
-                </select>
-                <span class="text-[10px] font-black text-indigo-300 uppercase tracking-widest px-1">Session:</span>
-                <select id="session-selector" onchange="switchSession(this.value)" class="bg-slate-900 text-white text-xs font-black px-3 py-1.5 rounded-lg outline-none cursor-pointer border border-slate-700">
-                    <option value="">Loading Session...</option>
+                    <option value="GHUMARWIN">Ghumarwin</option>
+                    <option value="DHARAMSHALA">Dharamshala</option>
                 </select>
             </div>
             
@@ -862,20 +860,35 @@
     </div>
 
     <script>
-   const SUPABASE_URL = "https://lpccpiozrqgxgusculbs.supabase.co";
-        const SUPABASE_ANON_KEY = "sb_publishable_1q3Xilxs8lSK_dyWwbfvzQ_7zJOQV6v";
-        const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+   const firebaseConfig = {
+            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
+            authDomain: "shop-portal-bbbbb.firebaseapp.com",
+            projectId: "shop-portal-bbbbb",
+            storageBucket: "shop-portal-bbbbb.firebasestorage.app",
+            messagingSenderId: "701377739976",
+            appId: "1:701377739976:web:99998220272090e56e79fd"
+        };
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
 
+        // --- ENABLE FIRESTORE OFFLINE PERSISTENCE ---
+        db.enablePersistence({ synchronizeTabs: true }).catch(err => {
+            console.warn("Offline persistence issue:", err.message);
+        });
+
+        // --- NETWORK CONNECTION LISTENERS ---
         window.addEventListener('offline', () => {
             const banner = document.getElementById('offline-banner');
-            if (banner) { banner.classList.remove('hidden'); banner.classList.add('flex'); }
+            if(banner) { banner.classList.remove('hidden'); banner.classList.add('flex'); }
         });
 
         window.addEventListener('online', () => {
             const banner = document.getElementById('offline-banner');
-            if (banner) { banner.classList.add('hidden'); banner.classList.remove('flex'); }
+            if(banner) { banner.classList.add('hidden'); banner.classList.remove('flex'); }
+            
+            // Auto-refresh the Save button if they just came online so they know it synced
             const saveBtn = document.getElementById('save-daily-btn');
-            if (saveBtn && saveBtn.innerHTML.includes('Offline')) {
+            if(saveBtn && saveBtn.innerHTML.includes('Offline')) {
                 saveBtn.innerHTML = "✅ Synced to Cloud";
                 setTimeout(() => { saveBtn.innerHTML = "💾 Save Attendance"; saveBtn.disabled = false; }, 3000);
             }
@@ -884,17 +897,11 @@
         document.addEventListener('DOMContentLoaded', () => {
             if (!navigator.onLine) {
                 const banner = document.getElementById('offline-banner');
-                if (banner) { banner.classList.remove('hidden'); banner.classList.add('flex'); }
+                if(banner) { banner.classList.remove('hidden'); banner.classList.add('flex'); }
             }
         });
 
-        let allBranchesList = [];
-        let allSessionsList = [];
-        let activeBranchId = null;
-        let activeSessionId = null;
-        let activeSessionName = "2026 - 2027";
-
-        let activeCenter = (sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN").toUpperCase();
+ let activeCenter = "GHUMARWIN";
         let activeStaff = null;
         let activeStudent = null;
         let holidaysData = [];
@@ -902,14 +909,14 @@
         let timetableData = [];
         let studentsData = [];
         let staffList = [];
-        let currentReg = null;
-        let currentMonthDoc = {};
+        let currentReg = null; 
+        let currentMonthDoc = {}; 
         let todayISO = "";
-        let absentWhatsAppList = [];
-        let remedialDataMap = {};
+      let absentWhatsAppList = [];
+        let remedialDataMap = {}; 
         let specialLeavesData = [];
         let teacherExamRoomDuty = null;
-
+        
         window.approvedEditUnlocked = false;
         window.activeEditTokenId = null;
         window.adminShowInchargeOnly = false;
@@ -919,435 +926,172 @@
             window.speechSynthesis.onvoiceschanged = () => { ttsVoices = window.speechSynthesis.getVoices(); };
         }
 
-        const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+   const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
         const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
 
-        function normDoc(val) { return String(val || "").replace(/\s/g, '_').toUpperCase(); }
-        function normMatch(val) { return String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase(); }
-
-        function parseJsonObj(val) {
-            if (!val) return {};
-            if (typeof val === 'object' && !Array.isArray(val)) return val;
-            if (typeof val === 'string') {
-                try { return JSON.parse(val); } catch (_) { return {}; }
-            }
-            return {};
-        }
-
-        function normalizeSessionKey(lbl) {
-            return String(lbl || '').replace(/\s+/g, '').replace(/[–—−]/g, '-');
-        }
-
-        function getRelevantIncharge(className, sectionName) {
+       function getRelevantIncharge(className, sectionName) {
             if (!window.instituteStructures) return "";
             const match = window.instituteStructures.find(st => normMatch(st.className) === normMatch(className) && normMatch(st.sectionName || st.section) === normMatch(sectionName));
             if (!match) return "";
             return match.secInchargeName || match.classInchargeName || "";
         }
 
-        function isRegisterSubjectIncharge(className, sectionName, subjectName) {
+  function isRegisterSubjectIncharge(className, sectionName, subjectName) {
+            // Dedicated standalone register for Incharges
             return normMatch(subjectName) === normMatch("CLASS INCHARGE");
         }
-
         function getSectionIncharge(className, sectionName) {
             if (!window.instituteStructures) return "";
             const match = window.instituteStructures.find(st => normMatch(st.className) === normMatch(className) && normMatch(st.sectionName || st.section) === normMatch(sectionName));
             return match ? (match.secInchargeName || "") : "";
         }
 
-        async function fetchAllPaginated(table, queryFn, pageSize = 1000) {
-            let out = [];
-            let from = 0;
-            while (true) {
-                let q = sb.from(table).select("*");
-                if (queryFn) q = queryFn(q);
-                const { data, error } = await q.range(from, from + pageSize - 1);
-                if (error) throw error;
-                const batch = data || [];
-                out = out.concat(batch);
-                if (batch.length < pageSize) break;
-                from += pageSize;
-            }
-            return out;
-        }
+      const normDoc = (val) => String(val || "").replace(/\s/g, '_').toUpperCase();
+        const normMatch = (val) => String(val || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-        function resolveDefaultSessionForBranch(branchId, targetDateIso = todayISO) {
-            const bSessions = allSessionsList.filter(s => s.branch_id === branchId && s.is_active !== false);
-            if (bSessions.length === 0) return null;
+        // Custom IDB Cache Deleted. Firebase Native Cache handles offline & Delta Syncs automatically.
 
-            const savedId = sessionStorage.getItem(`minerva_att_session_${branchId}`) || sessionStorage.getItem(`minerva_session_${branchId}`);
-            if (savedId && bSessions.some(s => s.id === savedId)) {
-                return bSessions.find(s => s.id === savedId);
-            }
+async function getCachedMonthAttendanceDocs(monthKey, className = null, sectionName = null) {
+    try {
+        console.log(`🔄 Fetching attendance for ${monthKey} via optimized query...`);
+        let query = getCollection("attendance_records").where("monthKey", "==", monthKey);
+        
+        // Enforce strict parameters to prevent unindexed full-collection scans
+        if (className) query = query.where("className", "==", className);
+        if (sectionName) query = query.where("section", "==", sectionName);
+        
+        const snap = await query.get();
+        let docsArray = [];
+        snap.forEach(doc => docsArray.push({ id: doc.id, data: doc.data() }));
+        return docsArray;
+    } catch (e) {
+        console.error("Attendance fetch error:", e);
+        return [];
+    }
+}
 
-            if (targetDateIso) {
-                const dateMatched = bSessions.find(s =>
-                    s.start_date && s.end_date &&
-                    String(s.start_date).slice(0, 10) <= targetDateIso &&
-                    String(s.end_date).slice(0, 10) >= targetDateIso
-                );
-                if (dateMatched) return dateMatched;
-            }
+async function bumpAttendanceMetadata(monthKey) {
+    // Deleted! Firebase native cache tracks document timestamps invisibly.
+    // No more manual version bumping required.
+    return Promise.resolve();
+}
 
-            return bSessions.find(s => normalizeSessionKey(s.session_name) === '2026-2027') || bSessions[0];
-        }
-
-        function populateBranchAndSessionSelectors() {
-            const bSel = document.getElementById('branch-selector');
-            if (bSel && allBranchesList.length > 0) {
-                bSel.innerHTML = allBranchesList.map(b => {
-                    const key = String(b.name || "").trim().toUpperCase();
-                    return `<option value="${key}" ${b.id === activeBranchId ? 'selected' : ''}>${b.name}</option>`;
-                }).join('');
-                bSel.value = activeCenter;
-            }
-
-            const sSel = document.getElementById('session-selector');
-            if (sSel && activeBranchId) {
-                const bSessions = allSessionsList.filter(s => s.branch_id === activeBranchId && s.is_active !== false);
-                sSel.innerHTML = bSessions.map(s =>
-                    `<option value="${s.id}" ${s.id === activeSessionId ? 'selected' : ''}>${s.session_name}</option>`
-                ).join('');
-                if (activeSessionId) sSel.value = activeSessionId;
-            }
-        }
-
-        async function resolveBranchAndSessionContext(preferredCenterName = null) {
-            const [bRes, sRes] = await Promise.all([
-                sb.from("branches").select("*").order("created_at", { ascending: true }),
-                sb.from("branch_sessions").select("*").order("start_date", { ascending: false })
-            ]);
-            if (bRes.error) throw bRes.error;
-            if (sRes.error) throw sRes.error;
-
-            allBranchesList = (bRes.data || []).filter(b => b.is_active !== false);
-            allSessionsList = sRes.data || [];
-
-            const targetName = String(preferredCenterName || activeCenter || "GHUMARWIN").trim().toUpperCase();
-            const matchedBranch = allBranchesList.find(b => String(b.name || "").trim().toUpperCase() === targetName)
-                || allBranchesList.find(b => String(b.name || "").trim().toUpperCase().includes(targetName))
-                || allBranchesList[0];
-
-            if (matchedBranch) {
-                activeBranchId = matchedBranch.id;
-                activeCenter = String(matchedBranch.name || targetName).trim().toUpperCase();
-                sessionStorage.setItem('minervaAdminCenter', activeCenter);
-                sessionStorage.setItem('minervaAdminBranchId', activeBranchId);
-
-                const chosenSess = resolveDefaultSessionForBranch(activeBranchId, todayISO);
-                activeSessionId = chosenSess ? chosenSess.id : null;
-                activeSessionName = chosenSess ? chosenSess.session_name : "2026 - 2027";
-                if (activeSessionId) {
-                    sessionStorage.setItem(`minerva_att_session_${activeBranchId}`, activeSessionId);
-                }
-            }
-
-            populateBranchAndSessionSelectors();
-        }
-
-        async function switchSession(sessionId) {
-            if (!sessionId) return;
-            activeSessionId = sessionId;
-            if (activeBranchId) {
-                sessionStorage.setItem(`minerva_att_session_${activeBranchId}`, sessionId);
-            }
-            const sessObj = allSessionsList.find(s => s.id === sessionId);
-            if (sessObj) activeSessionName = sessObj.session_name;
-            studentsData = [];
-            if (isAdmin) {
-                await fetchData("Admin");
-            } else if (activeStudent) {
-                await fetchDataForStudent(activeStudent);
-            } else {
-                const nameVal = activeStaff && activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : (activeStaff ? activeStaff.email : "Teacher");
-                await fetchData(nameVal);
-            }
-        }
-
-        function fromDbStudent(row) {
-            const rawAddl = row.additional_sections ?? row.additionalSections ?? [];
-            const addl = Array.isArray(rawAddl)
-                ? rawAddl
-                : (typeof rawAddl === 'string' && rawAddl.trim() ? rawAddl.split(',').map(s => s.trim()).filter(Boolean) : []);
-            return {
-                id: row.firestore_id || row.id,
-                _uuid: row.id,
-                branchId: row.branch_id,
-                sessionId: row.session_id,
-                className: row.class_name ?? row.className ?? "",
-                section: row.section ?? row.section_name ?? "",
-                additionalSections: addl,
-                optionalSubject: row.optional_subject ?? row.optionalSubject ?? "",
-                optSubEffectiveDate: row.opt_sub_effective_date ?? row.optSubEffectiveDate ?? "",
-                rollNo: row.roll_no ?? row.rollNo ?? "",
-                admNo: row.adm_no ?? row.admNo ?? "",
-                name: row.name || "",
-                gender: row.gender || "M",
-                addDate: row.add_date ?? row.addDate ?? "",
-                fatherName: row.father_name ?? row.fatherName ?? "",
-                motherName: row.mother_name ?? row.motherName ?? "",
-                fMobile: row.f_mobile ?? row.fMobile ?? "",
-                mMobile: row.m_mobile ?? row.mMobile ?? "",
-                whatsapp1: row.whatsapp1 || "",
-                whatsapp2: row.whatsapp2 || "",
-                category: row.category || "",
-                admissionStatus: row.admission_status ?? row.admissionStatus ?? "APPROVED",
-                isActive: row.is_active !== false && row.isActive !== false,
-                statusChangeDate: row.status_change_date ?? row.statusChangeDate ?? "",
-                statusRemark: row.status_remark ?? row.statusRemark ?? "",
-                prevClass: row.prev_class ?? row.prevClass ?? "",
-                prevSection: row.prev_section ?? row.prevSection ?? "",
-                prevCenter: row.prev_center ?? row.prevCenter ?? "",
-                transferDate: row.transfer_date ?? row.transferDate ?? "",
-                remarks: row.remarks || ""
-            };
-        }
-
-        function fromDbStructure(row) {
-            return {
-                id: row.id,
-                className: row.class_name ?? row.className ?? "",
-                sectionName: row.section_name ?? row.sectionName ?? row.section ?? "",
-                subjects: Array.isArray(row.subjects) ? row.subjects : [],
-                optionalSubjects: Array.isArray(row.optional_subjects) ? row.optional_subjects : (Array.isArray(row.optionalSubjects) ? row.optionalSubjects : []),
-                secInchargeName: row.sec_incharge_name ?? row.secInchargeName ?? "",
-                classInchargeName: row.class_incharge_name ?? row.classInchargeName ?? "",
-                registerHeader: row.register_header ?? row.registerHeader ?? "",
-                registerName: row.register_name ?? row.registerName ?? ""
-            };
-        }
-
-        function fromDbTimetable(row) {
-            return {
-                id: row.id,
-                day: row.day || "",
-                className: row.class_name ?? row.className ?? "",
-                section: row.section ?? row.section_name ?? "",
-                sectionName: row.section ?? row.section_name ?? "",
-                start24: row.start24 ?? row.start_24 ?? "",
-                end24: row.end24 ?? row.end_24 ?? "",
-                timeRange: row.time_range ?? row.timeRange ?? "",
-                duration: row.duration || "",
-                subject: row.subject || "",
-                teacher: row.teacher ?? row.teacher_name ?? "NONE",
-                teacherName: row.teacher_name ?? row.teacher ?? "NONE",
-                teacherEmail: row.teacher_email ?? row.teacherEmail ?? "",
-                room: row.room || "",
-                remark: row.remark || ""
-            };
-        }
-
-        function fromDbHoliday(row) {
-            return {
-                id: row.id,
-                type: row.event_type ?? row.type ?? "HOLIDAY",
-                staffStatus: row.staff_status ?? row.staffStatus ?? "OFF",
-                suspendClasses: row.suspend_classes !== false && row.suspendClasses !== false,
-                startDate: row.start_date ?? row.startDate,
-                endDate: row.end_date ?? row.endDate ?? row.start_date ?? row.startDate,
-                reason: row.reason || "",
-                isFullDay: row.is_full_day !== false && row.isFullDay !== false,
-                startTime: row.start_time ?? row.startTime ?? "",
-                endTime: row.end_time ?? row.endTime ?? "",
-                targetClasses: Array.isArray(row.target_classes) ? row.target_classes : (Array.isArray(row.targetClasses) ? row.targetClasses : ['ALL']),
-                targetStaff: Array.isArray(row.target_staff) ? row.target_staff : (Array.isArray(row.targetStaff) ? row.targetStaff : ['ALL']),
-                status: row.status || "ACTIVE",
-                timestamp: row.timestamp_ms ?? row.timestamp ?? 0
-            };
-        }
-
-        function fromDbHistory(row) {
-            const rawType = row.entry_type ?? row.type ?? "";
-            return {
-                id: row.id,
-                date: row.date,
-                type: rawType,
-                entry_type: rawType,
-                tag: row.tag || "",
-                status: row.status || "ACTIVE",
-                schedule: Array.isArray(row.schedule) ? row.schedule : [],
-                timestamp: row.last_updated_ms ?? row.timestamp ?? 0
-            };
-        }
-
-        function fromDbRemedial(row) {
-            const remKey = row.firestore_id || `${row.date}_${normDoc(row.class_name)}_${normDoc(row.section)}`;
-            return {
-                id: remKey,
-                _uuid: row.id,
-                date: row.date,
-                className: row.class_name ?? row.className ?? "",
-                section: row.section || "",
-                reason: row.reason || "Remedial Class"
-            };
-        }
-
-        function fromDbSpecialLeave(row) {
-            return {
-                id: row.id,
-                studentId: row.student_id ?? row.studentId ?? "",
-                className: row.class_name ?? row.className ?? "",
-                section: row.section || "",
-                date: row.date,
-                type: row.type || "FULL",
-                category: row.category || "LEAVE",
-                startTime: row.start_time ?? row.startTime ?? "",
-                endTime: row.end_time ?? row.endTime ?? "",
-                reason: row.reason || "",
-                authorizerName: row.authorizer_name ?? row.authorizerName ?? "Admin",
-                authorizerDept: row.authorizer_dept ?? row.authorizerDept ?? "Admin Office",
-                authorizerEmail: row.authorizer_email ?? row.authorizerEmail ?? "",
-                status: row.status || "ACTIVE",
-                timestamp: row.timestamp_ms ?? row.timestamp ?? 0
-            };
-        }
-
-        async function fetchMonthAttendanceDocs(monthKey, className = null, sectionName = null) {
+      async function getCachedStudentsRoster(prefix) {
             try {
-                const rows = await fetchAllPaginated("attendance_records", q => {
-                    let query = q.eq("branch_id", activeBranchId).eq("month_key", monthKey);
-                    if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                    if (className) query = query.eq("class_name", className);
-                    if (sectionName) query = query.eq("section", sectionName);
-                    return query;
-                });
-
-                return rows.map(r => ({
-                    id: r.firestore_id || r.id,
-                    _uuid: r.id,
-                    data: {
-                        className: r.class_name ?? r.className ?? "",
-                        section: r.section || "",
-                        subject: r.subject || "",
-                        monthKey: r.month_key ?? r.monthKey ?? monthKey,
-                        records: parseJsonObj(r.records),
-                        aggregatedStats: parseJsonObj(r.aggregated_stats ?? r.aggregatedStats),
-                        lastUpdated: r.last_updated_ms ?? r.lastUpdated ?? 0
-                    }
-                }));
-            } catch (e) {
-                console.error("Attendance fetch error:", e);
-                return [];
-            }
-        }
-
-        async function getStudentsRoster() {
-            try {
-                let rows = await fetchAllPaginated("students", q => {
-                    let query = q.eq("branch_id", activeBranchId);
-                    if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                    return query;
-                });
-
-                if (rows.length === 0 && activeSessionId) {
-                    rows = await fetchAllPaginated("students", q => q.eq("branch_id", activeBranchId));
-                }
-
-                const mapped = rows.map(fromDbStudent).filter(s => s.admissionStatus !== "PENDING");
-
-                if (isAdmin || (currentReg && currentReg.isExamRoom)) {
-                    return mapped.filter(s => s.isActive !== false || (s.isActive === false && s.statusChangeDate));
-                }
-
-                let targetClasses = new Set();
-                if (window.myRegistersCache) {
-                    window.myRegistersCache.forEach(reg => {
-                        if (reg.c && reg.s) targetClasses.add(`${normMatch(reg.c)}|${normMatch(reg.s)}`);
+                console.log("🔄 Fetching Students securely via Firebase Native Cache...");
+                let freshRoster = [];
+                
+                // ADMIN VIEW: Full Access to all students
+                if (isAdmin) {
+                    const snap = await db.collection(prefix + "students").where("admissionStatus", "!=", "PENDING").get();
+                    snap.forEach(d => {
+                        const data = d.data();
+                        if (data.isActive !== false || (data.isActive === false && data.statusChangeDate)) {
+                             freshRoster.push({ id: d.id, ...data });
+                        }
                     });
-                }
-                if (currentReg && currentReg.c && currentReg.s && currentReg.c !== 'EXAM_ROOM') {
-                    targetClasses.add(`${normMatch(currentReg.c)}|${normMatch(currentReg.s)}`);
-                }
+                } 
+                // TEACHER VIEW: Targeted Access (Saves Massive Firebase Reads)
+                else {
+                    let targetClasses = new Set();
+                    
+                    // Add regular classes from teacher's schedule
+                    if (window.myRegistersCache) {
+                        window.myRegistersCache.forEach(reg => {
+                            if (reg.c && reg.s) targetClasses.add(`${reg.c}|${reg.s}`);
+                        });
+                    }
+                    
+                    // Add the class of the currently opened register if not in schedule
+                    if (currentReg && currentReg.c && currentReg.s && currentReg.c !== 'EXAM_ROOM') {
+                        targetClasses.add(`${currentReg.c}|${currentReg.s}`);
+                    }
 
-                return mapped.filter(s => {
-                    const activeOk = s.isActive !== false || (s.isActive === false && s.statusChangeDate);
-                    if (!activeOk) return false;
-                    if (targetClasses.size === 0) return true;
-                    return targetClasses.has(`${normMatch(s.className)}|${normMatch(s.section)}`);
-                });
+                    if (targetClasses.size > 0) {
+                        const classGroups = {};
+                        targetClasses.forEach(tc => {
+                            const [c, s] = tc.split('|');
+                            if (!classGroups[c]) classGroups[c] = new Set();
+                            classGroups[c].add(s);
+                        });
+
+                        for (const className of Object.keys(classGroups)) {
+                            const sections = Array.from(classGroups[className]);
+                            while (sections.length > 0) {
+                                const chunk = sections.splice(0, 10);
+                                const snap = await db.collection(prefix + "students")
+                                    .where("className", "==", className)
+                                    .where("section", "in", chunk)
+                                    .get();
+                                    
+                                snap.forEach(d => {
+                                    const data = d.data();
+                                    if ((data.isActive !== false || (data.isActive === false && data.statusChangeDate)) && data.admissionStatus !== 'PENDING') {
+                                        freshRoster.push({ id: d.id, ...data });
+                                    }
+                                });
+                            }
+                        }
+                    } else if (currentReg && currentReg.isExamRoom) {
+                         // Exam Room fallback
+                         const snap = await db.collection(prefix + "students").where("admissionStatus", "!=", "PENDING").get();
+                         snap.forEach(d => {
+                             const data = d.data();
+                             if (data.isActive !== false || (data.isActive === false && data.statusChangeDate)) {
+                                  freshRoster.push({ id: d.id, ...data });
+                             }
+                         });
+                    }
+                }
+                return freshRoster;
             } catch (e) {
-                console.error("Students roster fetch error:", e);
+                console.warn("Fallback to network fetch:", e);
                 return [];
             }
         }
 
-        async function getMasterConfig(teacherName, userIsAdmin) {
+      async function getCachedMasterConfig(prefix, teacherName, userIsAdmin) {
             try {
-                const nowObj = new Date();
+                console.log("🔄 Fetching targeted configs via Firebase Native Cache...");
+                
+                // If not an admin, restrict the timetable query directly to the teacher's name
+                // to eliminate heavy full-collection reads. Admins pull the full set for auditing.
+                let timetableQuery = getCollection("timetable");
+                if (!userIsAdmin && teacherName && teacherName !== "Admin") {
+                    timetableQuery = timetableQuery.where("teacherName", "==", teacherName);
+                }
+
+               const nowObj = new Date();
+                const todayLocalIso = new Date(nowObj.getTime() - nowObj.getTimezoneOffset() * 60000).toISOString().split('T')[0];
                 const sessionStartIso = "2026-08-01";
                 const lookbackDate = new Date(nowObj.getTime() - nowObj.getTimezoneOffset() * 60000);
                 lookbackDate.setDate(lookbackDate.getDate() - 30);
                 const minHistoryIso = lookbackDate.toISOString().split('T')[0];
 
-                const [ttRows, structRows, holRows, staffRows, histRows, remRows, splRows] = await Promise.all([
-                    fetchAllPaginated("timetable", q => {
-                        let query = q.eq("branch_id", activeBranchId);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    }),
-                    fetchAllPaginated("institute_structure", q => {
-                        let query = q.eq("branch_id", activeBranchId);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    }),
-                    fetchAllPaginated("school_holidays", q => {
-                        let query = q.eq("branch_id", activeBranchId).gte("end_date", sessionStartIso);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    }),
+                const [ttSnap, structSnap, holSnap, staffSnap, histSnap, remSnap, splSnap] = await Promise.all([
+                    timetableQuery.get(),
+                    getCollection("institute_structure").get(),
+                    getCollection("school_holidays").where("endDate", ">=", sessionStartIso).get(),
                     userIsAdmin
-                        ? fetchAllPaginated("staff_applications")
-                        : Promise.resolve([]),
-                    fetchAllPaginated("timetable_history", q => {
-                        let query = q.eq("branch_id", activeBranchId).gte("date", minHistoryIso);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    }),
-                    fetchAllPaginated("remedial_classes", q => {
-                        let query = q.eq("branch_id", activeBranchId).gte("date", sessionStartIso);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    }),
-                    fetchAllPaginated("special_leaves", q => {
-                        let query = q.eq("branch_id", activeBranchId).eq("status", "ACTIVE").gte("date", minHistoryIso);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    })
+                        ? db.collection("staff_applications").where("status", "==", "approved").get()
+                        : Promise.resolve({ docs: [] }),
+                    getCollection("timetable_history").where("date", ">=", minHistoryIso).get(),
+                    getCollection("remedial_classes").where("date", ">=", sessionStartIso).get(),
+                    getCollection("special_leaves").where("status", "==", "ACTIVE").where("date", ">=", minHistoryIso).get()
                 ]);
 
-                const approvedStaff = (staffRows || []).filter(r => {
-                    const det = parseJsonObj(r.details);
-                    const st = String(r.status || det.status || "approved").toLowerCase();
-                    return st === "approved";
-                }).map(r => {
-                    const det = parseJsonObj(r.details);
-                    return {
-                        id: r.id,
-                        email: r.email,
-                        status: r.status || det.status || "approved",
-                        attendancePermission: r.attendance_permission ?? r.attendancePermission ?? det.attendancePermission ?? null,
-                        details: det
-                    };
-                });
-
-                const mappedTimetable = (ttRows || []).map(fromDbTimetable);
-                const filteredTimetable = (!userIsAdmin && teacherName && teacherName !== "Admin")
-                    ? mappedTimetable.filter(t => normMatch(t.teacherName) === normMatch(teacherName) || normMatch(t.teacher) === normMatch(teacherName))
-                    : mappedTimetable;
-
                 return {
-                    timetable: filteredTimetable,
-                    allBranchTimetable: mappedTimetable,
-                    structures: (structRows || []).map(fromDbStructure),
-                    holidays: (holRows || []).map(fromDbHoliday),
-                    timetableHistory: (histRows || []).map(fromDbHistory),
-                    staff: approvedStaff,
-                    remedial: (remRows || []).map(fromDbRemedial),
-                    specialLeaves: (splRows || []).map(fromDbSpecialLeave)
+                    timetable: ttSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    structures: structSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    holidays: holSnap.docs.map(d => d.data()),
+                    timetableHistory: histSnap.docs.map(d => d.data()),
+                    staff: staffSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    remedial: remSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+                    specialLeaves: splSnap.docs.map(d => ({ id: d.id, ...d.data() }))
                 };
             } catch (e) {
                 console.error("Master config fetch error:", e);
-                return { timetable: [], allBranchTimetable: [], structures: [], holidays: [], timetableHistory: [], staff: [], remedial: [], specialLeaves: [] };
+                return { timetable: [], structures: [], holidays: [], timetableHistory: [], staff: [], remedial: [], specialLeaves: [] };
             }
         }
 
@@ -1371,143 +1115,136 @@
             }
         }
 
-async function refreshEditRequestBadge() {
-            if (!activeBranchId) return;
-            let q = sb.from("attendance_edit_requests").select("id").eq("branch_id", activeBranchId).eq("status", "PENDING");
-            if (activeSessionId) q = q.eq("session_id", activeSessionId);
-            const { data, error } = await q;
-            if (error) return;
-            const badge = document.getElementById('edit-req-badge');
-            if (badge) {
-                const count = (data || []).length;
-                if (count > 0) {
-                    badge.innerText = count;
-                    badge.classList.remove('hidden');
-                } else {
-                    badge.classList.add('hidden');
-                }
-            }
+async function init() {
+        // Updated to fetch the correct student session data
+        activeStudent = JSON.parse(sessionStorage.getItem('minervaStudentData') || 'null');
+        activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff') || 'null');
+        
+        // Sends unauthenticated users back to the main hub
+        if (!activeStaff && !isAdmin && !activeStudent) return window.location.replace('index.html');
+
+       // --- RESTORED DATE INITIALIZATION ---
+        const today = new Date();
+        const offset = today.getTimezoneOffset() * 60000;
+        todayISO = new Date(today - offset).toISOString().split('T')[0];
+
+        let safeName = "Admin";
+        if (activeStudent) {
+            safeName = activeStudent.name || activeStudent.email || "Student";
+            activeCenter = String(activeStudent.center || "").toUpperCase().includes('DHARAMSHALA') ? "DHARAMSHALA" : "GHUMARWIN";
+        } else if (activeStaff) {
+            safeName = activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : activeStaff.email;
         }
-
-        async function refreshTeacherApprovedBanner() {
-            if (!activeStaff || !activeStaff.email) return;
-            const { data, error } = await sb
-                .from("attendance_edit_requests")
-                .select("*")
-                .ilike("teacher_email", activeStaff.email.trim())
-                .in("status", ["APPROVED", "APPROVED_AND_UNMARKED"]);
-            if (error) return;
-
-            const banner = document.getElementById('approved-requests-banner');
-            const textEl = document.getElementById('approved-req-text');
-            const btnEl = document.getElementById('btn-ack-approved');
-            const unacked = (data || []).filter(r => !r.teacher_acknowledged);
-
-            if (unacked.length > 0 && banner) {
-                const latest = unacked[0];
-                const prettyDate = new Date(latest.date + "T00:00:00").toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-                const actionText = latest.status === "APPROVED_AND_UNMARKED" ? "Unmark Request Approved & Deleted" : "Edit Request Approved & Unlocked";
-                textEl.innerHTML = `Your request for <strong>Class ${latest.class_name} - Sec ${latest.section} (${latest.subject})</strong> on <strong>${prettyDate}</strong> has been processed.<br><span class="text-emerald-900 font-black bg-emerald-400 px-2 py-0.5 rounded mt-1.5 inline-block">${actionText}</span>`;
-                banner.classList.remove('hidden');
-                banner.classList.add('flex');
-                btnEl.onclick = async () => {
-                    btnEl.innerHTML = "⏳...";
-                    try {
-                        await sb.from("attendance_edit_requests").update({
-                            teacher_acknowledged: true,
-                            acknowledged_at_ms: Date.now()
-                        }).eq("id", latest.id);
-                        banner.classList.add('hidden');
-                        banner.classList.remove('flex');
-                        btnEl.innerHTML = "OK, Got It";
-                    } catch (e) {
-                        console.error(e);
-                        btnEl.innerHTML = "Retry";
+            
+if (isAdmin) {
+            document.getElementById('admin-branch-container').style.display = 'flex';
+            document.getElementById('admin-nav-tabs').style.display = 'flex';
+            
+            if (sessionStorage.getItem('minervaDelegatedAdmin') === 'true' && activeStaff) {
+                try {
+                    const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                    if (!staffSnap.empty) {
+                        const data = staffSnap.docs[0].data();
+                        const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                        if (centerKey) activeCenter = String(data.details[centerKey]).toUpperCase().includes('DHARAMSHALA') ? 'DHARAMSHALA' : 'GHUMARWIN';
                     }
-                };
-            } else if (banner) {
-                banner.classList.add('hidden');
-                banner.classList.remove('flex');
-            }
-        }
-
-        async function init() {
-            activeStudent = JSON.parse(sessionStorage.getItem('minervaStudentData') || 'null');
-            activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff') || 'null');
-
-            if (!activeStaff && !isAdmin && !activeStudent) return window.location.replace('index.html');
-
-            const today = new Date();
-            const offset = today.getTimezoneOffset() * 60000;
-            todayISO = new Date(today - offset).toISOString().split('T')[0];
-
-            let safeName = "Admin";
-            let preferredCenter = null;
-
-            if (activeStudent) {
-                safeName = activeStudent.name || activeStudent.email || "Student";
-                preferredCenter = activeStudent.center || null;
-            } else if (activeStaff) {
-                safeName = activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : activeStaff.email;
+                } catch (e) { console.error(e); }
+            } else {
+                activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
             }
 
-            if (isAdmin) {
-                document.getElementById('admin-branch-container').style.display = 'flex';
-                document.getElementById('admin-nav-tabs').style.display = 'flex';
+            document.getElementById('branch-selector').value = activeCenter;
+            
+            if (sessionStorage.getItem('minervaDelegatedAdmin') === 'true') {
+                const branchSel = document.getElementById('branch-selector');
+                branchSel.disabled = true;
+                branchSel.title = "Branch locked to your assigned staff center";
+                branchSel.classList.add('opacity-75', 'cursor-not-allowed');
 
-                if (sessionStorage.getItem('minervaDelegatedAdmin') === 'true' && activeStaff && activeStaff.email) {
-                    try {
-                        const { data: rows } = await sb.from("staff_applications").select("*").ilike("email", activeStaff.email.trim()).limit(1);
-                        if (rows && rows[0]) {
-                            const det = parseJsonObj(rows[0].details);
-                            const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
-                            if (centerKey) preferredCenter = det[centerKey];
-                        }
-                    } catch (e) { console.error(e); }
-                } else {
-                    preferredCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
-                }
+                const returnBtn = document.createElement('button');
+                returnBtn.onclick = returnToTeacherView;
+                returnBtn.className = "bg-rose-600 hover:bg-rose-500 text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-md transition-all ml-2 border border-rose-500";
+                returnBtn.innerHTML = "👤 Exit Admin View";
+                document.getElementById('admin-branch-container').appendChild(returnBtn);
+            }
 
-                await resolveBranchAndSessionContext(preferredCenter);
-
-                if (sessionStorage.getItem('minervaDelegatedAdmin') === 'true') {
-                    const branchSel = document.getElementById('branch-selector');
-                    branchSel.disabled = true;
-                    branchSel.title = "Branch locked to your assigned staff center";
-                    branchSel.classList.add('opacity-75', 'cursor-not-allowed');
-
-                    const returnBtn = document.createElement('button');
-                    returnBtn.onclick = returnToTeacherView;
-                    returnBtn.className = "bg-rose-600 hover:bg-rose-500 text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-md transition-all ml-2 border border-rose-500";
-                    returnBtn.innerHTML = "👤 Exit Admin View";
-                    document.getElementById('admin-branch-container').appendChild(returnBtn);
-                }
-
-                document.getElementById('user-badge').innerText = `God Mode (${activeCenter}) • ${activeSessionName}`;
+            document.getElementById('user-badge').innerText = `God Mode (${activeCenter}) - Read Only`;
                 document.getElementById('header-title').innerText = "Attendance Audit Desk";
                 await fetchData("Admin");
-                await refreshEditRequestBadge();
-                listenForMissingAttendance();
+                listenForMissingAttendance(); // <--- Initialize Scanner Here
+
+                // Live listener for pending edit requests to update tab badge
+                db.collection("attendance_edit_requests")
+                  .where("center", "==", activeCenter)
+                  .where("status", "==", "PENDING")
+                  .onSnapshot(snap => {
+                      const badge = document.getElementById('edit-req-badge');
+                      if(badge) {
+                          if (snap.size > 0) {
+                              badge.innerText = snap.size;
+                              badge.classList.remove('hidden');
+                          } else {
+                              badge.classList.add('hidden');
+                          }
+                      }
+                  });
             } else if (activeStudent) {
-                await resolveBranchAndSessionContext(preferredCenter);
                 document.getElementById('user-badge').innerText = `Student: ${safeName} (${activeStudent.className}-${activeStudent.section})`;
                 document.getElementById('header-title').innerText = "My Attendance Register";
                 await fetchDataForStudent(activeStudent);
-            } else {
-                try {
-                    const { data: rows } = await sb.from("staff_applications").select("*").ilike("email", activeStaff.email.trim()).limit(1);
-                    if (rows && rows[0]) {
-                        const det = parseJsonObj(rows[0].details);
-                        const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
-                        if (centerKey) preferredCenter = det[centerKey];
-                    }
-                } catch (e) { console.error(e); }
-
-                await resolveBranchAndSessionContext(preferredCenter);
-                document.getElementById('user-badge').innerText = `Teacher: ${safeName} (${activeCenter}) • ${activeSessionName}`;
-                await fetchData(safeName);
-                await refreshTeacherApprovedBanner();
-            }
+   } else {
+            try {
+                const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                if (!staffSnap.empty) {
+                    const data = staffSnap.docs[0].data();
+                    const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                    if (centerKey) activeCenter = String(data.details[centerKey]).toUpperCase().includes('DHARAMSHALA') ? 'DHARAMSHALA' : 'GHUMARWIN';
+                }
+            } catch (e) { console.error(e); }
+          document.getElementById('user-badge').innerText = `Teacher: ${safeName} (${activeCenter})`;
+            await fetchData(safeName);
+            
+            // Live listener for Teacher: Show banner when Admin approves an edit/unmark request
+            db.collection("attendance_edit_requests")
+              .where("teacherEmail", "==", activeStaff.email)
+              .where("status", "in", ["APPROVED", "APPROVED_AND_UNMARKED"])
+              .onSnapshot(snap => {
+                  const banner = document.getElementById('approved-requests-banner');
+                  const textEl = document.getElementById('approved-req-text');
+                  const btnEl = document.getElementById('btn-ack-approved');
+                  
+                  // Only process requests the teacher hasn't clicked "OK" on yet
+                  const unacked = snap.docs.filter(d => !d.data().teacherAcknowledged);
+                  
+                  if (unacked.length > 0 && banner) {
+                      const latest = unacked[0].data();
+                      const docId = unacked[0].id;
+                      const prettyDate = new Date(latest.date).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'});
+                      let actionText = latest.status === "APPROVED_AND_UNMARKED" ? "Unmark Request Approved & Deleted" : "Edit Request Approved & Unlocked";
+                      
+                      textEl.innerHTML = `Your request for <strong>Class ${latest.className} - Sec ${latest.section} (${latest.subject})</strong> on <strong>${prettyDate}</strong> has been processed.<br><span class="text-emerald-900 font-black bg-emerald-400 px-2 py-0.5 rounded mt-1.5 inline-block">${actionText}</span>`;
+                      
+                      banner.classList.remove('hidden');
+                      banner.classList.add('flex');
+                      
+                      btnEl.onclick = async () => {
+                          btnEl.innerHTML = "⏳...";
+                          try {
+                              await db.collection("attendance_edit_requests").doc(docId).update({ teacherAcknowledged: true, acknowledgedAt: Date.now() });
+                              banner.classList.add('hidden');
+                              banner.classList.remove('flex');
+                              btnEl.innerHTML = "OK, Got It";
+                          } catch (e) {
+                              console.error(e);
+                              btnEl.innerHTML = "Retry";
+                          }
+                      };
+                  } else if (banner) {
+                      banner.classList.add('hidden');
+                      banner.classList.remove('flex');
+                  }
+              });
+        }
 
             document.getElementById('daily-date-picker').value = todayISO;
             document.getElementById('daily-date-picker').max = todayISO;
@@ -1520,14 +1257,20 @@ async function refreshEditRequestBadge() {
 
             const monthSelect = document.getElementById('ledger-month');
             let mHtml = "";
-            for (let i = 0; i < 6; i++) {
-                let d = new Date();
-                d.setDate(1);
+            for(let i=0; i<6; i++) {
+                let d = new Date(); 
+                d.setDate(1); // Prevent month overflow by setting to the 1st
                 d.setMonth(d.getMonth() - i);
-                let val = `${d.getFullYear()}_${String(d.getMonth() + 1).padStart(2, '0')}`;
+                let val = `${d.getFullYear()}_${String(d.getMonth()+1).padStart(2,'0')}`;
                 mHtml += `<option value="${val}">${monthNames[d.getMonth()]} ${d.getFullYear()}</option>`;
             }
             monthSelect.innerHTML = mHtml;
+        }
+
+   function getCollection(name) {
+            const globalCollections = ['configs', 'staff_applications', 'system_metadata', 'attendance_edit_requests'];
+            if (globalCollections.includes(name)) return db.collection(name);
+            return activeCenter === "GHUMARWIN" ? db.collection(name) : db.collection(`${activeCenter.toLowerCase()}_${name}`);
         }
 
 function getActiveStudentsForDate(c, s, dateStr) {
@@ -1582,16 +1325,11 @@ function getActiveStudentsForDate(c, s, dateStr) {
             return rawDept.toString();
         }
 
-    async function switchBranch() {
-            const chosenName = document.getElementById('branch-selector').value;
-            if (activeBranchId) {
-                sessionStorage.removeItem(`minerva_att_session_${activeBranchId}`);
-            }
-            await resolveBranchAndSessionContext(chosenName);
-            studentsData = [];
-            document.getElementById('user-badge').innerText = `God Mode (${activeCenter}) • ${activeSessionName}`;
-            await fetchData("Admin");
-            await refreshEditRequestBadge();
+    function switchBranch() {
+            activeCenter = document.getElementById('branch-selector').value;
+            sessionStorage.setItem('minervaAdminCenter', activeCenter);
+            document.getElementById('user-badge').innerText = `God Mode (${activeCenter}) - Read Only`;
+            fetchData("Admin");
         }
 
         function toggleAdminInchargeFilter() {
@@ -1632,9 +1370,11 @@ function switchMainTab(tab) {
           if (tab === 'specialleaves') {
                 document.getElementById('spl-date').value = todayISO;
                 document.getElementById('spl-filter-date').value = todayISO;
-
+                
+                // Ensure student roster is loaded so names don't show as UNKNOWN
                 if (!studentsData || studentsData.length === 0) {
-                    getStudentsRoster().then(roster => {
+                    const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+                    getCachedStudentsRoster(centerPrefix).then(roster => {
                         studentsData = roster;
                         populateSpecialLeavesFilters();
                         loadSpecialLeavesView();
@@ -1673,19 +1413,13 @@ function switchMainTab(tab) {
         async function populateExamRoomDates() {
             const dateSelect = document.getElementById('exam-room-date-filter');
             try {
-                const rows = await fetchAllPaginated("exam_schedules", q => {
-                    let query = q.eq("branch_id", activeBranchId);
-                    if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                    return query;
-                });
-
+                const snap = await getCollection("exam_schedules").get();
                 let examMap = {};
-                (rows || []).forEach(data => {
-                    const raw = parseJsonObj(data.raw_data);
-                    const eType = data.exam_type || raw.type || "";
+                snap.forEach(doc => {
+                    const data = doc.data();
                     if (data.date) {
                         if (!examMap[data.date]) examMap[data.date] = new Set();
-                        if (eType) examMap[data.date].add(eType);
+                        if (data.type) examMap[data.date].add(data.type);
                     }
                 });
 
@@ -1701,7 +1435,7 @@ function switchMainTab(tab) {
                     const types = Array.from(examMap[d]).join(', ') || 'EXAM';
                     return `<option value="${d}">${pretty} — [${types}]</option>`;
                 }).join('');
-
+                
                 document.getElementById('examrooms-bookshelf').innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest border-2 border-dashed border-slate-200 rounded-3xl bg-white">Select an exam date from the dropdown to load rooms</div>`;
             } catch (e) {
                 console.error("Error fetching exam dates:", e);
@@ -1712,7 +1446,7 @@ function switchMainTab(tab) {
         async function loadExamRoomsForDate() {
             const dateStr = document.getElementById('exam-room-date-filter').value;
             const container = document.getElementById('examrooms-bookshelf');
-
+            
             if (!dateStr) {
                 container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs tracking-widest border-2 border-dashed border-slate-200 rounded-3xl bg-white">Select an exam date from the dropdown to load rooms</div>`;
                 return;
@@ -1722,26 +1456,26 @@ function switchMainTab(tab) {
 
             try {
                 let roomNames = new Set();
+                
+                const roomSnap = await db.collection("exam_seating_rooms")
+                    .where("date", "==", dateStr)
+                    .where("center", "==", activeCenter)
+                    .get();
 
-                let rQuery = sb.from("exam_seating_rooms").select("*").eq("branch_id", activeBranchId).eq("date", dateStr);
-                if (activeSessionId) rQuery = rQuery.eq("session_id", activeSessionId);
-                const { data: roomRows } = await rQuery;
-
-                if (roomRows && roomRows.length > 0) {
-                    roomRows.forEach(r => {
-                        const roomName = r.room_name ?? r.roomName;
-                        const allocs = parseJsonObj(r.allocations);
-                        if (roomName && Object.keys(allocs).length > 0) {
+                if (!roomSnap.empty) {
+                    roomSnap.forEach(doc => {
+                        const roomName = doc.data().roomName;
+                        if (roomName && Object.keys(doc.data().allocations || {}).length > 0) {
                             roomNames.add(roomName);
                         }
                     });
                 } else {
-                    let aQuery = sb.from("exam_seating_allocations").select("*").eq("branch_id", activeBranchId).eq("date", dateStr).limit(1);
-                    if (activeSessionId) aQuery = aQuery.eq("session_id", activeSessionId);
-                    const { data: allocRows } = await aQuery;
-                    if (allocRows && allocRows[0]) {
-                        const allocs = parseJsonObj(allocRows[0].allocations);
-                        Object.keys(allocs).forEach(seatId => {
+                    const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                    const allocSnap = await allocDocRef.get();
+                    if (allocSnap.exists) {
+                        const allocs = allocSnap.data().allocations || {};
+                        let parsedAllocs = typeof allocs === 'string' ? JSON.parse(allocs) : allocs;
+                        Object.keys(parsedAllocs).forEach(seatId => {
                             const roomName = seatId.split('-R')[0];
                             if (roomName) roomNames.add(roomName);
                         });
@@ -1791,149 +1525,21 @@ function switchMainTab(tab) {
         async function fetchDataForStudent(student) {
             const container = document.getElementById('bookshelf-container');
             try {
-                const [holRows, histRows, structRows] = await Promise.all([
-                    fetchAllPaginated("school_holidays", q => {
-                        let query = q.eq("branch_id", activeBranchId);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    }),
-                    fetchAllPaginated("timetable_history", q => {
-                        let query = q.eq("branch_id", activeBranchId);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    }),
-                    fetchAllPaginated("institute_structure", q => {
-                        let query = q.eq("branch_id", activeBranchId);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    })
+                const [holSnap, histSnap, structSnap] = await Promise.all([
+                    getCollection("school_holidays").get(),
+                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"]).get(),
+                    getCollection("institute_structure").where("className", "==", student.className).where("sectionName", "==", student.section).get()
                 ]);
 
-                holidaysData = (holRows || []).map(fromDbHoliday);
-                timetableHistoryData = (histRows || []).map(fromDbHistory).filter(h =>
-                    ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"].includes(h.type)
-                );
-
-                const matchedStruct = (structRows || []).map(fromDbStructure).find(st =>
-                    normMatch(st.className) === normMatch(student.className) &&
-                    normMatch(st.sectionName) === normMatch(student.section)
-                );
+                holidaysData = holSnap.docs.map(d => d.data());
+                timetableHistoryData = histSnap.docs.map(d => d.data());
 
                 let subs = [];
-                if (matchedStruct) {
-                    subs = [...(matchedStruct.subjects || [])];
+                if (!structSnap.empty) {
+                    subs = structSnap.docs[0].data().subjects || [];
+                    // Add the Class Incharge (Overall Attendance) Register to the front
                     subs.unshift("CLASS INCHARGE");
                 }
-
-                let html = `<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">`;
-                const colors = [ { spine: 'bg-blue-800', cover: 'bg-blue-600', text: 'text-blue-200' }, { spine: 'bg-emerald-800', cover: 'bg-emerald-600', text: 'text-emerald-200' }, { spine: 'bg-rose-800', cover: 'bg-rose-600', text: 'text-rose-200' }, { spine: 'bg-amber-700', cover: 'bg-amber-500', text: 'text-amber-100' }, { spine: 'bg-purple-800', cover: 'bg-purple-600', text: 'text-purple-200' } ];
-
-                subs.forEach((sub, i) => {
-                    const c = colors[i % colors.length];
-                    const safeArgs = `'${String(student.className).replace(/'/g, "\\'")}', '${String(student.section).replace(/'/g, "\\'")}', '${String(sub).replace(/'/g, "\\'")}', false`;
-
-                    const isInch = sub === "CLASS INCHARGE";
-                    const frameWrapperClass = isInch ? "wood-frame" : "";
-                    const coverLabel = isInch ? "Incharge" : "Subject Register";
-
-                    html += `<div onclick="openRegister(${safeArgs})" class="cursor-pointer group relative transition-transform hover:-translate-y-2 hover:rotate-1 duration-300 ${frameWrapperClass}">
-                        <div class="absolute -top-3 -right-3 bg-slate-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">View Only</div>
-                        <div class="relative w-full aspect-[3/4] rounded-r-2xl rounded-l-md shadow-[4px_4px_15px_rgba(0,0,0,0.1)] overflow-hidden flex">
-                            <div class="w-6 h-full ${c.spine} book-spine shrink-0 z-10 relative"></div>
-                            <div class="flex-1 h-full ${c.cover} p-4 flex flex-col justify-between relative">
-                                <div class="absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/20 to-transparent"></div>
-                                <div class="relative z-10">
-                                    <div class="text-[10px] font-black ${c.text} uppercase tracking-widest mb-1 border-b border-white/20 pb-1 inline-block">${coverLabel}</div>
-                                    <h3 class="text-xl font-black text-white uppercase tracking-tighter leading-none break-words">${student.className}</h3>
-                                    <p class="text-sm font-bold text-white/80 uppercase mt-1">Sec ${student.section}</p>
-                                </div>
-                                <div class="relative z-10 bg-white/15 backdrop-blur-sm border border-white/20 p-2 rounded-lg text-center mt-4">
-                                    <span class="text-[10px] font-black text-white uppercase tracking-widest line-clamp-2">${sub}</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>`;
-                });
-
-                container.innerHTML = html + `</div>`;
-            } catch (e) {
-                console.error(e);
-                container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs">Error loading student registers.</div>`;
-            }
-        }
-
-        async function fetchData(safeName) {
-            const container = document.getElementById('bookshelf-container');
-            try {
-                const masterBundle = await getMasterConfig(safeName, isAdmin);
-
-                timetableData = masterBundle.timetable;
-                window.fullBranchTimetable = masterBundle.allBranchTimetable || masterBundle.timetable;
-                const structures = masterBundle.structures;
-                holidaysData = masterBundle.holidays;
-                timetableHistoryData = masterBundle.timetableHistory;
-                staffList = masterBundle.staff;
-
-                remedialDataMap = {};
-                masterBundle.remedial.forEach(d => { remedialDataMap[d.id] = d; });
-
-                specialLeavesData = masterBundle.specialLeaves;
-                if (isAdmin) loadStaffListForPerms();
-
-                let html = `<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">`;
-                const colors = [ { spine: 'bg-blue-800', cover: 'bg-blue-600', text: 'text-blue-200' }, { spine: 'bg-emerald-800', cover: 'bg-emerald-600', text: 'text-emerald-200' }, { spine: 'bg-rose-800', cover: 'bg-rose-600', text: 'text-rose-200' }, { spine: 'bg-amber-700', cover: 'bg-amber-500', text: 'text-amber-100' }, { spine: 'bg-purple-800', cover: 'bg-purple-600', text: 'text-purple-200' } ];
-
-                subs.forEach((sub, i) => {
-                    const c = colors[i % colors.length];
-                    const safeArgs = `'${String(student.className).replace(/'/g, "\\'")}', '${String(student.section).replace(/'/g, "\\'")}', '${String(sub).replace(/'/g, "\\'")}', false`;
-
-                    const isInch = sub === "CLASS INCHARGE";
-                    const frameWrapperClass = isInch ? "wood-frame" : "";
-                    const coverLabel = isInch ? "Incharge" : "Subject Register";
-
-                    html += `<div onclick="openRegister(${safeArgs})" class="cursor-pointer group relative transition-transform hover:-translate-y-2 hover:rotate-1 duration-300 ${frameWrapperClass}">
-                        <div class="absolute -top-3 -right-3 bg-slate-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">View Only</div>
-                        <div class="relative w-full aspect-[3/4] rounded-r-2xl rounded-l-md shadow-[4px_4px_15px_rgba(0,0,0,0.1)] overflow-hidden flex">
-                            <div class="w-6 h-full ${c.spine} book-spine shrink-0 z-10 relative"></div>
-                            <div class="flex-1 h-full ${c.cover} p-4 flex flex-col justify-between relative">
-                                <div class="absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/20 to-transparent"></div>
-                                <div class="relative z-10">
-                                    <div class="text-[10px] font-black ${c.text} uppercase tracking-widest mb-1 border-b border-white/20 pb-1 inline-block">${coverLabel}</div>
-                                    <h3 class="text-xl font-black text-white uppercase tracking-tighter leading-none break-words">${student.className}</h3>
-                                    <p class="text-sm font-bold text-white/80 uppercase mt-1">Sec ${student.section}</p>
-                                </div>
-                                <div class="relative z-10 bg-white/15 backdrop-blur-sm border border-white/20 p-2 rounded-lg text-center mt-4">
-                                    <span class="text-[10px] font-black text-white uppercase tracking-widest line-clamp-2">${sub}</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>`;
-                });
-
-                container.innerHTML = html + `</div>`;
-            } catch (e) {
-                console.error(e);
-                container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs">Error loading student registers.</div>`;
-            }
-        }
-
-        async function fetchData(safeName) {
-            const container = document.getElementById('bookshelf-container');
-            try {
-                const masterBundle = await getMasterConfig(safeName, isAdmin);
-
-                timetableData = masterBundle.timetable;
-                window.fullBranchTimetable = masterBundle.allBranchTimetable || masterBundle.timetable;
-                const structures = masterBundle.structures;
-                holidaysData = masterBundle.holidays;
-                timetableHistoryData = masterBundle.timetableHistory;
-                staffList = masterBundle.staff;
-
-                remedialDataMap = {};
-                masterBundle.remedial.forEach(d => { remedialDataMap[d.id] = d; });
-
-                specialLeavesData = masterBundle.specialLeaves;
-                if (isAdmin) loadStaffListForPerms();
 
                 let html = `<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">`;
                 const colors = [ { spine: 'bg-blue-800', cover: 'bg-blue-600', text: 'text-blue-200' }, { spine: 'bg-emerald-800', cover: 'bg-emerald-600', text: 'text-emerald-200' }, { spine: 'bg-rose-800', cover: 'bg-rose-600', text: 'text-rose-200' }, { spine: 'bg-amber-700', cover: 'bg-amber-500', text: 'text-amber-100' }, { spine: 'bg-purple-800', cover: 'bg-purple-600', text: 'text-purple-200' } ];
@@ -1972,150 +1578,23 @@ function switchMainTab(tab) {
             }
         }
 
-    async function fetchDataForStudent(student) {
+    async function fetchData(safeName) {
             const container = document.getElementById('bookshelf-container');
-            try {
-                const [holRows, histRows, structRows] = await Promise.all([
-                    fetchAllPaginated("school_holidays", q => {
-                        let query = q.eq("branch_id", activeBranchId);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    }),
-                    fetchAllPaginated("timetable_history", q => {
-                        let query = q.eq("branch_id", activeBranchId);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    }),
-                    fetchAllPaginated("institute_structure", q => {
-                        let query = q.eq("branch_id", activeBranchId);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    })
-                ]);
+          try {
+       const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
 
-                holidaysData = (holRows || []).map(fromDbHoliday);
-                timetableHistoryData = (histRows || []).map(fromDbHistory).filter(h =>
-                    ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE"].includes(h.type)
-                );
-
-                const matchedStruct = (structRows || []).map(fromDbStructure).find(st =>
-                    normMatch(st.className) === normMatch(student.className) &&
-                    normMatch(st.sectionName) === normMatch(student.section)
-                );
-
-                let subs = [];
-                if (matchedStruct) {
-                    subs = [...(matchedStruct.subjects || [])];
-                    subs.unshift("CLASS INCHARGE");
-                }
-
-                let html = `<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">`;
-                const colors = [ { spine: 'bg-blue-800', cover: 'bg-blue-600', text: 'text-blue-200' }, { spine: 'bg-emerald-800', cover: 'bg-emerald-600', text: 'text-emerald-200' }, { spine: 'bg-rose-800', cover: 'bg-rose-600', text: 'text-rose-200' }, { spine: 'bg-amber-700', cover: 'bg-amber-500', text: 'text-amber-100' }, { spine: 'bg-purple-800', cover: 'bg-purple-600', text: 'text-purple-200' } ];
-
-                subs.forEach((sub, i) => {
-                    const c = colors[i % colors.length];
-                    const safeArgs = `'${String(student.className).replace(/'/g, "\\'")}', '${String(student.section).replace(/'/g, "\\'")}', '${String(sub).replace(/'/g, "\\'")}', false`;
-
-                    const isInch = sub === "CLASS INCHARGE";
-                    const frameWrapperClass = isInch ? "wood-frame" : "";
-                    const coverLabel = isInch ? "Incharge" : "Subject Register";
-
-                    html += `<div onclick="openRegister(${safeArgs})" class="cursor-pointer group relative transition-transform hover:-translate-y-2 hover:rotate-1 duration-300 ${frameWrapperClass}">
-                        <div class="absolute -top-3 -right-3 bg-slate-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">View Only</div>
-                        <div class="relative w-full aspect-[3/4] rounded-r-2xl rounded-l-md shadow-[4px_4px_15px_rgba(0,0,0,0.1)] overflow-hidden flex">
-                            <div class="w-6 h-full ${c.spine} book-spine shrink-0 z-10 relative"></div>
-                            <div class="flex-1 h-full ${c.cover} p-4 flex flex-col justify-between relative">
-                                <div class="absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/20 to-transparent"></div>
-                                <div class="relative z-10">
-                                    <div class="text-[10px] font-black ${c.text} uppercase tracking-widest mb-1 border-b border-white/20 pb-1 inline-block">${coverLabel}</div>
-                                    <h3 class="text-xl font-black text-white uppercase tracking-tighter leading-none break-words">${student.className}</h3>
-                                    <p class="text-sm font-bold text-white/80 uppercase mt-1">Sec ${student.section}</p>
-                                </div>
-                                <div class="relative z-10 bg-white/15 backdrop-blur-sm border border-white/20 p-2 rounded-lg text-center mt-4">
-                                    <span class="text-[10px] font-black text-white uppercase tracking-widest line-clamp-2">${sub}</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>`;
-                });
-
-                container.innerHTML = html + `</div>`;
-            } catch (e) {
-                console.error(e);
-                container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs">Error loading student registers.</div>`;
-            }
-        }
-
-        async function fetchData(safeName) {
-            const container = document.getElementById('bookshelf-container');
-            try {
-                const masterBundle = await getMasterConfig(safeName, isAdmin);
+                // 1. Fetch Master Configuration Bundle (Targeted by Teacher or Global for Admin)
+                const masterBundle = await getCachedMasterConfig(centerPrefix, safeName, isAdmin);
 
                 timetableData = masterBundle.timetable;
-                window.fullBranchTimetable = masterBundle.allBranchTimetable || masterBundle.timetable;
                 const structures = masterBundle.structures;
                 holidaysData = masterBundle.holidays;
                 timetableHistoryData = masterBundle.timetableHistory;
                 staffList = masterBundle.staff;
-
+                
                 remedialDataMap = {};
                 masterBundle.remedial.forEach(d => { remedialDataMap[d.id] = d; });
-
-                specialLeavesData = masterBundle.specialLeaves;
-                if (isAdmin) loadStaffListForPerms();
-
-                let html = `<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6">`;
-                const colors = [ { spine: 'bg-blue-800', cover: 'bg-blue-600', text: 'text-blue-200' }, { spine: 'bg-emerald-800', cover: 'bg-emerald-600', text: 'text-emerald-200' }, { spine: 'bg-rose-800', cover: 'bg-rose-600', text: 'text-rose-200' }, { spine: 'bg-amber-700', cover: 'bg-amber-500', text: 'text-amber-100' }, { spine: 'bg-purple-800', cover: 'bg-purple-600', text: 'text-purple-200' } ];
-
-                subs.forEach((sub, i) => {
-                    const c = colors[i % colors.length];
-                    const safeArgs = `'${String(student.className).replace(/'/g, "\\'")}', '${String(student.section).replace(/'/g, "\\'")}', '${String(sub).replace(/'/g, "\\'")}', false`;
-
-                    const isInch = sub === "CLASS INCHARGE";
-                    const frameWrapperClass = isInch ? "wood-frame" : "";
-                    const coverLabel = isInch ? "Incharge" : "Subject Register";
-
-                    html += `<div onclick="openRegister(${safeArgs})" class="cursor-pointer group relative transition-transform hover:-translate-y-2 hover:rotate-1 duration-300 ${frameWrapperClass}">
-                        <div class="absolute -top-3 -right-3 bg-slate-500 text-white text-[8px] font-black px-2 py-1 rounded-lg shadow-md uppercase tracking-widest rotate-12 z-10">View Only</div>
-                        <div class="relative w-full aspect-[3/4] rounded-r-2xl rounded-l-md shadow-[4px_4px_15px_rgba(0,0,0,0.1)] overflow-hidden flex">
-                            <div class="w-6 h-full ${c.spine} book-spine shrink-0 z-10 relative"></div>
-                            <div class="flex-1 h-full ${c.cover} p-4 flex flex-col justify-between relative">
-                                <div class="absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-black/20 to-transparent"></div>
-                                <div class="relative z-10">
-                                    <div class="text-[10px] font-black ${c.text} uppercase tracking-widest mb-1 border-b border-white/20 pb-1 inline-block">${coverLabel}</div>
-                                    <h3 class="text-xl font-black text-white uppercase tracking-tighter leading-none break-words">${student.className}</h3>
-                                    <p class="text-sm font-bold text-white/80 uppercase mt-1">Sec ${student.section}</p>
-                                </div>
-                                <div class="relative z-10 bg-white/15 backdrop-blur-sm border border-white/20 p-2 rounded-lg text-center mt-4">
-                                    <span class="text-[10px] font-black text-white uppercase tracking-widest line-clamp-2">${sub}</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>`;
-                });
-
-                container.innerHTML = html + `</div>`;
-            } catch (e) {
-                console.error(e);
-                container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase text-xs">Error loading student registers.</div>`;
-            }
-        }
-
-        async function fetchData(safeName) {
-            const container = document.getElementById('bookshelf-container');
-            try {
-                const masterBundle = await getMasterConfig(safeName, isAdmin);
-
-                timetableData = masterBundle.timetable;
-                window.fullBranchTimetable = masterBundle.allBranchTimetable || masterBundle.timetable;
-                const structures = masterBundle.structures;
-                holidaysData = masterBundle.holidays;
-                timetableHistoryData = masterBundle.timetableHistory;
-                staffList = masterBundle.staff;
-
-                remedialDataMap = {};
-                masterBundle.remedial.forEach(d => { remedialDataMap[d.id] = d; });
-
+                
                 specialLeavesData = masterBundle.specialLeaves;
                 if (isAdmin) loadStaffListForPerms();
 
@@ -2273,23 +1752,19 @@ function switchMainTab(tab) {
                 
          let myExamDuties = [];
                 try {
-                    const rosterRows = await fetchAllPaginated("duty_rosters", q => {
-                        let query = q.eq("branch_id", activeBranchId);
-                        if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                        return query;
-                    });
+                    const rostersSnap = await getCollection("duty_rosters").get();
                     let dutyMap = {};
-
-                    (rosterRows || []).forEach(r => {
-                        const docId = r.firestore_id || r.id || "";
-                        if (String(docId).startsWith("exam_duty_")) {
-                            const rawId = String(docId).replace("exam_duty_", "");
-                            const dateStr = rawId.split('_')[0];
-                            const rosterData = parseJsonObj(r.roster_data ?? r.rosterData);
+                    
+                 rostersSnap.forEach(doc => {
+             if (doc.id.startsWith("exam_duty_")) {
+                            const rawId = doc.id.replace("exam_duty_", "");
+                            const dateStr = rawId.split('_')[0]; // Extract pure YYYY-MM-DD
+                            const rosterData = doc.data().rosterData || {};
                             Object.keys(rosterData).forEach(roomName => {
                                 const cols = rosterData[roomName].columns || {};
                                 Object.entries(cols).forEach(([colKey, col]) => {
                                     if (col.status === 'ASSIGNED' && col.staff && normMatch(col.staff.name) === mySafeName) {
+                                        // Use timing (or colKey) to separate shifts in the same room
                                         const timeOnly = col.timing ? col.timing.split(' (')[0].trim() : colKey;
                                         const key = `${dateStr}_${roomName}_${timeOnly}`;
                                         if (!dutyMap[key]) {
@@ -2369,18 +1844,10 @@ function switchMainTab(tab) {
                     }
                 });
 
-          let staffPermDoc = staffList.find(st => st.email && activeStaff.email && st.email.toLowerCase() === activeStaff.email.toLowerCase());
-                if (!staffPermDoc && activeStaff) {
-                    let qStaff = sb.from("staff_applications").select("*");
-                    qStaff = activeStaff.uid ? qStaff.eq("id", activeStaff.uid) : qStaff.ilike("email", activeStaff.email.trim());
-                    const { data: sRows } = await qStaff.limit(1);
-                    if (sRows && sRows[0]) {
-                        const det = parseJsonObj(sRows[0].details);
-                        staffPermDoc = {
-                            ...sRows[0],
-                            attendancePermission: sRows[0].attendance_permission ?? sRows[0].attendancePermission ?? det.attendancePermission ?? null
-                        };
-                    }
+          let staffPermDoc = staffList.find(st => st.email === activeStaff.email);
+                if (!staffPermDoc && activeStaff && activeStaff.uid) {
+                    const myStaffSnap = await db.collection("staff_applications").doc(activeStaff.uid).get();
+                    if (myStaffSnap.exists) staffPermDoc = myStaffSnap.data();
                 }
                 window.hasViewAllAttendancePermission = false;
                 if (staffPermDoc && staffPermDoc.attendancePermission === "VIEW_ALL") {
@@ -2400,37 +1867,28 @@ function switchMainTab(tab) {
                     });
                 }
 
-                const leaveRows = await fetchAllPaginated("leave_requests", q => {
-                    let query = q.eq("branch_id", activeBranchId).in("status", ["APPROVED", "PENDING"]);
-                    if (activeSessionId) query = query.eq("session_id", activeSessionId);
-                    return query;
-                });
-                (leaveRows || []).forEach(lRow => {
-                    const rawDet = parseJsonObj(lRow.raw_data);
-                    const adjs = Array.isArray(lRow.adjustments) && lRow.adjustments.length > 0
-                        ? lRow.adjustments
-                        : (Array.isArray(rawDet.adjustments) ? rawDet.adjustments : []);
-                    adjs.forEach(adj => {
-                        const adjDate = adj.date || adj.leaveDate || '';
-                        const resp = String(adj.substituteResponse || adj.substitute_response || adj.status || '').toUpperCase();
-                        const adjEmail = adj.adjustedEmail || adj.adjusted_email || adj.substituteEmail || '';
-                        const adjTo = adj.adjustedTo || adj.adjusted_to || adj.substituteName || '';
-                        if (adjDate === todayISO && resp === "ACCEPTED" &&
-                            ((adjEmail && activeStaff.email && adjEmail.toLowerCase() === activeStaff.email.toLowerCase()) ||
-                             (adjTo && normMatch(adjTo) === mySafeName))) {
-                            const parts = (adj.sub || "").split('|');
-                            const cName = parts[0] ? parts[0].trim() : (adj.className || "");
-                            const sName = parts[1] ? parts[1].replace('Sec', '').trim() : (adj.section || "");
-                            const adjSub = adj.title || adj.subject || "";
-                            const subLower = adjSub.toLowerCase();
-                            if (!subLower.includes("break") && !subLower.includes("lunch")) {
-                                let subEntry = { c: cName, s: sName, sub: adjSub, isSub: true, canEdit: true };
-                                regMap.set(`${cName}|${sName}|${adjSub}`, subEntry);
-                                myRegMap.set(`${cName}|${sName}|${adjSub}`, subEntry);
-                            }
+               const leaveSnap = await getCollection("leave_requests")
+                    .where("status", "in", ["APPROVED", "PENDING"])
+                    .where("endDate", ">=", todayISO)
+                    .get();
+                    leaveSnap.forEach(doc => {
+                        const lData = doc.data();
+                        if (lData.adjustments) {
+                            lData.adjustments.forEach(adj => {
+                                if (adj.date === todayISO && adj.substituteResponse === "ACCEPTED" && adj.adjustedEmail === activeStaff.email) {
+                                    const parts = (adj.sub || "").split('|');
+                                    const cName = parts[0] ? parts[0].trim() : "";
+                                    const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "";
+                                    const subLower = (adj.title || "").toLowerCase();
+                                    if (!subLower.includes("break") && !subLower.includes("lunch")) {
+                                        let subEntry = { c: cName, s: sName, sub: adj.title, isSub: true, canEdit: true };
+                                        regMap.set(`${cName}|${sName}|${adj.title}`, subEntry);
+                                        myRegMap.set(`${cName}|${sName}|${adj.title}`, subEntry);
+                                    }
+                                }
+                            });
                         }
                     });
-                });
 
                     window.myRegistersCache = Array.from(myRegMap.values());
                     window.allRegistersCache = Array.from(regMap.values());
@@ -2532,48 +1990,40 @@ function switchMainTab(tab) {
 
             if (!startDateStr || checkedBoxes.length === 0) return alert("Select a start date and at least one section.");
             if (startDateStr > endDateStr) return alert("Start Date cannot be after End Date.");
-
+            
             const msgDate = startDateStr === endDateStr ? startDateStr : `${startDateStr} to ${endDateStr}`;
             if (!confirm(`Apply "${reason}" to ${checkedBoxes.length} sections for ${msgDate}?`)) return;
 
-            const rowsToUpsert = [];
+            const batch = db.batch();
+            
             let dCur = new Date(startDateStr);
             const dEnd = new Date(endDateStr);
             const offset = dCur.getTimezoneOffset() * 60000;
-
+            
             while (dCur <= dEnd) {
                 const currentDateStr = new Date(dCur - offset).toISOString().split('T')[0];
+                
                 checkedBoxes.forEach(val => {
                     const [cName, sName] = val.split('|');
                     const remKey = `${currentDateStr}_${normDoc(cName)}_${normDoc(sName)}`;
-                    rowsToUpsert.push({
-                        firestore_id: remKey,
-                        branch_id: activeBranchId,
-                        session_id: activeSessionId,
-                        date: currentDateStr,
-                        class_name: cName,
-                        section: sName,
-                        reason: reason,
-                        updated_at: new Date().toISOString()
-                    });
-                    remedialDataMap[remKey] = { id: remKey, date: currentDateStr, className: cName, section: sName, reason: reason };
+                    const docRef = getCollection("remedial_classes").doc(remKey);
+                    batch.set(docRef, { date: currentDateStr, className: cName, section: sName, reason: reason });
+                    remedialDataMap[remKey] = { date: currentDateStr, className: cName, section: sName, reason: reason };
                 });
                 dCur.setDate(dCur.getDate() + 1);
             }
 
-            try {
-                for (let i = 0; i < rowsToUpsert.length; i += 200) {
-                    const { error } = await sb.from("remedial_classes").upsert(rowsToUpsert.slice(i, i + 200), { onConflict: 'firestore_id' });
-                    if (error) throw error;
-                }
+try {
+                await batch.commit();
+                await getCollection("system_metadata").doc("master_config_version").set({ lastUpdated: Date.now() }, { merge: true });
                 alert("✅ Global Remedial Rules Applied Successfully.");
-            } catch (e) {
+            } catch(e) {
                 console.error(e);
-                alert("Failed to save rules: " + e.message);
+                alert("Failed to save rules.");
             }
         }
 
-        async function removeGlobalRemedial() {
+      async function removeGlobalRemedial() {
             const startDateStr = document.getElementById('global-rem-start-date').value;
             const endDateStr = document.getElementById('global-rem-end-date').value || startDateStr;
             const checkedBoxes = Array.from(document.querySelectorAll('.g-rem-cb:checked')).map(cb => cb.value);
@@ -2584,33 +2034,32 @@ function switchMainTab(tab) {
             const msgDate = startDateStr === endDateStr ? startDateStr : `${startDateStr} to ${endDateStr}`;
             if (!confirm(`Clear remedial status for ${checkedBoxes.length} sections on ${msgDate}?`)) return;
 
-            const keysToDelete = [];
+            const batch = db.batch();
+            
             let dCur = new Date(startDateStr);
             const dEnd = new Date(endDateStr);
             const offset = dCur.getTimezoneOffset() * 60000;
-
+            
             while (dCur <= dEnd) {
                 const currentDateStr = new Date(dCur - offset).toISOString().split('T')[0];
+                
                 checkedBoxes.forEach(val => {
                     const [cName, sName] = val.split('|');
                     const remKey = `${currentDateStr}_${normDoc(cName)}_${normDoc(sName)}`;
-                    keysToDelete.push(remKey);
+                    const docRef = getCollection("remedial_classes").doc(remKey);
+                    batch.delete(docRef);
                     delete remedialDataMap[remKey];
                 });
                 dCur.setDate(dCur.getDate() + 1);
             }
 
-            try {
-                for (let i = 0; i < keysToDelete.length; i += 200) {
-                    let delQ = sb.from("remedial_classes").delete().eq("branch_id", activeBranchId).in("firestore_id", keysToDelete.slice(i, i + 200));
-                    if (activeSessionId) delQ = delQ.eq("session_id", activeSessionId);
-                    const { error } = await delQ;
-                    if (error) throw error;
-                }
+          try {
+                await batch.commit();
+                await getCollection("system_metadata").doc("master_config_version").set({ lastUpdated: Date.now() }, { merge: true });
                 alert("✅ Remedial Rules Cleared Successfully.");
-            } catch (e) {
+            } catch(e) {
                 console.error(e);
-                alert("Failed to clear rules: " + e.message);
+                alert("Failed to clear rules.");
             }
         }
 
@@ -2695,8 +2144,10 @@ function updateAuditSectionFilter() {
             const monthKey = `${y}_${m}`;
 
             try {
-                const docList = await fetchMonthAttendanceDocs(monthKey, filterClass || null, filterSection || null);
-                const snap = { forEach: (fn) => docList.forEach(d => fn({ data: () => d.data })) };
+                let query = getCollection("attendance_records").where("monthKey", "==", monthKey);
+                if(filterClass) query = query.where("className", "==", filterClass);
+                if(filterSection) query = query.where("section", "==", filterSection);
+                const snap = await query.get();
                 let absenteeRows = [];
                 let totalPresent = 0;
                 let totalAbsent = 0;
@@ -2836,18 +2287,19 @@ function updateAuditSectionFilter() {
                 if (filterSection) query = query.where("section", "==", filterSection);
                 if (filterSubject) query = query.where("subject", "==", filterSubject);
 
-                const docList = await fetchMonthAttendanceDocs(monthKey, filterClass || null, filterSection || null);
-                const snap = { forEach: (fn) => docList.forEach(d => fn({ data: () => d.data })) };
-
+                const snap = await query.get();
+                
+                // 2. We need to recursively look back to find the true baseline stats if the current month's aggregatedStats are empty.
                 let pastMonthKeys = [];
-                let loopDate = new Date(2026, 7, 1);
+                let loopDate = new Date(2026, 7, 1); // August 2026 (Start of session)
                 let limitDate = new Date(y, m - 1, 1);
                 while (loopDate < limitDate) {
                     pastMonthKeys.push(`${loopDate.getFullYear()}_${String(loopDate.getMonth() + 1).padStart(2, '0')}`);
                     loopDate.setMonth(loopDate.getMonth() + 1);
                 }
-
-                let prevDocsArrays = await Promise.all(pastMonthKeys.map(mk => fetchMonthAttendanceDocs(mk, filterClass || null, filterSection || null)));
+                
+                // Use IndexedDB Cache to fetch all past records rapidly
+                let prevDocsArrays = await Promise.all(pastMonthKeys.map(mk => getCachedMonthAttendanceDocs(mk)));
                 let prevDocsArray = prevDocsArrays.flat();
 
                 let lowAttRows = [];
@@ -3173,12 +2625,11 @@ function updateAuditSectionFilter() {
                 if (prevM === 0) { prevM = 12; prevY--; }
                 const prevMonthKey = `${prevY}_${String(prevM).padStart(2, '0')}`;
 
-                const [curList, prevList] = await Promise.all([
-                    fetchMonthAttendanceDocs(currentMonthKey),
-                    fetchMonthAttendanceDocs(prevMonthKey)
+                // Fetch current and previous month records to seamlessly scan across month changes
+                const [curSnap, prevSnap] = await Promise.all([
+                    getCollection("attendance_records").where("monthKey", "==", currentMonthKey).get(),
+                    getCollection("attendance_records").where("monthKey", "==", prevMonthKey).get()
                 ]);
-                const curSnap = { forEach: (fn) => curList.forEach(d => fn({ data: () => d.data })) };
-                const prevSnap = { forEach: (fn) => prevList.forEach(d => fn({ data: () => d.data })) };
 
                 let studentDailyStatus = {};
 
@@ -3328,16 +2779,13 @@ function updateAuditSectionFilter() {
             msgEl.innerText = "⏳ Updating permission...";
             try {
                 const staffDoc = staffList.find(s => s.email === email);
-                if (staffDoc) {
-                    const nextDetails = { ...(staffDoc.details || {}), attendancePermission: mode };
-                    const { error } = await sb.from("staff_applications").update({ details: nextDetails }).eq("id", staffDoc.id);
-                    if (error) throw error;
-                    staffDoc.details = nextDetails;
+                if(staffDoc) {
+                    await db.collection("staff_applications").doc(staffDoc.id).update({ attendancePermission: mode });
                     staffDoc.attendancePermission = mode;
                     msgEl.innerText = mode === 'VIEW_ALL' ? `✅ Access Granted Successfully!` : `✅ Access Revoked Successfully!`;
                     renderAuthorizedFaculty();
                 }
-            } catch (e) {
+            } catch(e) {
                 console.error(e);
                 msgEl.innerText = "❌ Failed to update permission.";
             }
@@ -3371,8 +2819,10 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             document.getElementById('register-modal').style.display = 'flex';
             document.getElementById('daily-date-picker').value = targetDate;
 
+            // LAZY LOAD STUDENTS NOW
             if (!studentsData || studentsData.length === 0) {
-                studentsData = await getStudentsRoster();
+                const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+                studentsData = await getCachedStudentsRoster(centerPrefix);
             }
 
             const saveBar = document.getElementById('save-bar-container');
@@ -3393,44 +2843,33 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             const listContainer = document.getElementById('daily-students-list');
             listContainer.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
 
-       async function fetchExamRoomRowFromSupabase(roomName, dateStr) {
-            const exactSafeName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
-            const exactFsId = `${activeCenter}_${dateStr}_${exactSafeName}`;
-            const baseRoomName = roomName.split(' [')[0];
-            const baseSafeName = baseRoomName.replace(/[^a-zA-Z0-9]/g, '_');
-            const baseFsId = `${activeCenter}_${dateStr}_${baseSafeName}`;
-
-            let q = sb.from("exam_seating_rooms").select("*").eq("branch_id", activeBranchId).eq("date", dateStr);
-            if (activeSessionId) q = q.eq("session_id", activeSessionId);
-            const { data: rows } = await q;
-            const list = rows || [];
-
-            const exactMatch = list.find(r => r.firestore_id === exactFsId || r.room_name === roomName);
-            if (exactMatch && Object.keys(parseJsonObj(exactMatch.allocations)).length > 0) return exactMatch;
-
-            const baseMatch = list.find(r => r.firestore_id === baseFsId || r.room_name === baseRoomName);
-            if (baseMatch && Object.keys(parseJsonObj(baseMatch.allocations)).length > 0) return baseMatch;
-
-            return exactMatch || baseMatch || null;
-        }
-
-        try {
-                const baseRoomName = roomName.split(' [')[0];
-                const roomRow = await fetchExamRoomRowFromSupabase(roomName, dateStr);
+       try {
+              // 1. Try fetching the exact room name (including tags if they came from seating plan)
+                const exactSafeName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+                const exactDocId = `${activeCenter}_${dateStr}_${exactSafeName}`;
+                let roomSnap = await db.collection("exam_seating_rooms").doc(exactDocId).get();
+                
+                // 2. If exact match is missing or empty, fallback to the stripped base room name
+                const baseRoomName = roomName.split(' [')[0]; 
+                if (!roomSnap.exists || Object.keys(roomSnap.data()?.allocations || {}).length === 0) {
+                    const baseSafeName = baseRoomName.replace(/[^a-zA-Z0-9]/g, '_');
+                    const baseDocId = `${activeCenter}_${dateStr}_${baseSafeName}`;
+                    roomSnap = await db.collection("exam_seating_rooms").doc(baseDocId).get();
+                }
 
                 let seatedStudents = [];
-                if (roomRow && Object.keys(parseJsonObj(roomRow.allocations)).length > 0) {
-                    const allocs = parseJsonObj(roomRow.allocations);
+                if (roomSnap.exists && Object.keys(roomSnap.data()?.allocations || {}).length > 0) {
+                    const allocs = roomSnap.data().allocations || {};
                     Object.keys(allocs).forEach(seatId => {
                         const stu = allocs[seatId];
                         if (stu) seatedStudents.push({ seatId, ...stu });
                     });
                 } else {
-                    let aQuery = sb.from("exam_seating_allocations").select("*").eq("branch_id", activeBranchId).eq("date", dateStr).limit(1);
-                    if (activeSessionId) aQuery = aQuery.eq("session_id", activeSessionId);
-                    const { data: aRows } = await aQuery;
-                    if (aRows && aRows[0]) {
-                        const allocs = parseJsonObj(aRows[0].allocations);
+                    // 3. Legacy Fallback to exam_seating_allocations
+                    const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                    const allocSnap = await allocDocRef.get();
+                    if (allocSnap.exists) {
+                        const allocs = allocSnap.data().allocations || {};
                         Object.keys(allocs).forEach(seatId => {
                             if (seatId.startsWith(`${baseRoomName}-`)) {
                                 const stu = allocs[seatId];
@@ -3440,7 +2879,7 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
                     }
                 }
 
-                seatedStudents.sort((a, b) => String(a.seatId).localeCompare(String(b.seatId)));
+                seatedStudents.sort((a,b) => String(a.seatId).localeCompare(String(b.seatId)));
 
                 if (seatedStudents.length === 0) {
                     listContainer.innerHTML = `<div class="text-center py-10 text-slate-400 font-bold uppercase tracking-widest text-xs border-2 border-dashed border-slate-300 rounded-2xl">No students allocated to this room for ${dateStr}.</div>`;
@@ -3449,11 +2888,11 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
 
                 const [y, m, d] = dateStr.split('-');
                 const monthKey = `${y}_${m}`;
-                const roomAttDocs = await fetchMonthAttendanceDocs(monthKey);
-
-                let sectionAttendanceMap = {};
-                roomAttDocs.forEach(doc => {
-                    const data = doc.data;
+                const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).get();
+                
+            let sectionAttendanceMap = {};
+                querySnap.forEach(doc => {
+                    const data = doc.data();
                     if (data.records && data.records[dateStr]) {
                         const key = `${normMatch(data.className)}|${normMatch(data.section)}|${normMatch(data.subject)}`;
                         sectionAttendanceMap[key] = data.records[dateStr];
@@ -3649,8 +3088,10 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             document.getElementById('register-modal').style.display = 'flex';
             document.getElementById('daily-date-picker').value = todayISO; 
 
+            // LAZY LOAD STUDENTS NOW (Only fetches once per session)
             if (!studentsData || studentsData.length === 0) {
-                studentsData = await getStudentsRoster();
+                const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+                studentsData = await getCachedStudentsRoster(centerPrefix);
             }
 
         const saveBar = document.getElementById('save-bar-container');
@@ -3891,11 +3332,9 @@ async function loadStudentPersonalView() {
     try {
         let stuId = activeStudent.id || activeStudent.uid || activeStudent.docId;
         if (!stuId && activeStudent.rollNo) {
-            let sQuery = sb.from("students").select("*").eq("branch_id", activeBranchId).eq("roll_no", String(activeStudent.rollNo));
-            if (activeSessionId) sQuery = sQuery.eq("session_id", activeSessionId);
-            const { data: sRows } = await sQuery.limit(1);
-            if (sRows && sRows[0]) {
-                stuId = sRows[0].firestore_id || sRows[0].id;
+            const stuSnap = await getCollection("students").where("rollNo", "==", activeStudent.rollNo).get();
+            if (!stuSnap.empty) {
+                stuId = stuSnap.docs[0].id;
                 activeStudent.id = stuId;
                 sessionStorage.setItem('minervaStudentData', JSON.stringify(activeStudent));
             }
@@ -3905,19 +3344,22 @@ async function loadStudentPersonalView() {
         let stats = { P: 0, L: 0, Total: 0 };
         let historyLog = [];
 
+        // Generate exact month keys for the past 6 months
         let monthKeys = [];
         let d = new Date();
-        for (let i = 0; i < 6; i++) {
+        for(let i=0; i<6; i++) {
             let mDate = new Date(d.getFullYear(), d.getMonth() - i, 1);
-            monthKeys.push(`${mDate.getFullYear()}_${String(mDate.getMonth() + 1).padStart(2, '0')}`);
+            monthKeys.push(`${mDate.getFullYear()}_${String(mDate.getMonth()+1).padStart(2,'0')}`);
         }
 
         const subNorm = normMatch(currentReg.sub);
         const classNorm = normMatch(currentReg.c);
         const secNorm = normMatch(currentReg.s);
 
+       // Fetch months using IndexedDB Caching (0 reads if unchanged!)
         for (let mKey of monthKeys) {
-            const docsArray = await fetchMonthAttendanceDocs(mKey, currentReg.c, currentReg.s);
+            // TEACHER OPTIMIZATION: Only fetch the specific class/section needed!
+            const docsArray = await getCachedMonthAttendanceDocs(mKey, currentReg.c, currentReg.s);
             docsArray.forEach(item => {
                 const data = item.data;
                 const matchesClass = normMatch(data.className) === classNorm;
@@ -4042,7 +3484,8 @@ async function loadDailyAttendance() {
             }
 
             try {
-                const docsArray = await fetchMonthAttendanceDocs(monthKey, currentReg.c, currentReg.s);
+            // Robust Fetch using IndexedDB Cache: ONLY get data for this specific Class and Section
+                const docsArray = await getCachedMonthAttendanceDocs(monthKey, currentReg.c, currentReg.s);
                 let mergedRecords = {};
                 let anySubjectPresentStatus = {}; // Tracks if student was present in ANY subject
                 let allSubjectsAttendance = {}; // NEW: Tracks the exact status for every individual subject
@@ -4110,27 +3553,25 @@ async function loadDailyAttendance() {
                 let editUnlocked = !isPastDate || isAdmin;
                 if (isFutureDate) editUnlocked = false;
 
-                if (isPastDate && !isAdmin && activeStaff && activeStaff.email) {
-                    let rQuery = sb.from("attendance_edit_requests")
-                        .select("*")
-                        .eq("branch_id", activeBranchId)
-                        .eq("date", dateStr)
-                        .eq("class_name", currentReg.c)
-                        .eq("section", currentReg.s)
-                        .eq("subject", currentReg.sub)
-                        .ilike("teacher_email", activeStaff.email.trim());
-                    if (activeSessionId) rQuery = rQuery.eq("session_id", activeSessionId);
-                    const { data: reqRows } = await rQuery;
+                // Check if an approved/pending request exists SPECIFICALLY for this past date
+                if (isPastDate && !isAdmin && activeStaff) {
+                    const reqSnap = await getCollection("attendance_edit_requests")
+                        .where("date", "==", dateStr)
+                        .where("className", "==", currentReg.c)
+                        .where("section", "==", currentReg.s)
+                        .where("subject", "==", currentReg.sub)
+                        .where("teacherEmail", "==", activeStaff.email)
+                        .get();
 
-                    if (reqRows && reqRows.length > 0) {
-                        const approvedDoc = reqRows.find(r => r.status === "APPROVED");
+                    if (!reqSnap.empty) {
+                        const approvedDoc = reqSnap.docs.find(d => d.data().status === "APPROVED");
                         if (approvedDoc) {
                             window.activeEditTokenId = approvedDoc.id;
                             window.approvedEditUnlocked = true;
                             editUnlocked = true;
                         } else {
-                            const pendingDoc = reqRows.find(r => r.status === "PENDING");
-                            if (pendingDoc) editUnlocked = false;
+                            const pendingDoc = reqSnap.docs.find(d => d.data().status === "PENDING");
+                            if (pendingDoc) editUnlocked = false; 
                         }
                     }
                 }
@@ -4467,21 +3908,32 @@ function getActiveTeacherName() {
       if (currentReg.isExamRoom) {
                 try {
                     const roomName = currentReg.s;
+                    
+                    // 1. Try exact match first (handles multi-shift rooms with tags like [08:15 - 09:20])
+                    const exactSafeName = roomName.replace(/[^a-zA-Z0-9]/g, '_');
+                    const exactDocId = `${activeCenter}_${dateStr}_${exactSafeName}`;
+                    let roomSnap = await db.collection("exam_seating_rooms").doc(exactDocId).get();
+                    
+                    // 2. Fallback to base room name if exact match fails
                     const baseRoomName = roomName.split(' [')[0];
-                    const roomRow = await fetchExamRoomRowFromSupabase(roomName, dateStr);
-
+                    if (!roomSnap.exists || Object.keys(roomSnap.data()?.allocations || {}).length === 0) {
+                        const baseSafeName = baseRoomName.replace(/[^a-zA-Z0-9]/g, '_');
+                        const baseDocId = `${activeCenter}_${dateStr}_${baseSafeName}`;
+                        roomSnap = await db.collection("exam_seating_rooms").doc(baseDocId).get();
+                    }
+                    
                     let seatedStudents = [];
-                    if (roomRow && Object.keys(parseJsonObj(roomRow.allocations)).length > 0) {
-                        const allocs = parseJsonObj(roomRow.allocations);
+                    if (roomSnap.exists && Object.keys(roomSnap.data()?.allocations || {}).length > 0) {
+                        const allocs = roomSnap.data().allocations || {};
                         Object.values(allocs).forEach(stu => {
                             if (stu) seatedStudents.push(stu);
                         });
                     } else {
-                        let aQuery = sb.from("exam_seating_allocations").select("*").eq("branch_id", activeBranchId).eq("date", dateStr).limit(1);
-                        if (activeSessionId) aQuery = aQuery.eq("session_id", activeSessionId);
-                        const { data: aRows } = await aQuery;
-                        if (aRows && aRows[0]) {
-                            const allocs = parseJsonObj(aRows[0].allocations);
+                        // 3. Legacy Fallback
+                        const allocDocRef = db.collection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                        const allocSnap = await allocDocRef.get();
+                        if (allocSnap.exists) {
+                            const allocs = allocSnap.data().allocations || {};
                             Object.keys(allocs).forEach(seatId => {
                                 if (seatId.startsWith(`${baseRoomName}-`)) {
                                     const stu = allocs[seatId];
@@ -4546,28 +3998,7 @@ function getActiveTeacherName() {
                     if (!confirm("Direct correction for past dates is locked.\n\nDo you want to send an Edit Request to the Admin to unlock this date?")) return;
                     
                     try {
-                        const nowMs = Date.now();
-                        const dbPayload = {
-                            branch_id: activeBranchId,
-                            session_id: activeSessionId,
-                            center: activeCenter,
-                            class_name: currentReg.c,
-                            section: currentReg.s,
-                            subject: currentReg.sub,
-                            date: dateStr,
-                            teacher_email: activeStaff.email,
-                            teacher_name: getActiveTeacherName(),
-                            reason: `[Correction Request] ${reason}`,
-                            status: "PENDING",
-                            request_type: "EDIT",
-                            teacher_acknowledged: false,
-                            timestamp_ms: nowMs
-                        };
-
-                        const { error: insErr } = await sb.from("attendance_edit_requests").insert([dbPayload]);
-                        if (insErr) throw insErr;
-                        sendEditRequestEmailNotification({
-                            type: "ATTENDANCE_EDIT_REQUEST",
+                      const reqPayload = {
                             center: activeCenter,
                             className: currentReg.c,
                             section: currentReg.s,
@@ -4577,13 +4008,16 @@ function getActiveTeacherName() {
                             teacherName: getActiveTeacherName(),
                             reason: `[Correction Request] ${reason}`,
                             status: "PENDING",
-                            timestamp: nowMs
-                        });
+                            timestamp: Date.now()
+                        };
+
+                        await getCollection("attendance_edit_requests").add(reqPayload);
+                        sendEditRequestEmailNotification({ type: "ATTENDANCE_EDIT_REQUEST", ...reqPayload });
 
                         document.getElementById('correction-modal').style.display = 'none';
                         return alert("✅ Edit request sent to Admin successfully! Notifications have been emailed.");
-                    } catch (err) {
-                        return alert("Failed to submit request: " + err.message);
+                    } catch(err) {
+                        return alert("Failed to submit request.");
                     }
                 }
             }
@@ -4620,44 +4054,24 @@ function getActiveTeacherName() {
             }
 
             const docId = `att_${activeCenter}_${normDoc(targetClass)}_${normDoc(targetSection)}_${normDoc(targetSubject)}_${monthKey}`;
+            const docRef = getCollection("attendance_records").doc(docId);
 
-            try {
-                let qRec = sb.from("attendance_records").select("*").eq("branch_id", activeBranchId).eq("firestore_id", docId).limit(1);
-                if (activeSessionId) qRec = qRec.eq("session_id", activeSessionId);
-                const { data: recRows, error: fErr } = await qRec;
-                if (fErr) throw fErr;
-                if (!recRows || recRows.length === 0) return alert("No attendance record found for this month.");
+         try {
+                const snap = await docRef.get();
+                if (!snap.exists) return alert("No attendance record found for this month.");
+                let data = snap.data();
+                if (!data.records[dateStr]) data.records[dateStr] = {};
+                
+                const oldStatus = data.records[dateStr][stuId] || "P";
+                data.records[dateStr][stuId] = newStatus;
+                
+                await getCollection("attendance_corrections").add({
+                    center: activeCenter, className: currentReg.c, section: currentReg.s, subject: currentReg.sub,
+                    studentId: stuId, date: dateStr, oldStatus, newStatus, reason, author: activeStaff ? activeStaff.email : 'Admin', timestamp: Date.now()
+                });
 
-                const recRow = recRows[0];
-                const recordsObj = parseJsonObj(recRow.records);
-                if (!recordsObj[dateStr]) recordsObj[dateStr] = {};
-
-                const oldStatus = recordsObj[dateStr][stuId] || "P";
-                recordsObj[dateStr][stuId] = newStatus;
-
-                const { error: corrErr } = await sb.from("attendance_corrections").insert([{
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
-                    center: activeCenter,
-                    class_name: currentReg.c,
-                    section: currentReg.s,
-                    subject: currentReg.sub,
-                    student_id: stuId,
-                    date: dateStr,
-                    old_status: oldStatus,
-                    new_status: newStatus,
-                    reason,
-                    author: activeStaff ? activeStaff.email : 'Admin',
-                    timestamp_ms: Date.now()
-                }]);
-                if (corrErr) throw corrErr;
-
-                const { error: upErr } = await sb.from("attendance_records").update({
-                    records: recordsObj,
-                    last_updated_ms: Date.now(),
-                    updated_at: new Date().toISOString()
-                }).eq("id", recRow.id);
-                if (upErr) throw upErr;
+              await docRef.set(data);
+                await bumpAttendanceMetadata(monthKey);
 
         // --- AUTO-SYNC CLASS INCHARGE ON CORRECTION ---
                 if (targetSubject !== 'CLASS INCHARGE') {
@@ -4774,10 +4188,13 @@ function shareWholeClassWhatsApp() {
             const monthKey = `${y}_${m}`;
 
             try {
+                // LAZY LOAD STUDENTS: Ensure roster is fetched if the teacher clicked this before opening any register
                 if (!studentsData || studentsData.length === 0) {
-                    studentsData = await getStudentsRoster();
+                    const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+                    studentsData = await getCachedStudentsRoster(centerPrefix);
                 }
 
+                // Find all sections belonging to this class
                 const classSections = new Set();
                 studentsData.forEach(s => {
                     if (normMatch(s.className) === normMatch(className) && s.section) {
@@ -4789,11 +4206,16 @@ function shareWholeClassWhatsApp() {
                     return alert(`No sections found for Class ${className}.`);
                 }
 
-                const monthDocs = await fetchMonthAttendanceDocs(monthKey, className, null);
-                let sectionRecordsMap = {};
-                monthDocs.forEach(item => {
-                    const data = item.data;
-                    if (normMatch(data.subject) !== normMatch("CLASS INCHARGE")) return;
+               // Fetch all attendance records for this month and class (Filtered to Incharge Registers Only)
+                const snap = await getCollection("attendance_records")
+                    .where("monthKey", "==", monthKey)
+                    .where("className", "==", className)
+                    .where("subject", "==", "CLASS INCHARGE")
+                    .get();
+
+              let sectionRecordsMap = {}; // section -> { studentId -> status }
+                snap.forEach(doc => {
+                    const data = doc.data();
                     const sec = data.section;
                     if (data.records && data.records[dateStr]) {
                         if (!sectionRecordsMap[sec]) sectionRecordsMap[sec] = {};
@@ -4801,25 +4223,28 @@ function shareWholeClassWhatsApp() {
                     }
                 });
 
+            // --- EXAM DAY vs NORMAL DAY VALIDATION ---
                 let isExamDayForClass = false;
                 let missingRooms = new Set();
-
+                
                 try {
-                    let rQuery = sb.from("exam_seating_rooms").select("*").eq("branch_id", activeBranchId).eq("date", dateStr);
-                    if (activeSessionId) rQuery = rQuery.eq("session_id", activeSessionId);
-                    const { data: roomRows } = await rQuery;
-
+                    const roomSnap = await getCollection("exam_seating_rooms")
+                        .where("date", "==", dateStr)
+                        .where("center", "==", activeCenter)
+                        .get();
+                    
                     let allAllocs = {};
-                    if (roomRows && roomRows.length > 0) {
-                        roomRows.forEach(r => {
-                            Object.assign(allAllocs, parseJsonObj(r.allocations));
+                    if (!roomSnap.empty) {
+                        roomSnap.forEach(doc => {
+                            const roomData = doc.data().allocations || {};
+                            Object.assign(allAllocs, roomData);
                         });
                     } else {
-                        let aQuery = sb.from("exam_seating_allocations").select("*").eq("branch_id", activeBranchId).eq("date", dateStr).limit(1);
-                        if (activeSessionId) aQuery = aQuery.eq("session_id", activeSessionId);
-                        const { data: allocRows } = await aQuery;
-                        if (allocRows && allocRows[0]) {
-                            allAllocs = parseJsonObj(allocRows[0].allocations);
+                        // Legacy Fallback
+                        const allocDocRef = getCollection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
+                        const allocSnap = await allocDocRef.get();
+                        if (allocSnap.exists) {
+                            allAllocs = allocSnap.data().allocations || {};
                         }
                     }
 
@@ -5011,24 +4436,21 @@ function shareWholeClassWhatsApp() {
             const invigilatorEmail = activeStaff ? activeStaff.email : "Admin";
 
             try {
-                const { error } = await sb.from("exam_incident_reports").insert([{
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
+                await getCollection("exam_incident_reports").add({
                     center: activeCenter,
-                    student_id: stuId,
-                    student_name: stuName,
-                    roll_no: rollNo != null ? String(rollNo) : null,
-                    class_name: cname,
+                    studentId: stuId,
+                    studentName: stuName,
+                    rollNo: rollNo,
+                    className: cname,
                     section: sname,
                     date: dateStr,
-                    room_name: roomName,
-                    invigilator_name: invigilatorName,
-                    invigilator_email: invigilatorEmail,
+                    roomName: roomName,
+                    invigilatorName: invigilatorName,
+                    invigilatorEmail: invigilatorEmail,
                     details: details,
-                    timestamp_ms: Date.now()
-                }]);
-                if (error) throw error;
-
+                    timestamp: Date.now()
+                });
+                
                 alert("✅ Report saved to cloud successfully.");
                 closeReportModal();
             } catch (err) {
@@ -5058,82 +4480,77 @@ function shareWholeClassWhatsApp() {
         }
 
 async function backgroundSyncClassIncharge(dateStr, monthKey, className, sectionName) {
-            try {
-                const docsArray = await fetchMonthAttendanceDocs(monthKey, className, sectionName);
-                let aggregated = {};
-                let existingInchargeStatus = {};
+    try {
+        const snap = await getCollection("attendance_records")
+            .where("monthKey", "==", monthKey)
+            .where("className", "==", className)
+            .get();
+        
+        let aggregated = {};
+        let existingInchargeStatus = {}; // <--- NEW: Memory to protect Incharge's manual marks
 
-                docsArray.forEach(item => {
-                    const data = item.data;
-                    if (normMatch(data.section) === normMatch(sectionName)) {
-                        if (normMatch(data.subject) === "classincharge") {
-                            if (data.records && data.records[dateStr]) {
-                                existingInchargeStatus = { ...data.records[dateStr] };
-                            }
-                        } else {
-                            if (data.records && data.records[dateStr]) {
-                                Object.keys(data.records[dateStr]).forEach(stuId => {
-                                    const status = data.records[dateStr][stuId];
-                                    if (status === 'P') {
-                                        aggregated[stuId] = 'P';
-                                    } else if ((status === 'L' || status === 'A') && aggregated[stuId] !== 'P') {
-                                        aggregated[stuId] = 'L';
-                                    }
-                                });
-                            }
-                        }
+        snap.forEach(doc => {
+            const data = doc.data();
+            if (normMatch(data.section) === normMatch(sectionName)) {
+                
+                // 1. Capture the existing Incharge record so we don't wipe it out
+                if (normMatch(data.subject) === "classincharge") {
+                    if (data.records && data.records[dateStr]) {
+                        existingInchargeStatus = data.records[dateStr];
                     }
-                });
-
-                if (dateStr < "2026-10-12") {
-                    Object.keys(existingInchargeStatus).forEach(stuId => {
-                        if (existingInchargeStatus[stuId] === 'P') {
-                            aggregated[stuId] = 'P';
-                        }
-                    });
-                }
-
-                const inchargeDocId = `att_${activeCenter}_${normDoc(className)}_${normDoc(sectionName)}_CLASS_INCHARGE_${monthKey}`;
-                let qInc = sb.from("attendance_records").select("*").eq("branch_id", activeBranchId).eq("firestore_id", inchargeDocId).limit(1);
-                if (activeSessionId) qInc = qInc.eq("session_id", activeSessionId);
-                const { data: incRows } = await qInc;
-                const existingIncRow = incRows && incRows[0] ? incRows[0] : null;
-                const mergedRecs = existingIncRow ? parseJsonObj(existingIncRow.records) : {};
-
-                if (Object.keys(aggregated).length > 0) {
-                    mergedRecs[dateStr] = aggregated;
-                    if (existingIncRow) {
-                        await sb.from("attendance_records").update({
-                            records: mergedRecs,
-                            last_updated_ms: Date.now(),
-                            updated_at: new Date().toISOString()
-                        }).eq("id", existingIncRow.id);
-                    } else {
-                        await sb.from("attendance_records").insert([{
-                            firestore_id: inchargeDocId,
-                            branch_id: activeBranchId,
-                            session_id: activeSessionId,
-                            class_name: className,
-                            section: sectionName,
-                            subject: "CLASS INCHARGE",
-                            month_key: monthKey,
-                            records: mergedRecs,
-                            last_updated_ms: Date.now(),
-                            updated_at: new Date().toISOString()
-                        }]);
+                } 
+                // 2. Aggregate all other normal subjects
+                else if (normMatch(data.subject) !== "classincharge") {
+                    if (data.records && data.records[dateStr]) {
+                        Object.keys(data.records[dateStr]).forEach(stuId => {
+                            const status = data.records[dateStr][stuId];
+                            if (status === 'P') {
+                                aggregated[stuId] = 'P';
+                            } else if ((status === 'L' || status === 'A') && aggregated[stuId] !== 'P') {
+                                aggregated[stuId] = 'L';
+                            }
+                        });
                     }
-                } else if (existingIncRow && mergedRecs[dateStr]) {
-                    delete mergedRecs[dateStr];
-                    await sb.from("attendance_records").update({
-                        records: mergedRecs,
-                        last_updated_ms: Date.now(),
-                        updated_at: new Date().toISOString()
-                    }).eq("id", existingIncRow.id);
                 }
-            } catch (err) {
-                console.warn("Background Class Incharge auto-sync failed:", err);
             }
+        });
+
+        // --- THE IRONCLAD INCHARGE RULE ---
+        // For dates before 12-Oct-2026: Never let background sync downgrade a 'P' to an 'L'.
+        // For dates >= 2026-10-12: Exam records are separated, so allow dynamic downgrading to 'L' if all subjects/exams are marked 'L'.
+        if (dateStr < "2026-10-12") {
+            Object.keys(existingInchargeStatus).forEach(stuId => {
+                if (existingInchargeStatus[stuId] === 'P') {
+                    aggregated[stuId] = 'P'; 
+                }
+            });
         }
+
+        const inchargeDocId = `att_${activeCenter}_${normDoc(className)}_${normDoc(sectionName)}_CLASS_INCHARGE_${monthKey}`;
+        const inchargeDocRef = getCollection("attendance_records").doc(inchargeDocId);
+
+    if (Object.keys(aggregated).length > 0) {
+            await inchargeDocRef.set({
+                className: className,
+                section: sectionName,
+                subject: "CLASS INCHARGE",
+                monthKey: monthKey,
+                lastUpdated: Date.now(),
+                records: {
+                    [dateStr]: aggregated
+                }
+            }, { merge: true });
+            await bumpAttendanceMetadata(monthKey);
+        } else {
+            // If all other subjects are unmarked/deleted, automatically clean up the Incharge record too
+            await inchargeDocRef.update({
+                [`records.${dateStr}`]: firebase.firestore.FieldValue.delete()
+            }).catch(() => {});
+        }
+    } catch (err) {
+        console.warn("Background Class Incharge auto-sync failed:", err);
+    }
+}
 
 async function saveDailyAttendance() {
     if(!currentReg.canEdit || activeStudent || isAdmin) return;
