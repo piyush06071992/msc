@@ -252,6 +252,7 @@
                 if (window.activeSessionId) q = q.eq("session_id", window.activeSessionId);
             }
             for (const f of filters) {
+                if (table === "exam_seating_rooms" && f.field === "center") continue;
                 const col = mapCol(table, f.field);
                 if (f.op === "==") q = q.eq(col, f.val);
                 else if (f.op === "!=") q = q.neq(col, f.val);
