@@ -314,29 +314,37 @@
                         };
                     },
                     set: async (payload) => {
-                    await ensureContext();
-                    const mapped = {};
-                    Object.entries(payload || {}).forEach(([k, v]) => {
-                        mapped[mapCol(table, k)] = v;
-                    });
-                    if (!globalTables.has(table)) {
-                        if (!mapped.branch_id && window.activeBranchId) mapped.branch_id = window.activeBranchId;
-                        if (!mapped.session_id && window.activeSessionId) mapped.session_id = window.activeSessionId;
-                    }
-                    if (!mapped.firestore_id) mapped.firestore_id = docId;
-                    const { error } = await sbClient.from(table).upsert([mapped], { onConflict: "firestore_id" });
-                    if (error) throw error;
-                },
-                update: async (payload) => {
-                    const mapped = {};
-                    Object.entries(payload || {}).forEach(([k, v]) => {
-                        mapped[mapCol(table, k)] = v;
-                    });
-                    const { error } = await applyKeyFilter(sbClient.from(table).update(mapped));
-                    if (error) throw error;
-                },
+                        await ensureContext();
+                        const mapped = {};
+                        Object.entries(payload || {}).forEach(([k, v]) => {
+                            mapped[mapCol(table, k)] = v;
+                        });
+                        if (!globalTables.has(table)) {
+                            if (!mapped.branch_id && window.activeBranchId) mapped.branch_id = window.activeBranchId;
+                            if (!mapped.session_id && window.activeSessionId) mapped.session_id = window.activeSessionId;
+                        }
+                        if (!mapped.firestore_id) mapped.firestore_id = docId;
+
+                        if (table === "attendance_records" && mapped.records && typeof mapped.records === "object") {
+                            let existingQ = sbClient.from(table).select("records").eq("firestore_id", mapped.firestore_id);
+                            if (mapped.branch_id) existingQ = existingQ.eq("branch_id", mapped.branch_id);
+                            if (mapped.session_id) existingQ = existingQ.eq("session_id", mapped.session_id);
+                            const { data: existingRows } = await existingQ.limit(1);
+                            if (existingRows && existingRows[0] && existingRows[0].records) {
+                                const prevRecs = parseJson(existingRows[0].records);
+                                mapped.records = { ...prevRecs, ...mapped.records };
+                            }
+                        }
+
+                        const { error } = await sbClient.from(table).upsert([mapped], { onConflict: "firestore_id" });
+                        if (error) throw error;
+                    },
                     update: async (payload) => {
-                        const { error } = await applyKeyFilter(sbClient.from(table).update(payload));
+                        const mapped = {};
+                        Object.entries(payload || {}).forEach(([k, v]) => {
+                            mapped[mapCol(table, k)] = v;
+                        });
+                        const { error } = await applyKeyFilter(sbClient.from(table).update(mapped));
                         if (error) throw error;
                     },
                     delete: async () => {
