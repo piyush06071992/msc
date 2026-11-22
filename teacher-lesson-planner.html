@@ -714,10 +714,18 @@
                 }
 
                 const myEmailMatch = String(activeStaff.email || '').trim().toLowerCase();
+                const normStr = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
                 const myAbsences = [];
+
                 leaveRowsCache.forEach(rawLeave => {
                     const rawObj = parseJsonField(rawLeave.raw_data);
-                    const leaveData = { ...rawObj, ...rawLeave };
+                    const leaveData = {
+                        ...rawObj,
+                        ...rawLeave,
+                        adjustments: Array.isArray(rawLeave.adjustments) && rawLeave.adjustments.length > 0
+                            ? rawLeave.adjustments
+                            : (Array.isArray(rawObj.adjustments) ? rawObj.adjustments : [])
+                    };
                     if (leaveData.status === "APPROVED" && String(leaveData.teacher_email ?? leaveData.teacherEmail ?? '').toLowerCase() === myEmailMatch) {
                         const sDate = leaveData.start_date ?? leaveData.startDate;
                         const eDate = leaveData.end_date ?? leaveData.endDate ?? sDate;
@@ -728,23 +736,49 @@
                                 myAbsences.push({ date: cur.toISOString().split('T')[0], isFullDay: true });
                                 cur.setDate(cur.getDate() + 1);
                             }
+                        } else if (leaveData.adjustments.length > 0) {
+                            leaveData.adjustments.forEach(adj => {
+                                const cNameAdj = adj.className || (adj.sub ? String(adj.sub).split('|')[0].trim() : "");
+                                const sNameAdj = adj.section || (adj.sub && String(adj.sub).split('|')[1] ? String(adj.sub).split('|')[1].replace(/sec/gi, '').trim() : "");
+                                myAbsences.push({
+                                    date: adj.date || adj.leaveDate || '',
+                                    isFullDay: false,
+                                    className: cNameAdj,
+                                    section: sNameAdj,
+                                    subject: adj.title || adj.subject || ''
+                                });
+                            });
                         }
                     }
                 });
+
+                if (!liveMasterRowsCache) {
+                    let ttFallbackQ = sb.from("timetable")
+                        .select("id, day, class_name, section, subject, teacher_name, teacher_email, start24, end24, time_range, duration, remark")
+                        .eq("branch_id", activeBranchId);
+                    if (activeSessionId) ttFallbackQ = ttFallbackQ.eq("session_id", activeSessionId);
+                    const { data: ttFallbackRows } = await ttFallbackQ;
+                    liveMasterRowsCache = (ttFallbackRows || []).map(normalizeSlot);
+                }
 
                 window.catchUpDates = [];
                 let iterDate = new Date(scanStartDate);
                 const endD = new Date(todayISO + "T00:00:00");
                 let revHtml = "";
                 const dArr = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-                const normStr = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
                 while (iterDate <= endD) {
                     const curStr = iterDate.toISOString().split('T')[0];
                     const dayName = dArr[iterDate.getDay()];
                     const shortDate = iterDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
                     const exclusion = checkDateExclusion(iterDate, cName, sName, subName);
-                    const wasOnLeave = myAbsences.some(a => a.date === curStr && a.isFullDay);
+                    const wasOnLeave = myAbsences.some(a => {
+                        if (a.date !== curStr) return false;
+                        if (a.isFullDay) return true;
+                        return normStr(a.className) === normStr(cName) &&
+                            normStr(a.section) === normStr(sName) &&
+                            normStr(a.subject) === normStr(subName);
+                    });
 
                     let isWorkingDay = false;
                     let reason = "";
