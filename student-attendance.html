@@ -7194,10 +7194,107 @@ async function printLedgerPDF() {
             }
         }
 
+        function getLocalDateIso() {
+            const now = new Date();
+            const offset = now.getTimezoneOffset() * 60000;
+            return new Date(now.getTime() - offset).toISOString().split('T')[0];
+        }
+
+        function resolveCurrentSessionForBranch(branchId, targetDateIso = getLocalDateIso()) {
+            const sessions = (window.allSessionsList || []).filter(s => s.branch_id === branchId && s.is_active !== false);
+            if (!sessions.length) return null;
+
+            const activeByDate = sessions.find(s =>
+                s.start_date && s.end_date &&
+                String(s.start_date).slice(0, 10) <= targetDateIso &&
+                String(s.end_date).slice(0, 10) >= targetDateIso
+            );
+            return activeByDate || sessions[0];
+        }
+
+        function populateBranchAndSessionDropdowns() {
+            const bSel = document.getElementById('branch-selector');
+            const branches = window.allBranchesList || [];
+            if (bSel && branches.length) {
+                bSel.innerHTML = branches.map(b => {
+                    const code = String(b.name || '').trim().toUpperCase();
+                    return `<option value="${code}" ${b.id === window.activeBranchId ? 'selected' : ''}>${b.name}</option>`;
+                }).join('');
+            }
+
+            const sSel = document.getElementById('session-selector');
+            const sessions = (window.allSessionsList || []).filter(s => s.branch_id === window.activeBranchId && s.is_active !== false);
+            if (sSel) {
+                sSel.innerHTML = sessions.length
+                    ? sessions.map(s => `<option value="${s.id}" ${s.id === window.activeSessionId ? 'selected' : ''}>${s.session_name}</option>`).join('')
+                    : `<option value="">No Session</option>`;
+            }
+        }
+
+        async function switchSession(newSessionId) {
+            if (!newSessionId) return;
+            window.activeSessionId = newSessionId;
+            if (window.activeBranchId) {
+                sessionStorage.setItem(`minerva_att_session_${window.activeBranchId}`, newSessionId);
+            }
+            const found = (window.allSessionsList || []).find(s => s.id === newSessionId);
+            if (found) window.activeSessionName = found.session_name;
+            studentsData = [];
+            if (isAdmin) {
+                document.getElementById('user-badge').innerText = `God Mode (${activeCenter}) • ${window.activeSessionName}`;
+                await fetchData("Admin");
+            } else if (activeStudent) {
+                await fetchDataForStudent(activeStudent);
+            } else {
+                const safeName = activeStaff && activeStaff.name && activeStaff.name !== "undefined" ? activeStaff.name : (activeStaff ? activeStaff.email : "Teacher");
+                await fetchData(safeName);
+            }
+        }
         </script>
     <script src="supabase-attendance-bridge.js"></script>
     <script>
-        init();
+        (async function bootAttendance() {
+            const dIso = getLocalDateIso();
+            if (window.sb && !window.activeBranchId) {
+                const [bRes, sRes] = await Promise.all([
+                    window.sb.from("branches").select("*").order("created_at", { ascending: true }),
+                    window.sb.from("branch_sessions").select("*").order("start_date", { ascending: false })
+                ]);
+                window.allBranchesList = (bRes.data || []).filter(b => b.is_active !== false);
+                window.allSessionsList = sRes.data || [];
+
+                const rawStudent = JSON.parse(sessionStorage.getItem('minervaStudentData') || 'null');
+                const rawStaff = JSON.parse(localStorage.getItem('minervaActiveStaff') || 'null');
+                let targetCenter = sessionStorage.getItem('minervaAdminCenter') || window.activeCenter || "GHUMARWIN";
+                if (rawStudent && rawStudent.center) targetCenter = rawStudent.center;
+
+                const matchedBranch = window.allBranchesList.find(b =>
+                    String(b.name || '').trim().toUpperCase() === String(targetCenter).trim().toUpperCase() ||
+                    String(b.name || '').trim().toUpperCase().includes(String(targetCenter).trim().toUpperCase())
+                ) || window.allBranchesList[0];
+
+                if (matchedBranch) {
+                    window.activeBranchId = matchedBranch.id;
+                    window.activeCenter = String(matchedBranch.name || targetCenter).trim().toUpperCase();
+                    activeCenter = window.activeCenter;
+
+                    if (isAdmin) {
+                        const savedAdminSess = sessionStorage.getItem(`minerva_att_session_${matchedBranch.id}`);
+                        const bSess = window.allSessionsList.filter(s => s.branch_id === matchedBranch.id && s.is_active !== false);
+                        const chosen = bSess.find(s => s.id === savedAdminSess) || resolveCurrentSessionForBranch(matchedBranch.id, dIso);
+                        window.activeSessionId = chosen ? chosen.id : null;
+                        window.activeSessionName = chosen ? chosen.session_name : "2026 - 2027";
+                    } else {
+                        const currentSess = resolveCurrentSessionForBranch(matchedBranch.id, dIso);
+                        window.activeSessionId = currentSess ? currentSess.id : null;
+                        window.activeSessionName = currentSess ? currentSess.session_name : "2026 - 2027";
+                    }
+                }
+                populateBranchAndSessionDropdowns();
+            }
+            await init();
+            populateBranchAndSessionDropdowns();
+        })();
     </script>
 
     <!-- ELECTIVE ROSTER MANAGEMENT MODAL HTML -->
