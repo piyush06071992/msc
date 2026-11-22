@@ -860,37 +860,54 @@
             if (isAdmin) return;
 
             const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff') || 'null');
-            if (!activeStaff || !activeStaff.email) return window.location.replace('staff-login.html');
+            if (!activeStaff || (!activeStaff.email && !activeStaff.uid)) return window.location.replace('staff-login.html');
 
             try {
-                const { data: rows, error } = await supabaseClient
-                    .from("staff_applications")
-                    .select("*")
-                    .eq("email", activeStaff.email)
-                    .limit(1);
-                if (error || !rows || rows.length === 0) throw new Error("No profile");
+                let staffData = null;
+                if (activeStaff.uid) {
+                    const { data: byId } = await supabaseClient
+                        .from("staff_applications")
+                        .select("*")
+                        .eq("id", activeStaff.uid)
+                        .limit(1);
+                    if (byId && byId[0]) staffData = byId[0];
+                }
+                if (!staffData && activeStaff.email) {
+                    const { data: byEmail, error } = await supabaseClient
+                        .from("staff_applications")
+                        .select("*")
+                        .ilike("email", activeStaff.email.trim())
+                        .limit(1);
+                    if (error) throw error;
+                    if (byEmail && byEmail[0]) staffData = byEmail[0];
+                }
+                if (!staffData) throw new Error("No profile");
 
-                const staffData = rows[0];
-                const authLevel = staffData.can_edit_timetable ?? staffData.canEditTimetable;
+                const det = parseDetails(staffData.details);
+                const authLevel = staffData.can_edit_timetable ?? staffData.canEditTimetable ?? det.canEditTimetable ?? det.can_edit_timetable;
 
                 if (!authLevel) {
                     alert("Unauthorized Access. Redirecting...");
                     return window.location.replace('teacher-portal.html');
                 }
 
-                if (typeof authLevel === 'string' && authLevel.toUpperCase() !== activeCenter) {
-                    sessionStorage.setItem('minervaAdminCenter', authLevel.toUpperCase());
-                    window.location.reload();
-                    return;
-                }
+                if (typeof authLevel === 'string' && authLevel.trim() !== '') {
+                    const authBranch = authLevel.trim().toUpperCase();
+                    if (activeCenter !== authBranch) {
+                        sessionStorage.setItem('minervaAdminCenter', authBranch);
+                        window.location.reload();
+                        return;
+                    }
 
-                const dropdown = document.getElementById('global-center-switch');
-                if (dropdown && typeof authLevel === 'string') {
-                    dropdown.disabled = true;
-                    dropdown.className = "text-[10px] font-black text-slate-400 bg-slate-100 border border-slate-200 outline-none rounded px-2 py-0.5 uppercase tracking-widest cursor-not-allowed";
-                    dropdown.title = "Restricted to your authorized branch";
+                    const dropdown = document.getElementById('global-center-switch');
+                    if (dropdown) {
+                        dropdown.disabled = true;
+                        dropdown.className = "text-[10px] font-black text-slate-400 bg-slate-100 border border-slate-200 outline-none rounded px-2 py-0.5 uppercase tracking-widest cursor-not-allowed";
+                        dropdown.title = "Restricted to your authorized branch";
+                    }
                 }
             } catch (e) {
+                console.error("Timetable permission check error:", e);
                 alert("Auth Error. Redirecting...");
                 window.location.replace('teacher-portal.html');
             }
