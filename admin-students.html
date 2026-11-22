@@ -37,10 +37,14 @@
             </button>
             <div>
                 <h1 class="text-xl font-black text-slate-800 tracking-tight leading-none uppercase">Student Database</h1>
-                <select id="global-center-switch" onchange="switchAdminCenter(this.value)" class="text-[10px] font-black text-sky-700 bg-sky-50 border border-sky-200 outline-none rounded px-2 py-0.5 mt-1 cursor-pointer uppercase tracking-widest shadow-sm">
-                    <option value="GHUMARWIN">📍 Ghumarwin</option>
-                    <option value="DHARAMSHALA">📍 Dharamshala</option>
-                </select>
+                <div class="flex flex-wrap items-center gap-2 mt-1">
+                    <select id="global-center-switch" onchange="switchAdminCenter(this.value)" class="text-[10px] font-black text-sky-700 bg-sky-50 border border-sky-200 outline-none rounded px-2 py-0.5 cursor-pointer uppercase tracking-widest shadow-sm">
+                        <option value="">Loading Branch...</option>
+                    </select>
+                    <select id="global-session-switch" onchange="switchAdminSession(this.value)" class="text-[10px] font-black text-indigo-700 bg-indigo-50 border border-indigo-200 outline-none rounded px-2 py-0.5 cursor-pointer uppercase tracking-widest shadow-sm">
+                        <option value="">Loading Session...</option>
+                    </select>
+                </div>
             </div>
         </div>
 
@@ -699,70 +703,109 @@
         const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwY2NwaW96cnFneGd1c2N1bGJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM5NzMzNzQsImV4cCI6MjEwOTU0OTM3NH0.b2cNwu7y-uoFTOOK-Qy2-XX7QbrSMYzJ5Ja2EBO98Hc";
         const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-        let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
-        sessionStorage.setItem('minervaAdminCenter', activeCenter);
+        let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "";
+        let activeSessionId = sessionStorage.getItem('minervaAdminSessionId') || "";
 
         const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+        let allBranchesList = [];
+        let allSessionsList = [];
         const branchSessionMap = {};
         let activeBranchId = null;
-        let activeSessionId = null;
 
         function normalizeSessionName(name) {
             return String(name || "").replace(/\s+/g, "").replace(/[–—−]/g, "-");
         }
 
+        function populateBranchAndSessionDropdowns() {
+            const branchSel = document.getElementById('global-center-switch');
+            if (branchSel && allBranchesList.length > 0) {
+                branchSel.innerHTML = allBranchesList.map(b => {
+                    const bVal = String(b.name || "").trim().toUpperCase();
+                    return `<option value="${bVal}">📍 ${b.name}</option>`;
+                }).join('');
+                branchSel.value = activeCenter;
+            }
+
+            const sessionSel = document.getElementById('global-session-switch');
+            if (sessionSel && activeBranchId) {
+                const branchSessions = allSessionsList.filter(s => s.branch_id === activeBranchId);
+                sessionSel.innerHTML = branchSessions.map(s =>
+                    `<option value="${s.id}">📅 ${s.session_name}</option>`
+                ).join('');
+                if (activeSessionId) {
+                    sessionSel.value = activeSessionId;
+                }
+            }
+        }
+
         async function resolveBranchesAndSessions() {
-            const { data: branches, error: bErr } = await sb.from("branches").select("id, name, is_active");
+            const { data: branches, error: bErr } = await sb.from("branches").select("*").order("name");
             if (bErr) throw bErr;
 
-            const { data: sessions, error: sErr } = await sb
-                .from("branch_sessions")
-                .select("id, branch_id, session_name, is_active");
+            const { data: sessions, error: sErr } = await sb.from("branch_sessions").select("*").order("session_name", { ascending: false });
             if (sErr) throw sErr;
 
-            for (const branchKey of ["GHUMARWIN", "DHARAMSHALA"]) {
-                const matchedBranch = (branches || []).find(b =>
-                    String(b.name || "").trim().toUpperCase().includes(branchKey)
-                );
-                if (!matchedBranch) {
-                    throw new Error(`Branch "${branchKey}" not found in Supabase branches.`);
-                }
+            allBranchesList = (branches || []).filter(b => b.is_active !== false);
+            allSessionsList = sessions || [];
 
-                const matchedSession = (sessions || []).find(s =>
-                    s.branch_id === matchedBranch.id &&
-                    normalizeSessionName(s.session_name) === "2026-2027"
-                ) || (sessions || []).find(s => s.branch_id === matchedBranch.id && s.is_active);
-
-                if (!matchedSession) {
-                    throw new Error(`Session "2026 - 2027" not found for ${branchKey} in branch_sessions.`);
-                }
-
-                branchSessionMap[branchKey] = {
-                    branch_id: matchedBranch.id,
-                    session_id: matchedSession.id
+            for (const b of allBranchesList) {
+                const key = String(b.name || "").trim().toUpperCase();
+                const bSessions = allSessionsList.filter(s => s.branch_id === b.id);
+                const preferred = bSessions.find(s => normalizeSessionName(s.session_name) === "2026-2027")
+                    || bSessions.find(s => s.is_active)
+                    || bSessions[0];
+                branchSessionMap[key] = {
+                    branch_id: b.id,
+                    session_id: preferred ? preferred.id : ""
                 };
             }
 
+            if (!activeCenter && allBranchesList.length > 0) {
+                activeCenter = String(allBranchesList[0].name || "").trim().toUpperCase();
+            }
+
             syncActiveBranchSession();
+            populateBranchAndSessionDropdowns();
         }
 
         function syncActiveBranchSession() {
-            const key = String(activeCenter || "GHUMARWIN").toUpperCase().includes("DHARAMSHALA")
-                ? "DHARAMSHALA"
-                : "GHUMARWIN";
-            activeCenter = key;
+            const matchedBranch = allBranchesList.find(b =>
+                String(b.name || "").trim().toUpperCase() === String(activeCenter || "").trim().toUpperCase()
+            ) || allBranchesList[0];
+
+            if (!matchedBranch) return;
+
+            activeCenter = String(matchedBranch.name || "").trim().toUpperCase();
+            activeBranchId = matchedBranch.id;
             sessionStorage.setItem('minervaAdminCenter', activeCenter);
-            if (branchSessionMap[key]) {
-                activeBranchId = branchSessionMap[key].branch_id;
-                activeSessionId = branchSessionMap[key].session_id;
+
+            const branchSessions = allSessionsList.filter(s => s.branch_id === activeBranchId);
+            const savedSessionValid = branchSessions.some(s => s.id === activeSessionId);
+
+            if (!savedSessionValid) {
+                const preferred = branchSessions.find(s => normalizeSessionName(s.session_name) === "2026-2027")
+                    || branchSessions.find(s => s.is_active)
+                    || branchSessions[0];
+                activeSessionId = preferred ? preferred.id : "";
+            }
+
+            if (activeSessionId) {
+                sessionStorage.setItem('minervaAdminSessionId', activeSessionId);
             }
         }
 
         function getBranchSessionForCenter(centerName) {
-            const key = String(centerName || activeCenter || "GHUMARWIN").toUpperCase().includes("DHARAMSHALA")
-                ? "DHARAMSHALA"
-                : "GHUMARWIN";
-            return branchSessionMap[key] || { branch_id: activeBranchId, session_id: activeSessionId };
+            const targetKey = String(centerName || activeCenter || "").trim().toUpperCase();
+            const exact = branchSessionMap[targetKey];
+            if (exact) return exact;
+            const partialKey = Object.keys(branchSessionMap).find(k => k.includes(targetKey) || targetKey.includes(k));
+            return (partialKey && branchSessionMap[partialKey]) || { branch_id: activeBranchId, session_id: activeSessionId };
+        }
+
+        async function switchAdminSession(sessionId) {
+            activeSessionId = sessionId;
+            sessionStorage.setItem('minervaAdminSessionId', sessionId);
+            await loadAllSupabaseData();
         }
 
         async function fetchAllPaginated(table, buildQueryFn, pageSize = 1000) {
@@ -1095,14 +1138,17 @@
             syncActiveBranchSession();
             if (!activeBranchId || !activeSessionId) return;
 
-            const [structRows, studentRows] = await Promise.all([
+            const [structRows, allBranchStudents] = await Promise.all([
                 fetchAllPaginated("institute_structure", q =>
                     q.eq("branch_id", activeBranchId).eq("session_id", activeSessionId)
                 ),
                 fetchAllPaginated("students", q =>
-                    q.eq("branch_id", activeBranchId).eq("session_id", activeSessionId)
+                    q.eq("branch_id", activeBranchId)
                 )
             ]);
+
+            const sessionMatchedStudents = allBranchStudents.filter(r => !activeSessionId || r.session_id === activeSessionId);
+            const studentRows = sessionMatchedStudents.length > 0 ? sessionMatchedStudents : allBranchStudents;
 
             globalStructureData = structRows
                 .map(fromDbStructureRow)
@@ -3049,7 +3095,6 @@ async function saveStudentProfileInline(e) {
             }
 
             const checkboxes = document.querySelectorAll('.bo-stu-cb');
-            const batch = db.batch();
             let updateCount = 0;
 
             checkboxes.forEach(cb => {
@@ -3061,11 +3106,8 @@ async function saveStudentProfileInline(e) {
                 const targetSub = isChecked ? primarySub : remainingSub;
                 const currentOpt = stu.optionalSubject || "";
 
-                // ONLY update if the target isn't SKIP, AND their subject actually needs to change!
                 if (targetSub !== "SKIP" && currentOpt !== targetSub) {
-                    const docRef = getCollection("students").doc(stuId);
-                    batch.update(docRef, { optionalSubject: targetSub, optSubEffectiveDate: effectiveDate });
-                    stu.optionalSubject = targetSub; // Local cache sync
+                    stu.optionalSubject = targetSub;
                     stu.optSubEffectiveDate = effectiveDate;
                     updateCount++;
                 }
