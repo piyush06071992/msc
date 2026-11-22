@@ -4774,13 +4774,10 @@ function shareWholeClassWhatsApp() {
             const monthKey = `${y}_${m}`;
 
             try {
-                // LAZY LOAD STUDENTS: Ensure roster is fetched if the teacher clicked this before opening any register
                 if (!studentsData || studentsData.length === 0) {
-                    const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                    studentsData = await getCachedStudentsRoster(centerPrefix);
+                    studentsData = await getStudentsRoster();
                 }
 
-                // Find all sections belonging to this class
                 const classSections = new Set();
                 studentsData.forEach(s => {
                     if (normMatch(s.className) === normMatch(className) && s.section) {
@@ -4792,16 +4789,11 @@ function shareWholeClassWhatsApp() {
                     return alert(`No sections found for Class ${className}.`);
                 }
 
-               // Fetch all attendance records for this month and class (Filtered to Incharge Registers Only)
-                const snap = await getCollection("attendance_records")
-                    .where("monthKey", "==", monthKey)
-                    .where("className", "==", className)
-                    .where("subject", "==", "CLASS INCHARGE")
-                    .get();
-
-              let sectionRecordsMap = {}; // section -> { studentId -> status }
-                snap.forEach(doc => {
-                    const data = doc.data();
+                const monthDocs = await fetchMonthAttendanceDocs(monthKey, className, null);
+                let sectionRecordsMap = {};
+                monthDocs.forEach(item => {
+                    const data = item.data;
+                    if (normMatch(data.subject) !== normMatch("CLASS INCHARGE")) return;
                     const sec = data.section;
                     if (data.records && data.records[dateStr]) {
                         if (!sectionRecordsMap[sec]) sectionRecordsMap[sec] = {};
@@ -4809,28 +4801,25 @@ function shareWholeClassWhatsApp() {
                     }
                 });
 
-            // --- EXAM DAY vs NORMAL DAY VALIDATION ---
                 let isExamDayForClass = false;
                 let missingRooms = new Set();
-                
+
                 try {
-                    const roomSnap = await getCollection("exam_seating_rooms")
-                        .where("date", "==", dateStr)
-                        .where("center", "==", activeCenter)
-                        .get();
-                    
+                    let rQuery = sb.from("exam_seating_rooms").select("*").eq("branch_id", activeBranchId).eq("date", dateStr);
+                    if (activeSessionId) rQuery = rQuery.eq("session_id", activeSessionId);
+                    const { data: roomRows } = await rQuery;
+
                     let allAllocs = {};
-                    if (!roomSnap.empty) {
-                        roomSnap.forEach(doc => {
-                            const roomData = doc.data().allocations || {};
-                            Object.assign(allAllocs, roomData);
+                    if (roomRows && roomRows.length > 0) {
+                        roomRows.forEach(r => {
+                            Object.assign(allAllocs, parseJsonObj(r.allocations));
                         });
                     } else {
-                        // Legacy Fallback
-                        const allocDocRef = getCollection("exam_seating_allocations").doc(`${activeCenter}_${dateStr}`);
-                        const allocSnap = await allocDocRef.get();
-                        if (allocSnap.exists) {
-                            allAllocs = allocSnap.data().allocations || {};
+                        let aQuery = sb.from("exam_seating_allocations").select("*").eq("branch_id", activeBranchId).eq("date", dateStr).limit(1);
+                        if (activeSessionId) aQuery = aQuery.eq("session_id", activeSessionId);
+                        const { data: allocRows } = await aQuery;
+                        if (allocRows && allocRows[0]) {
+                            allAllocs = parseJsonObj(allocRows[0].allocations);
                         }
                     }
 
@@ -5022,21 +5011,24 @@ function shareWholeClassWhatsApp() {
             const invigilatorEmail = activeStaff ? activeStaff.email : "Admin";
 
             try {
-                await getCollection("exam_incident_reports").add({
+                const { error } = await sb.from("exam_incident_reports").insert([{
+                    branch_id: activeBranchId,
+                    session_id: activeSessionId,
                     center: activeCenter,
-                    studentId: stuId,
-                    studentName: stuName,
-                    rollNo: rollNo,
-                    className: cname,
+                    student_id: stuId,
+                    student_name: stuName,
+                    roll_no: rollNo != null ? String(rollNo) : null,
+                    class_name: cname,
                     section: sname,
                     date: dateStr,
-                    roomName: roomName,
-                    invigilatorName: invigilatorName,
-                    invigilatorEmail: invigilatorEmail,
+                    room_name: roomName,
+                    invigilator_name: invigilatorName,
+                    invigilator_email: invigilatorEmail,
                     details: details,
-                    timestamp: Date.now()
-                });
-                
+                    timestamp_ms: Date.now()
+                }]);
+                if (error) throw error;
+
                 alert("✅ Report saved to cloud successfully.");
                 closeReportModal();
             } catch (err) {
