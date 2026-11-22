@@ -762,13 +762,20 @@
                     }
                 });
 
-                if (!liveMasterRowsCache) {
+                {
                     let ttFallbackQ = sb.from("timetable")
                         .select("id, day, class_name, section, subject, teacher_name, teacher_email, start24, end24, time_range, duration, remark")
                         .eq("branch_id", activeBranchId);
                     if (activeSessionId) ttFallbackQ = ttFallbackQ.eq("session_id", activeSessionId);
                     const { data: ttFallbackRows } = await ttFallbackQ;
-                    liveMasterRowsCache = (ttFallbackRows || []).map(normalizeSlot);
+                    if (ttFallbackRows && ttFallbackRows.length > 0) {
+                        liveMasterRowsCache = ttFallbackRows.map(normalizeSlot);
+                    } else if (!liveMasterRowsCache) {
+                        const { data: allBranchTt } = await sb.from("timetable")
+                            .select("id, day, class_name, section, subject, teacher_name, teacher_email, start24, end24, time_range, duration, remark")
+                            .eq("branch_id", activeBranchId);
+                        liveMasterRowsCache = (allBranchTt || []).map(normalizeSlot);
+                    }
                 }
 
                 let histOverrideQ = sb.from("timetable_history")
@@ -964,19 +971,40 @@
             return { isExcluded: false, reason: "" };
         }
 
+        function getScheduleSnapshotForDate(dateIso) {
+            const overrides = window.historyOverrides || [];
+            const exactOverride = overrides.find(h =>
+                h.date === dateIso &&
+                (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE")
+            );
+            if (exactOverride && Array.isArray(exactOverride.schedule) && exactOverride.schedule.length > 0) {
+                return exactOverride.schedule;
+            }
+            const masterSnapshots = overrides
+                .filter(h => h.type === "LIVE_MASTER_UPDATE" || h.type === "APPLIED_MASTER" || h.type === "FUTURE_MASTER")
+                .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+            const validMaster = masterSnapshots.find(h => String(h.date || '') <= dateIso);
+            if (validMaster && Array.isArray(validMaster.schedule) && validMaster.schedule.length > 0) {
+                return validMaster.schedule;
+            }
+            return liveMasterRowsCache || mySessions || [];
+        }
+
         function isTimetableWorkingDay(dateObj, className, sectionName, subjectName) {
             if (dateObj.getDay() === 0) return false;
+            const offset = dateObj.getTimezoneOffset() * 60000;
+            const curStr = (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
             const dayName = DAYS_OF_WEEK[dateObj.getDay()];
             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-            const sourceSlots = liveMasterRowsCache || mySessions;
-            return sourceSlots.some(t =>
-                (!t.day || t.day === dayName) &&
+            const scheduleToCheck = getScheduleSnapshotForDate(curStr);
+            const hasDaySlots = scheduleToCheck.some(t => t.day === dayName);
+            return scheduleToCheck.some(t =>
+                (!t.day || !hasDaySlots || t.day === dayName) &&
                 norm(t.className) === norm(className) &&
                 norm(t.section) === norm(sectionName) &&
                 norm(t.subject) === norm(subjectName)
             );
         }
-
         function formatDateString(iso) {
             if (!iso) return '--';
             const [y, m, d] = String(iso).split('-');
