@@ -501,18 +501,144 @@
             }
 
             await fetchStructure();
-            await fetchTeachers();
-            await loadAllData();
-
-            const nameMatch = safeName.toLowerCase();
-            myTimetableData = allTimetableData.filter(t =>
-                (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) ||
-                (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
-            );
-
-            populateFilterDropdowns();
+            await loadTodayTeacherScheduleOnly();
             renderDashboard();
+
+            // Load remaining branch metadata & filters in the background so initial render isn't blocked
+            fetchTeachers()
+                .then(() => populateFilterDropdowns())
+                .catch(err => console.error("Background teacher load error:", err));
         };
+
+        async function loadTodayTeacherScheduleOnly() {
+            const todayIso = getLocalTodayIso();
+            await refreshSessionForReferenceDate(todayIso);
+            if (!activeBranch) return;
+
+            try {
+                let ttQuery = sb.from("timetable")
+                    .select("*")
+                    .eq("branch_id", activeBranch.id)
+                    .eq("day", TODAY_FULL);
+                if (activeSession) ttQuery = ttQuery.eq("session_id", activeSession.id);
+
+                let histQuery = sb.from("timetable_history")
+                    .select("*")
+                    .eq("branch_id", activeBranch.id)
+                    .eq("date", todayIso);
+                if (activeSession) histQuery = histQuery.eq("session_id", activeSession.id);
+
+                let leaveQuery = sb.from("leave_requests")
+                    .select("*")
+                    .eq("branch_id", activeBranch.id);
+                if (activeSession) leaveQuery = leaveQuery.eq("session_id", activeSession.id);
+
+                const [{ data: ttRows, error: ttErr }, { data: histRows }, { data: leaveRows }] = await Promise.all([
+                    ttQuery,
+                    histQuery,
+                    leaveQuery
+                ]);
+                if (ttErr) throw ttErr;
+
+                let daySlots = (ttRows || []).map(normalizeSlot);
+                const matchedHist = (histRows || []).find(h => h.status !== "CANCELLED" && Array.isArray(h.schedule) && h.schedule.length > 0);
+                if (matchedHist) {
+                    daySlots = matchedHist.schedule
+                        .filter(s => s.day === TODAY_FULL)
+                        .map(s => normalizeSlot(s));
+
+                    const badge = document.getElementById('today-badge');
+                    if (badge) {
+                        badge.className = "bg-rose-100 text-rose-800 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-widest shadow-sm border border-rose-200 animate-pulse";
+                        badge.innerText = `🚨 EXAM DAY: ${TODAY_FULL.toUpperCase()}`;
+                    }
+                }
+
+                daySlots = applyLeavesForDate(daySlots, leaveRows || [], todayIso, TODAY_FULL);
+
+                const nameMatch = safeName.toLowerCase();
+                myTimetableData = daySlots.filter(t =>
+                    (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) ||
+                    (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
+                );
+                allTimetableData = myTimetableData;
+            } catch (e) {
+                console.error("Error loading today's teacher schedule:", e);
+            }
+        }
+
+        function applyLeavesForDate(slots, leaveRows, targetIso, targetDayName) {
+            const minsTo24 = (mins) => `${Math.floor(mins / 60).toString().padStart(2, '0')}:${(mins % 60).toString().padStart(2, '0')}`;
+            const updated = [...slots];
+
+            (leaveRows || []).forEach(lRow => {
+                const rawDet = parseDetails(lRow.raw_data);
+                const leaveData = {
+                    ...rawDet,
+                    teacherName: lRow.teacher_name || lRow.teacherName || rawDet.teacherName || '',
+                    status: lRow.status || rawDet.status || '',
+                    adjustments: Array.isArray(lRow.adjustments) && lRow.adjustments.length > 0
+                        ? lRow.adjustments
+                        : (Array.isArray(rawDet.adjustments) ? rawDet.adjustments : [])
+                };
+
+                if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
+                    leaveData.adjustments.forEach(adj => {
+                        const adjDate = adj.date || adj.leaveDate || '';
+                        const resp = String(adj.substituteResponse || adj.substitute_response || adj.status || '').toUpperCase();
+                        const adjTo = adj.adjustedTo || adj.adjusted_to || adj.substituteName || adj.substitute_name || '';
+                        const adjEmail = adj.adjustedEmail || adj.adjusted_email || adj.substituteEmail || '';
+                        const adjTitle = adj.title || adj.subject || '';
+                        const adjStart = Number(adj.start ?? adj.startMins ?? adj.start_mins ?? 0);
+                        const adjEnd = Number(adj.end ?? adj.endMins ?? adj.end_mins ?? 0);
+
+                        if (adjDate === targetIso && resp === "ACCEPTED" && adjTo) {
+                            const parts = String(adj.sub || adj.classSection || '').split('|');
+                            const cName = parts[0] ? parts[0].trim() : (adj.className || adj.class_name || '');
+                            const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : (adj.section || '');
+                            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+                            const targetSlot = updated.find(slot => {
+                                if (slot.day !== targetDayName) return false;
+                                if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adjTitle)) return false;
+                                if (slot.start24) {
+                                    const [sh, sm] = slot.start24.split(':').map(Number);
+                                    if (Math.abs((sh * 60 + sm) - adjStart) > 15) return false;
+                                }
+                                return true;
+                            });
+
+                            if (targetSlot) {
+                                targetSlot.teacher = adjTo;
+                                targetSlot.teacherName = adjTo;
+                                targetSlot.teacherEmail = adjEmail;
+                                targetSlot.remark = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
+                            } else if (adj.type === "OTHER" || cName === "Custom" || cName === "Extra Duty") {
+                                updated.push({
+                                    id: 'sub_' + Math.random().toString(36).substr(2, 9),
+                                    day: targetDayName,
+                                    className: "Extra Duty",
+                                    section: "Task",
+                                    subject: adjTitle,
+                                    teacher: adjTo,
+                                    teacherName: adjTo,
+                                    teacherEmail: adjEmail,
+                                    start24: minsTo24(adjStart),
+                                    end24: minsTo24(adjEnd),
+                                    room: "TBD",
+                                    remark: "(Assigned)"
+                                });
+                                if (!structureData.some(s => s.className === "Extra Duty")) {
+                                    structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adjTitle] });
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+
+            return updated;
+        }
 
         async function fetchTeachers() {
             const { data, error } = await sb.from("staff_applications").select("*");
@@ -589,6 +715,71 @@
                 sectionName: row.section_name ?? row.sectionName ?? '',
                 subjects: Array.isArray(row.subjects) ? row.subjects : []
             }));
+        }
+
+        async function loadTodayFullSchoolOnly() {
+            const todayIso = getLocalTodayIso();
+            await refreshSessionForReferenceDate(todayIso);
+            if (!activeBranch) return;
+
+            try {
+                let holQuery = sb.from("school_holidays").select("*").eq("branch_id", activeBranch.id);
+                if (activeSession) holQuery = holQuery.eq("session_id", activeSession.id);
+
+                let ttQuery = sb.from("timetable")
+                    .select("*")
+                    .eq("branch_id", activeBranch.id)
+                    .eq("day", TODAY_FULL);
+                if (activeSession) ttQuery = ttQuery.eq("session_id", activeSession.id);
+
+                let histQuery = sb.from("timetable_history")
+                    .select("*")
+                    .eq("branch_id", activeBranch.id)
+                    .eq("date", todayIso);
+                if (activeSession) histQuery = histQuery.eq("session_id", activeSession.id);
+
+                let leaveQuery = sb.from("leave_requests")
+                    .select("*")
+                    .eq("branch_id", activeBranch.id);
+                if (activeSession) leaveQuery = leaveQuery.eq("session_id", activeSession.id);
+
+                const [{ data: holRows }, { data: ttRows, error: ttErr }, { data: histRows }, { data: leaveRows }] = await Promise.all([
+                    holQuery,
+                    ttQuery,
+                    histQuery,
+                    leaveQuery
+                ]);
+                if (ttErr) throw ttErr;
+
+                holidaysData = (holRows || []).map(h => ({
+                    ...h,
+                    startDate: h.start_date ?? h.startDate,
+                    endDate: h.end_date ?? h.endDate ?? h.start_date ?? h.startDate,
+                    isFullDay: h.is_full_day ?? h.isFullDay ?? true,
+                    startTime: h.start_time ?? h.startTime,
+                    endTime: h.end_time ?? h.endTime,
+                    targetClasses: Array.isArray(h.target_classes) ? h.target_classes : (Array.isArray(h.targetClasses) ? h.targetClasses : ['ALL'])
+                }));
+
+                let daySlots = (ttRows || []).map(normalizeSlot);
+                const matchedHist = (histRows || []).find(h => h.status !== "CANCELLED" && Array.isArray(h.schedule) && h.schedule.length > 0);
+                if (matchedHist) {
+                    daySlots = matchedHist.schedule
+                        .filter(s => s.day === TODAY_FULL)
+                        .map(s => normalizeSlot(s));
+                }
+
+                daySlots = applyLeavesForDate(daySlots, leaveRows || [], todayIso, TODAY_FULL);
+                allTimetableData = daySlots;
+
+                const nameMatch = safeName.toLowerCase();
+                myTimetableData = allTimetableData.filter(t =>
+                    (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) ||
+                    (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
+                );
+            } catch (e) {
+                console.error("Error loading today's full school schedule:", e);
+            }
         }
 
         async function loadAllData() {
@@ -734,10 +925,19 @@
                 btnMe.className = "px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[11px] transition-all bg-transparent text-slate-500 hover:bg-slate-100";
                 btnAll.className = "px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[11px] transition-all bg-indigo-600 text-white shadow-md";
                 title.innerText = "Full School Schedule";
-                sub.innerText = "Showing the entire master timetable.";
+                sub.innerText = isDateViewActive && viewDateIso
+                    ? `Showing full school schedule for ${viewDateIso}.`
+                    : `Showing today's (${TODAY_FULL}) full school schedule.`;
                 filterContainer.classList.remove('hidden');
                 filterContainer.classList.add('flex');
-                renderDashboard();
+
+                if (isDateViewActive && viewDateIso) {
+                    await loadDateView();
+                } else {
+                    await loadTodayFullSchoolOnly();
+                    populateFilterDropdowns();
+                    renderDashboard();
+                }
             }
         }
 
