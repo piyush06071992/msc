@@ -4,8 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva | Teacher Timetable</title>
-    <script src="tailwind-engine.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+   <script src="tailwind-engine.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
@@ -18,9 +19,11 @@
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
         
+        /* Responsive Sidebar: Top bar on mobile, Side bar on PC */
         .tt-sidebar { width: 100%; flex-shrink: 0; background: #0f172a; color: white; display: flex; flex-direction: row; align-items: center; justify-content: space-between; font-weight: 900; font-size: 14px; text-align: center; border-bottom: 4px solid #1e293b; padding: 12px 20px; }
         @media (min-width: 640px) { .tt-sidebar { width: 140px; flex-direction: column; justify-content: center; border-bottom: none; border-right: 4px solid #1e293b; padding: 10px; border-radius: 16px 0 0 16px; } }
         
+        /* Responsive Blocks: Fit screen on mobile, Fixed size on PC */
         .time-block { flex-shrink: 0; width: 100%; background: white; border: 1px solid #e2e8f0; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); transition: all 0.2s; display: flex; flex-direction: column; overflow: hidden; }
         @media (min-width: 640px) { .time-block { width: 260px; } }
         
@@ -29,6 +32,7 @@
         
         .day-pill { display: inline-block; background: #e0e7ff; color: #1e40af; font-size: 8px; font-weight: 900; padding: 2px 4px; border-radius: 4px; margin: 2px; }
         
+        /* The Dimming Class for days not matching today */
         .dim-block { opacity: 0.45; filter: grayscale(40%); transition: all 0.3s ease; }
         .dim-block:hover { opacity: 1; filter: grayscale(0%); box-shadow: 0 10px 15px -3px rgba(0,0,0,0.15); }
     </style>
@@ -42,20 +46,15 @@
                 Dashboard
             </button>
             <div>
-                <div class="flex items-center gap-2 flex-wrap">
-                    <h1 class="text-sm sm:text-xl font-black uppercase text-white tracking-widest">Timetable Hub</h1>
-                    <select id="branch-select" onchange="switchBranch(this.value)" class="text-[10px] font-black text-sky-900 bg-sky-100 border border-sky-200 outline-none rounded px-2 py-0.5 cursor-pointer uppercase tracking-widest shadow-sm">
-                        <option value="">📍 Loading...</option>
-                    </select>
-                    <span id="session-badge" class="text-[10px] font-black text-emerald-200 bg-emerald-900/70 border border-emerald-600/40 rounded px-2 py-0.5 uppercase tracking-widest shadow-sm">
-                        📅 Session: Detecting...
-                    </span>
-                </div>
+                <h1 class="text-sm sm:text-xl font-black uppercase text-white tracking-widest">Timetable Hub</h1>
                 <p id="teacher-badge" class="text-[9px] sm:text-[10px] font-bold text-indigo-300 uppercase tracking-widest mt-1">Loading...</p>
             </div>
         </div>
         
         <div class="flex gap-2">
+            <button onclick="forceSync()" class="bg-indigo-900 hover:bg-indigo-800 text-indigo-200 px-4 py-2 rounded-xl font-black uppercase tracking-widest text-[9px] transition-all shadow-inner border border-indigo-700" title="Fetch latest database changes">
+                ↻ Sync
+            </button>
             <button id="edit-master-btn" onclick="window.location.href='admin-timetable.html'" class="hidden bg-emerald-500 hover:bg-emerald-400 text-[#1e1b4b] px-5 py-2.5 rounded-xl font-black uppercase tracking-widest text-[10px] transition-all shadow-[0_0_15px_rgba(16,185,129,0.4)] active:scale-95">
                 ✏️ Edit Master
             </button>
@@ -64,7 +63,7 @@
 
     <main class="max-w-7xl mx-auto p-4 sm:p-8">
         
-        <div class="flex flex-col sm:flex-row justify-center items-center gap-3 mb-8 bg-white p-2 rounded-2xl shadow-sm border border-slate-200 max-w-fit mx-auto">
+      <div class="flex flex-col sm:flex-row justify-center items-center gap-3 mb-8 bg-white p-2 rounded-2xl shadow-sm border border-slate-200 max-w-fit mx-auto">
             <div class="flex gap-2 w-full sm:w-auto">
                 <button id="btn-me" onclick="switchView('ME')" class="flex-1 sm:flex-none px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[11px] transition-all bg-indigo-600 text-white shadow-md">
                     👤 My Timetable
@@ -80,7 +79,7 @@
             </div>
         </div>
 
-        <div class="flex justify-between items-end mb-6 px-2">
+    <div class="flex justify-between items-end mb-6 px-2">
             <div>
                 <h2 id="view-title" class="text-2xl font-black text-slate-800 uppercase tracking-tighter">My Schedule</h2>
                 <p id="view-subtitle" class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Showing all sections where you are assigned.</p>
@@ -124,24 +123,28 @@
     </div>
 
     <script>
-        const SUPABASE_URL = "https://lpccpiozrqgxgusculbs.supabase.co";
-        const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwY2NwaW96cnFneGd1c2N1bGJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM5NzMzNzQsImV4cCI6MjEwOTU0OTM3NH0.b2cNwu7y-uoFTOOK-Qy2-XX7QbrSMYzJ5Ja2EBO98Hc";
-        const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        const firebaseConfig = { apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", authDomain: "shop-portal-bbbbb.firebaseapp.com", projectId: "shop-portal-bbbbb", storageBucket: "shop-portal-bbbbb.firebasestorage.app", messagingSenderId: "701377739976", appId: "1:701377739976:web:99998220272090e56e79fd" };
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
 
+        // --- MULTI-CENTER DYNAMIC DB ROUTER (TEACHER EDITION) ---
+        const storedStaff = JSON.parse(localStorage.getItem('minervaActiveStaff')) || {};
+        let activeCenter = "GHUMARWIN"; // Will automatically update based on profile
+
+        function getCollection(name) {
+            const globalCollections = ['configs', 'staff_applications', 'system_metadata'];
+            if (globalCollections.includes(name)) return db.collection(name);
+            
+            if (activeCenter === "GHUMARWIN") return db.collection(name);
+            return db.collection(`${activeCenter.toLowerCase()}_${name}`);
+        }
+        // --------------------------------------------------------
+        
         let activeStaff = null;
         let safeName = "";
         let structureData = [];
-        let allTeachers = [];
-        let holidaysData = [];
-
-       let allBranches = [];
-        let allSessions = [];
-        let activeBranch = null;
-        let activeSession = null;
-        let activeCenter = "GHUMARWIN";
-        let ttRealtimeChannel = null;
-        let realtimeRefreshTimer = null;
-
+        let allTeachers = []; // List of all staff
+        
         let myTimetableData = [];
         let allTimetableData = [];
         let currentMode = 'ME'; // 'ME' or 'ALL'
@@ -149,231 +152,95 @@
         const SPECIAL_SUBJECTS = ['BREAK', 'ASSEMBLY', 'EXAM', 'EVENT'];
         const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
         const DAY_SHORTS = { 'Monday':'MON', 'Tuesday':'TUE', 'Wednesday':'WED', 'Thursday':'THU', 'Friday':'FRI', 'Saturday':'SAT', 'Sunday':'SUN' };
-
-        const TODAY_FULL = DAYS_OF_WEEK[new Date().getDay()];
-        let pinnedSections = new Set();
+        
+       const TODAY_FULL = DAYS_OF_WEEK[new Date().getDay()];
+        let pinnedSections = new Set(); 
         let isDateViewActive = false;
         let viewDateIso = null;
         let viewDayFull = null;
 
-        function getLocalTodayIso() {
-            const d = new Date();
-            return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-        }
-
-        function parseDetails(raw) {
-            if (!raw) return {};
-            if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
-            if (typeof raw === 'string') {
-                try { return JSON.parse(raw); } catch (_) { return {}; }
-            }
-            return {};
-        }
-
-        function normalizeSlot(r) {
-            return {
-                id: r.id || ('id_' + Math.random().toString(36).substr(2, 9)),
-                day: r.day || '',
-                className: r.class_name ?? r.className ?? '',
-                section: r.section ?? r.section_name ?? r.sectionName ?? '',
-                start24: r.start24 ?? r.start_24 ?? '',
-                end24: r.end24 ?? r.end_24 ?? '',
-                timeRange: r.time_range ?? r.timeRange ?? '',
-                duration: r.duration ?? '',
-                subject: r.subject ?? '',
-                teacher: r.teacher ?? r.teacher_name ?? r.teacherName ?? 'NONE',
-                teacherName: r.teacher_name ?? r.teacherName ?? r.teacher ?? 'NONE',
-                teacherEmail: r.teacher_email ?? r.teacherEmail ?? '',
-                room: r.room ?? '',
-                remark: r.remark ?? ''
-            };
-        }
-
-        async function loadBranchesAndSessionsList() {
-            const [bRes, sRes] = await Promise.all([
-                sb.from("branches").select("*").order("created_at", { ascending: true }),
-                sb.from("branch_sessions").select("*").order("start_date", { ascending: false })
-            ]);
-            if (bRes.error) throw bRes.error;
-            if (sRes.error) throw sRes.error;
-
-            allBranches = (bRes.data || []).filter(b => b.is_active !== false);
-            allSessions = sRes.data || [];
-        }
-
-        // Checks targetDateIso (defaults to today's date) against branch_sessions start_date & end_date for branchId
-        function resolveSessionForDate(branchId, targetIso = getLocalTodayIso()) {
-            const branchSessions = allSessions.filter(s => s.branch_id === branchId);
-            if (branchSessions.length === 0) return null;
-
-            const matchingRange = branchSessions.find(s => {
-                const startD = s.start_date || s.startDate;
-                const endD = s.end_date || s.endDate;
-                if (!startD || !endD) return false;
-                return targetIso >= String(startD).slice(0, 10) && targetIso <= String(endD).slice(0, 10);
-            });
-
-            if (matchingRange) return matchingRange;
-
-            const activeSess = branchSessions.find(s => s.is_active === true);
-            if (activeSess) return activeSess;
-
-            return branchSessions[0];
-        }
-
-        function updateSessionBadge() {
-            const badge = document.getElementById('session-badge');
-            if (!badge) return;
-            const refDate = isDateViewActive && viewDateIso ? viewDateIso : getLocalTodayIso();
-            const sessName = activeSession ? (activeSession.session_name || activeSession.sessionName || "2026 - 2027") : "2026 - 2027";
-            badge.innerText = `📅 Session: ${sessName} (${refDate})`;
-        }
-
-        async function refreshSessionForReferenceDate(refDateIso) {
-            if (!activeBranch) return;
-            activeSession = resolveSessionForDate(activeBranch.id, refDateIso);
-            updateSessionBadge();
-        }
-
-        async function switchBranch(branchId) {
-            const chosen = allBranches.find(b => b.id === branchId);
-            if (!chosen) return;
-            activeBranch = chosen;
-            activeCenter = String(chosen.name || "GHUMARWIN").trim().toUpperCase();
-            sessionStorage.setItem('minervaAdminCenter', activeCenter);
-            sessionStorage.setItem('minervaAdminBranchId', chosen.id);
-
-            const refDate = isDateViewActive && viewDateIso ? viewDateIso : getLocalTodayIso();
-            await refreshSessionForReferenceDate(refDate);
-            subscribeLiveTimetableUpdates();
-
-            document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Loading Schedule...</div>`;
-            await fetchStructure();
-            await fetchTeachers();
-            if (isDateViewActive && viewDateIso) {
-                await loadDateView();
-            } else if (currentMode === 'ME') {
-                await loadTodayTeacherScheduleOnly();
-            } else {
-                await loadTodayFullSchoolOnly();
-            }
-            if (currentMode === 'ME') {
-                renderDashboard();
-            } else {
-                const nameMatch = safeName.toLowerCase();
-                myTimetableData = allTimetableData.filter(t =>
-                    (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) ||
-                    (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
-                );
-                populateFilterDropdowns();
-                renderDashboard();
-            }
-        }
-
         async function loadDateView() {
             const dateVal = document.getElementById('date-filter').value;
-            if (!dateVal) return clearDateView();
+            if(!dateVal) return clearDateView();
 
             const btn = document.getElementById('clear-date-btn');
             btn.classList.remove('hidden');
             btn.innerText = "⏳...";
 
             try {
-                const [yy, mm, dd] = dateVal.split('-').map(Number);
-                const dObj = new Date(yy, (mm || 1) - 1, dd || 1);
+                const dObj = new Date(dateVal);
                 viewDayFull = DAYS_OF_WEEK[dObj.getDay()];
                 viewDateIso = dateVal;
                 isDateViewActive = true;
 
-                await refreshSessionForReferenceDate(viewDateIso);
+                // 1. Fetch Normal Master for this specific weekday
+                const masterSnap = await getCollection("timetable").where("day", "==", viewDayFull).get();
+                let dayData = masterSnap.docs.map(d => ({id: d.id, ...d.data()}));
 
-                let ttQuery = sb.from("timetable").select("*").eq("branch_id", activeBranch.id).eq("day", viewDayFull);
-                if (activeSession) ttQuery = ttQuery.eq("session_id", activeSession.id);
-                const { data: masterRows, error: mErr } = await ttQuery;
-                if (mErr) throw mErr;
-
-                let dayData = (masterRows || []).map(normalizeSlot);
-
-                let histQuery = sb.from("timetable_history").select("*").eq("branch_id", activeBranch.id).eq("date", viewDateIso);
-                if (activeSession) histQuery = histQuery.eq("session_id", activeSession.id);
-                const { data: histRows } = await histQuery;
-
+              // 2. Fetch Override for this exact date
+                const historySnap = await getCollection("timetable_history").doc(viewDateIso).get();
                 let isExamDay = false;
-                const matchedHist = (histRows || []).find(h => h.status !== "CANCELLED" && Array.isArray(h.schedule) && h.schedule.length > 0);
-                if (matchedHist) {
-                    dayData = matchedHist.schedule
-                        .filter(s => s.day === viewDayFull)
-                        .map(s => normalizeSlot(s));
+                if (historySnap.exists && historySnap.data().schedule) {
+                    dayData = historySnap.data().schedule.filter(s => s.day === viewDayFull); // Strict day filter
                     isExamDay = true;
                 }
 
+                dayData = dayData.map(item => ({
+                    ...item,
+                    id: item.id || 'id_' + Math.random().toString(36).substr(2, 9)
+                }));
+
+                // --- NEW: THE LIVE LEAVE PATCHER FOR DATE VIEW ---
                 const minsTo24 = (mins) => `${Math.floor(mins / 60).toString().padStart(2, '0')}:${(mins % 60).toString().padStart(2, '0')}`;
-                let leaveQuery = sb.from("leave_requests").select("*");
-                if (activeBranch) leaveQuery = leaveQuery.eq("branch_id", activeBranch.id);
-                const { data: leaveRows } = await leaveQuery;
-
-                (leaveRows || []).forEach(lRow => {
-                    const rawDet = parseDetails(lRow.raw_data);
-                    const leaveData = {
-                        ...rawDet,
-                        teacherName: lRow.teacher_name || lRow.teacherName || rawDet.teacherName || '',
-                        status: lRow.status || rawDet.status || '',
-                        adjustments: Array.isArray(lRow.adjustments) && lRow.adjustments.length > 0
-                            ? lRow.adjustments
-                            : (Array.isArray(rawDet.adjustments) ? rawDet.adjustments : [])
-                    };
-
+                const leaveSnap = await getCollection("leave_requests").get();
+                leaveSnap.forEach(doc => {
+                    const leaveData = doc.data();
                     if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
-                        leaveData.adjustments.forEach(adj => {
-                            const adjDate = adj.date || adj.leaveDate || '';
-                            const resp = String(adj.substituteResponse || adj.substitute_response || adj.status || '').toUpperCase();
-                            const adjTo = adj.adjustedTo || adj.adjusted_to || adj.substituteName || adj.substitute_name || '';
-                            const adjEmail = adj.adjustedEmail || adj.adjusted_email || adj.substituteEmail || '';
-                            const adjTitle = adj.title || adj.subject || '';
-                            const adjStart = Number(adj.start ?? adj.startMins ?? adj.start_mins ?? 0);
-                            const adjEnd = Number(adj.end ?? adj.endMins ?? adj.end_mins ?? 0);
+                        if (leaveData.adjustments) {
+                            leaveData.adjustments.forEach(adj => {
+                                if (adj.date === viewDateIso && adj.substituteResponse === "ACCEPTED") {
+                                    const parts = (adj.sub || "").split('|');
+                                    const cName = parts[0] ? parts[0].trim() : "";
+                                    const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "";
+                                  const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-                            if (adjDate === viewDateIso && resp === "ACCEPTED" && adjTo) {
-                                const parts = String(adj.sub || adj.classSection || '').split('|');
-                                const cName = parts[0] ? parts[0].trim() : (adj.className || adj.class_name || '');
-                                const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : (adj.section || '');
-                                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-
-                                const targetSlot = dayData.find(slot => {
-                                    if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adjTitle)) return false;
-                                    if (slot.start24) {
-                                        const [sh, sm] = slot.start24.split(':').map(Number);
-                                        if (Math.abs((sh * 60 + sm) - adjStart) > 15) return false;
-                                    }
-                                    return true;
-                                });
-
-                                if (targetSlot) {
-                                    targetSlot.teacher = adjTo;
-                                    targetSlot.teacherName = adjTo;
-                                    targetSlot.teacherEmail = adjEmail;
-                                    targetSlot.remark = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
-                                } else if (adj.type === "OTHER" || cName === "Custom" || cName === "Extra Duty") {
-                                    dayData.push({
-                                        id: 'sub_' + Math.random().toString(36).substr(2, 9),
-                                        day: viewDayFull,
-                                        className: "Extra Duty",
-                                        section: "Task",
-                                        subject: adjTitle,
-                                        teacher: adjTo,
-                                        teacherName: adjTo,
-                                        teacherEmail: adjEmail,
-                                        start24: minsTo24(adjStart),
-                                        end24: minsTo24(adjEnd),
-                                        room: "TBD",
-                                        remark: "(Assigned)"
+                                   const targetSlot = dayData.find(slot => {
+                                        if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adj.title)) return false;
+                                        // 15-minute buffer to match the exact time slot safely
+                                        if (slot.start24) {
+                                            const [sh, sm] = slot.start24.split(':').map(Number);
+                                            if (Math.abs((sh * 60 + sm) - adj.start) > 15) return false;
+                                        }
+                                        return true;
                                     });
-                                    if (!structureData.some(s => s.className === "Extra Duty")) {
-                                        structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adjTitle] });
+
+                                    if (targetSlot) {
+                                        targetSlot.teacher = adj.adjustedTo;
+                                        targetSlot.teacherName = adj.adjustedTo;
+                                        targetSlot.teacherEmail = adj.adjustedEmail;
+                                        targetSlot.remark = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
+                                    } else if (adj.type === "OTHER" || cName === "Custom" || cName === "Extra Duty") {
+                                        dayData.push({
+                                            id: 'sub_' + Math.random().toString(36).substr(2,9),
+                                            day: viewDayFull,
+                                            className: "Extra Duty",
+                                            section: "Task",
+                                            subject: adj.title,
+                                            teacher: adj.adjustedTo,
+                                            teacherName: adj.adjustedTo,
+                                            teacherEmail: adj.adjustedEmail,
+                                            start24: minsTo24(adj.start),
+                                            end24: minsTo24(adj.end),
+                                            room: "TBD",
+                                            remark: "(Assigned)"
+                                        });
+                                        if (!structureData.some(s => s.className === "Extra Duty")) {
+                                            structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adj.title] });
+                                        }
                                     }
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
                 });
 
@@ -388,15 +255,15 @@
 
                 allTimetableData = dayData;
                 const nameMatch = safeName.toLowerCase();
-                myTimetableData = allTimetableData.filter(t =>
-                    (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) ||
+                myTimetableData = allTimetableData.filter(t => 
+                    (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) || 
                     (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
                 );
-
+                
                 renderDashboard();
-            } catch (e) {
+            } catch(e) {
                 console.error(e);
-                alert("Error loading date: " + e.message);
+                alert("Error loading date.");
             } finally {
                 btn.innerText = "✕ Clear";
             }
@@ -409,8 +276,6 @@
             viewDateIso = null;
             viewDayFull = null;
 
-            await refreshSessionForReferenceDate(getLocalTodayIso());
-
             document.getElementById('today-badge').className = "bg-amber-100 text-amber-800 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-widest shadow-sm";
             document.getElementById('today-badge').innerText = `TODAY: ${TODAY_FULL.toUpperCase()}`;
 
@@ -418,274 +283,113 @@
             btn.classList.remove('hidden');
             btn.innerText = "⏳...";
 
-if (currentMode === 'ME') {
-                await loadTodayTeacherScheduleOnly();
-            } else {
-                await loadTodayFullSchoolOnly();
-                populateFilterDropdowns();
-            }
+            await loadAllData();
+            const nameMatch = safeName.toLowerCase();
+            myTimetableData = allTimetableData.filter(t => 
+                (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) || 
+                (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
+            );
             renderDashboard();
-
+            
             btn.classList.add('hidden');
             btn.innerText = "✕ Clear";
         }
 
         window.onload = async () => {
-            activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff') || 'null');
+            activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
             if (!activeStaff) return window.location.replace('staff-login.html');
-
+            
+            // Clean up the name to prevent trailing space bugs
             safeName = (activeStaff.name && activeStaff.name !== "undefined") ? activeStaff.name.trim() : activeStaff.email.trim();
             const safeDept = (activeStaff.dept && activeStaff.dept !== "undefined") ? activeStaff.dept : "General";
-
+            
             document.getElementById('teacher-badge').innerText = `ID: ${safeName} | DEPT: ${safeDept}`;
             document.getElementById('today-badge').innerText = `TODAY: ${TODAY_FULL.toUpperCase()}`;
 
             try {
-                await loadBranchesAndSessionsList();
-
-                let staffRow = null;
-                if (activeStaff.uid) {
-                    const { data: byId } = await sb.from("staff_applications").select("*").eq("id", activeStaff.uid).limit(1);
-                    if (byId && byId[0]) staffRow = byId[0];
-                }
-                if (!staffRow && activeStaff.email) {
-                    const { data: byEmail } = await sb.from("staff_applications").select("*").eq("email", activeStaff.email).limit(1);
-                    if (byEmail && byEmail[0]) staffRow = byEmail[0];
-                }
-
-                let preferredBranchId = sessionStorage.getItem('minervaAdminBranchId') || null;
-                let canEditFlag = false;
-                let authBranchName = null;
-
-                if (staffRow) {
-                    const det = parseDetails(staffRow.details);
-                    if (staffRow.branch_id) preferredBranchId = staffRow.branch_id;
-
-                    const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
-                    if (!preferredBranchId && centerKey) {
-                        const rawCenter = String(det[centerKey]).trim().toUpperCase();
-                        const matched = allBranches.find(b => String(b.name || '').toUpperCase().includes(rawCenter));
-                        if (matched) preferredBranchId = matched.id;
+                const staffDoc = await db.collection("staff_applications").doc(activeStaff.uid).get();
+                if (staffDoc.exists) {
+                    const data = staffDoc.data();
+                    
+                    // 1. Bulletproof Branch Detection
+                    const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                    if (centerKey) {
+                        const rawCenter = String(data.details[centerKey]).toUpperCase();
+                        if (rawCenter.includes('DHARAMSHALA')) activeCenter = 'DHARAMSHALA';
+                        else if (rawCenter.includes('GHUMARWIN')) activeCenter = 'GHUMARWIN';
+                        else activeCenter = rawCenter.trim();
                     }
 
-                    const authLevel = staffRow.can_edit_timetable ?? staffRow.canEditTimetable ?? det.canEditTimetable;
-                    if (authLevel === true) {
-                        canEditFlag = true;
-                    } else if (typeof authLevel === 'string' && authLevel.trim() !== '') {
-                        canEditFlag = true;
-                        authBranchName = authLevel.trim().toUpperCase();
-                        const authBranchObj = allBranches.find(b => String(b.name || '').toUpperCase().includes(authBranchName));
-                        if (authBranchObj) preferredBranchId = authBranchObj.id;
+                    // 2. Setup Edit Master button if authorized
+                    const authLevel = data.canEditTimetable;
+                    if (authLevel === true || authLevel === activeCenter) {
+                        const editBtn = document.getElementById('edit-master-btn');
+                        editBtn.classList.remove('hidden');
                     }
                 }
+            } catch (err) { console.error("Auth & Center check failed:", err); }
 
-                activeBranch = allBranches.find(b => b.id === preferredBranchId) || allBranches[0] || null;
-                if (activeBranch) {
-                    activeCenter = String(activeBranch.name || "GHUMARWIN").trim().toUpperCase();
-                    sessionStorage.setItem('minervaAdminCenter', activeCenter);
-                    sessionStorage.setItem('minervaAdminBranchId', activeBranch.id);
-                }
-
-                const branchSel = document.getElementById('branch-select');
-                branchSel.innerHTML = allBranches.map(b =>
-                    `<option value="${b.id}" ${activeBranch && b.id === activeBranch.id ? 'selected' : ''}>📍 ${b.name}</option>`
-                ).join('');
-
-                if (authBranchName && activeBranch && !activeCenter.includes(authBranchName)) {
-                    branchSel.disabled = true;
-                    branchSel.title = "Restricted to your authorized branch";
-                }
-
-                if (canEditFlag && (!authBranchName || activeCenter.includes(authBranchName))) {
-                    document.getElementById('edit-master-btn').classList.remove('hidden');
-                }
-
-                await refreshSessionForReferenceDate(getLocalTodayIso());
-                subscribeLiveTimetableUpdates();
-            } catch (err) {
-                console.error("Auth & Center check failed:", err);
-            }
-
-            await fetchStructure();
-            await loadTodayTeacherScheduleOnly();
+            await fetchStructure(); 
+            await fetchTeachers(); // Fetch branch-specific staff list
+            
+            // First load everything into memory to detect cross-teacher clashes
+            await loadAllData(); 
+            
+            // Extract my data using bulletproof matching
+            const nameMatch = safeName.toLowerCase();
+            myTimetableData = allTimetableData.filter(t => 
+                (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) || 
+                (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
+            );
+            
+            populateFilterDropdowns(); // Populate the dropdowns
             renderDashboard();
-
-            // Load remaining branch metadata & filters in the background so initial render isn't blocked
-            fetchTeachers()
-                .then(() => populateFilterDropdowns())
-                .catch(err => console.error("Background teacher load error:", err));
         };
 
-        async function loadTodayTeacherScheduleOnly() {
-            const todayIso = getLocalTodayIso();
-            await refreshSessionForReferenceDate(todayIso);
-            if (!activeBranch) return;
-
-            try {
-                let ttQuery = sb.from("timetable")
-                    .select("*")
-                    .eq("branch_id", activeBranch.id)
-                    .eq("day", TODAY_FULL);
-                if (activeSession) ttQuery = ttQuery.eq("session_id", activeSession.id);
-
-                let histQuery = sb.from("timetable_history")
-                    .select("*")
-                    .eq("branch_id", activeBranch.id)
-                    .eq("date", todayIso);
-                if (activeSession) histQuery = histQuery.eq("session_id", activeSession.id);
-
-                let leaveQuery = sb.from("leave_requests")
-                    .select("*")
-                    .eq("branch_id", activeBranch.id);
-                if (activeSession) leaveQuery = leaveQuery.eq("session_id", activeSession.id);
-
-                const [{ data: ttRows, error: ttErr }, { data: histRows }, { data: leaveRows }] = await Promise.all([
-                    ttQuery,
-                    histQuery,
-                    leaveQuery
-                ]);
-                if (ttErr) throw ttErr;
-
-                let daySlots = (ttRows || []).map(normalizeSlot);
-                const matchedHist = (histRows || []).find(h => h.status !== "CANCELLED" && Array.isArray(h.schedule) && h.schedule.length > 0);
-                if (matchedHist) {
-                    daySlots = matchedHist.schedule
-                        .filter(s => s.day === TODAY_FULL)
-                        .map(s => normalizeSlot(s));
-
-                    const badge = document.getElementById('today-badge');
-                    if (badge) {
-                        badge.className = "bg-rose-100 text-rose-800 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-widest shadow-sm border border-rose-200 animate-pulse";
-                        badge.innerText = `🚨 EXAM DAY: ${TODAY_FULL.toUpperCase()}`;
-                    }
-                }
-
-                daySlots = applyLeavesForDate(daySlots, leaveRows || [], todayIso, TODAY_FULL);
-
-                const nameMatch = safeName.toLowerCase();
-                myTimetableData = daySlots.filter(t =>
-                    (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) ||
-                    (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
-                );
-                allTimetableData = myTimetableData;
-            } catch (e) {
-                console.error("Error loading today's teacher schedule:", e);
-            }
-        }
-
-        function applyLeavesForDate(slots, leaveRows, targetIso, targetDayName) {
-            const minsTo24 = (mins) => `${Math.floor(mins / 60).toString().padStart(2, '0')}:${(mins % 60).toString().padStart(2, '0')}`;
-            const updated = [...slots];
-
-            (leaveRows || []).forEach(lRow => {
-                const rawDet = parseDetails(lRow.raw_data);
-                const leaveData = {
-                    ...rawDet,
-                    teacherName: lRow.teacher_name || lRow.teacherName || rawDet.teacherName || '',
-                    status: lRow.status || rawDet.status || '',
-                    adjustments: Array.isArray(lRow.adjustments) && lRow.adjustments.length > 0
-                        ? lRow.adjustments
-                        : (Array.isArray(rawDet.adjustments) ? rawDet.adjustments : [])
-                };
-
-                if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
-                    leaveData.adjustments.forEach(adj => {
-                        const adjDate = adj.date || adj.leaveDate || '';
-                        const resp = String(adj.substituteResponse || adj.substitute_response || adj.status || '').toUpperCase();
-                        const adjTo = adj.adjustedTo || adj.adjusted_to || adj.substituteName || adj.substitute_name || '';
-                        const adjEmail = adj.adjustedEmail || adj.adjusted_email || adj.substituteEmail || '';
-                        const adjTitle = adj.title || adj.subject || '';
-                        const adjStart = Number(adj.start ?? adj.startMins ?? adj.start_mins ?? 0);
-                        const adjEnd = Number(adj.end ?? adj.endMins ?? adj.end_mins ?? 0);
-
-                        if (adjDate === targetIso && resp === "ACCEPTED" && adjTo) {
-                            const parts = String(adj.sub || adj.classSection || '').split('|');
-                            const cName = parts[0] ? parts[0].trim() : (adj.className || adj.class_name || '');
-                            const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : (adj.section || '');
-                            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-
-                            const targetSlot = updated.find(slot => {
-                                if (slot.day !== targetDayName) return false;
-                                if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adjTitle)) return false;
-                                if (slot.start24) {
-                                    const [sh, sm] = slot.start24.split(':').map(Number);
-                                    if (Math.abs((sh * 60 + sm) - adjStart) > 15) return false;
-                                }
-                                return true;
-                            });
-
-                            if (targetSlot) {
-                                targetSlot.teacher = adjTo;
-                                targetSlot.teacherName = adjTo;
-                                targetSlot.teacherEmail = adjEmail;
-                                targetSlot.remark = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
-                            } else if (adj.type === "OTHER" || cName === "Custom" || cName === "Extra Duty") {
-                                updated.push({
-                                    id: 'sub_' + Math.random().toString(36).substr(2, 9),
-                                    day: targetDayName,
-                                    className: "Extra Duty",
-                                    section: "Task",
-                                    subject: adjTitle,
-                                    teacher: adjTo,
-                                    teacherName: adjTo,
-                                    teacherEmail: adjEmail,
-                                    start24: minsTo24(adjStart),
-                                    end24: minsTo24(adjEnd),
-                                    room: "TBD",
-                                    remark: "(Assigned)"
-                                });
-                                if (!structureData.some(s => s.className === "Extra Duty")) {
-                                    structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adjTitle] });
-                                }
-                            }
-                        }
-                    });
-                }
-            });
-
-            return updated;
-        }
-
+        // --- FILTER ENGINE ---
         async function fetchTeachers() {
-            const { data, error } = await sb.from("staff_applications").select("*");
-            if (error) { console.error("Teachers fetch error:", error); return; }
-
+            // Include activeCenter in the cache key so it doesn't cross-contaminate
+            const cacheKey = `minerva_teachers_${activeCenter}`;
+            const cached = localStorage.getItem(cacheKey);
+            if (cached) {
+                allTeachers = JSON.parse(cached);
+                return;
+            }
+            const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
             let tempTeachers = [];
-            (data || []).forEach(row => {
-                const det = parseDetails(row.details);
-                const statusVal = String(row.status ?? det.status ?? "approved").toLowerCase();
-                if (statusVal !== "approved") return;
-
-                const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
-                const teacherCenter = centerKey ? String(det[centerKey]).toUpperCase() : "GHUMARWIN";
-                const matchesBranch = (activeBranch && row.branch_id === activeBranch.id) || teacherCenter.includes(activeCenter);
-
-                if (matchesBranch) {
-                    const nameKey = Object.keys(det).find(k => k.toLowerCase().includes('name'));
-                    const deptKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
-                    tempTeachers.push({
-                        name: nameKey ? det[nameKey] : row.email,
-                        email: row.email,
-                        dept: deptKey ? det[deptKey] : 'General'
+            
+            snap.docs.forEach(doc => {
+                const data = doc.data();
+                // Filter teachers strictly by the branch we are viewing
+                const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                const teacherCenter = centerKey ? String(data.details[centerKey]).toUpperCase() : "GHUMARWIN";
+                
+                if (teacherCenter.includes(activeCenter)) {
+                    const nameKey = Object.keys(data.details).find(k => k.toLowerCase().includes('name'));
+                    const deptKey = Object.keys(data.details).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                    tempTeachers.push({ 
+                        name: nameKey ? data.details[nameKey] : data.email, 
+                        email: data.email, 
+                        dept: deptKey ? data.details[deptKey] : 'General' 
                     });
                 }
             });
             allTeachers = tempTeachers;
+            localStorage.setItem(cacheKey, JSON.stringify(allTeachers));
         }
 
         function populateFilterDropdowns() {
             const subSelect = document.getElementById('filter-subject');
-            subSelect.innerHTML = '<option value="ALL">All Subjects</option>';
             let allSubjects = new Set();
             allTeachers.forEach(t => {
                 const depts = Array.isArray(t.dept) ? t.dept : [t.dept];
-                depts.forEach(d => { if (d && d !== 'General') allSubjects.add(String(d).trim().toUpperCase()); });
+                depts.forEach(d => { if (d && d !== 'General') allSubjects.add(d.trim().toUpperCase()); });
             });
             structureData.forEach(st => {
-                (st.subjects || []).forEach(s => allSubjects.add(String(s).trim().toUpperCase()));
+                st.subjects.forEach(s => allSubjects.add(s.trim().toUpperCase()));
             });
             Array.from(allSubjects).sort().forEach(sub => {
-                if (!SPECIAL_SUBJECTS.includes(sub)) {
+                if(!SPECIAL_SUBJECTS.includes(sub)) {
                     subSelect.innerHTML += `<option value="${sub}">${sub}</option>`;
                 }
             });
@@ -699,219 +403,165 @@ if (currentMode === 'ME') {
             let filteredTeachers = allTeachers;
             if (sub !== 'ALL') {
                 filteredTeachers = allTeachers.filter(t => {
-                    const deptStr = Array.isArray(t.dept) ? t.dept.join(',').toUpperCase() : String(t.dept || '').toUpperCase();
+                    const deptStr = Array.isArray(t.dept) ? t.dept.join(',').toUpperCase() : t.dept.toUpperCase();
                     return deptStr.includes(sub);
                 });
             }
-            filteredTeachers.sort((a, b) => String(a.name).localeCompare(String(b.name))).forEach(t => {
+            filteredTeachers.sort((a,b) => a.name.localeCompare(b.name)).forEach(t => {
                 teaSelect.innerHTML += `<option value="${t.name}">${t.name}</option>`;
             });
-            renderDashboard();
+            renderDashboard(); 
         }
 
         async function fetchStructure() {
-            if (!activeBranch) return;
-            let q = sb.from("institute_structure").select("*").eq("branch_id", activeBranch.id).order("class_name", { ascending: true });
-            if (activeSession) q = q.eq("session_id", activeSession.id);
-            const { data, error } = await q;
-            if (error) { console.error("Structure fetch error:", error); return; }
-
-            structureData = (data || []).map(row => ({
-                className: row.class_name ?? row.className ?? '',
-                sectionName: row.section_name ?? row.sectionName ?? '',
-                subjects: Array.isArray(row.subjects) ? row.subjects : []
-            }));
-        }
-
-        async function loadTodayFullSchoolOnly() {
-            const todayIso = getLocalTodayIso();
-            await refreshSessionForReferenceDate(todayIso);
-            if (!activeBranch) return;
-
-            try {
-                let holQuery = sb.from("school_holidays").select("*").eq("branch_id", activeBranch.id);
-                if (activeSession) holQuery = holQuery.eq("session_id", activeSession.id);
-
-                let ttQuery = sb.from("timetable")
-                    .select("*")
-                    .eq("branch_id", activeBranch.id)
-                    .eq("day", TODAY_FULL);
-                if (activeSession) ttQuery = ttQuery.eq("session_id", activeSession.id);
-
-                let histQuery = sb.from("timetable_history")
-                    .select("*")
-                    .eq("branch_id", activeBranch.id)
-                    .eq("date", todayIso);
-                if (activeSession) histQuery = histQuery.eq("session_id", activeSession.id);
-
-                let leaveQuery = sb.from("leave_requests")
-                    .select("*")
-                    .eq("branch_id", activeBranch.id);
-                if (activeSession) leaveQuery = leaveQuery.eq("session_id", activeSession.id);
-
-                const [{ data: holRows }, { data: ttRows, error: ttErr }, { data: histRows }, { data: leaveRows }] = await Promise.all([
-                    holQuery,
-                    ttQuery,
-                    histQuery,
-                    leaveQuery
-                ]);
-                if (ttErr) throw ttErr;
-
-                holidaysData = (holRows || []).map(h => ({
-                    ...h,
-                    startDate: h.start_date ?? h.startDate,
-                    endDate: h.end_date ?? h.endDate ?? h.start_date ?? h.startDate,
-                    isFullDay: h.is_full_day ?? h.isFullDay ?? true,
-                    startTime: h.start_time ?? h.startTime,
-                    endTime: h.end_time ?? h.endTime,
-                    targetClasses: Array.isArray(h.target_classes) ? h.target_classes : (Array.isArray(h.targetClasses) ? h.targetClasses : ['ALL'])
-                }));
-
-                let daySlots = (ttRows || []).map(normalizeSlot);
-                const matchedHist = (histRows || []).find(h => h.status !== "CANCELLED" && Array.isArray(h.schedule) && h.schedule.length > 0);
-                if (matchedHist) {
-                    daySlots = matchedHist.schedule
-                        .filter(s => s.day === TODAY_FULL)
-                        .map(s => normalizeSlot(s));
-                }
-
-                daySlots = applyLeavesForDate(daySlots, leaveRows || [], todayIso, TODAY_FULL);
-                allTimetableData = daySlots;
-
-                const nameMatch = safeName.toLowerCase();
-                myTimetableData = allTimetableData.filter(t =>
-                    (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) ||
-                    (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
-                );
-            } catch (e) {
-                console.error("Error loading today's full school schedule:", e);
+            const cacheKey = `minerva_struct_${activeCenter}`;
+            const cached = localStorage.getItem(cacheKey);
+            if (cached) {
+                structureData = JSON.parse(cached);
+            } else {
+                const snap = await getCollection("institute_structure").orderBy("className").get();
+                structureData = snap.docs.map(doc => doc.data());
+                localStorage.setItem(cacheKey, JSON.stringify(structureData));
             }
         }
 
+       let holidaysData = [];
+
         async function loadAllData() {
-            const todayIso = getLocalTodayIso();
-            await refreshSessionForReferenceDate(todayIso);
-
+            // 1. Guarantee Local Time Zone for the Date (Fixes night-time bugs in IST)
+            const d = new Date();
+            const todayIso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+            
+            // 2. Branch-Specific Cache Keys (Prevents cross-branch ghost data!)
+            const cacheKey = `minerva_timetable_cache_${activeCenter}_${todayIso}`; 
+            const timeKey = `minerva_tt_last_update_${activeCenter}`;
+            
             try {
-                let holQuery = sb.from("school_holidays").select("*").eq("branch_id", activeBranch.id);
-                if (activeSession) holQuery = holQuery.eq("session_id", activeSession.id);
-                const { data: holRows } = await holQuery;
-                holidaysData = (holRows || []).map(h => ({
-                    ...h,
-                    startDate: h.start_date ?? h.startDate,
-                    endDate: h.end_date ?? h.endDate ?? h.start_date ?? h.startDate,
-                    isFullDay: h.is_full_day ?? h.isFullDay ?? true,
-                    startTime: h.start_time ?? h.startTime,
-                    endTime: h.end_time ?? h.endTime,
-                    targetClasses: Array.isArray(h.target_classes) ? h.target_classes : (Array.isArray(h.targetClasses) ? h.targetClasses : ['ALL'])
-                }));
+                // Fetch holidays every time to ensure live overlay accuracy
+                const holSnap = await getCollection("school_holidays").get();
+                holidaysData = holSnap.docs.map(d => d.data());
 
-                let ttQuery = sb.from("timetable").select("*").eq("branch_id", activeBranch.id);
-                if (activeSession) ttQuery = ttQuery.eq("session_id", activeSession.id);
-                const { data: ttRows, error: ttErr } = await ttQuery;
-                if (ttErr) throw ttErr;
+                // Costs exactly 1 Firebase Read to check if Admin pushed an update!
+                const metaSnap = await getCollection("system_metadata").doc("timetable").get();
+                const serverTime = metaSnap.exists ? metaSnap.data().lastUpdated : 0;
+                const localTime = localStorage.getItem(timeKey) || 0;
 
-                let masterData = (ttRows || []).map(normalizeSlot);
+                const cached = localStorage.getItem(cacheKey);
+                
+                // If we have cache AND the Admin hasn't saved a newer version... use memory!
+                if (cached && parseInt(localTime) >= serverTime) {
+                    allTimetableData = JSON.parse(cached);
+                    
+                    // Restore UI Badge if cache contains an override
+                    const isExamCached = allTimetableData.some(t => t.remark === "Doubt Session" || t.subject === "EXAM" || t.remark === "Rescaled Class");
+                    if (isExamCached && document.getElementById('today-badge')) {
+                        document.getElementById('today-badge').className = "bg-rose-100 text-rose-800 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-widest shadow-sm border border-rose-200 animate-pulse";
+                        document.getElementById('today-badge').innerText = `🚨 EXAM DAY: ${TODAY_FULL.toUpperCase()}`;
+                    }
+                    return;
+                }
 
-                let histQuery = sb.from("timetable_history").select("*").eq("branch_id", activeBranch.id).eq("date", todayIso);
-                if (activeSession) histQuery = histQuery.eq("session_id", activeSession.id);
-                const { data: histRows } = await histQuery;
-                const matchedHist = (histRows || []).find(h => h.status !== "CANCELLED" && Array.isArray(h.schedule) && h.schedule.length > 0);
-
-                if (matchedHist) {
+                // 1. Fetch Normal Master Timetable
+                const snap = await getCollection("timetable").get();
+                let masterData = snap.docs.map(d => ({id: d.id, ...d.data()}));
+                
+                // 2. FETCH TODAY'S EXAM/OVERRIDE
+                const historySnap = await getCollection("timetable_history").doc(todayIso).get();
+                if (historySnap.exists) {
+                    const overrideData = historySnap.data().schedule;
+                    
+                    // Remove the normal classes for today
                     masterData = masterData.filter(t => t.day !== TODAY_FULL);
-                    const overrideSlots = matchedHist.schedule
-                        .filter(s => s.day === TODAY_FULL)
-                        .map(s => normalizeSlot(s));
-                    masterData = masterData.concat(overrideSlots);
-
+                    
+                    // Inject the Exam/Override classes
+                    masterData = masterData.concat(overrideData);
+                    
+                    // Update the UI Badge to alert the teacher
                     const badge = document.getElementById('today-badge');
-                    if (badge) {
+                    if(badge) {
                         badge.className = "bg-rose-100 text-rose-800 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-widest shadow-sm border border-rose-200 animate-pulse";
                         badge.innerText = `🚨 EXAM DAY: ${TODAY_FULL.toUpperCase()}`;
                     }
                 }
 
+              // 🚨 CRITICAL BUG FIX: Give any injected override data a unique ID.
+                masterData = masterData.map(item => ({
+                    ...item,
+                    id: item.id || 'id_' + Math.random().toString(36).substr(2, 9)
+                }));
+
+                // --- NEW: THE LIVE LEAVE PATCHER FOR FULL WEEK ---
                 const minsTo24 = (mins) => `${Math.floor(mins / 60).toString().padStart(2, '0')}:${(mins % 60).toString().padStart(2, '0')}`;
-                let leaveQuery = sb.from("leave_requests").select("*").eq("branch_id", activeBranch.id);
-                if (activeSession) leaveQuery = leaveQuery.eq("session_id", activeSession.id);
-                const { data: leaveRows } = await leaveQuery;
-
-                (leaveRows || []).forEach(lRow => {
-                    const rawDet = parseDetails(lRow.raw_data);
-                    const leaveData = {
-                        ...rawDet,
-                        teacherName: lRow.teacher_name || lRow.teacherName || rawDet.teacherName || '',
-                        status: lRow.status || rawDet.status || '',
-                        adjustments: Array.isArray(lRow.adjustments) && lRow.adjustments.length > 0
-                            ? lRow.adjustments
-                            : (Array.isArray(rawDet.adjustments) ? rawDet.adjustments : [])
-                    };
-
+                const leaveSnap = await getCollection("leave_requests").get();
+                leaveSnap.forEach(doc => {
+                    const leaveData = doc.data();
                     if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
-                        leaveData.adjustments.forEach(adj => {
-                            const adjDate = adj.date || adj.leaveDate || '';
-                            const resp = String(adj.substituteResponse || adj.substitute_response || adj.status || '').toUpperCase();
-                            const adjTo = adj.adjustedTo || adj.adjusted_to || adj.substituteName || adj.substitute_name || '';
-                            const adjEmail = adj.adjustedEmail || adj.adjusted_email || adj.substituteEmail || '';
-                            const adjTitle = adj.title || adj.subject || '';
-                            const adjStart = Number(adj.start ?? adj.startMins ?? adj.start_mins ?? 0);
-                            const adjEnd = Number(adj.end ?? adj.endMins ?? adj.end_mins ?? 0);
+                        if (leaveData.adjustments) {
+                           leaveData.adjustments.forEach(adj => {
+                                // ONLY apply substitutions for TODAY to prevent history from corrupting the master view
+                                if (adj.date === todayIso && adj.substituteResponse === "ACCEPTED") {
+                                    const adjDateObj = new Date(adj.date);
+                                    const adjDayName = DAYS_OF_WEEK[adjDateObj.getDay()];
+                                    
+                                    const parts = (adj.sub || "").split('|');
+                                    const cName = parts[0] ? parts[0].trim() : "";
+                                    const sName = parts[1] ? parts[1].replace('Sec', '').trim() : "";
+                                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-                            if (adjDate === todayIso && resp === "ACCEPTED" && adjTo) {
-                                const [ay, am, ad] = adjDate.split('-').map(Number);
-                                const adjDayName = DAYS_OF_WEEK[new Date(ay, (am || 1) - 1, ad || 1).getDay()];
-                                const parts = String(adj.sub || adj.classSection || '').split('|');
-                                const cName = parts[0] ? parts[0].trim() : (adj.className || adj.class_name || '');
-                                const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : (adj.section || '');
-                                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-
-                                const targetSlot = masterData.find(slot => {
-                                    if (slot.day !== adjDayName) return false;
-                                    if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adjTitle)) return false;
-                                    if (slot.start24) {
-                                        const [sh, sm] = slot.start24.split(':').map(Number);
-                                        if (Math.abs((sh * 60 + sm) - adjStart) > 15) return false;
-                                    }
-                                    return true;
-                                });
-
-                                if (targetSlot) {
-                                    targetSlot.teacher = adjTo;
-                                    targetSlot.teacherName = adjTo;
-                                    targetSlot.teacherEmail = adjEmail;
-                                    targetSlot.remark = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
-                                } else if (adj.type === "OTHER" || cName === "Custom" || cName === "Extra Duty") {
-                                    masterData.push({
-                                        id: 'sub_' + Math.random().toString(36).substr(2, 9),
-                                        day: adjDayName,
-                                        className: "Extra Duty",
-                                        section: "Task",
-                                        subject: adjTitle,
-                                        teacher: adjTo,
-                                        teacherName: adjTo,
-                                        teacherEmail: adjEmail,
-                                        start24: minsTo24(adjStart),
-                                        end24: minsTo24(adjEnd),
-                                        room: "TBD",
-                                        remark: "(Assigned)"
+                                 const targetSlot = masterData.find(slot => {
+                                        if (slot.day !== adjDayName) return false;
+                                        if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adj.title)) return false;
+                                        if (slot.start24) {
+                                            const [sh, sm] = slot.start24.split(':').map(Number);
+                                            if (Math.abs((sh * 60 + sm) - adj.start) > 15) return false;
+                                        }
+                                        return true;
                                     });
-                                    if (!structureData.some(s => s.className === "Extra Duty")) {
-                                        structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adjTitle] });
+
+                                    if (targetSlot) {
+                                        targetSlot.teacher = adj.adjustedTo;
+                                        targetSlot.teacherName = adj.adjustedTo;
+                                        targetSlot.teacherEmail = adj.adjustedEmail;
+                                        targetSlot.remark = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
+                                    } else if (adj.type === "OTHER" || cName === "Custom" || cName === "Extra Duty") {
+                                        masterData.push({
+                                            id: 'sub_' + Math.random().toString(36).substr(2,9),
+                                            day: adjDayName,
+                                            className: "Extra Duty",
+                                            section: "Task",
+                                            subject: adj.title,
+                                            teacher: adj.adjustedTo,
+                                            teacherName: adj.adjustedTo,
+                                            teacherEmail: adj.adjustedEmail,
+                                            start24: minsTo24(adj.start),
+                                            end24: minsTo24(adj.end),
+                                            room: "TBD",
+                                            remark: "(Assigned)"
+                                        });
+                                        if (!structureData.some(s => s.className === "Extra Duty")) {
+                                            structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adj.title] });
+                                        }
                                     }
                                 }
-                            }
-                        });
+                            });
+                        }
                     }
                 });
 
                 allTimetableData = masterData;
-            } catch (e) {
-                console.error("Error loading timetable from Supabase:", e);
+                
+                // Save the merged data AND the new timestamp to memory
+                localStorage.setItem(cacheKey, JSON.stringify(allTimetableData));
+                localStorage.setItem(timeKey, serverTime.toString());
+            } catch(e) {
+                console.error("Error loading timetable:", e);
+                // Safe offline fallback
+                const cached = localStorage.getItem(cacheKey);
+                if(cached) allTimetableData = JSON.parse(cached);
             }
         }
 
-        async function switchView(mode) {
+       async function switchView(mode) {
             currentMode = mode;
             const btnMe = document.getElementById('btn-me');
             const btnAll = document.getElementById('btn-all');
@@ -919,7 +569,7 @@ if (currentMode === 'ME') {
             const sub = document.getElementById('view-subtitle');
             const filterContainer = document.getElementById('filter-container');
 
-            if (mode === 'ME') {
+            if(mode === 'ME') {
                 btnMe.className = "px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[11px] transition-all bg-indigo-600 text-white shadow-md";
                 btnAll.className = "px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[11px] transition-all bg-transparent text-slate-500 hover:bg-slate-100";
                 title.innerText = "My Schedule";
@@ -931,46 +581,35 @@ if (currentMode === 'ME') {
                 btnMe.className = "px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[11px] transition-all bg-transparent text-slate-500 hover:bg-slate-100";
                 btnAll.className = "px-6 py-3 rounded-xl font-black uppercase tracking-widest text-[11px] transition-all bg-indigo-600 text-white shadow-md";
                 title.innerText = "Full School Schedule";
-                sub.innerText = isDateViewActive && viewDateIso
-                    ? `Showing full school schedule for ${viewDateIso}.`
-                    : `Showing today's (${TODAY_FULL}) full school schedule.`;
+                sub.innerText = "Showing the entire master timetable.";
                 filterContainer.classList.remove('hidden');
                 filterContainer.classList.add('flex');
-
-                if (isDateViewActive && viewDateIso) {
-                    await loadDateView();
-                } else {
-                    await loadTodayFullSchoolOnly();
-                    populateFilterDropdowns();
-                    renderDashboard();
-                }
+                renderDashboard();
             }
         }
 
         function togglePin(secId) {
-            if (pinnedSections.has(secId)) pinnedSections.delete(secId);
+            if(pinnedSections.has(secId)) pinnedSections.delete(secId);
             else pinnedSections.add(secId);
-            renderDashboard();
+            renderDashboard(); 
         }
 
+        // --- SILENT CLASH DETECTOR ---
         function timeToMins(t) {
-            if (!t) return 0;
-            const [h, m] = t.split(':').map(Number);
-            return h * 60 + m;
+            if(!t) return 0; let [h,m] = t.split(':').map(Number); return h*60+m;
         }
 
         function findClashes(dataArray) {
             let clashingIds = new Set();
-            for (let i = 0; i < dataArray.length; i++) {
-                for (let j = i + 1; j < dataArray.length; j++) {
-                    const a = dataArray[i], b = dataArray[j];
+            for(let i=0; i<dataArray.length; i++) {
+                for(let j=i+1; j<dataArray.length; j++) {
+                    let a = dataArray[i], b = dataArray[j];
                     if (a.teacher !== "NONE" && a.teacher && a.teacher === b.teacher && a.day === b.day) {
-                        const aS = timeToMins(a.start24), aE = timeToMins(a.end24);
-                        const bS = timeToMins(b.start24), bE = timeToMins(b.end24);
+                        let aS = timeToMins(a.start24), aE = timeToMins(a.end24);
+                        let bS = timeToMins(b.start24), bE = timeToMins(b.end24);
                         if (aS < bE && aE > bS) {
-                            if (a.room && b.room && a.room.toLowerCase() === b.room.toLowerCase()) continue;
-                            clashingIds.add(a.id);
-                            clashingIds.add(b.id);
+                            if (a.room && b.room && a.room.toLowerCase() === b.room.toLowerCase()) continue; // Merged class exception
+                            clashingIds.add(a.id); clashingIds.add(b.id);
                         }
                     }
                 }
@@ -984,22 +623,23 @@ if (currentMode === 'ME') {
 
             const datasetToUse = currentMode === 'ME' ? myTimetableData : allTimetableData;
 
-            if (datasetToUse.length === 0) {
+            if(datasetToUse.length === 0) {
                 container.innerHTML = `<div class="bg-white border-2 border-dashed border-slate-300 rounded-[2rem] p-16 text-center shadow-sm">
                     <div class="text-4xl mb-4">📭</div>
                     <h3 class="text-xl font-black text-slate-700 uppercase tracking-widest">No Classes Found</h3>
-                    <p class="text-slate-400 font-bold text-[10px] uppercase tracking-widest mt-2">No classes scheduled for this branch and session.</p>
+                    <p class="text-slate-400 font-bold text-[10px] uppercase tracking-widest mt-2">You currently have no classes scheduled in the system.</p>
                 </div>`;
                 return;
             }
 
+            // Flag clashes against the FULL DATA to ensure accuracy
             const globalClashIds = findClashes(allTimetableData);
             datasetToUse.forEach(item => { item.hasClash = globalClashIds.has(item.id); });
 
-            const renderGroups = {};
+           const renderGroups = {};
             structureData.forEach(struct => {
-                if (!renderGroups[struct.className]) renderGroups[struct.className] = {};
-                renderGroups[struct.className][struct.sectionName] = [];
+                if(!renderGroups[struct.className]) renderGroups[struct.className] = {};
+                renderGroups[struct.className][struct.sectionName] = []; 
             });
 
             const selectedSub = (currentMode === 'ALL' && document.getElementById('filter-subject')) ? document.getElementById('filter-subject').value : 'ALL';
@@ -1007,16 +647,17 @@ if (currentMode === 'ME') {
             const isFiltering = currentMode === 'ALL' && (selectedSub !== 'ALL' || selectedTea !== 'ALL');
 
             datasetToUse.forEach(item => {
-                const matchSub = selectedSub === 'ALL' || (item.subject && item.subject.toUpperCase() === selectedSub.toUpperCase());
-                const matchTea = selectedTea === 'ALL' || item.teacher === selectedTea;
+                let matchSub = selectedSub === 'ALL' || (item.subject && item.subject.toUpperCase() === selectedSub.toUpperCase());
+                let matchTea = selectedTea === 'ALL' || item.teacher === selectedTea;
 
                 if (matchSub && matchTea) {
-                    if (renderGroups[item.className] && renderGroups[item.className][item.section]) {
+                    if(renderGroups[item.className] && renderGroups[item.className][item.section]) {
                         renderGroups[item.className][item.section].push(item);
                     }
                 }
             });
 
+            // Pinned Board Setup
             let pinnedHtml = `
                 <div class="bg-indigo-50 border-2 border-indigo-200 p-4 sm:p-6 rounded-[2.5rem] mb-10 shadow-md">
                     <div class="flex flex-wrap justify-between items-center mb-6 gap-4 border-b border-indigo-100 pb-4">
@@ -1028,12 +669,12 @@ if (currentMode === 'ME') {
             let hasPinned = false;
             let normalHtml = "";
 
-            Object.keys(renderGroups).sort().forEach(className => {
+           Object.keys(renderGroups).sort().forEach(className => {
                 let classHasData = false;
                 Object.keys(renderGroups[className]).forEach(sec => {
-                    if (renderGroups[className][sec].length > 0) classHasData = true;
+                    if(renderGroups[className][sec].length > 0) classHasData = true;
                 });
-
+                
                 if ((currentMode === 'ME' || isFiltering) && !classHasData) return;
 
                 const shouldOpenClass = (isFiltering || currentMode === 'ME') ? 'open' : '';
@@ -1046,17 +687,17 @@ if (currentMode === 'ME') {
                             <span class="w-8 text-right opacity-50 group-open:rotate-180 transition-transform duration-300">▼</span>
                         </summary>
                         <div class="flex flex-col p-4 bg-slate-50 gap-4">`;
-
+                
                 let hasUnpinned = false;
 
                 Object.keys(renderGroups[className]).sort().forEach(sectionName => {
                     const slots = renderGroups[className][sectionName];
-                    if ((currentMode === 'ME' || isFiltering) && slots.length === 0) return;
+                    if ((currentMode === 'ME' || isFiltering) && slots.length === 0) return; 
 
                     const secId = `sec_${className.replace(/\s+/g, '')}_${sectionName.replace(/\s+/g, '')}`;
                     const isPinned = pinnedSections.has(secId);
                     const shouldOpenSec = (isPinned || isFiltering || currentMode === 'ME') ? 'open' : '';
-
+                    
                     const pinBtn = `<button onclick="togglePin('${secId}')" class="mt-4 px-4 py-2 rounded-full text-[9px] font-black uppercase tracking-widest transition-all ${isPinned ? 'text-indigo-800 bg-indigo-200 hover:bg-indigo-300 shadow-md' : 'text-slate-500 bg-slate-200 hover:bg-slate-300'}">${isPinned ? '📍 Unpin' : '📌 Pin'}</button>`;
                     const gridStyle = isPinned ? 'flex-wrap: nowrap !important; overflow-x: auto; padding-bottom: 12px;' : '';
 
@@ -1077,13 +718,13 @@ if (currentMode === 'ME') {
                                     </div>
                                     ${pinBtn}
                                 </div>
-                                <div class="tt-grid flex-1" id="grid-${secId}" style="${gridStyle}">
+                               <div class="tt-grid flex-1" id="grid-${secId}" style="${gridStyle}">
                                     ${generateTimeBlocksHTML(slots, className, sectionName)}
                                 </div>
                             </div>
                         </details>`;
 
-                    if (isPinned) {
+                    if(isPinned) {
                         pinnedHtml += secHtml;
                         hasPinned = true;
                     } else {
@@ -1093,55 +734,56 @@ if (currentMode === 'ME') {
                 });
 
                 groupHtml += `</div></details>`;
-                if (hasUnpinned) normalHtml += groupHtml;
+                if(hasUnpinned) normalHtml += groupHtml;
             });
 
             pinnedHtml += `</div></div>`;
             container.innerHTML = (hasPinned ? pinnedHtml : '') + normalHtml;
         }
 
-        function generateTimeBlocksHTML(slots, className, sectionName) {
-            const timeContainers = {};
+      function generateTimeBlocksHTML(slots, className, sectionName) {
+            const timeContainers = {}; 
             slots.forEach(slot => {
                 const tKey = `${slot.start24}-${slot.end24}`;
-                if (!timeContainers[tKey]) timeContainers[tKey] = { start24: slot.start24, end24: slot.end24, entries: [] };
-
+                if(!timeContainers[tKey]) timeContainers[tKey] = { start24: slot.start24, end24: slot.end24, entries: [] };
+                
                 let existingEntry = timeContainers[tKey].entries.find(e => e.subject === slot.subject && e.teacher === slot.teacher && e.room === slot.room);
-                if (existingEntry) {
-                    if (!existingEntry.days.includes(slot.day)) existingEntry.days.push(slot.day);
-                    if (slot.hasClash) existingEntry.hasClash = true;
+                if(existingEntry) {
+                    if(!existingEntry.days.includes(slot.day)) existingEntry.days.push(slot.day);
+                    if(slot.hasClash) existingEntry.hasClash = true; // Transfer clash flag
                 } else {
                     timeContainers[tKey].entries.push({ subject: slot.subject, teacher: slot.teacher, room: slot.room, remark: slot.remark, days: [slot.day], hasClash: slot.hasClash });
                 }
             });
 
+        // Dynamically target the selected date OR today's date
             const targetDay = isDateViewActive ? viewDayFull : TODAY_FULL;
             const targetDateObj = isDateViewActive ? new Date(viewDateIso) : new Date();
-            targetDateObj.setHours(0, 0, 0, 0);
+            targetDateObj.setHours(0,0,0,0);
 
             let finalHtml = "";
-            Object.values(timeContainers).sort((a, b) => a.start24.localeCompare(b.start24)).forEach(tc => {
+            Object.values(timeContainers).sort((a,b) => a.start24.localeCompare(b.start24)).forEach(tc => {
+                
                 let happensToday = false;
-                tc.entries.forEach(ent => { if (ent.days.includes(targetDay)) happensToday = true; });
+                tc.entries.forEach(ent => { if(ent.days.includes(targetDay)) happensToday = true; });
 
                 let durStr = "SET TIME";
                 let sMins = 0, eMins = 0;
-                if (tc.start24 && tc.end24) {
-                    const [sh, sm] = tc.start24.split(':').map(Number);
+                if(tc.start24 && tc.end24) {
+                    const [sh, sm] = tc.start24.split(':').map(Number); 
                     const [eh, em] = tc.end24.split(':').map(Number);
-                    sMins = sh * 60 + sm;
-                    eMins = eh * 60 + em;
+                    sMins = sh * 60 + sm; eMins = eh * 60 + em;
                     const mins = eMins - sMins;
                     if (!isNaN(mins) && mins > 0) durStr = `${mins} MINS`;
                 }
 
-                let isHolidayToday = false;
-                let holidayReason = "";
+                // --- HOLIDAY CHECK FOR TODAY ---
+                let isHolidayToday = false; let holidayReason = "";
                 if (happensToday && holidaysData && holidaysData.length > 0) {
                     for (let h of holidaysData) {
-                        const hStart = new Date(h.startDate); hStart.setHours(0, 0, 0, 0);
-                        const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23, 59, 59, 999);
-
+                        const hStart = new Date(h.startDate); hStart.setHours(0,0,0,0);
+                        const hEnd = new Date(h.endDate || h.startDate); hEnd.setHours(23,59,59,999);
+                        
                         if (targetDateObj >= hStart && targetDateObj <= hEnd) {
                             const targetCls = `${className}|${sectionName}`;
                             if (h.targetClasses.includes('ALL') || h.targetClasses.includes(targetCls)) {
@@ -1151,6 +793,7 @@ if (currentMode === 'ME') {
                                     const [hsh, hsm] = h.startTime.split(':').map(Number);
                                     const [heh, hem] = h.endTime.split(':').map(Number);
                                     const hStartMins = hsh * 60 + hsm; const hEndMins = heh * 60 + hem;
+                                    
                                     if (sMins < hEndMins && eMins > hStartMins) {
                                         isHolidayToday = true; holidayReason = h.reason; break;
                                     }
@@ -1160,6 +803,7 @@ if (currentMode === 'ME') {
                     }
                 }
 
+                // If it's a holiday today, we dim it out so the teacher focuses on other days
                 const dimClass = (happensToday && !isHolidayToday) ? '' : 'dim-block';
 
                 let blockHtml = `
@@ -1177,25 +821,25 @@ if (currentMode === 'ME') {
                         </div>
                     `;
                 }
-
                 tc.entries.forEach((ent, index) => {
-                    if (index > 0) blockHtml += `<hr class="border-dashed border-slate-200">`;
-
-                    let subColor = '#e11d48';
+                    if(index > 0) blockHtml += `<hr class="border-dashed border-slate-200">`;
+                    
+                    let subColor = '#e11d48'; 
                     if (SPECIAL_SUBJECTS.includes(ent.subject)) subColor = '#94a3b8';
                     if (ent.subject === 'EXAM' || ent.subject === 'EVENT') subColor = '#8b5cf6';
                     if (ent.subject.toUpperCase().includes('MATH')) subColor = '#047857';
                     if (ent.subject.toUpperCase().includes('PHYSICS')) subColor = '#1d4ed8';
 
-                    const sortedDays = ent.days.sort((a, b) => DAYS_OF_WEEK.indexOf(a) - DAYS_OF_WEEK.indexOf(b));
+                  const sortedDays = ent.days.sort((a,b) => DAYS_OF_WEEK.indexOf(a) - DAYS_OF_WEEK.indexOf(b));
                     let pillsHtml = sortedDays.map(d => {
                         if (d === targetDay) {
                             return `<span class="inline-block bg-blue-600 text-white font-black text-[9px] px-2 py-0.5 rounded shadow-md transform scale-110 z-10 mx-[3px] border border-blue-800">${DAY_SHORTS[d]}</span>`;
                         }
                         return `<span class="day-pill opacity-60">${DAY_SHORTS[d]}</span>`;
                     }).join('');
-
-                    if (ent.hasClash) {
+                    
+                    // IF CLASH DETECTED, SHOW RED BADGE
+                    if(ent.hasClash) {
                         pillsHtml += `<span class="inline-block bg-rose-600 text-white font-black text-[8px] px-1.5 py-0.5 rounded shadow-sm animate-pulse ml-1 border border-rose-800" title="Teacher is booked in two places at once!">🚨 CLASH</span>`;
                     }
 
@@ -1208,7 +852,7 @@ if (currentMode === 'ME') {
                                     <button onclick="peekTeacher('${ent.teacher}')" class="bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-full w-4 h-4 flex items-center justify-center text-[8px] font-black shadow-sm transition-colors" title="View Teacher Schedule">ℹ️</button>
                                 </div>
                             ` : ''}
-                            ${(ent.room && ent.room !== 'undefined') ? `<span class="text-[9px] font-bold text-slate-500 mt-0.5">RM: ${ent.room}</span>` : ''}
+                          ${(ent.room && ent.room !== 'undefined') ? `<span class="text-[9px] font-bold text-slate-500 mt-0.5">RM: ${ent.room}</span>` : ''}
                             ${(ent.remark && ent.remark !== 'undefined') ? `<span class="text-[9px] font-bold italic text-amber-600 mt-0.5">(${ent.remark})</span>` : ''}
                             <div class="mt-2 flex justify-center flex-wrap items-center min-h-[18px]">
                                 ${pillsHtml}
@@ -1228,26 +872,26 @@ if (currentMode === 'ME') {
             const modal = document.getElementById('teacher-info-modal');
             const title = document.getElementById('ti-name');
             const content = document.getElementById('ti-content');
-
+            
             title.innerText = teacherName;
             content.innerHTML = "";
 
-            if (schedule.length === 0) {
+            if(schedule.length === 0) {
                 content.innerHTML = `<div class="text-center py-10"><div class="text-4xl mb-2">✨</div><div class="text-emerald-600 font-black uppercase tracking-widest text-sm">Fully Available</div><div class="text-slate-400 text-[10px] font-bold mt-1">No saved classes found in the system.</div></div>`;
                 modal.classList.replace('hidden', 'flex');
                 return;
             }
 
             DAYS_OF_WEEK.forEach(day => {
-                const dayClasses = schedule.filter(s => s.day === day).sort((a, b) => a.start24.localeCompare(b.start24));
-                if (dayClasses.length > 0) {
+                const dayClasses = schedule.filter(s => s.day === day).sort((a,b) => a.start24.localeCompare(b.start24));
+                if(dayClasses.length > 0) {
                     let dayHtml = `
                     <div class="bg-slate-50 border border-slate-200 rounded-2xl p-4">
                         <div class="font-black text-slate-800 text-xs uppercase tracking-widest mb-3 flex items-center gap-2">
                             <span class="${day === TODAY_FULL ? 'bg-blue-600 text-white' : 'bg-indigo-100 text-indigo-700'} px-2 py-1 rounded shadow-sm">📍 ${day}</span>
                         </div>
                         <div class="space-y-2">`;
-
+                    
                     dayClasses.forEach(c => {
                         dayHtml += `
                             <div class="flex flex-col sm:flex-row sm:items-center justify-between bg-white border border-slate-100 p-3 rounded-xl shadow-sm">
@@ -1266,66 +910,19 @@ if (currentMode === 'ME') {
             modal.classList.replace('hidden', 'flex');
         }
 
-        async function reloadTimetableLive() {
-            if (!activeBranch) return;
-            await fetchStructure();
-           if (isDateViewActive && viewDateIso) {
-                await loadDateView();
-            } else if (currentMode === 'ME') {
-                await loadTodayTeacherScheduleOnly();
-            } else {
-                await loadTodayFullSchoolOnly();
-            }
-            if (currentMode === 'ME') {
-                renderDashboard();
-            } else {
-                const nameMatch = safeName.toLowerCase();
-                myTimetableData = allTimetableData.filter(t =>
-                    (t.teacher && t.teacher.trim().toLowerCase() === nameMatch) ||
-                    (t.teacherName && t.teacherName.trim().toLowerCase() === nameMatch)
-                );
-                if (currentMode === 'ALL') {
-                    populateFilterDropdowns();
-                } else {
-                    renderDashboard();
+       function forceSync() {
+            // Dynamically sweep and delete all cached timetable data
+            Object.keys(localStorage).forEach(key => {
+                if (key.includes('minerva_timetable') || key.includes('minerva_struct') || key.includes('minerva_teachers')) {
+                    localStorage.removeItem(key);
                 }
-            }
-        }
-
-        function subscribeLiveTimetableUpdates() {
-            if (ttRealtimeChannel) {
-                sb.removeChannel(ttRealtimeChannel);
-                ttRealtimeChannel = null;
-            }
-            if (!activeBranch) return;
-
-            const scheduleDebouncedReload = () => {
-                clearTimeout(realtimeRefreshTimer);
-                realtimeRefreshTimer = setTimeout(() => {
-                    reloadTimetableLive().catch(err => console.error("Live refresh error:", err));
-                }, 150);
-            };
-
-            const tables = ['institute_structure', 'timetable', 'timetable_history', 'school_holidays', 'leave_requests'];
-            ttRealtimeChannel = sb.channel(`teacher_tt_live_${activeBranch.id}`);
-
-            tables.forEach(tbl => {
-                ttRealtimeChannel.on(
-                    'postgres_changes',
-                    { event: '*', schema: 'public', table: tbl, filter: `branch_id=eq.${activeBranch.id}` },
-                    scheduleDebouncedReload
-                );
             });
-
-            ttRealtimeChannel.subscribe();
+            window.location.reload();
         }
-
         function format12Hour(time24) {
-            if (!time24) return "";
-            let [h, m] = time24.split(':');
-            const ampm = h >= 12 ? 'PM' : 'AM';
-            h = h % 12 || 12;
-            return `${String(h).padStart(2, '0')}:${m} ${ampm}`;
+            if(!time24) return ""; let [h, m] = time24.split(':');
+            let ampm = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+            return `${h.toString().padStart(2, '0')}:${m} ${ampm}`;
         }
     </script>
 </body>
