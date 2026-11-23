@@ -5,7 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva | Master Timetable</title>
   <script src="tailwind-engine.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
     <style>
         /* Clean Details Dropdown Arrow */
@@ -75,6 +76,7 @@
                     <button onclick="manageSpecialDates(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-amber-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-amber-50 transition-all">🎯 Manage Special Dates</button>
                     <button onclick="openHolidayModal(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-rose-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-rose-50 transition-all">🗓️ Holidays / Events</button>
                     <button onclick="openPrintModal(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-emerald-800 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-emerald-50 transition-all">🖨️ Export / Print</button>
+                    <button onclick="forceSync(); document.getElementById('top-menu-dropdown').classList.add('hidden')" class="w-full text-left flex items-center gap-3 text-sky-700 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-sky-50 transition-all">↻ Force Sync</button>
                     <button id="auth-btn" onclick="window.location.href='admin-timetable-auth.html'; document.getElementById('top-menu-dropdown').classList.add('hidden')" class="hidden w-full text-left flex items-center gap-3 text-indigo-800 px-4 py-3 rounded-xl font-black text-[10px] sm:text-xs uppercase tracking-widest hover:bg-indigo-50 transition-all">🔐 Delegations</button>
                 </div>
             </div>
@@ -83,13 +85,11 @@
                 <svg class="w-5 h-5 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
             </button>
             <div class="flex flex-col">
-                <div class="flex items-center gap-2 flex-wrap">
+                <div class="flex items-center gap-3">
                     <h1 class="text-lg sm:text-xl font-black text-slate-800 uppercase tracking-tighter leading-none">Timetable Editor</h1>
                     <select id="global-center-switch" onchange="switchAdminCenter(this.value)" class="text-[10px] font-black text-sky-700 bg-sky-50 border border-sky-200 outline-none rounded px-2 py-0.5 cursor-pointer uppercase tracking-widest shadow-sm">
-                        <option value="">📍 Loading...</option>
-                    </select>
-                    <select id="global-session-switch" onchange="switchSessionContext(this.value)" class="text-[10px] font-black text-indigo-700 bg-indigo-50 border border-indigo-200 outline-none rounded px-2 py-0.5 cursor-pointer uppercase tracking-widest shadow-sm">
-                        <option value="">📅 Session...</option>
+                        <option value="GHUMARWIN">📍 Ghumarwin</option>
+                        <option value="DHARAMSHALA">📍 Dharamshala</option>
                     </select>
                 </div>
                 <div class="flex items-center gap-2 mt-1">
@@ -699,219 +699,66 @@
         </div>
     </div>
     <script>
-        const SUPABASE_URL = "https://lpccpiozrqgxgusculbs.supabase.co";
-        const SUPABASE_ANON_KEY = "sb_publishable_1q3Xilxs8lSK_dyWwbfvzQ_7zJOQV6v";
-        const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        const firebaseConfig = {
+            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
+            authDomain: "shop-portal-bbbbb.firebaseapp.com",
+            projectId: "shop-portal-bbbbb",
+            storageBucket: "shop-portal-bbbbb.firebasestorage.app",
+            messagingSenderId: "701377739976",
+            appId: "1:701377739976:web:99998220272090e56e79fd"
+        };
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+    // const storage = firebase.storage();
 
-        let allBranches = [];
-        let branchSessions = [];
-        let activeBranchId = null;
-        let activeSessionId = null;
-        let activeSessionLabel = "2026–2027";
-        let realtimeChannel = null;
-
-        function parseDetails(rawDetails) {
-            if (!rawDetails) return {};
-            if (typeof rawDetails === 'object' && !Array.isArray(rawDetails)) return rawDetails;
-            if (typeof rawDetails === 'string') {
-                try { return JSON.parse(rawDetails); } catch (_) { return {}; }
-            }
-            return {};
-        }
-
-        function normalizeSessionKey(lbl) {
-            return String(lbl || '').replace(/\s+/g, '').replace(/[–—-]/g, '-');
-        }
-
-        async function loadBranchesAndSessions(forceRefresh = false) {
-            const cachedBranchesRaw = !forceRefresh ? sessionStorage.getItem('minerva_cached_branches') : null;
-            if (cachedBranchesRaw) {
-                try {
-                    allBranches = JSON.parse(cachedBranchesRaw) || [];
-                } catch (_) {
-                    allBranches = [];
-                }
-            }
-
-            if (allBranches.length === 0) {
-                const { data: bRows, error: bErr } = await supabaseClient
-                    .from('branches')
-                    .select('id, name, is_active')
-                    .order('created_at', { ascending: true });
-                if (bErr) throw bErr;
-
-                allBranches = (bRows || []).filter(b => b.is_active !== false && b.name && b.name.trim() !== '');
-                sessionStorage.setItem('minerva_cached_branches', JSON.stringify(allBranches));
-            }
-
-            if (allBranches.length === 0) return;
-
-            const matchedBranch = allBranches.find(b => b.name.trim().toUpperCase() === String(activeCenter).toUpperCase()) || allBranches[0];
-            activeCenter = matchedBranch.name.trim().toUpperCase();
-            activeBranchId = matchedBranch.id;
-            sessionStorage.setItem('minervaAdminCenter', activeCenter);
-
-            const branchSelect = document.getElementById('global-center-switch');
-            if (branchSelect) {
-                branchSelect.innerHTML = allBranches.map(b =>
-                    `<option value="${b.name.trim().toUpperCase()}" ${b.id === activeBranchId ? 'selected' : ''}>📍 ${b.name.trim()}</option>`
-                ).join('');
-            }
-
-            const sessionCacheKey = `minerva_cached_sessions_${activeBranchId}`;
-            const cachedSessionsRaw = !forceRefresh ? sessionStorage.getItem(sessionCacheKey) : null;
-            branchSessions = [];
-            if (cachedSessionsRaw) {
-                try {
-                    branchSessions = JSON.parse(cachedSessionsRaw) || [];
-                } catch (_) {
-                    branchSessions = [];
-                }
-            }
-
-            if (branchSessions.length === 0) {
-                const { data: sRows, error: sErr } = await supabaseClient
-                    .from('branch_sessions')
-                    .select('id, branch_id, session_name, is_active')
-                    .eq('branch_id', activeBranchId)
-                    .order('session_name', { ascending: false });
-                if (sErr) throw sErr;
-
-                branchSessions = (sRows || []).filter(s => s.is_active !== false && s.session_name);
-                sessionStorage.setItem(sessionCacheKey, JSON.stringify(branchSessions));
-            }
-
-            const savedSessionId = sessionStorage.getItem(`minerva_session_${activeBranchId}`);
-            const default2627 = branchSessions.find(s => normalizeSessionKey(s.session_name) === '2026-2027');
-            const chosenSession =
-                branchSessions.find(s => s.id === savedSessionId) ||
-                default2627 ||
-                branchSessions[0] ||
-                null;
-
-            activeSessionId = chosenSession ? chosenSession.id : null;
-            activeSessionLabel = chosenSession ? chosenSession.session_name : "2026–2027";
-            if (activeSessionId) sessionStorage.setItem(`minerva_session_${activeBranchId}`, activeSessionId);
-
-            const sessionSelect = document.getElementById('global-session-switch');
-            if (sessionSelect) {
-                sessionSelect.innerHTML = branchSessions.map(s =>
-                    `<option value="${s.id}" ${s.id === activeSessionId ? 'selected' : ''}>📅 ${s.session_name}</option>`
-                ).join('');
-            }
-        }
-
-       async function switchAdminCenter(centerName) {
-            activeCenter = String(centerName || "GHUMARWIN").toUpperCase();
-            sessionStorage.setItem('minervaAdminCenter', activeCenter);
-            const wm = document.getElementById('center-watermark');
-            if (wm) wm.innerHTML = activeCenter;
-            document.getElementById('timetable-container').innerHTML = `<div class="text-center py-12 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Switching to ${activeCenter}...</div>`;
-            await loadBranchesAndSessions();
-            subscribeLiveTables();
-            await Promise.all([fetchStructure(), fetchRooms(), fetchHolidays(), fetchTeachers()]);
-            populateFilterDropdowns();
-            await loadTodayScheduleForActiveContext();
-        }
-
-        async function switchSessionContext(sessionId) {
-            const sObj = branchSessions.find(s => s.id === sessionId);
-            if (!sObj) return;
-            activeSessionId = sObj.id;
-            activeSessionLabel = sObj.session_name;
-            sessionStorage.setItem(`minerva_session_${activeBranchId}`, activeSessionId);
-            await Promise.all([fetchStructure(), fetchHolidays()]);
-            populateFilterDropdowns();
-            await loadTodayScheduleForActiveContext();
-        }
-
-        function subscribeLiveTables() {
-            if (realtimeChannel) {
-                supabaseClient.removeChannel(realtimeChannel);
-                realtimeChannel = null;
-            }
-            if (!activeBranchId) return;
-
-            realtimeChannel = supabaseClient
-                .channel(`tt_live_${activeBranchId}_${activeSessionId || 'none'}`)
-                .on('postgres_changes', {
-                    event: '*',
-                    schema: 'public',
-                    table: 'institute_structure',
-                    filter: `branch_id=eq.${activeBranchId}`
-                }, async () => {
-                    await fetchStructure();
-                    populateFilterDropdowns();
-                    renderDirectDashboard(true);
-                })
-                .on('postgres_changes', {
-                    event: '*',
-                    schema: 'public',
-                    table: 'infrastructure_rooms',
-                    filter: `branch_id=eq.${activeBranchId}`
-                }, async () => {
-                    await fetchRooms();
-                })
-                .subscribe();
-        }
-
+        // IDB Helper Removed. Firebase Native Cache is now managing Delta Syncs.
+        
+// --- SECURITY GUARD & AUTO-ROUTER ---
         const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
         async function checkPermission() {
-            if (isAdmin) return;
-
-            const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff') || 'null');
-            if (!activeStaff || (!activeStaff.email && !activeStaff.uid)) return window.location.replace('staff-login.html');
-
+            if (isAdmin) return; // Full Admins are free to roam between branches
+            
+            const activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
+            if (!activeStaff) return window.location.replace('staff-login.html');
+            
             try {
-                let staffData = null;
-                if (activeStaff.uid) {
-                    const { data: byId } = await supabaseClient
-                        .from("staff_applications")
-                        .select("*")
-                        .eq("id", activeStaff.uid)
-                        .limit(1);
-                    if (byId && byId[0]) staffData = byId[0];
-                }
-                if (!staffData && activeStaff.email) {
-                    const { data: byEmail, error } = await supabaseClient
-                        .from("staff_applications")
-                        .select("*")
-                        .ilike("email", activeStaff.email.trim())
-                        .limit(1);
-                    if (error) throw error;
-                    if (byEmail && byEmail[0]) staffData = byEmail[0];
-                }
-                if (!staffData) throw new Error("No profile");
-
-                const det = parseDetails(staffData.details);
-                const authLevel = staffData.can_edit_timetable ?? staffData.canEditTimetable ?? det.canEditTimetable ?? det.can_edit_timetable;
-
+                const snap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                if (snap.empty) throw new Error("No profile");
+                
+                const staffData = snap.docs[0].data();
+                const authLevel = staffData.canEditTimetable;
+                
                 if (!authLevel) {
                     alert("Unauthorized Access. Redirecting...");
                     return window.location.replace('teacher-portal.html');
                 }
 
-                if (typeof authLevel === 'string' && authLevel.trim() !== '') {
-                    const authBranch = authLevel.trim().toUpperCase();
-                    if (activeCenter !== authBranch) {
-                        sessionStorage.setItem('minervaAdminCenter', authBranch);
-                        window.location.reload();
-                        return;
-                    }
-
-                    const dropdown = document.getElementById('global-center-switch');
-                    if (dropdown) {
-                        dropdown.disabled = true;
-                        dropdown.className = "text-[10px] font-black text-slate-400 bg-slate-100 border border-slate-200 outline-none rounded px-2 py-0.5 uppercase tracking-widest cursor-not-allowed";
-                        dropdown.title = "Restricted to your authorized branch";
-                    }
+                // If teacher is restricted to a specific branch and it's NOT the one currently loaded
+                if (authLevel !== true && authLevel !== activeCenter) {
+                    // Auto-route them to THEIR branch instead of kicking them out!
+                    sessionStorage.setItem('minervaAdminCenter', authLevel);
+                    // Clear memory to force fresh fetch for their correct branch
+                    sessionStorage.removeItem('minerva_struct');
+                    sessionStorage.removeItem('minerva_timetable');
+                    sessionStorage.removeItem('minerva_teachers');
+                    window.location.reload(); 
+                    return; // Stop execution while it reloads
                 }
+
+                // Lock the dropdown so they can't change it manually and break their view
+                const dropdown = document.getElementById('global-center-switch');
+                if (dropdown && authLevel !== true) {
+                    dropdown.disabled = true;
+                    dropdown.className = "text-[10px] font-black text-slate-400 bg-slate-100 border border-slate-200 outline-none rounded px-2 py-0.5 uppercase tracking-widest cursor-not-allowed";
+                    dropdown.title = "Restricted to your authorized branch";
+                }
+
             } catch (e) {
-                console.error("Timetable permission check error:", e);
                 alert("Auth Error. Redirecting...");
                 window.location.replace('teacher-portal.html');
             }
         }
+        checkPermission();
 // --- UNDO/REDO ENGINE ---
 let historyStack = [];
 let redoStack = [];
@@ -953,32 +800,35 @@ function updateUndoButtons() {
     if(uBtn) uBtn.classList.toggle('text-slate-400', historyStack.length === 0);
     if(rBtn) rBtn.classList.toggle('text-slate-400', redoStack.length === 0);
 }
-      let activeCenter = (sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN").toUpperCase();
+       // --- MULTI-CENTER DYNAMIC DB ROUTER ---
+        let activeCenter = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
         sessionStorage.setItem('minervaAdminCenter', activeCenter);
-
-        async function switchAdminCenter(centerName) {
-            activeCenter = String(centerName || "GHUMARWIN").toUpperCase();
-            sessionStorage.setItem('minervaAdminCenter', activeCenter);
-            const wm = document.getElementById('center-watermark');
-            if (wm) wm.innerHTML = activeCenter;
-            document.getElementById('timetable-container').innerHTML = `<div class="text-center py-12 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Switching to ${activeCenter}...</div>`;
-            await loadBranchesAndSessions();
-            subscribeLiveTables();
-            await Promise.all([fetchStructure(), fetchRooms(), fetchHolidays(), fetchTeachers()]);
-            populateFilterDropdowns();
-            await loadTodayScheduleForActiveContext();
+        
+        // --- CROSS-PAGE CACHE PROTECTOR ---
+        // If the Admin switched branches from the Main Dashboard or Leave Portal, the browser 
+        // might still be holding the old branch's data in memory. This instantly forces a clean slate!
+        if (sessionStorage.getItem('minerva_cache_center') !== activeCenter) {
+            sessionStorage.removeItem('minerva_struct');
+            sessionStorage.removeItem('minerva_timetable');
+            sessionStorage.removeItem('minerva_teachers');
+            sessionStorage.removeItem('minerva_rooms');
+            sessionStorage.setItem('minerva_cache_center', activeCenter);
         }
 
-        async function switchSessionContext(sessionId) {
-            const sObj = branchSessions.find(s => s.id === sessionId);
-            if (!sObj) return;
-            activeSessionId = sObj.id;
-            activeSessionLabel = sObj.session_name;
-            sessionStorage.setItem(`minerva_session_${activeBranchId}`, activeSessionId);
-            await Promise.all([fetchStructure(), fetchHolidays()]);
-            populateFilterDropdowns();
-            await loadTodayScheduleForActiveContext();
+   function getCollection(name) {
+            // Only Staff remains global. Settings (configs) are now branch-specific.
+            const globalCollections = ['staff_applications'];
+            if (globalCollections.includes(name)) return db.collection(name);
+            
+            if (activeCenter === "GHUMARWIN") return db.collection(name);
+            return db.collection(`${activeCenter.toLowerCase()}_${name}`);
         }
+function switchAdminCenter(centerName) {
+            sessionStorage.setItem('minervaAdminCenter', centerName);
+            // The cache prefixes handle the isolation automatically, so we just reload.
+            window.location.reload();
+        }
+        // --------------------------------------
 
     let structureData = [];
         let allTeachers = [];
@@ -1055,142 +905,110 @@ function updateTeacherDropdown(skipRender = false) {
             if (!skipRender) renderDirectDashboard(true); 
         }
 
- async function loadTodayScheduleForActiveContext() {
-    const todayIso = new Date().toISOString().split('T')[0];
-    const dateInput = document.getElementById('context-date-input');
-    if (dateInput) dateInput.value = todayIso;
-    currentContextMode = 'OVERRIDE';
-    await confirmDateContext();
-}
-
  async function init() {
-    await checkPermission();
-    await loadBranchesAndSessions();
+    // Set the dropdown to match the active session storage
+    const dropdown = document.getElementById('global-center-switch');
+    if (dropdown) dropdown.value = activeCenter;
 
+    // --- SAFETY UI: Theme & Watermark ---
+    if (activeCenter === "DHARAMSHALA") {
+        document.querySelector('header').classList.replace('bg-white', 'bg-purple-50');
+        document.querySelector('header').classList.replace('border-b', 'border-purple-200');
+        document.body.classList.replace('bg-slate-200', 'bg-purple-100');
+    }
+    // Add Background Watermark
     const watermark = document.createElement('div');
-    watermark.id = 'center-watermark';
     watermark.innerHTML = activeCenter;
     watermark.className = "fixed inset-0 pointer-events-none flex items-center justify-center text-[10vw] font-black opacity-5 text-slate-900 z-[1] tracking-widest uppercase overflow-hidden whitespace-nowrap";
+    if(activeCenter === "DHARAMSHALA") watermark.classList.replace('text-slate-900', 'text-purple-900');
     document.body.appendChild(watermark);
 
+   // 1. Smart Back Button (Routes based on Role)
     const backBtn = document.getElementById('dynamic-back-btn');
-    if (backBtn) {
+    if(backBtn) {
         backBtn.onclick = () => {
-            window.location.href = sessionStorage.getItem('minervaAdminAuth') === 'true' ? 'admin.html' : 'teacher-portal.html';
+            const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+            if (isAdmin) {
+                window.location.href = 'admin.html'; // Admin goes to Admin Hub
+            } else {
+                window.location.href = 'teacher-portal.html'; // Teacher goes to Teacher Hub
+            }
         };
     }
 
+    // 2. Show Delegations button ONLY if it is the Admin
+    const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
     const authBtn = document.getElementById('auth-btn');
-    if (sessionStorage.getItem('minervaAdminAuth') === 'true' && authBtn) {
+    if (isAdmin && authBtn) {
         authBtn.classList.remove('hidden');
     }
+// 3. Load the rest of the timetable
+   await checkAndApplyFutureMaster(); 
+    await Promise.all([fetchStructure(), fetchTeachers(), fetchRooms()]);
+    await fetchTimetable();
+    await fetchLiveMasterCache(); // Cache pure master for audit checks
+   await fetchHolidays();
+    await fetchBellTemplates();
+    
+    // Auto-load Today's Schedule by default
+    const todayIso = new Date().toISOString().split('T')[0];
+    document.getElementById('context-date-input').value = todayIso;
+    await confirmDateContext(); // This internally renders the dashboard
 
-    subscribeLiveTables();
-
-    // Parallel core fetches for fast startup
-    await Promise.all([fetchStructure(), fetchRooms(), fetchHolidays(), fetchTeachers()]);
-    populateFilterDropdowns();
-    await loadTodayScheduleForActiveContext();
-
-    // Non-blocking background tasks
-    setTimeout(() => {
-        fetchBellTemplates();
-        checkAndApplyFutureMaster();
-    }, 0);
+    // Run this AFTER the context is confirmed so it doesn't trigger a double-render loop
+    populateFilterDropdowns(); 
 }
 
 async function checkAndApplyFutureMaster() {
-    if (!activeBranchId || !activeSessionId) return;
     const todayIso = new Date().toISOString().split('T')[0];
     try {
-        const { data: rows, error } = await supabaseClient
-            .from('timetable_history')
-            .select('*')
-            .eq('branch_id', activeBranchId)
-            .eq('session_id', activeSessionId)
-            .eq('entry_type', 'FUTURE_MASTER')
-            .neq('status', 'CANCELLED');
+        const histSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+        if (histSnap.empty) return;
 
-        if (error || !rows || rows.length === 0) return;
-
-        const pendingMasters = rows
-            .filter(r => r.date && r.date <= todayIso && Array.isArray(r.schedule))
-            .sort((a, b) => b.date.localeCompare(a.date));
-
+        let pendingMasters = [];
+        histSnap.forEach(doc => { if (doc.id <= todayIso) pendingMasters.push(doc.data()); });
         if (pendingMasters.length === 0) return;
+
+        // Get the most recent valid future master
+        pendingMasters.sort((a, b) => b.date.localeCompare(a.date));
         const targetMaster = pendingMasters[0];
 
-        await supabaseClient
-            .from('timetable')
-            .delete()
-            .eq('branch_id', activeBranchId)
-            .eq('session_id', activeSessionId);
+        const batch = db.batch();
+        
+        // 1. Wipe the old Live Master
+        const liveSnap = await getCollection("timetable").get();
+        liveSnap.forEach(doc => batch.delete(doc.ref));
 
-        const cleanSlots = (targetMaster.schedule || []).map(slot => ({
-            branch_id: activeBranchId,
-            session_id: activeSessionId,
-            day: slot.day || '',
-            class_name: slot.className || slot.class_name || '',
-            section: slot.section || '',
-            start24: slot.start24 || '',
-            end24: slot.end24 || '',
-            time_range: slot.timeRange || slot.time_range || '',
-            duration: slot.duration || '',
-            subject: slot.subject || '',
-            teacher: slot.teacher || 'NONE',
-            teacher_name: slot.teacherName || slot.teacher_name || slot.teacher || 'NONE',
-            teacher_email: slot.teacherEmail || slot.teacher_email || '',
-            room: slot.room || '',
-            remark: slot.remark || '',
-            version_id: slot.version_id || targetMaster.version_id || '',
-            effective_from: todayIso
-        }));
+        // 2. Apply the new Live Master
+        targetMaster.schedule.forEach(slot => {
+            const { sMins, eMins, ...cleanSlot } = slot;
+            batch.set(getCollection("timetable").doc(), cleanSlot);
+        });
 
-        for (let i = 0; i < cleanSlots.length; i += 200) {
-            const { error: insErr } = await supabaseClient.from('timetable').insert(cleanSlots.slice(i, i + 200));
-            if (insErr) throw insErr;
-        }
+        // 3. Mark it as APPLIED so it never runs again
+        batch.update(getCollection("timetable_history").doc(targetMaster.date), { type: "APPLIED_MASTER" });
 
-        await supabaseClient
-            .from('timetable_history')
-            .update({ entry_type: 'APPLIED_MASTER', updated_at: new Date().toISOString() })
-            .eq('id', targetMaster.id);
-
-        await fetchTimetable();
-        renderDirectDashboard(true);
-        console.log("✅ Auto-Promoted Future Master to Live Schedule in Supabase!");
+        await batch.commit();
+        sessionStorage.removeItem('minerva_timetable'); // Force fresh fetch
+        console.log("✅ Auto-Promoted Future Master to Live Schedule!");
     } catch (e) {
         console.error("Auto-Promote Failed:", e);
     }
 }
     async function fetchStructure() {
-            if (!activeBranchId) return;
-            let q = supabaseClient
-                .from('institute_structure')
-                .select('*')
-                .eq('branch_id', activeBranchId)
-                .order('class_name', { ascending: true });
-            if (activeSessionId) q = q.eq('session_id', activeSessionId);
-
-            const { data, error } = await q;
-            if (error) { console.error("Structure fetch error:", error); return; }
-
-            structureData = (data || []).map(row => ({
-                id: row.id,
-                className: String(row.class_name || '').trim(),
-                sectionName: String(row.section_name || '').trim(),
-                subjects: Array.isArray(row.subjects) ? row.subjects : []
-            }));
-
+            console.log("🔄 Fetching Structure via Firebase Native Cache...");
+            const snap = await getCollection("institute_structure").orderBy("className").get();
+            structureData = snap.docs.map(d => d.data());
+            
             const pScope = document.getElementById('p-scope');
-            if (pScope) {
+            if(pScope) {
                 pScope.innerHTML = '<option value="ALL">Entire Institute</option>';
                 const grouped = {};
                 structureData.forEach(s => {
-                    if (!grouped[s.className]) grouped[s.className] = [];
+                    if(!grouped[s.className]) grouped[s.className] = [];
                     grouped[s.className].push(s.sectionName);
                 });
-                Object.keys(grouped).sort().forEach(c => {
+                Object.keys(grouped).forEach(c => {
                     let optGroup = `<optgroup label="${c}">`;
                     optGroup += `<option value="CLASS|${c}">Entire ${c}</option>`;
                     grouped[c].sort().forEach(sec => { optGroup += `<option value="SEC|${c}|${sec}">Section ${sec} Only</option>`; });
@@ -1201,188 +1019,83 @@ async function checkAndApplyFutureMaster() {
         }
 
      async function fetchTeachers() {
-            const { data, error } = await supabaseClient
-                .from("staff_applications")
-                .select("id, email, status, branch_id, details")
-                .eq("status", "approved");
-            if (error) { console.error("Teachers fetch error:", error); return; }
-
-            let tempTeachers = (data || []).map(row => {
-                const det = parseDetails(row.details);
-                const centreVal = det["Centre"] ?? det["centre"] ?? det["Center"] ?? det["center"] ?? det["Branch"] ?? det["branch"] ?? "";
-                const nameVal = det["Full Name"] ?? det["full name"] ?? det["Name"] ?? det["name"] ?? row.email;
-                const deptVal = det["Department"] ?? det["department"] ?? det["Subject"] ?? det["subject"] ?? "General";
-
-                return {
-                    branchId: row.branch_id,
-                    name: String(nameVal || row.email || '').trim(),
-                    email: String(row.email || '').trim(),
-                    dept: deptVal,
-                    teacherCenter: String(centreVal || '').trim().toUpperCase()
-                };
+            console.log("🔄 Fetching Teachers via Firebase Native Cache...");
+            const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
+            let tempTeachers = [];
+            
+            snap.docs.forEach(doc => {
+                const data = doc.data();
+                const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
+                const teacherCenter = centerKey ? String(data.details[centerKey]).toUpperCase() : "GHUMARWIN";
+                
+                const nameKey = Object.keys(data.details).find(k => k.toLowerCase().includes('name'));
+                const deptKey = Object.keys(data.details).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+                tempTeachers.push({ 
+                    name: nameKey ? data.details[nameKey] : data.email, 
+                    email: data.email, 
+                    dept: deptKey ? data.details[deptKey] : 'General',
+                    teacherCenter: teacherCenter
+                });
             });
-
-           allTeachers = tempTeachers.filter(t =>
-                (activeBranchId && t.branchId === activeBranchId) ||
-                (t.teacherCenter && t.teacherCenter === activeCenter)
-            );
-            teachersByDeptCache = null;
-
-            document.querySelectorAll('.ent-row').forEach(row => {
-                const tSel = row.querySelector('.ent-tea');
-                if (tSel) {
-                    const curVal = tSel.getAttribute('data-selected') || tSel.value || 'NONE';
-                    tSel.setAttribute('data-selected', curVal);
-                    const blockId = row.closest('.time-block')?.id;
-                    if (blockId) handleEntrySubject(blockId, row.id);
-                }
-            });
+            
+            allTeachers = tempTeachers.filter(t => t.teacherCenter.includes(activeCenter.toUpperCase()));
         }
 
-        async function fetchRooms() {
-            if (!activeBranchId) return;
-            try {
-                const { data, error } = await supabaseClient
-                    .from("infrastructure_rooms")
-                    .select("id, name, capacity, extra_seats, rows")
-                    .eq("branch_id", activeBranchId);
-                if (error) throw error;
-                allRooms = (data || []).sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base', numeric: true }));
-            } catch (e) {
-                console.error("Room fetch error:", e);
-                allRooms = [];
-            }
+     // --- LIVE REAL-TIME ROOM SYNC LISTENER ---
+        function fetchRooms() {
+            return new Promise((resolve) => {
+                const cached = sessionStorage.getItem('minerva_rooms');
+                if (cached) {
+                    allRooms = JSON.parse(cached);
+                    resolve(); // Resolve instantly using cache
+                }
+                getCollection("infrastructure_rooms").onSnapshot(snapshot => {
+                    allRooms = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    allRooms.sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base', numeric: true }));
+                    sessionStorage.setItem('minerva_rooms', JSON.stringify(allRooms));
+                    if (!cached) resolve();
+                }, error => {
+                    console.error("Live room sync error:", error);
+                    if (!cached) { allRooms = []; resolve(); }
+                });
+            });
         }
 
      async function fetchTimetable() {
-            if (!activeBranchId || !activeSessionId) return;
+            // 1. Context-Aware Draft Check
             const draftKey = `draft_${activeCenter}_LIVE`;
-            const { data: draftRows } = await supabaseClient
-                .from("timetable_drafts")
-                .select("*")
-                .eq("branch_id", activeBranchId)
-                .eq("session_id", activeSessionId)
-                .eq("draft_key", draftKey)
-                .limit(1);
-
-            if (draftRows && draftRows[0] && Array.isArray(draftRows[0].schedule) && draftRows[0].schedule.length > 0) {
-                globalTimetable = draftRows[0].schedule;
+            const draftSnap = await db.collection("timetable_drafts").doc(draftKey).get();
+            
+            if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
+                globalTimetable = draftSnap.data().schedule;
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED MASTER DRAFT</span>`;
-                oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
+                oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
                 return;
-            }
+            } 
 
-            const { data, error } = await supabaseClient
-                .from("timetable")
-                .select("id, day, class_name, section, start24, end24, time_range, duration, subject, teacher, teacher_name, teacher_email, room, remark")
-                .eq("branch_id", activeBranchId)
-                .eq("session_id", activeSessionId);
-            if (error) { console.error("Timetable fetch error:", error); return; }
-
-            globalTimetable = (data || []).map(r => {
-                const [sh, sm] = String(r.start24 || '0:0').split(':').map(Number);
-                const [eh, em] = String(r.end24 || '0:0').split(':').map(Number);
-                return {
-                    id: r.id,
-                    day: r.day,
-                    className: r.class_name,
-                    section: r.section,
-                    start24: r.start24,
-                    end24: r.end24,
-                    timeRange: r.time_range,
-                    duration: r.duration,
-                    subject: r.subject,
-                    teacher: r.teacher || 'NONE',
-                    teacherName: r.teacher_name || r.teacher || 'NONE',
-                    teacherEmail: r.teacher_email || '',
-                    room: r.room || '',
-                    remark: r.remark || '',
-                    sMins: (sh || 0) * 60 + (sm || 0),
-                    eMins: (eh || 0) * 60 + (em || 0)
-                };
-            });
-            oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
+            // 2. Load Live Master via Native Cache
+            console.log("🔄 Fetching Timetable via Firebase Native Cache...");
+            const snap = await getCollection("timetable").get();
+            globalTimetable = snap.docs.map(d => ({id: d.id, ...d.data()}));
+            oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
         }
 
-        async function fetchFullWeekTimetable() {
-            if (!activeBranchId || !activeSessionId) return [];
-            const pageSize = 1000;
-            let from = 0;
-            let allRows = [];
-
-            while (true) {
-                const { data, error } = await supabaseClient
-                    .from("timetable")
-                    .select("id, day, class_name, section, start24, end24, time_range, duration, subject, teacher, teacher_name, teacher_email, room, remark")
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId)
-                    .range(from, from + pageSize - 1);
-                if (error) { console.error("Full week timetable fetch error:", error); break; }
-                const batchRows = data || [];
-                allRows = allRows.concat(batchRows);
-                if (batchRows.length < pageSize) break;
-                from += pageSize;
-            }
-
-            return allRows.map(r => {
-                const [sh, sm] = String(r.start24 || '0:0').split(':').map(Number);
-                const [eh, em] = String(r.end24 || '0:0').split(':').map(Number);
-                return {
-                    id: r.id,
-                    day: r.day,
-                    className: r.class_name,
-                    section: r.section,
-                    start24: r.start24,
-                    end24: r.end24,
-                    timeRange: r.time_range,
-                    duration: r.duration,
-                    subject: r.subject,
-                    teacher: r.teacher || 'NONE',
-                    teacherName: r.teacher_name || r.teacher || 'NONE',
-                    teacherEmail: r.teacher_email || '',
-                    room: r.room || '',
-                    remark: r.remark || '',
-                    sMins: (sh || 0) * 60 + (sm || 0),
-                    eMins: (eh || 0) * 60 + (em || 0)
-                };
-            });
-        }
-
-        async function fetchLiveMasterCache() {
-            if (liveMasterTimetable.length > 0) return liveMasterTimetable;
-            liveMasterTimetable = await fetchFullWeekTimetable();
-            return liveMasterTimetable;
-        }
-
-        async function fetchHolidays() {
-            if (!activeBranchId || !activeSessionId) return;
+    async function fetchLiveMasterCache() {
             try {
-                const { data, error } = await supabaseClient
-                    .from("school_holidays")
-                    .select("*")
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId);
-                if (error) throw error;
-                holidaysData = (data || []).map(h => ({
-                    id: h.id,
-                    type: h.event_type || 'HOLIDAY',
-                    staffStatus: h.staff_status || 'OFF',
-                    suspendClasses: h.suspend_classes !== false,
-                    startDate: h.start_date,
-                    endDate: h.end_date,
-                    reason: h.reason || '',
-                    isFullDay: h.is_full_day !== false,
-                    startTime: h.start_time,
-                    endTime: h.end_time,
-                    targetClasses: Array.isArray(h.target_classes) ? h.target_classes : ['ALL'],
-                    targetStaff: Array.isArray(h.target_staff) ? h.target_staff : ['ALL'],
-                    status: h.status || 'ACTIVE',
-                    version_id: h.version_id || '',
-                    cancel_version_id: h.cancel_version_id || '',
-                    cancelled_at: h.cancelled_at_ms || null,
-                    timestamp: h.timestamp_ms || 0
-                }));
-            } catch (e) { console.error("Holiday Fetch Error:", e); }
+                const snap = await getCollection("timetable").get();
+                liveMasterTimetable = snap.docs.map(d => d.data());
+            } catch(e) {
+                console.error("Master cache fetch error:", e);
+            }
+        }
+
+     // --- HOLIDAY OVERLAY ENGINE ---
+        async function fetchHolidays() {
+            console.log("🔄 Fetching Holidays via Firebase Native Cache...");
+            try {
+                const snap = await getCollection("school_holidays").get();
+                holidaysData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            } catch(e) { console.error("Holiday Fetch Error:", e); }
         }
 
      function openHolidayModal() {
@@ -1564,90 +1277,81 @@ async function checkAndApplyFutureMaster() {
 
 async function saveHoliday() {
             const startDate = document.getElementById('hol-start-date').value;
-            const endDate = document.getElementById('hol-end-date').value || startDate;
+            const endDate = document.getElementById('hol-end-date').value || startDate; 
             const reason = document.getElementById('hol-reason').value.trim();
             const eventType = document.getElementById('hol-type').value;
             const staffStatus = document.getElementById('hol-staff-status').value;
             const suspendClasses = document.getElementById('hol-suspend-classes').checked;
-
+            
             const isFullDay = document.getElementById('hol-is-full-day').checked;
             const startTime = document.getElementById('hol-start-time').value;
             const endTime = document.getElementById('hol-end-time').value;
 
-            if (!startDate || !reason) return alert("Start Date and Title/Reason are mandatory!");
-            if (!isFullDay && (!startTime || !endTime)) return alert("Please specify Start and End times for partial-day events.");
-
+            if(!startDate || !reason) return alert("Start Date and Title/Reason are mandatory!");
+            if(!isFullDay && (!startTime || !endTime)) return alert("Please specify Start and End times for partial-day events.");
+            
             const isAllClasses = document.getElementById('hol-all-classes').checked;
             const targetClasses = isAllClasses ? ['ALL'] : Array.from(document.querySelectorAll('.hol-section-cb:checked')).map(cb => cb.value);
-            if (targetClasses.length === 0) return alert("Select at least one target class/section.");
+            
+            if(targetClasses.length === 0) return alert("Select at least one target class/section.");
 
             let targetStaff = ['ALL'];
             if (staffStatus === 'CUSTOM') {
                 const isAllStaff = document.getElementById('hol-all-staff').checked;
                 targetStaff = isAllStaff ? ['ALL'] : Array.from(document.querySelectorAll('.hol-staff-cb:checked')).map(cb => cb.value);
             }
-
-            const btn = document.getElementById('hol-save-btn');
-            btn.innerText = "Saving...";
-            btn.disabled = true;
-
-            try {
-                const nowMs = Date.now();
-                const versionId = "v_hol_" + nowMs;
-                const payload = {
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
-                    event_type: eventType,
-                    staff_status: staffStatus,
-                    suspend_classes: suspendClasses,
-                    start_date: startDate,
-                    end_date: endDate,
-                    reason,
-                    is_full_day: isFullDay,
-                    start_time: isFullDay ? null : startTime,
-                    end_time: isFullDay ? null : endTime,
-                    target_classes: targetClasses,
-                    target_staff: targetStaff,
-                    timestamp_ms: nowMs,
+            
+            const btn = document.getElementById('hol-save-btn') || event.target; 
+            const origText = btn.innerText;
+            btn.innerText = "Saving..."; btn.disabled = true;
+            
+          try {
+                const versionId = "v_hol_" + Date.now();
+                const data = {
+                    type: eventType,
+                    staffStatus: staffStatus,
+                    suspendClasses: suspendClasses,
+                    startDate, endDate, reason,
+                    isFullDay: isFullDay,
+                    startTime: isFullDay ? null : startTime,
+                    endTime: isFullDay ? null : endTime,
+                    targetClasses,
+                    targetStaff,
+                    timestamp: Date.now(),
                     version_id: versionId,
                     status: "ACTIVE",
-                    cancelled_at_ms: null,
-                    updated_at: new Date().toISOString()
+                    cancelled_at: null
                 };
-
-                let savedDocId = editingHolidayId;
+                
                 if (editingHolidayId) {
-                    const { error } = await supabaseClient.from('school_holidays').update(payload).eq('id', editingHolidayId);
-                    if (error) throw error;
+                    await getCollection("school_holidays").doc(editingHolidayId).update(data);
+                    await getCollection("timetable_versions").doc(versionId).set({
+                        version_id: versionId,
+                        start_date: startDate,
+                        created_at: Date.now(),
+                        type: "HOLIDAY_UPDATED",
+                        doc_id: editingHolidayId
+                    });
+                    alert("Holiday / Event Rule Updated!");
                 } else {
-                    payload.firestore_id = `ui_${activeCenter.toLowerCase()}_hol_${nowMs}_${Math.random().toString(36).slice(2, 6)}`;
-                    const { data: ins, error } = await supabaseClient.from('school_holidays').insert([payload]).select('id').single();
-                    if (error) throw error;
-                    savedDocId = ins.id;
+                    const docRef = await getCollection("school_holidays").add(data);
+                    await getCollection("timetable_versions").doc(versionId).set({
+                        version_id: versionId,
+                        start_date: startDate,
+                        created_at: Date.now(),
+                        type: "HOLIDAY_CREATED",
+                        doc_id: docRef.id
+                   });
+                    alert("Holiday / Event Rule Saved!");
                 }
 
-                await supabaseClient.from('timetable_versions').insert([{
-                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
-                    version_id: versionId,
-                    start_date: startDate,
-                    created_at_ms: nowMs,
-                    version_type: editingHolidayId ? "HOLIDAY_UPDATED" : "HOLIDAY_CREATED",
-                    doc_id: String(savedDocId || '')
-                }]);
-
-                alert(editingHolidayId ? "Holiday / Event Rule Updated!" : "Holiday / Event Rule Saved!");
                 cancelEditHoliday();
+                
                 await fetchHolidays();
                 renderActiveHolidays();
-                renderDirectDashboard(true);
-            } catch (e) {
-                alert("Error saving rule: " + e.message);
-            } finally {
-                btn.innerText = editingHolidayId ? "💾 Update Exception" : "➕ Add Exception";
-                btn.disabled = false;
-            }
+                renderDirectDashboard();
+            } catch(e) { alert("Error saving rule: " + e.message); }
+            finally { btn.innerText = editingHolidayId ? "💾 Update Exception" : "➕ Add Exception"; btn.disabled = false; }
         }
 
        function renderActiveHolidays() {
@@ -1693,37 +1397,28 @@ async function saveHoliday() {
         }
 
     async function deleteHoliday(id) {
-            if (!confirm("Remove this holiday? The original timetable will be restored immediately.")) return;
+            if(!confirm("Remove this holiday? The original timetable will be restored immediately.")) return;
             try {
-                const nowMs = Date.now();
-                const versionId = "v_hol_cancel_" + nowMs;
-                const { error } = await supabaseClient
-                    .from('school_holidays')
-                    .update({
-                        status: "CANCELLED",
-                        cancelled_at_ms: nowMs,
-                        cancel_version_id: versionId,
-                        updated_at: new Date().toISOString()
-                    })
-                    .eq('id', id);
-                if (error) throw error;
+                const versionId = "v_hol_cancel_" + Date.now();
+                
+                await getCollection("school_holidays").doc(id).update({ 
+                    status: "CANCELLED", 
+                    cancelled_at: Date.now(),
+                    cancel_version_id: versionId
+                });
 
-                await supabaseClient.from('timetable_versions').insert([{
-                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
+                // Log the cancellation to the registry
+                await getCollection("timetable_versions").doc(versionId).set({
                     version_id: versionId,
-                    created_at_ms: nowMs,
-                    version_type: "HOLIDAY_CANCELLED",
-                    doc_id: String(id)
-                }]);
+                    created_at: Date.now(),
+                    type: "HOLIDAY_CANCELLED",
+                    doc_id: id
+                });
 
                 await fetchHolidays();
                 renderActiveHolidays();
-                renderDirectDashboard(true);
-            } catch (e) {
-                alert("Error removing holiday: " + e.message);
-            }
+                renderDirectDashboard();
+            } catch(e) { alert("Error removing."); }
         }
 
         // ============================================================================
@@ -2156,10 +1851,11 @@ async function saveHoliday() {
             checkGlobalClash();
         }
 
+        // --- MANUAL NAMED DRAFT ENGINE ---
         async function saveNamedDraft() {
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             if (allBlocks.length === 0) return alert("Nothing to save!");
-
+            
             const draftName = prompt("Enter a name for this draft (e.g., 'Winter Update V2'):");
             if (!draftName || draftName.trim() === "") return;
 
@@ -2167,31 +1863,30 @@ async function saveHoliday() {
             const originalText = btnText ? btnText.innerHTML : "Save Changes";
             if (btnText) btnText.innerHTML = "⏳ Saving Draft...";
 
-            let draftSlots = [];
+            let draftSlots = []; 
             for (let b of allBlocks) {
                 const className = b.getAttribute('data-class');
                 const sectionName = b.getAttribute('data-section');
-                const s24 = b.querySelector('.tb-s24').value;
+                const s24 = b.querySelector('.tb-s24').value; 
                 const e24 = b.querySelector('.tb-e24').value;
                 const entries = Array.from(b.querySelectorAll('.ent-row'));
                 if (!s24 || !e24) continue;
-
-                const [sh, sm] = s24.split(':').map(Number);
-                const [eh, em] = e24.split(':').map(Number);
-                const sMins = sh * 60 + sm;
-                const eMins = eh * 60 + em;
+                
+                const [sh, sm] = s24.split(':').map(Number); const [eh, em] = e24.split(':').map(Number);
+                const sMins = sh * 60 + sm; const eMins = eh * 60 + em;
                 const dur = `${eMins - sMins} MINS`;
                 const timeRange = `${format12Hour(s24)} - ${format12Hour(e24)}`;
 
-                for (let ent of entries) {
+                for(let ent of entries) {
                     if (ent.classList.contains('temp-duty-row')) continue;
                     const sub = ent.querySelector('.ent-sub').value;
-                    let teacher = ent.querySelector('.ent-tea').value || "NONE";
+                    let teacher = ent.querySelector('.ent-tea').value || "NONE"; 
                     const room = ent.querySelector('.ent-room').value.trim();
                     let remark = ent.querySelector('.ent-rem').value.trim();
-
+                    
                     let teacherEmail = "";
                     let teacherName = teacher;
+                    
                     if (ent.getAttribute('data-temp-sub') === 'true') {
                         teacher = ent.getAttribute('data-orig-tea') || "NONE";
                         teacherName = ent.getAttribute('data-orig-tea-name') || teacher;
@@ -2199,66 +1894,60 @@ async function saveHoliday() {
                         remark = ent.getAttribute('data-orig-rem') || "";
                     } else if (teacher !== "NONE") {
                         const tObj = allTeachers.find(t => t.name === teacher);
-                        if (tObj) teacherEmail = tObj.email || "";
+                        if (tObj) teacherEmail = tObj.email || ""; 
                     }
 
                     const activeDays = Array.from(ent.querySelectorAll('.ent-day:checked')).map(cb => cb.value);
+
                     activeDays.forEach(day => {
                         draftSlots.push({ day, className, section: sectionName, start24: s24, end24: e24, timeRange, duration: dur, subject: sub, teacher, teacherName, teacherEmail, room, remark, sMins, eMins });
                     });
                 }
             }
-
+            
             try {
+                // Generates a clean URL-friendly ID for Firebase
                 const draftKey = `draft_${activeCenter}_${draftName.replace(/[^a-zA-Z0-9]/g, '_')}`;
-                const nowMs = Date.now();
-                const { error } = await supabaseClient
-                    .from('timetable_drafts')
-                    .upsert([{
-                        firestore_id: `ui_${activeCenter.toLowerCase()}_${draftKey}`,
-                        branch_id: activeBranchId,
-                        session_id: activeSessionId,
-                        draft_key: draftKey,
-                        name: draftName.trim(),
-                        last_edited_ms: nowMs,
-                        schedule: draftSlots,
-                        mode: currentContextMode,
-                        date: currentContextDate || '',
-                        updated_at: new Date().toISOString()
-                    }], { onConflict: 'firestore_id' });
-                if (error) throw error;
-                alert(`✅ Draft "${draftName}" saved to Supabase!`);
-            } catch (e) {
-                console.error("Draft save failed", e);
-                alert("Error saving draft: " + e.message);
+                
+                await db.collection("timetable_drafts").doc(draftKey).set({
+                    name: draftName,
+                    lastEdited: Date.now(),
+                    schedule: draftSlots,
+                    mode: currentContextMode,
+                    date: currentContextDate
+                });
+                
+                alert(`✅ Draft "${draftName}" saved successfully to the cloud!`);
+           } catch(e) { 
+                console.error("Draft save failed", e); 
+                alert("Error saving draft.");
             } finally {
                 if (btnText) btnText.innerHTML = originalText;
             }
         }
 
+        // --- MANAGE FUTURE MASTERS ENGINE ---
         async function manageFutureMasters() {
             document.getElementById('future-masters-modal').classList.replace('hidden', 'flex');
             const listContainer = document.getElementById('future-masters-list');
             listContainer.innerHTML = '<p class="text-xs text-slate-400 font-bold italic text-center py-10">Loading...</p>';
 
             try {
-                const { data, error } = await supabaseClient
-                    .from('timetable_history')
-                    .select('*')
-                    .eq('branch_id', activeBranchId)
-                    .eq('session_id', activeSessionId)
-                    .eq('entry_type', 'FUTURE_MASTER');
-                if (error) throw error;
-
+                const snap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+                let masters = [];
                 const todayStr = new Date().toISOString().split('T')[0];
-                const masters = (data || [])
-                    .filter(d => d.status !== 'CANCELLED' && d.date >= todayStr)
-                    .sort((a, b) => a.date.localeCompare(b.date));
+                
+                snap.docs.forEach(doc => {
+                    const data = doc.data();
+                    if (data.date >= todayStr) masters.push(data);
+                });
 
                 if (masters.length === 0) {
                     listContainer.innerHTML = '<p class="text-[11px] font-black tracking-widest text-slate-400 uppercase text-center py-10">No pending Future Masters.</p>';
                     return;
                 }
+
+                masters.sort((a, b) => a.date.localeCompare(b.date));
 
                 listContainer.innerHTML = masters.map(m => {
                     const prettyDate = new Date(m.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
@@ -2274,80 +1963,77 @@ async function saveHoliday() {
                         </div>
                     </div>`;
                 }).join('');
+
             } catch (e) {
                 console.error(e);
                 listContainer.innerHTML = '<p class="text-xs text-rose-500 font-bold italic text-center py-10">Error loading Future Masters.</p>';
             }
         }
 
-        async function editFutureMaster(date) {
+      function editFutureMaster(date) {
             document.getElementById('future-masters-modal').classList.replace('flex', 'hidden');
+            
+            // Clear the screen immediately so the scraper has nothing to copy!
             document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Loading Future Master...</div>`;
 
-            const { data } = await supabaseClient
-                .from('timetable_history')
-                .select('*')
-                .eq('branch_id', activeBranchId)
-                .eq('session_id', activeSessionId)
-                .eq('date', date)
-                .limit(1);
-
-            if (data && data[0]) {
-                globalTimetable = Array.isArray(data[0].schedule) ? data[0].schedule : [];
-                currentContextDate = date;
-                currentContextMode = 'EDIT_FUTURE';
-                const prettyDate = new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-                document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 animate-pulse font-bold">🟡 EDITING FUTURE MASTER (Effective: ${prettyDate})</span>`;
-                renderDirectDashboard(true);
-            }
+            getCollection("timetable_history").doc(date).get().then(doc => {
+                if(doc.exists) {
+                    globalTimetable = doc.data().schedule || [];
+                    currentContextDate = date;
+                    currentContextMode = 'EDIT_FUTURE';
+                    
+                    const prettyDate = new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                    document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 animate-pulse font-bold">🟡 EDITING FUTURE MASTER (Effective: ${prettyDate})</span>`;
+                    
+                    // CRITICAL FIX: Pass 'true' to completely skip scraping the background!
+                    renderDirectDashboard(true);
+                }
+            });
         }
-
-        async function deleteFutureMaster(date) {
-            if (!confirm(`Are you sure you want to completely cancel the Future Master scheduled for ${date}?`)) return;
+       async function deleteFutureMaster(date) {
+            if(!confirm(`Are you sure you want to completely cancel the Future Master scheduled for ${date}?`)) return;
             try {
-                const { error } = await supabaseClient
-                    .from('timetable_history')
-                    .delete()
-                    .eq('branch_id', activeBranchId)
-                    .eq('session_id', activeSessionId)
-                    .eq('date', date);
-                if (error) throw error;
+                await getCollection("timetable_history").doc(date).delete();
                 alert(`Future Master for ${date} cancelled successfully.`);
-                manageFutureMasters();
-            } catch (e) {
+                manageFutureMasters(); // Refresh list automatically
+            } catch(e) {
                 alert("Error cancelling: " + e.message);
             }
         }
 
+        // --- MANAGE SPECIAL DATES ENGINE ---
         async function manageSpecialDates() {
             document.getElementById('special-dates-modal').classList.replace('hidden', 'flex');
             const listContainer = document.getElementById('special-dates-list');
             listContainer.innerHTML = '<p class="text-xs text-slate-400 font-bold italic text-center py-10">Loading...</p>';
 
             try {
-                const { data, error } = await supabaseClient
-                    .from('timetable_history')
-                    .select('*')
-                    .eq('branch_id', activeBranchId)
-                    .eq('session_id', activeSessionId);
-                if (error) throw error;
-
+                // Fetch the overrides from timetable_history
+                const snap = await getCollection("timetable_history").get();
+                let overrides = [];
                 const todayStr = new Date().toISOString().split('T')[0];
-                const overrides = (data || [])
-                    .filter(d => (d.entry_type === 'DAILY_OVERRIDE' || d.entry_type === 'EXAM_OVERRIDE') && d.status !== 'CANCELLED' && d.date)
-                    .sort((a, b) => b.date.localeCompare(a.date));
+                
+               snap.docs.forEach(doc => {
+                    const data = doc.data();
+                    // Show both past and future overrides so Admin has a full record (Ignore cancelled ones)
+                    if ((data.type === "DAILY_OVERRIDE" || data.type === "EXAM_OVERRIDE") && data.status !== "CANCELLED") {
+                        overrides.push(data);
+                    }
+                });
 
                 if (overrides.length === 0) {
                     listContainer.innerHTML = '<p class="text-[11px] font-black tracking-widest text-slate-400 uppercase text-center py-10">No upcoming special dates saved.</p>';
                     return;
                 }
 
+                // Sort newest to oldest so upcoming ones are at the top
+                overrides.sort((a, b) => b.date.localeCompare(a.date));
+
                 listContainer.innerHTML = overrides.map(o => {
                     const isPast = o.date < todayStr;
-                    const [yy, mm, dd] = String(o.date).split('-').map(Number);
-                    const prettyDate = new Date(yy, (mm || 1) - 1, dd || 1).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
-                    const badgeColor = o.entry_type === "EXAM_OVERRIDE" ? "rose" : "amber";
-                    const tagName = o.tag || (o.entry_type === "EXAM_OVERRIDE" ? "Exam Day" : "Daily Override");
+                    const prettyDate = new Date(o.date).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
+                    const badgeColor = o.type === "EXAM_OVERRIDE" ? "rose" : "amber";
+                    const tagName = o.tag || (o.type === "EXAM_OVERRIDE" ? "Exam Day" : "Daily Override");
 
                     return `
                     <div class="bg-${isPast ? 'slate' : badgeColor}-50 border border-${isPast ? 'slate' : badgeColor}-200 p-4 rounded-xl flex flex-col sm:flex-row justify-between sm:items-center gap-4 ${isPast ? 'opacity-70' : ''}">
@@ -2361,6 +2047,7 @@ async function saveHoliday() {
                         </div>
                     </div>`;
                 }).join('');
+
             } catch (e) {
                 console.error(e);
                 listContainer.innerHTML = '<p class="text-xs text-rose-500 font-bold italic text-center py-10">Error loading Special Dates.</p>';
@@ -2370,42 +2057,39 @@ async function saveHoliday() {
         function viewSpecialDate(date) {
             document.getElementById('special-dates-modal').classList.replace('flex', 'hidden');
             document.getElementById('context-date-input').value = date;
-            pendingMode = 'OVERRIDE';
+            
+            // Re-use the existing logic to load that specific date!
+            pendingMode = 'OVERRIDE'; 
             confirmDateContext();
         }
 
-        async function deleteSpecialDate(date) {
-            if (!confirm(`⚠️ REVERT DATE: Are you sure you want to delete the override for ${date}?\n\nThis will instantly revert that day back to the standard Live Master schedule.`)) return;
-            try {
-                const nowMs = Date.now();
-                const versionId = "v_override_revert_" + nowMs;
-                const { error } = await supabaseClient
-                    .from('timetable_history')
-                    .delete()
-                    .eq('branch_id', activeBranchId)
-                    .eq('session_id', activeSessionId)
-                    .eq('date', date);
-                if (error) throw error;
+       async function deleteSpecialDate(date) {
+            if(!confirm(`⚠️ REVERT DATE: Are you sure you want to delete the override for ${date}?\n\nThis will instantly revert that day back to the standard Live Master schedule.`)) return;
+          try {
+                const versionId = "v_override_revert_" + Date.now();
+                
+                // Hard Delete: Completely erase the document from the database
+                await getCollection("timetable_history").doc(date).delete();
 
-                await supabaseClient.from('timetable_versions').insert([{
-                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
+                await getCollection("timetable_versions").doc(versionId).set({
                     version_id: versionId,
-                    created_at_ms: nowMs,
-                    version_type: "OVERRIDE_REVERTED",
+                    created_at: Date.now(),
+                    type: "OVERRIDE_REVERTED",
                     date_affected: date
-                }]);
+                });
 
                 alert(`✅ Special schedule for ${date} removed successfully. Restored to Live Master.`);
-                manageSpecialDates();
+                
+                manageSpecialDates(); // Refresh list automatically
+                
+                // If they are currently looking at the date they just deleted, force a refresh!
                 if (currentContextDate === date) {
                     currentContextDate = null;
-                    currentContextMode = 'LIVE';
-                    await fetchTimetable();
-                    renderDirectDashboard(true);
+                  currentContextMode = 'LIVE';
+                    document.getElementById('context-date-input').value = new Date().toISOString().split('T')[0];
+                    confirmDateContext();
                 }
-            } catch (e) {
+            } catch(e) {
                 alert("Error reverting: " + e.message);
             }
         }
@@ -2461,15 +2145,15 @@ async function saveHoliday() {
             if (changes.length === 0) return false;
 
             try {
-                const { data: rows } = await supabaseClient
-                    .from("timetable_history")
-                    .select("*")
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId)
-                    .neq("status", "CANCELLED");
-                let affectedDates = (rows || []).filter(data =>
-                    (data.entry_type === "DAILY_OVERRIDE" || data.entry_type === "EXAM_OVERRIDE") && data.date >= effectiveDate
-                );
+                const snap = await getCollection("timetable_history").get();
+                let affectedDates = [];
+                
+                snap.docs.forEach(doc => {
+                    const data = doc.data();
+                    if ((data.type === "DAILY_OVERRIDE" || data.type === "EXAM_OVERRIDE") && data.date >= effectiveDate) {
+                        affectedDates.push(data);
+                    }
+                });
 
                 if (affectedDates.length === 0) return false;
 
@@ -2525,17 +2209,20 @@ async function saveHoliday() {
             btn.innerHTML = "⏳ Syncing Cosmos..."; btn.disabled = true;
 
             const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const batch = db.batch();
             let syncCount = 0;
 
             try {
                 for (let dateObj of pendingSyncDates) {
                     let scheduleChanged = false;
-                    let schedule = Array.isArray(dateObj.schedule) ? dateObj.schedule : [];
+                    let schedule = dateObj.schedule;
 
+                    // Scan the special date's schedule
                     schedule.forEach(slot => {
-                        const change = pendingSyncChanges.find(c =>
-                            norm(c.className) === norm(slot.className) &&
-                            norm(c.section) === norm(slot.section) &&
+                        // See if this slot matches one of our changes
+                        const change = pendingSyncChanges.find(c => 
+                            norm(c.className) === norm(slot.className) && 
+                            norm(c.section) === norm(slot.section) && 
                             norm(c.subject) === norm(slot.subject)
                         );
 
@@ -2552,14 +2239,12 @@ async function saveHoliday() {
                     });
 
                     if (scheduleChanged) {
-                        const { error: upErr } = await supabaseClient
-                            .from("timetable_history")
-                            .update({ schedule, updated_at: new Date().toISOString() })
-                            .eq("id", dateObj.id);
-                        if (upErr) throw upErr;
+                        batch.update(getCollection("timetable_history").doc(dateObj.date), { schedule: schedule });
                         syncCount++;
                     }
                 }
+
+                if (syncCount > 0) await batch.commit();
                 
                 alert(`✨ Cosmos Aligned! Successfully synced teacher/room changes across ${syncCount} upcoming special dates.`);
                 closeSmartSync();
@@ -2630,29 +2315,22 @@ async function saveHoliday() {
                     effective_from: currentContextDate
                 }));
 
-               const nowMs = Date.now();
-                const { error: futHistErr } = await supabaseClient.from("timetable_history").upsert([{
-                    firestore_id: `ui_${activeCenter.toLowerCase()}_future_${currentContextDate}`,
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
-                    doc_key: currentContextDate,
+                await getCollection("timetable_history").doc(currentContextDate).set({
                     date: currentContextDate,
-                    last_updated_ms: nowMs,
-                    schedule: taggedSlots,
-                    entry_type: "FUTURE_MASTER",
-                    status: "ACTIVE",
-                    version_id: versionId,
-                    updated_at: new Date().toISOString()
-                }], { onConflict: 'branch_id,session_id,doc_key' });
-                if (futHistErr) throw futHistErr;
+                    lastUpdated: Date.now(),
+                    schedule: taggedSlots, 
+                    type: "FUTURE_MASTER",
+                    version_id: versionId
+                }, { merge: true });
 
                 alert(`✅ Future Master for ${currentContextDate} updated successfully!`);
 
+                // Reset back to Live seamlessly
                 currentContextMode = 'LIVE';
                 currentContextDate = null;
                 document.getElementById('view-label').innerHTML = `Showing: Live Master Schedule`;
-                await fetchTimetable();
-                renderDirectDashboard(true);
+                sessionStorage.removeItem('minerva_timetable');
+                fetchTimetable().then(() => renderDirectDashboard());
 
             } catch (err) {
                 alert("Error updating: " + err.message);
@@ -2663,13 +2341,9 @@ async function saveHoliday() {
 
         async function loadNamedDraft() {
             try {
-                const { data, error } = await supabaseClient
-                    .from("timetable_drafts")
-                    .select("*")
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId);
-                if (error) throw error;
-                const branchDrafts = (data || []).filter(d => String(d.draft_key || '').startsWith(`draft_${activeCenter}_`));
+                const snap = await db.collection("timetable_drafts").get();
+                // Filter drafts so Ghumarwin only sees Ghumarwin drafts, etc.
+                const branchDrafts = snap.docs.filter(d => d.id.startsWith(`draft_${activeCenter}_`)).map(d => d.data());
                 
                 if (branchDrafts.length === 0) return alert("No drafts found for this branch.");
                 
@@ -2703,15 +2377,11 @@ async function saveHoliday() {
 
         async function manageDrafts() {
             try {
-                const { data, error } = await supabaseClient
-                    .from("timetable_drafts")
-                    .select("*")
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId);
-                if (error) throw error;
-                const branchDrafts = (data || [])
-                    .filter(d => String(d.draft_key || '').startsWith(`draft_${activeCenter}_`))
-                    .map(d => ({ docId: d.id, ...d }));
+                const snap = await db.collection("timetable_drafts").get();
+                // Map the document ID along with the data so we can delete it
+                const branchDrafts = snap.docs
+                    .filter(d => d.id.startsWith(`draft_${activeCenter}_`))
+                    .map(d => ({ docId: d.id, ...d.data() }));
                 
                 if (branchDrafts.length === 0) return alert("✨ Clean slate! There are no saved drafts in the cloud for this branch.");
                 
@@ -2734,11 +2404,10 @@ async function saveHoliday() {
                 const draftName = selectedDraft.name || (selectedDraft.mode === 'LIVE' ? 'Live Master Draft' : `Date Override: ${selectedDraft.date}`);
 
                 if (confirm(`⚠️ WARNING: Are you sure you want to permanently delete the draft: "${draftName}"?`)) {
-                    const { error: delErr } = await supabaseClient.from("timetable_drafts").delete().eq("id", selectedDraft.docId);
-                    if (delErr) throw delErr;
+                    await db.collection("timetable_drafts").doc(selectedDraft.docId).delete();
                     alert(`✅ Draft "${draftName}" deleted successfully.`);
                 }
-            } catch (e) {
+            } catch(e) {
                 console.error(e);
                 alert("Error accessing drafts.");
             }
@@ -2775,16 +2444,11 @@ async function saveHoliday() {
             }
             
             try {
-                await supabaseClient.from("timetable_drafts").upsert([{
-                    firestore_id: `ui_${activeCenter.toLowerCase()}_draft_${activeCenter}`,
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
-                    draft_key: activeCenter,
-                    name: `${activeCenter} Auto Draft`,
-                    last_edited_ms: Date.now(),
-                    schedule: draftSlots,
-                    updated_at: new Date().toISOString()
-                }], { onConflict: 'firestore_id' });
+                // Save safely to a parallel 'drafts' collection tied specifically to the active branch
+                await db.collection("timetable_drafts").doc(activeCenter).set({
+                    lastEdited: Date.now(),
+                    schedule: draftSlots
+                });
                 
                 const btnText = document.getElementById('btn-text');
                 if (btnText) {
@@ -2890,8 +2554,8 @@ async function saveHoliday() {
             const addBtn = document.getElementById('add-btn-' + secId);
             grid.insertBefore(div, addBtn);
             
-           blockData.entries.forEach(ent => {
-                addEntryToBlock(blockId, className, sectionName, ent, true);
+            blockData.entries.forEach(ent => {
+                addEntryToBlock(blockId, className, sectionName, ent);
             });
         }
 function generateReadHTML(blockData, className, sectionName) {
@@ -2987,26 +2651,7 @@ function generateReadHTML(blockData, className, sectionName) {
             return html;
         }
 
-  let teachersByDeptCache = null;
-        function getTeachersByDept() {
-            if (teachersByDeptCache) return teachersByDeptCache;
-            const map = new Map();
-            (allTeachers || []).forEach(t => {
-                const depts = Array.isArray(t.dept) ? t.dept : String(t.dept || 'General').split(',');
-                const seenDepts = new Set();
-                depts.forEach(d => {
-                    const key = d.trim().toLowerCase();
-                    if (!key || seenDepts.has(key)) return;
-                    seenDepts.add(key);
-                    if (!map.has(key)) map.set(key, []);
-                    map.get(key).push(t);
-                });
-            });
-            teachersByDeptCache = map;
-            return map;
-        }
-
-        function addEntryToBlock(blockId, className, sectionName, entryData = null, deferClash = false) {
+  function addEntryToBlock(blockId, className, sectionName, entryData = null) {
             const wrapper = document.querySelector(`#${blockId} .entries-wrapper`);
             const entId = 'ent_' + Math.random().toString(36).substr(2, 9);
             
@@ -3137,19 +2782,22 @@ function generateReadHTML(blockData, className, sectionName) {
                 <div class="ent-warn hidden absolute top-0 right-0 w-2 h-2 rounded-full bg-red-600 animate-ping z-30"></div>
             `;
             wrapper.appendChild(div);
-            handleEntrySubject(blockId, entId, deferClash);
+            handleEntrySubject(blockId, entId);
         }
 
-function handleEntrySubject(blockId, entId, deferClash = false) {
+function handleEntrySubject(blockId, entId) {
             const row = document.getElementById(entId);
-            if (!row) return;
             const sub = row.querySelector('.ent-sub').value;
             const tWrap = row.querySelector('.ent-tea-wrap');
-            const tSel = row.querySelector('.ent-tea');
+            const roomInp = row.querySelector('.ent-room');
+            const remInp = row.querySelector('.ent-rem'); 
+           const tSel = row.querySelector('.ent-tea');
             const showAllCb = row.querySelector('.ent-showall');
             const showAll = showAllCb ? showAllCb.checked : false;
-            const prevSel = tSel ? (tSel.getAttribute('data-selected') || '') : '';
-
+            const prevSel = tSel ? tSel.getAttribute('data-selected') : "";
+            // --- IMMEDIATE UI SYNC ---
+            // If this block is set to OT, find all other regular blocks in this section
+            // and label them as "Doubt Session" immediately on screen.
             if (sub === 'OT') {
                 const grid = row.closest('.tt-grid');
                 if (grid) {
@@ -3157,67 +2805,56 @@ function handleEntrySubject(blockId, entId, deferClash = false) {
                     const allSubs = grid.querySelectorAll('.ent-sub');
                     allSubs.forEach((sInp, idx) => {
                         const upperVal = sInp.value.toUpperCase();
-                        if (!SPECIAL_SUBJECTS.includes(upperVal) && allRemarks[idx]) {
+                        // If it's a regular teaching subject (not a break or OT itself)
+                        if (!SPECIAL_SUBJECTS.includes(upperVal)) {
                             allRemarks[idx].value = "Doubt Session";
                         }
                     });
                 }
             }
 
-            const upperSub = sub.toUpperCase();
+         const upperSub = sub.toUpperCase();
             if (SPECIAL_SUBJECTS.includes(upperSub)) {
-                tWrap.classList.add('hidden');
+                tWrap.classList.add('hidden'); 
                 tSel.innerHTML = '<option value="NONE">NONE</option>';
                 tSel.value = "NONE";
             } else {
-                tWrap.classList.remove('hidden');
-                const subKey = String(sub || '').trim().toLowerCase();
-                let candidates = [];
-
-                if (showAll) {
-                    candidates = allTeachers;
-                } else {
-                    const deptMap = getTeachersByDept();
-                    const matched = new Set();
-                    deptMap.forEach((list, deptKey) => {
-                        if (subKey && (deptKey.includes(subKey) || subKey.includes(deptKey))) {
-                            list.forEach(t => matched.add(t));
-                        }
-                    });
-                    candidates = Array.from(matched);
-                }
-
-                let foundPrev = false;
-                const opts = ['<option value="NONE">- Teacher -</option>'];
-                candidates.forEach(t => {
-                    const isSelected = t.name === prevSel;
-                    if (isSelected) foundPrev = true;
-                    opts.push(`<option value="${t.name}" ${isSelected ? 'selected' : ''}>${t.name}</option>`);
+                tWrap.classList.remove('hidden'); 
+                tSel.innerHTML = '<option value="NONE">- Teacher -</option>';
+               let foundPrev = false;
+                allTeachers.forEach(t => {
+                    const deptStr = Array.isArray(t.dept) ? t.dept.join(',').toLowerCase() : t.dept.toLowerCase();
+                    if (showAll || deptStr.includes(sub.toLowerCase())) {
+                        const isSelected = (t.name === prevSel) ? 'selected' : '';
+                        if (isSelected) foundPrev = true;
+                        tSel.innerHTML += `<option value="${t.name}" ${isSelected}>${t.name}</option>`;
+                    }
                 });
-
+                
+                // Force substitute teacher into the dropdown even if their department doesn't match
                 if (prevSel && prevSel !== "NONE" && !foundPrev) {
-                    opts.push(`<option value="${prevSel}" selected>${prevSel}</option>`);
+                    tSel.innerHTML += `<option value="${prevSel}" selected>${prevSel}</option>`;
                 }
-
-                tSel.innerHTML = opts.join('');
-                tSel.setAttribute('data-selected', '');
+                
+                tSel.setAttribute('data-selected', ''); 
             }
 
+         // --- DYNAMIC COLOR ASSIGNMENT ---
             row.setAttribute('data-sub', upperSub);
             row.setAttribute('data-tea', tSel ? tSel.value : '');
-
+            
             const subInp = row.querySelector('.ent-sub');
             if (subInp) {
-                subInp.classList.remove('text-rose-600');
+                subInp.classList.remove('text-rose-600'); // Remove default red
                 subInp.style.color = getDynamicColor(upperSub);
             }
-
+            
             if (tSel) {
-                tSel.classList.remove('text-slate-500');
+                tSel.classList.remove('text-slate-500'); // Remove default gray
                 tSel.style.color = getDynamicColor(tSel.value);
             }
 
-            if (!deferClash) checkGlobalClash();
+            checkGlobalClash();
         }
 
         function toggleEditMode(blockId, isEditing) {
@@ -3917,93 +3554,90 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
             btn.innerHTML = "⌛ Saving..."; btn.disabled = true;
 
            try {
-                const fullOldWeek = oldTimetableState.length > 0 ? oldTimetableState : await fetchFullWeekTimetable();
-                const teachersToNotify = detectTeacherChanges(fullOldWeek, newSlots);
+                const teachersToNotify = detectTeacherChanges(oldTimetableState, newSlots);
+                const snap = await getCollection("timetable").get();
+                
+                // HIGH-SPEED CHUNKED BATCHING
+                const CHUNK_SIZE = 400;
+                let currentBatch = db.batch();
+                let operationCount = 0;
+                const batchPromises = [];
 
-                const { error: delErr } = await supabaseClient
-                    .from("timetable")
-                    .delete()
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId);
-                if (delErr) throw delErr;
-
-                const todayIso = new Date().toISOString().split('T')[0];
-                const nowMs = Date.now();
-                const versionId = "v_master_" + nowMs;
-
-                const dbRows = newSlots.map((slot, idx) => ({
-                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}_${idx}`,
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
-                    day: slot.day,
-                    class_name: slot.className,
-                    section: slot.section,
-                    start24: slot.start24,
-                    end24: slot.end24,
-                    time_range: slot.timeRange,
-                    duration: slot.duration,
-                    subject: slot.subject,
-                    teacher: slot.teacher || "NONE",
-                    teacher_name: slot.teacherName || slot.teacher || "NONE",
-                    teacher_email: slot.teacherEmail || "",
-                    room: slot.room || "",
-                    remark: slot.remark || "",
-                    version_id: versionId,
-                    effective_from: todayIso,
-                    updated_at: new Date().toISOString()
-                }));
-
-                for (let i = 0; i < dbRows.length; i += 200) {
-                    const { error: insErr } = await supabaseClient.from("timetable").insert(dbRows.slice(i, i + 200));
-                    if (insErr) throw insErr;
+                function commitAndResetIfNeeded() {
+                    if (operationCount >= CHUNK_SIZE) {
+                        batchPromises.push(currentBatch.commit());
+                        currentBatch = db.batch(); // Create a fresh batch
+                        operationCount = 0;
+                    }
                 }
+
+                // 1. Pack Deletions
+                snap.docs.forEach(doc => {
+                    currentBatch.delete(doc.ref);
+                    operationCount++;
+                    commitAndResetIfNeeded();
+                });
+                
+                const todayIso = new Date().toISOString().split('T')[0];
+                const versionId = "v_master_" + Date.now(); // Creates a unique version stamp
+
+                // 2. Pack New Additions (Now tagged with Temporal Versioning)
+                newSlots.forEach(slot => {
+                    const { sMins, eMins, ...cleanSlot } = slot;
+                    cleanSlot.version_id = versionId;
+                    cleanSlot.effective_from = todayIso;
+                    
+                    currentBatch.set(getCollection("timetable").doc(), cleanSlot);
+                    operationCount++;
+                    commitAndResetIfNeeded();
+                });
+
+                // 3. Ship any remaining items in the final box
+                if (operationCount > 0) {
+                    batchPromises.push(currentBatch.commit());
+                }
+
+               await Promise.all(batchPromises);
 
                 if (teachersToNotify.length > 0) {
-                    await supabaseClient.from("instant_alerts").insert([{
-                        firestore_id: `ui_${activeCenter.toLowerCase()}_alert_${nowMs}`,
-                        branch_id: activeBranchId,
-                        session_id: activeSessionId,
-                        timestamp_ms: nowMs,
-                        alert_type: "TIMETABLE_UPDATE",
-                        teachers: teachersToNotify,
-                        raw_data: { timestamp: nowMs, type: "TIMETABLE_UPDATE", teachers: teachersToNotify }
-                    }]);
+                    await db.collection("instant_alerts").add({
+                        timestamp: Date.now(),
+                        type: "TIMETABLE_UPDATE",
+                        teachers: teachersToNotify
+                    });
                 }
 
-                await supabaseClient.from("timetable_versions").insert([{
-                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
+                // 4. --- TEMPORAL VERSION REGISTRY ---
+                // We log this version permanently. It will NEVER be overwritten.
+                await getCollection("timetable_versions").doc(versionId).set({
                     version_id: versionId,
                     start_date: todayIso,
-                    created_at_ms: nowMs,
-                    version_type: "LIVE_MASTER_UPDATE"
-                }]);
+                    created_at: Date.now(),
+                    type: "LIVE_MASTER_UPDATE"
+                });
+                
+               // Keep the daily history sync for backward compatibility with your planner
+                const existingTodaySnap = await getCollection("timetable_history").doc(todayIso).get();
+                let snapshotDocId = todayIso; // Default to saving in the YYYY-MM-DD folder for the planner
 
-                const { data: existingTodayRows } = await supabaseClient
-                    .from("timetable_history")
-                    .select("id, doc_key, entry_type")
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId)
-                    .eq("date", todayIso);
+                if (existingTodaySnap.exists) {
+                    const existingType = existingTodaySnap.data().type;
+                    if (existingType === "EXAM_OVERRIDE" || existingType === "DAILY_OVERRIDE") {
+                        // An override exists! We cannot overwrite the YYYY-MM-DD folder without breaking the exam schedule.
+                        // Instead, save the Master Snapshot under its unique version ID.
+                        // The planner will read the override today, but the Admin Editor will still detect this master update for tomorrow!
+                        snapshotDocId = versionId; 
+                    }
+                }
 
-                const hasOverrideToday = (existingTodayRows || []).some(r => r.entry_type === "EXAM_OVERRIDE" || r.entry_type === "DAILY_OVERRIDE");
-                const snapshotDocKey = hasOverrideToday ? versionId : todayIso;
-
-                const { error: liveHistErr } = await supabaseClient.from("timetable_history").upsert([{
-                    firestore_id: `ui_${activeCenter.toLowerCase()}_hist_${snapshotDocKey}`,
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
-                    doc_key: snapshotDocKey,
+                // Save the snapshot. It either goes to YYYY-MM-DD (for the planner) or versionId (if blocked by an override)
+                await getCollection("timetable_history").doc(snapshotDocId).set({
                     date: todayIso,
-                    last_updated_ms: nowMs,
+                    lastUpdated: Date.now(),
                     schedule: newSlots,
-                    entry_type: "LIVE_MASTER_UPDATE",
-                    status: "ACTIVE",
-                    version_id: versionId,
-                    updated_at: new Date().toISOString()
-                }], { onConflict: 'branch_id,session_id,doc_key' });
-                if (liveHistErr) throw liveHistErr;
+                    type: "LIVE_MASTER_UPDATE",
+                    version_id: versionId
+                });
           // 🌟 FIX: CALCULATE DELTAS BEFORE WIPING MEMORY
                 const deltaChanges = getDeltaChanges(oldTimetableState, newSlots);
 
@@ -4062,19 +3696,15 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                 body: JSON.stringify(payload)
             }).catch(e => console.error("Email trigger failed:", e));
             
-        if (teachers && teachers.length > 0 && activeBranchId && activeSessionId) {
+         // --- CRITICAL FIX: AWAIT PUSH NOTIFICATIONS ---
+            if (teachers && teachers.length > 0) {
                 try {
-                    const ts = Date.now();
-                    await supabaseClient.from("instant_alerts").insert([{
-                        firestore_id: `ui_${activeCenter.toLowerCase()}_alert_${ts}`,
-                        branch_id: activeBranchId,
-                        session_id: activeSessionId,
-                        timestamp_ms: ts,
-                        alert_type: "TIMETABLE_UPDATE",
-                        teachers: teachers,
-                        raw_data: { timestamp: ts, type: "TIMETABLE_UPDATE", teachers: teachers }
-                    }]);
-                } catch (e) {
+                    await db.collection("instant_alerts").add({
+                        timestamp: Date.now(),
+                        type: "TIMETABLE_UPDATE",
+                        teachers: teachers
+                    });
+                } catch(e) {
                     console.error("Instant push trigger failed:", e);
                 }
             }
@@ -4113,30 +3743,28 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                 let allData = [];
                 let displayDateStr = "";
 
+                // 1. SMART FETCHING LOGIC
                 if (timeframe === "DATE") {
                     if (!selectedDate) throw new Error("Please select a specific date first.");
-                    const { data: hRows } = await supabaseClient
-                        .from("timetable_history")
-                        .select("*")
-                        .eq("branch_id", activeBranchId)
-                        .eq("session_id", activeSessionId)
-                        .eq("date", selectedDate)
-                        .neq("status", "CANCELLED");
-                    const ov = (hRows || []).find(r => Array.isArray(r.schedule) && r.schedule.length > 0);
-                    if (ov) {
-                        allData = ov.schedule;
+                    
+                    // Check if an override (like an Exam Day) exists for this date
+                    const historySnap = await getCollection("timetable_history").doc(selectedDate).get();
+                    if (historySnap.exists && historySnap.data().schedule) {
+                        allData = historySnap.data().schedule;
                     } else {
-                        const [yy, mm, dd] = selectedDate.split('-').map(Number);
-                        const dayName = new Date(yy, (mm || 1) - 1, dd || 1).toLocaleDateString('en-US', { weekday: 'long' });
-                        const weekRows = await fetchFullWeekTimetable();
-                        allData = weekRows.filter(d => d.day === dayName);
+                        // Fall back to the normal Live Master schedule for that specific weekday
+                        const dayName = new Date(selectedDate).toLocaleDateString('en-US', { weekday: 'long' });
+                        const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                        allData = masterSnap.docs.map(d => d.data());
                     }
                     displayDateStr = new Date(selectedDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                    
                 } else if (timeframe === "DAY") {
-                    const weekRows = await fetchFullWeekTimetable();
-                    allData = weekRows.filter(d => d.day === selectedDay);
+                    const snap = await getCollection("timetable").where("day", "==", selectedDay).get();
+                    allData = snap.docs.map(d => d.data());
                 } else {
-                    allData = await fetchFullWeekTimetable();
+                    const snap = await getCollection("timetable").get();
+                    allData = snap.docs.map(d => d.data());
                 }
 
                let targetStructures = structureData;
@@ -4268,7 +3896,17 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                handlePrimaryAction();
            }
        });
-// Force sync removed; structure & rooms update live via Supabase Realtime.
+function forceSync() {
+            // 1. Tell the browser to forget all the memorized versions to force a hard cloud fetch
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            IDB.set(`${prefix}structure_last_version`, 0);
+            IDB.set(`teachers_last_version`, 0);
+            IDB.set(`${prefix}timetable_last_version`, 0);
+            IDB.set(`${prefix}holidays_last_version`, 0);
+            
+            // 2. Refresh the page instantly
+            window.location.reload();
+        }
        // --- CALENDAR ENGINE STATE ---
         let currentContextMode = 'LIVE'; // LIVE, FUTURE_MASTER, OVERRIDE, HISTORY
         let currentContextDate = null; 
@@ -4281,14 +3919,14 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                 currentContextMode = 'LIVE';
                 currentContextDate = null;
                 document.getElementById('view-label').innerHTML = `Showing: Live Master Schedule`;
-
+                
+                // Clear dirty UI and re-fetch clean master data from database
                 document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Loading Live Master...</div>`;
-                fetchFullWeekTimetable().then(weekSlots => {
-                    globalTimetable = weekSlots;
-                    liveMasterTimetable = weekSlots;
-                    oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
-                    renderDirectDashboard(true);
-                });
+                sessionStorage.removeItem('minerva_timetable');
+                
+                // CRITICAL FIX: Pass 'true' to skip scraping the screen. 
+                // This stops the current view from contaminating the Live Master memory!
+                fetchTimetable().then(() => renderDirectDashboard(true));
             } else {
                 // Open the Date Picker instead of just setting the badge
                 pendingMode = mode;
@@ -4347,146 +3985,144 @@ async function confirmDateContext() {
                 nameTagInp.value = ""; // Reset first
             }
 
-       const [{ data: histDateRows }, { data: dayMasterRows }, { data: leaveRows }] = await Promise.all([
-                supabaseClient
-                    .from("timetable_history")
-                    .select("id, date, entry_type, status, tag, schedule")
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId)
-                    .eq("date", dateVal)
-                    .in("entry_type", ["DAILY_OVERRIDE", "EXAM_OVERRIDE"])
-                    .neq("status", "CANCELLED"),
-                supabaseClient
-                    .from("timetable")
-                    .select("id, day, class_name, section, start24, end24, time_range, duration, subject, teacher, teacher_name, teacher_email, room, remark")
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId)
-                    .eq("day", dayName),
-                supabaseClient
-                    .from("leave_requests")
-                    .select("id, teacher_name, status, adjustments")
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId)
-                    .in("status", ["PENDING", "APPROVED"])
+       // High-Speed Parallel Query Execution
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            const draftKey = `draft_${activeCenter}_${dateVal}`;
+            
+            const [draftSnap, historySnap, masterSnap, leaveSnap] = await Promise.all([
+                db.collection("timetable_drafts").doc(draftKey).get(),
+                getCollection("timetable_history").doc(dateVal).get(),
+                getCollection("timetable_history").where("type", "in", ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"]).get(),
+                db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get()
             ]);
-
-            const dayLiveSlots = (dayMasterRows || []).map(r => {
-                const [sh, sm] = String(r.start24 || '0:0').split(':').map(Number);
-                const [eh, em] = String(r.end24 || '0:0').split(':').map(Number);
-                return {
-                    id: r.id,
-                    day: r.day,
-                    className: r.class_name,
-                    section: r.section,
-                    start24: r.start24,
-                    end24: r.end24,
-                    timeRange: r.time_range,
-                    duration: r.duration,
-                    subject: r.subject,
-                    teacher: r.teacher || 'NONE',
-                    teacherName: r.teacher_name || r.teacher || 'NONE',
-                    teacherEmail: r.teacher_email || '',
-                    room: r.room || '',
-                    remark: r.remark || '',
-                    sMins: (sh || 0) * 60 + (sm || 0),
-                    eMins: (eh || 0) * 60 + (em || 0)
-                };
-            });
-            liveMasterTimetable = dayLiveSlots;
-
-            const activeOverride = (histDateRows || []).find(h => Array.isArray(h.schedule));
-
-            if (activeOverride) {
-                globalTimetable = (activeOverride.schedule || []).filter(slot => slot.day === dayName);
-                if (nameTagInp) nameTagInp.value = activeOverride.tag || "";
-                document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
+            
+         if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
+                globalTimetable = draftSnap.data().schedule;
+                document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED OVERRIDE DRAFT:</span> ${prettyDate}`;
             } else {
-                globalTimetable = dayLiveSlots;
-                document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
+                if (historySnap.exists && historySnap.data().status !== "CANCELLED" && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
+                    const hData = historySnap.data();
+                    globalTimetable = (hData.schedule || []).filter(slot => slot.day === dayName);
+                    if (nameTagInp) nameTagInp.value = hData.tag || "";
+                    document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
+            } else {
+                    const todayISO = new Date().toISOString().split('T')[0];
+                    
+                    if (dateVal >= todayISO) {
+                        // FOR TODAY & FUTURE: Always use the current Live Master as baseline
+                        let futureMasters = [];
+                        masterSnap.docs.forEach(doc => { 
+                            const d = doc.data();
+                            if (d.type === "FUTURE_MASTER" && d.status !== "CANCELLED" && d.date > todayISO && d.date <= dateVal) {
+                                futureMasters.push(d);
+                            }
+                        });
+
+                        if (futureMasters.length > 0) {
+                            // If a Future Master kicks in before the selected date, use it
+                            futureMasters.sort((a, b) => b.date.localeCompare(a.date));
+                            globalTimetable = (futureMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                            document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 font-bold">📅 FUTURE MASTER (From ${futureMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
+                        } else {
+                            // Default to exactly what the Live Master currently holds
+                            globalTimetable = liveMasterTimetable.filter(t => t.day === dayName);
+                            document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
+                        }
+                    } else {
+                        // FOR PAST DATES: Look for historical snapshots
+                        let pastMasters = [];
+                        masterSnap.docs.forEach(doc => { 
+                            const d = doc.data();
+                            if (d.date <= dateVal && d.status !== "CANCELLED") pastMasters.push(d); 
+                        });
+
+                        if (pastMasters.length > 0) {
+                            pastMasters.sort((a, b) => b.date.localeCompare(a.date));
+                            globalTimetable = (pastMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                            document.getElementById('view-label').innerHTML = `<span class="text-slate-600 font-bold">🕰️ HISTORICAL MASTER (From ${pastMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
+                        } else {
+                            globalTimetable = liveMasterTimetable.filter(t => t.day === dayName);
+                            document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
+                        }
+                    }
+                }
             }
-            (leaveRows || []).forEach(lRow => {
-                const leaveData = {
-                    teacherName: lRow.teacher_name || '',
-                    status: lRow.status || '',
-                    adjustments: Array.isArray(lRow.adjustments) ? lRow.adjustments : []
-                };
+            // --- THE LIVE LEAVE PATCHER FOR ADMIN ---
+
+            leaveSnap.forEach(doc => {
+                const leaveData = doc.data();
                 if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
-                    if (Array.isArray(leaveData.adjustments)) {
+                    if (leaveData.adjustments) {
                         leaveData.adjustments.forEach(adj => {
-                            const adjDate = adj.date || adj.leaveDate || '';
-                            const resp = String(adj.substituteResponse || adj.substitute_response || adj.status || '').toUpperCase();
-                            const adjTo = adj.adjustedTo || adj.adjusted_to || adj.substituteName || adj.substitute_name || '';
-                            const adjEmail = adj.adjustedEmail || adj.adjusted_email || adj.substituteEmail || '';
-                            const adjTitle = adj.title || adj.subject || '';
-                            const adjStart = Number(adj.start ?? adj.startMins ?? adj.start_mins ?? 0);
-                            const adjEnd = Number(adj.end ?? adj.endMins ?? adj.end_mins ?? 0);
+                            if (adj.date === dateVal && adj.substituteResponse === "ACCEPTED") {
+                    const parts = (adj.sub || "").split('|');
+                                    const cName = parts[0] ? parts[0].trim() : "";
+                                    const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : "";
+                                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-                            if (adjDate === dateVal && resp === "ACCEPTED" && adjTo) {
-                                const parts = String(adj.sub || adj.classSection || '').split('|');
-                                const cName = parts[0] ? parts[0].trim() : (adj.className || adj.class_name || '');
-                                const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : (adj.section || '');
-                                const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-
-                                const targetSlot = globalTimetable.find(slot => {
-                                    if (slot.day !== dayName) return false;
-                                    const classOk = !cName || norm(slot.className) === norm(cName);
-                                    const secOk = !sName || norm(slot.section) === norm(sName);
-                                    const subOk = !adjTitle || norm(slot.subject) === norm(adjTitle);
-                                    if (!classOk || !secOk || !subOk) return false;
-                                    if (slot.start24 && slot.end24 && (adjStart || adjEnd)) {
-                                        const [sh, sm] = slot.start24.split(':').map(Number);
-                                        const [eh, em] = slot.end24.split(':').map(Number);
-                                        const slotStartMins = sh * 60 + sm;
-                                        const slotEndMins = eh * 60 + em;
-                                        if (adjEnd <= slotStartMins - 15 || adjStart >= slotEndMins + 15) return false;
-                                    }
-                                    return true;
-                                });
+                                    // Try to find the exact class in globalTimetable
+                                    const targetSlot = globalTimetable.find(slot => {
+                                        if (slot.day !== dayName) return false; // STRICT DAY LOCK
+                                        if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adj.title)) return false;
+                                        if (slot.start24 && slot.end24) {
+                                            const [sh, sm] = slot.start24.split(':').map(Number);
+                                            const [eh, em] = slot.end24.split(':').map(Number);
+                                            const slotStartMins = sh * 60 + sm;
+                                            const slotEndMins = eh * 60 + em;
+                                            
+                                            // Check if substitution time overlaps with the class time block
+                                            if (adj.end <= slotStartMins - 15 || adj.start >= slotEndMins + 15) return false;
+                                        }
+                                        return true;
+                                    });
 
                                 if (targetSlot) {
-                                    targetSlot.origTeacher = targetSlot.teacher;
-                                    targetSlot.origTeacherName = targetSlot.teacherName;
-                                    targetSlot.origTeacherEmail = targetSlot.teacherEmail;
-                                    targetSlot.origRemark = targetSlot.remark;
-                                    targetSlot.isTemporarySub = true;
+                                        // Backup the original data so it isn't permanently saved if cloned!
+                                        targetSlot.origTeacher = targetSlot.teacher;
+                                        targetSlot.origTeacherName = targetSlot.teacherName;
+                                        targetSlot.origTeacherEmail = targetSlot.teacherEmail;
+                                        targetSlot.origRemark = targetSlot.remark;
+                                        targetSlot.isTemporarySub = true;
 
-                                    targetSlot.teacher = adjTo;
-                                    targetSlot.teacherName = adjTo;
-                                    targetSlot.teacherEmail = adjEmail;
-
-                                    let subNote = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
-                                    if (adj.assignedTimeWindow || adj.assigned_time_window) {
-                                        subNote += ` [${adj.assignedTimeWindow || adj.assigned_time_window}]`;
-                                    }
-                                    targetSlot.remark = subNote;
-                                } else {
-                                    const existingDuty = globalTimetable.find(slot =>
-                                        norm(slot.className) === "extraduty" &&
-                                        norm(slot.subject) === norm(adjTitle) &&
-                                        norm(slot.teacher) === norm(adjTo) &&
-                                        slot.start24 === minsTo24(adjStart)
-                                    );
-
-                                    if (!existingDuty) {
-                                        globalTimetable.push({
-                                            day: dayName,
-                                            className: "Extra Duty",
-                                            section: "Task",
-                                            subject: adjTitle || "Substitution",
-                                            teacher: adjTo,
-                                            teacherName: adjTo,
-                                            teacherEmail: adjEmail,
-                                            start24: minsTo24(adjStart),
-                                            end24: minsTo24(adjEnd),
-                                            remark: adj.sub || "(Assigned to " + adjTo.split(' ')[0] + ")",
-                                            room: "TBD",
-                                            isTemporaryDuty: true
-                                        });
-                                        if (!structureData.some(s => s.className === "Extra Duty")) {
-                                            structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adjTitle || "Substitution"] });
+                                        // Override Teacher Name to the Substitute!
+                                        targetSlot.teacher = adj.adjustedTo;
+                                        targetSlot.teacherName = adj.adjustedTo;
+                                        targetSlot.teacherEmail = adj.adjustedEmail;
+                                        
+                                        let subNote = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
+                                        if (adj.assignedTimeWindow) subNote += ` [${adj.assignedTimeWindow}]`;
+                                        targetSlot.remark = subNote;
+                                    } else {
+                                        // Catch-all Failsafe: Render as Extra Duty if standard class match fails
+                                        const existingDuty = globalTimetable.find(slot => 
+                                            norm(slot.className) === "extraduty" && 
+                                            norm(slot.subject) === norm(adj.title) && 
+                                            norm(slot.teacher) === norm(adj.adjustedTo) &&
+                                            slot.start24 === minsTo24(adj.start)
+                                        );
+                                        
+                                        if (!existingDuty) {
+                                            // Inject Extra Duty into the Timetable view!
+                                            globalTimetable.push({
+                                                day: dayName,
+                                                className: "Extra Duty",
+                                                section: "Task",
+                                                subject: adj.title || "Substitution",
+                                                teacher: adj.adjustedTo,
+                                                teacherName: adj.adjustedTo,
+                                                teacherEmail: adj.adjustedEmail,
+                                                start24: minsTo24(adj.start),
+                                                end24: minsTo24(adj.end),
+                                                remark: adj.sub || "(Assigned to " + adj.adjustedTo.split(' ')[0] + ")",
+                                                room: "TBD",
+                                                isTemporaryDuty: true
+                                            });
+                                            // Force structure injection so it renders on screen
+                                            if (!structureData.some(s => s.className === "Extra Duty")) {
+                                                structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adj.title || "Substitution"] });
+                                            }
                                         }
                                     }
-                                }
                             }
                         });
                     }
@@ -4643,42 +4279,29 @@ function processSave(type) {
                     effective_from: dateVal
                 }));
 
-            const nowMs = Date.now();
-                const { error: saveFutErr } = await supabaseClient.from("timetable_history").upsert([{
-                    firestore_id: `ui_${activeCenter.toLowerCase()}_future_${dateVal}`,
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
-                    doc_key: dateVal,
+             await getCollection("timetable_history").doc(dateVal).set({
                     date: dateVal,
-                    last_updated_ms: nowMs,
-                    schedule: taggedSlots,
-                    entry_type: "FUTURE_MASTER",
-                    status: "ACTIVE",
-                    version_id: versionId,
-                    updated_at: new Date().toISOString()
-                }], { onConflict: 'branch_id,session_id,doc_key' });
-                if (saveFutErr) throw saveFutErr;
+                    lastUpdated: Date.now(),
+                    schedule: taggedSlots, 
+                    type: "FUTURE_MASTER",
+                    version_id: versionId
+                });
+
                 if (teachersToNotify.length > 0) {
-                    await supabaseClient.from("instant_alerts").insert([{
-                        firestore_id: `ui_${activeCenter.toLowerCase()}_alert_${nowMs}`,
-                        branch_id: activeBranchId,
-                        session_id: activeSessionId,
-                        timestamp_ms: nowMs,
-                        alert_type: "TIMETABLE_UPDATE",
-                        teachers: teachersToNotify,
-                        raw_data: { timestamp: nowMs, type: "TIMETABLE_UPDATE", teachers: teachersToNotify }
-                    }]);
+                    await db.collection("instant_alerts").add({
+                        timestamp: Date.now(),
+                        type: "TIMETABLE_UPDATE",
+                        teachers: teachersToNotify
+                    });
                 }
 
-                await supabaseClient.from("timetable_versions").insert([{
-                    firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
-                    branch_id: activeBranchId,
-                    session_id: activeSessionId,
+                // Register the Future Version in the registry
+                await getCollection("timetable_versions").doc(versionId).set({
                     version_id: versionId,
                     start_date: dateVal,
-                    created_at_ms: nowMs,
-                    version_type: "FUTURE_MASTER"
-                }]);
+                    created_at: Date.now(),
+                    type: "FUTURE_MASTER"
+                });
 
             // 🌟 FIX: CALCULATE DELTAS BEFORE WIPING MEMORY
                 const deltaChanges = getDeltaChanges(oldTimetableState, newSlots);
@@ -4838,12 +4461,14 @@ async function confirmMultiDates() {
             return `${norm(c)}|${norm(s)}`;
         });
 
-     const allMasterSlots = await fetchFullWeekTimetable();
+     // --- LIVE MASTER DISCREPANCY AUDIT ---
+        const masterSnapAll = await getCollection("timetable").get();
+        const allMasterSlots = masterSnapAll.docs.map(doc => doc.data());
         let allMismatches = [];
 
-        const auditPayloads = [];
-        const nowMs = Date.now();
-        const versionId = "v_override_" + nowMs;
+const batch = db.batch();
+            const auditPayloads = [];
+            const versionId = "v_override_" + Date.now(); // Version stamp for these overrides
             
             for (const dateIso of selectedDates) {
                 const [y, m_val, d_val] = dateIso.split('-');
@@ -4961,8 +4586,24 @@ async function confirmMultiDates() {
                 effective_from: dateIso
             }));
 
-            auditPayloads.push({ date: dateIso, schedule: finalMergedSchedule, tag: schedName });
+            batch.set(getCollection("timetable_history").doc(dateIso), {
+                date: dateIso,
+                lastUpdated: Date.now(),
+                schedule: finalMergedSchedule,
+                type: "DAILY_OVERRIDE",
+                tag: schedName,
+                version_id: versionId
+            });
+            auditPayloads.push({ date: dateIso, schedule: finalMergedSchedule });
         }
+        
+        // Log the version registry
+        batch.set(getCollection("timetable_versions").doc(versionId), {
+            version_id: versionId,
+            created_at: Date.now(),
+            type: "DAILY_OVERRIDE",
+            dates_affected: selectedDates
+        });
 
         if (allMismatches.length > 0) {
             let warningText = "⚠️ Master Schedule Discrepancies Detected:\nThe following slots differ from the Live Master Schedule:\n\n";
@@ -4973,79 +4614,40 @@ async function confirmMultiDates() {
             });
             if (allMismatches.length > 10) warningText += `\n...and ${allMismatches.length - 10} more discrepancies.`;
             warningText += "\n\nDo you want to continue saving this schedule with these changes?";
-
+            
             if (!confirm(warningText)) {
                 btn.disabled = false; btn.innerText = "🚀 Execute Replication";
                 return;
             }
         }
 
-        for (const payload of auditPayloads) {
-            const { error: hErr } = await supabaseClient.from("timetable_history").upsert([{
-                firestore_id: `ui_${activeCenter.toLowerCase()}_ov_${payload.date}`,
-                branch_id: activeBranchId,
-                session_id: activeSessionId,
-                doc_key: payload.date,
-                date: payload.date,
-                last_updated_ms: Date.now(),
-                schedule: payload.schedule,
-                entry_type: "DAILY_OVERRIDE",
-                status: "ACTIVE",
-                tag: payload.tag || "Daily Override",
-                version_id: versionId,
-                updated_at: new Date().toISOString()
-            }], { onConflict: 'branch_id,session_id,doc_key' });
-            if (hErr) throw hErr;
-        }
-
-        await supabaseClient.from("timetable_versions").insert([{
-            firestore_id: `ui_${activeCenter.toLowerCase()}_${versionId}`,
-            branch_id: activeBranchId,
-            session_id: activeSessionId,
-            version_id: versionId,
-            created_at_ms: nowMs,
-            version_type: "DAILY_OVERRIDE",
-            dates_affected: selectedDates
-        }]);
-
-        await supabaseClient.from("system_metadata").upsert([{
-            firestore_id: `ui_${activeCenter.toLowerCase()}_meta_timetable`,
-            branch_id: activeBranchId,
-            session_id: activeSessionId,
-            meta_key: "timetable",
-            last_updated_ms: Date.now(),
-            meta_value: { lastUpdated: Date.now() },
-            updated_at: new Date().toISOString()
-        }], { onConflict: 'firestore_id' });
-
+        await batch.commit();
+        await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
+        
         let allAffectedTeachersMap = new Map();
 
         for (const payload of auditPayloads) {
-            const [yy, mm, dd] = payload.date.split('-').map(Number);
-            const dayName = new Date(yy, (mm || 1) - 1, dd || 1).toLocaleDateString('en-US', { weekday: 'long' });
-            const masterSlots = allMasterSlots.filter(d => d.day === dayName);
+            const dayName = new Date(payload.date).toLocaleDateString('en-US', { weekday: 'long' });
+            const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+            const masterSlots = masterSnap.docs.map(d => d.data());
             const affected = detectTeacherChanges(masterSlots, payload.schedule);
-
+            
             if (affected.length > 0) {
                 await sendEmailNotification(affected);
                 affected.forEach(t => allAffectedTeachersMap.set(t.name, t));
             }
         }
 
-        const combinedAffected = Array.from(allAffectedTeachersMap.values());
+      const combinedAffected = Array.from(allAffectedTeachersMap.values());
         if (combinedAffected.length > 0) {
             const dateList = auditPayloads.map(p => p.date).join(', ');
             openWhatsAppAlert(combinedAffected, `Specific Dates / Exam Override (${dateList})`);
 
-            await supabaseClient.from("instant_alerts").insert([{
-                firestore_id: `ui_${activeCenter.toLowerCase()}_alert_${Date.now()}`,
-                branch_id: activeBranchId,
-                session_id: activeSessionId,
-                timestamp_ms: Date.now(),
-                alert_type: "TIMETABLE_UPDATE",
-                teachers: combinedAffected,
-                raw_data: { timestamp: Date.now(), type: "TIMETABLE_UPDATE", teachers: combinedAffected }
-            }]);
+            await db.collection("instant_alerts").add({
+                timestamp: Date.now(),
+                type: "TIMETABLE_UPDATE",
+                teachers: combinedAffected
+            });
         }
 
         alert(`✅ Successfully Replicated and notified affected teachers!`);
@@ -5244,44 +4846,25 @@ async function executeImport() {
     const btn = event.target;
     btn.disabled = true; btn.innerText = "Importing...";
 
-   try {
-        const { data: histRows } = await supabaseClient
-            .from("timetable_history")
-            .select("*")
-            .eq("branch_id", activeBranchId)
-            .eq("session_id", activeSessionId)
-            .eq("date", importDate)
-            .neq("status", "CANCELLED");
-
+    try {
+        // 1. Fetch Source Data
+        const historySnap = await getCollection("timetable_history").doc(importDate).get();
         let sourceSlots = [];
-        const histMatch = (histRows || []).find(r => Array.isArray(r.schedule) && r.schedule.length > 0);
-        if (histMatch) {
-            sourceSlots = histMatch.schedule;
+        if (historySnap.exists) {
+            sourceSlots = historySnap.data().schedule || [];
         } else {
-            const [yy, mm, dd] = importDate.split('-').map(Number);
-            const dayName = new Date(yy, (mm || 1) - 1, dd || 1).toLocaleDateString('en-US', { weekday: 'long' });
-            const weekRows = await fetchFullWeekTimetable();
-            sourceSlots = weekRows.filter(d => d.day === dayName);
+            const dayName = new Date(importDate).toLocaleDateString('en-US', { weekday: 'long' });
+            const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+            sourceSlots = masterSnap.docs.map(d => d.data());
         }
-
-        const importedData = sourceSlots.filter(s => s.className === className && s.section === sectionName);
+        
+     const importedData = sourceSlots.filter(s => s.className === className && s.section === sectionName);
         if (importedData.length === 0) throw new Error("No data found for this class on that date.");
 
-        const { data: leaveRows } = await supabaseClient
-            .from("leave_requests")
-            .select("*")
-            .eq("branch_id", activeBranchId)
-            .eq("session_id", activeSessionId)
-            .in("status", ["PENDING", "APPROVED"]);
-
-        const activeLeaves = (leaveRows || []).map(lRow => ({
-            ...parseDetails(lRow.raw_data),
-            teacherName: lRow.teacher_name || '',
-            status: lRow.status,
-            adjustments: Array.isArray(lRow.adjustments) && lRow.adjustments.length > 0
-                ? lRow.adjustments
-                : (parseDetails(lRow.raw_data).adjustments || [])
-        }));
+        // --- NEW: FETCH LEAVES AND AUTO-APPLY SUBSTITUTIONS TO IMPORTED DATA ---
+        const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+        const leaveSnap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get();
+        const activeLeaves = leaveSnap.docs.map(d => d.data());
         const targetDate = currentContextDate || new Date().toISOString().split('T')[0];
         const normStr = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
@@ -5591,9 +5174,9 @@ async function executeImport() {
 
         async function updateSingleDispatcherTime(cName, sName) {
             const type = document.getElementById(`type_${cName}_${sName}`).value;
-            const bellRow = await getBellConfigFromSupabase();
-            if (bellRow && bellRow[type.toLowerCase()]) {
-                const rules = bellRow[type.toLowerCase()];
+            const bellDoc = await getCollection("configs").doc("bell_schedules").get();
+            if (bellDoc.exists && bellDoc.data()[type.toLowerCase()]) {
+                const rules = bellDoc.data()[type.toLowerCase()];
                 document.getElementById(`es_${cName}_${sName}`).value = rules.examStart || "09:00";
                 document.getElementById(`ee_${cName}_${sName}`).value = rules.examEnd || "10:30";
             }
@@ -5601,7 +5184,7 @@ async function executeImport() {
 
         async function generateExamSchedule() {
             const date = document.getElementById('ed-date').value;
-
+            
             const targetClassesData = Array.from(document.querySelectorAll('.ed-class-cb:checked')).map(cb => {
                 const [cName, sName] = cb.value.split('|');
                 const groupSelect = document.getElementById(`lg_${cName}_${sName}`);
@@ -5611,10 +5194,10 @@ async function executeImport() {
                 const eStart = document.getElementById(`es_${cName}_${sName}`).value;
                 const eEnd = document.getElementById(`ee_${cName}_${sName}`).value;
                 const sectionSubs = Array.from(document.querySelectorAll(`.ed-section-sub-cb[data-cls="${cName}"][data-sec="${sName}"]:checked`)).map(scb => scb.value.toUpperCase());
-
-                return {
-                    className: cName, sectionName: sName,
-                    lunchGroup: groupSelect ? parseInt(groupSelect.value) : 1,
+                
+                return { 
+                    className: cName, sectionName: sName, 
+                    lunchGroup: groupSelect ? parseInt(groupSelect.value) : 1, 
                     breakMode: breakModeSelect ? breakModeSelect.value : 'SPREAD',
                     examType: typeSelect ? typeSelect.value : 'UT',
                     examTitle: titleInput ? titleInput.value : 'Exam Day',
@@ -5623,35 +5206,27 @@ async function executeImport() {
                 };
             });
 
-            if (!date) return alert("Please select a target date.");
-            if (targetClassesData.length === 0) return alert("Select at least one class.");
+            if(!date) return alert("Please select a target date.");
+            if(targetClassesData.length === 0) return alert("Select at least one class.");
 
             const btn = document.getElementById('ed-generate-btn');
             const origBtnText = btn.innerHTML;
             btn.innerHTML = "⏳ Calibrating Grid..."; btn.disabled = true;
 
             try {
-                const bellRow = await getBellConfigFromSupabase();
-                if (!bellRow) throw new Error("Bell Schedules not configured.");
-                const allBellRules = { ut: bellRow.ut || {}, ot: bellRow.ot || {} };
+                const bellDoc = await getCollection("configs").doc("bell_schedules").get();
+                if (!bellDoc.exists) throw new Error("Bell Schedules not configured.");
+                const allBellRules = bellDoc.data();
 
-                const [yy, mm, dd] = date.split('-').map(Number);
-                const dayName = new Date(yy, (mm || 1) - 1, dd || 1).toLocaleDateString('en-US', { weekday: 'long' });
-                const { data: histRows } = await supabaseClient
-                    .from("timetable_history")
-                    .select("*")
-                    .eq("branch_id", activeBranchId)
-                    .eq("session_id", activeSessionId)
-                    .eq("date", date)
-                    .neq("status", "CANCELLED");
-
+                const dayName = new Date(date).toLocaleDateString('en-US', { weekday: 'long' });
+                const historySnap = await getCollection("timetable_history").doc(date).get();
                 let masterDayData = [];
-                const histMatch = (histRows || []).find(r => Array.isArray(r.schedule) && r.schedule.length > 0);
-                if (histMatch) {
-                    masterDayData = histMatch.schedule;
+                
+                if (historySnap.exists && historySnap.data().schedule) {
+                    masterDayData = historySnap.data().schedule;
                 } else {
-                    const weekRows = await fetchFullWeekTimetable();
-                    masterDayData = weekRows.filter(d => d.day === dayName);
+                    const masterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                    masterDayData = masterSnap.docs.map(d => d.data());
                 }
 
                let transformedSchedule = [];
@@ -5824,45 +5399,36 @@ async function executeImport() {
             document.getElementById('bell-config-modal').classList.replace('flex', 'hidden');
         }
 
-        async function getBellConfigFromSupabase() {
-            const { data } = await supabaseClient
-                .from('bell_schedules')
-                .select('*')
-                .eq('branch_id', activeBranchId)
-                .eq('session_id', activeSessionId)
-                .eq('config_key', 'bell_schedules')
-                .limit(1);
-            return data && data[0] ? data[0] : null;
-        }
-
         async function fetchBellTemplates() {
             try {
-                const row = await getBellConfigFromSupabase();
-                if (row) {
-                    const ut = row.ut || {};
-                    const ot = row.ot || {};
-                    document.getElementById('tpl-ut-start').value = ut.examStart || "09:00";
-                    document.getElementById('tpl-ut-end').value = ut.examEnd || "10:30";
-                    document.getElementById('tpl-ut-lunch-s').value = ut.lunchStart || "12:00";
-                    document.getElementById('tpl-ut-lunch-e').value = ut.lunchEnd || "13:30";
-                    document.getElementById('tpl-ut-lunch-dur').value = ut.lunchDuration || 30;
-
-                    document.getElementById('tpl-ot-start').value = ot.examStart || "09:00";
-                    document.getElementById('tpl-ot-end').value = ot.examEnd || "12:30";
-                    document.getElementById('tpl-ot-lunch-s').value = ot.lunchStart || "12:30";
-                    document.getElementById('tpl-ot-lunch-e').value = ot.lunchEnd || "13:30";
-                    document.getElementById('tpl-ot-lunch-dur').value = ot.lunchDuration || 30;
+                const doc = await getCollection("configs").doc("bell_schedules").get();
+                if (doc.exists) {
+                    const data = doc.data();
+                    if(data.ut) {
+                        document.getElementById('tpl-ut-start').value = data.ut.examStart || "09:00";
+                        document.getElementById('tpl-ut-end').value = data.ut.examEnd || "10:30";
+                        document.getElementById('tpl-ut-lunch-s').value = data.ut.lunchStart || "12:00";
+                        document.getElementById('tpl-ut-lunch-e').value = data.ut.lunchEnd || "13:30";
+                        document.getElementById('tpl-ut-lunch-dur').value = data.ut.lunchDuration || 30;
+                    }
+                    if(data.ot) {
+                        document.getElementById('tpl-ot-start').value = data.ot.examStart || "09:00";
+                        document.getElementById('tpl-ot-end').value = data.ot.examEnd || "12:30";
+                        document.getElementById('tpl-ot-lunch-s').value = data.ot.lunchStart || "12:30";
+                        document.getElementById('tpl-ot-lunch-e').value = data.ot.lunchEnd || "13:30";
+                        document.getElementById('tpl-ot-lunch-dur').value = data.ot.lunchDuration || 30;
+                    }
                 }
-            } catch (e) { console.error("Error loading bell templates", e); }
+            } catch(e) { console.error("Error loading bell templates", e); }
         }
 
-        async function saveBellTemplates() {
-            if (sessionStorage.getItem('minervaAdminAuth') !== 'true') return alert("You don't have authorization. Admin access required.");
+       async function saveBellTemplates() {
+            const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+            if (!isAdmin) return alert("You don't have authorization. Admin access required.");
             const btn = document.getElementById('bell-save-btn');
             const orig = btn.innerHTML;
-            btn.innerHTML = "⌛ Saving...";
-            btn.disabled = true;
-
+            btn.innerHTML = "⌛ Saving..."; btn.disabled = true;
+            
             const config = {
                 ut: {
                     examStart: document.getElementById('tpl-ut-start').value,
@@ -5879,35 +5445,21 @@ async function executeImport() {
                     lunchDuration: parseInt(document.getElementById('tpl-ot-lunch-dur').value) || 30
                 }
             };
-
-            try {
-                if (!confirm(`🚨 SETTINGS SAVE: Update the Master Bell/Exam Timings for ${activeCenter} (${activeSessionLabel})?`)) {
-                    btn.innerHTML = orig;
-                    btn.disabled = false;
+            
+          try {
+                // --- HARD STOP: Branch Specific Confirmation ---
+                if(!confirm(`🚨 SETTINGS SAVE: Update the Master Bell/Exam Timings for the ${activeCenter} branch?`)) {
+                    btn.innerHTML = orig; btn.disabled = false;
                     return;
                 }
 
-                const { error } = await supabaseClient
-                    .from('bell_schedules')
-                    .upsert([{
-                        firestore_id: `ui_${activeCenter.toLowerCase()}_bell_schedules`,
-                        branch_id: activeBranchId,
-                        session_id: activeSessionId,
-                        config_key: 'bell_schedules',
-                        ut: config.ut,
-                        ot: config.ot,
-                        raw_config: config,
-                        updated_at: new Date().toISOString()
-                    }], { onConflict: 'firestore_id' });
-                if (error) throw error;
-
+                await getCollection("configs").doc("bell_schedules").set(config, {merge: true});
                 alert(`✅ ${activeCenter} Bell Schedules Saved Successfully.`);
                 closeBellConfig();
-            } catch (e) {
+            } catch(e) {
                 alert("Error saving: " + e.message);
             } finally {
-                btn.innerHTML = orig;
-                btn.disabled = false;
+                btn.innerHTML = orig; btn.disabled = false;
             }
         }
         // --- FLOATING MODAL DRAG SCRIPT ---
