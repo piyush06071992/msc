@@ -5,9 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva | Staff Registration</title>
     <script src="https://cdn.tailwindcss.com"></script>
-   <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <style>
         .glass { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); }
         .locked { opacity: 0.15; pointer-events: none; user-select: none; filter: blur(3px); }
@@ -94,59 +93,35 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        const SUPABASE_URL = "https://lpccpiozrqgxgusculbs.supabase.co";
-        const SUPABASE_ANON_KEY = "sb_publishable_1q3Xilxs8lSK_dyWwbfvzQ_7zJOQV6v";
-        const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
         let correctOrgCode = "";
-
-        function normalizeAcceptAttr(acceptMode) {
-            if (acceptMode === "pdf") return "application/pdf,.pdf";
-            if (acceptMode === "image") return "image/*,.jpg,.jpeg,.png,.webp";
-            return "application/pdf,image/*,.pdf,.jpg,.jpeg,.png,.webp";
-        }
 
         async function fetchConfig() {
             try {
-                const { data, error } = await supabaseClient
-                    .from("form_configs")
-                    .select("org_code, fields")
-                    .eq("config_key", "staff_registration_form")
-                    .maybeSingle();
-
-                if (error) throw error;
-
-                if (data) {
-                    correctOrgCode = data.org_code || "";
-                    const rawFields = Array.isArray(data.fields) ? data.fields : [];
-                    const indexedFields = rawFields.map((field, idx) => ({
-                        ...field,
-                        fieldIndex: typeof field.fieldIndex === "number" ? field.fieldIndex : idx
-                    }));
-                    renderDynamicFields(indexedFields);
+                const docSnap = await db.collection("configs").doc("staff_registration_form").get();
+                if (docSnap.exists) {
+                    const data = docSnap.data();
+                    correctOrgCode = data.orgCode;
+                    renderDynamicFields(data.fields);
                 }
-            } catch (e) { console.error("Supabase form config error:", e); }
+            } catch (e) { console.error(e); }
         }
 
-        // --- INSTANT DUPLICITY CHECKER (SUPABASE) ---
+        // --- INSTANT DUPLICITY CHECKER ---
         async function checkSystemDuplicity(type, value, inputEl) {
             if (!value) return;
 
-            try {
-                let query = supabaseClient
-                    .from("staff_applications")
-                    .select("id, status")
-                    .neq("status", "rejected");
+            let query;
+            if (type === 'email') query = db.collection("staff_applications").where("email", "==", value);
+            else if (type === 'mobile') query = db.collection("staff_applications").where("mobile", "==", value);
+            else if (type === 'aadhaar') query = db.collection("staff_applications").where("details.Aadhaar Number", "==", value);
 
-                if (type === 'email') query = query.eq("email", value.trim());
-                else if (type === 'mobile') query = query.eq("mobile", String(value).trim());
-                else if (type === 'id_number') query = query.filter("details->>Aadhaar Number", "eq", String(value).trim());
-                else return;
+        try {
+                const snapshot = await query.get();
+                
+                // Filter out any applications that were explicitly rejected so they can re-apply
+                const activeDocs = snapshot.docs.filter(doc => doc.data().status !== 'rejected');
 
-                const { data: activeRows, error } = await query;
-                if (error) throw error;
-
-                if (activeRows && activeRows.length > 0) {
+                if (activeDocs.length > 0) {
                     alert(`❌ ERROR: This ${type.toUpperCase()} is already associated with an existing account or pending application.`);
                     inputEl.value = "";
                     inputEl.classList.add('shake', 'border-red-500');
@@ -186,46 +161,33 @@
         function renderDynamicFields(fields) {
             const area = document.getElementById('dynamic-fields-area');
             area.innerHTML = "";
-            fields.forEach((f, idx) => {
-                const fieldIndex = typeof f.fieldIndex === "number" ? f.fieldIndex : idx;
+            fields.forEach(f => {
                 const container = document.createElement('div');
-                container.setAttribute('data-field-index', fieldIndex);
-                container.setAttribute('data-field-label', f.label);
-
                 const label = `<label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 ml-1">${f.label} ${f.required ? '*' : ''}</label>`;
                 let inputHtml = '';
                 const style = "w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold outline-none focus:bg-white transition-all";
-                const fileStyle = "w-full p-3.5 bg-slate-50 border-2 border-slate-100 rounded-2xl font-bold text-xs text-slate-600 outline-none focus:bg-white transition-all file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-black file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100";
 
-                const isNationalIdField = f.label === 'Aadhaar Number';
-                const extraOnInput = isNationalIdField ? `; if(this.value.length === 12) checkSystemDuplicity('id_number', this.value, this)` : '';
+                // Universal Logic: If label is Aadhaar, check instantly at 12 digits
+                const extraOnInput = f.label === 'Aadhaar Number' ? `; if(this.value.length === 12) checkSystemDuplicity('aadhaar', this.value, this)` : '';
                 const limitScript = f.limit ? `maxlength="${f.limit}" oninput="if(this.value.length > ${f.limit}) this.value = this.value.slice(0, ${f.limit})${extraOnInput}"` : "";
 
                 if (f.type === 'text') {
-                    inputHtml = `<input type="text" name="${f.label}" data-field-index="${fieldIndex}" ${f.required ? 'required' : ''} ${limitScript} placeholder="Max ${f.limit || '∞'} chars" class="${style}">`;
+                    inputHtml = `<input type="text" name="${f.label}" ${f.required ? 'required' : ''} ${limitScript} placeholder="Max ${f.limit || '∞'} chars" class="${style}">`;
                 } else if (f.type === 'number') {
-                    inputHtml = `<input type="number" inputmode="numeric" name="${f.label}" data-field-index="${fieldIndex}" ${f.required ? 'required' : ''} ${limitScript} class="${style}">`;
+                    inputHtml = `<input type="number" inputmode="numeric" name="${f.label}" ${f.required ? 'required' : ''} ${limitScript} class="${style}">`;
                 } else if (f.type === 'date') {
-                    inputHtml = `<input type="date" name="${f.label}" data-field-index="${fieldIndex}" ${f.required ? 'required' : ''} class="${style}">`;
+                    inputHtml = `<input type="date" name="${f.label}" ${f.required ? 'required' : ''} class="${style}">`;
                 } else if (f.type === 'select') {
-                    const opts = (f.options || "").split(',').filter(o => o.trim()).map(o => `<option value="${o.trim()}">${o.trim()}</option>`).join('');
-                    inputHtml = `<select name="${f.label}" data-field-index="${fieldIndex}" ${f.required ? 'required' : ''} class="${style}">${opts}</select>`;
+                    const opts = f.options.split(',').map(o => `<option value="${o.trim()}">${o.trim()}</option>`).join('');
+                    inputHtml = `<select name="${f.label}" ${f.required ? 'required' : ''} class="${style}">${opts}</select>`;
                 } else if (f.type === 'checkbox') {
-                    const opts = (f.options || "").split(',').filter(o => o.trim()).map(o => `
+                    const opts = f.options.split(',').map(o => `
                         <label class="flex items-center p-4 bg-white border-2 border-slate-100 rounded-2xl cursor-pointer mb-2 active:bg-blue-50">
-                            <input type="checkbox" name="${f.label}" data-field-index="${fieldIndex}" value="${o.trim()}" class="w-6 h-6 accent-blue-600 rounded-lg">
+                            <input type="checkbox" name="${f.label}" value="${o.trim()}" class="w-6 h-6 accent-blue-600 rounded-lg">
                             <span class="ml-4 font-bold text-slate-700">${o.trim()}</span>
                         </label>
                     `).join('');
-                    const attachHtml = f.allowFileUpload ? `
-                        <div class="mt-3 pt-3 border-t border-slate-100">
-                            <label class="block text-[9px] font-black text-cyan-700 uppercase tracking-widest mb-1.5 ml-1">Supporting File (PDF or Image — Optional)</label>
-                            <input type="file" data-upload-for="${f.label}" data-field-index="${fieldIndex}" accept="${normalizeAcceptAttr(f.uploadAccept)}" class="${fileStyle}">
-                        </div>
-                    ` : '';
-                    inputHtml = `<div class="grid grid-cols-1 gap-1">${opts}</div>${attachHtml}`;
-                } else if (f.type === 'file') {
-                    inputHtml = `<input type="file" name="${f.label}" data-field-index="${fieldIndex}" accept="${normalizeAcceptAttr(f.uploadAccept)}" ${f.required ? 'required' : ''} class="${fileStyle}">`;
+                    inputHtml = `<div class="grid grid-cols-1 gap-1">${opts}</div>`;
                 }
 
                 container.innerHTML = label + inputHtml;
@@ -233,72 +195,35 @@
             });
         }
 
-        async function uploadStaffFile(file) {
-            const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-            const filePath = `applications/${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${safeName}`;
-            const { error } = await supabaseClient.storage
-                .from("staff-uploads")
-                .upload(filePath, file, { cacheControl: "3600", upsert: false });
-            if (error) throw error;
-
-            const { data: pubData } = supabaseClient.storage
-                .from("staff-uploads")
-                .getPublicUrl(filePath);
-            return pubData?.publicUrl || filePath;
-        }
-
         document.getElementById('main-form').onsubmit = async (e) => {
             e.preventDefault();
             const btn = document.getElementById('submit-btn');
             btn.innerText = "Syncing..."; btn.disabled = true;
 
-            const details = {};
-            const elements = e.target.querySelectorAll('[name]');
-            for (const el of elements) {
-                if (el.type === 'checkbox') {
-                    if (!details[el.name]) details[el.name] = [];
-                    if (el.checked) details[el.name].push(el.value);
-                } else if (el.type === 'file') {
-                    if (el.files && el.files[0]) {
-                        details[el.name] = await uploadStaffFile(el.files[0]);
-                    } else {
-                        details[el.name] = "";
-                    }
-                } else {
-                    details[el.name] = el.value;
-                }
-            }
-
-            const uploadExtras = e.target.querySelectorAll('input[type="file"][data-upload-for]');
-            for (const upEl of uploadExtras) {
-                if (upEl.files && upEl.files[0]) {
-                    const targetKey = upEl.getAttribute('data-upload-for');
-                    details[`${targetKey} Attachment`] = await uploadStaffFile(upEl.files[0]);
-                }
-            }
-
-            const staffPayload = {
-                email: document.getElementById('sys-email').value.trim(),
-                mobile: String(document.getElementById('sys-mobile').value).trim(),
+            const staffData = {
+                email: document.getElementById('sys-email').value,
+                mobile: document.getElementById('sys-mobile').value,
                 password: document.getElementById('sys-pass').value,
                 status: "pending",
-                applied_on: new Date().toISOString(),
-                details
+                appliedOn: firebase.firestore.FieldValue.serverTimestamp(),
+                details: {}
             };
 
-            try {
-                const { error } = await supabaseClient
-                    .from("staff_applications")
-                    .insert([staffPayload]);
+            const elements = e.target.querySelectorAll('[name]');
+            elements.forEach(el => {
+                if(el.type === 'checkbox') {
+                    if(!staffData.details[el.name]) staffData.details[el.name] = [];
+                    if(el.checked) staffData.details[el.name].push(el.value);
+                } else {
+                    staffData.details[el.name] = el.value;
+                }
+            });
 
-                if (error) throw error;
+            try {
+                await db.collection("staff_applications").add(staffData);
                 alert("Success! Application PENDING approval.");
                 window.location.href = 'index.html';
-            } catch (err) {
-                alert(err.message || "Failed to submit application.");
-                btn.disabled = false;
-                btn.innerText = "Submit Application";
-            }
+            } catch (err) { alert(err.message); btn.disabled = false; btn.innerText = "Submit Application"; }
         };
 
         fetchConfig();
