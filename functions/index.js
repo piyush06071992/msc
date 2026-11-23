@@ -180,8 +180,9 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
     let seatSpecificTasks = [];
     let bulkSplitCounts = {}; 
     let subjectCounters = {};
+    let missingOmrSections = new Set();
 
-    // PASS 1: Map Subjects and Build Processing Tasks
+    // PASS 1: Map Subjects, Validate OMR Availability, and Build Processing Tasks
     for (let i = 0; i < roomOccupants.length; i++) {
         const { seatId, student } = roomOccupants[i];
         if (!student || !student.className || !student.section) continue;
@@ -215,6 +216,12 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
         
         const basePaperLinks = sectionPapers["SERIES A"] || Object.values(sectionPapers)[0] || {};
         const basePdfUrl = docType === 'omr' ? basePaperLinks.omr : basePaperLinks.qp;
+
+        if (docType === 'omr' && !basePdfUrl) {
+            const subLabel = matchedSubKey ? ` (${matchedSubKey})` : "";
+            missingOmrSections.add(`Class ${student.className} - Sec ${student.section}${subLabel}`);
+            continue;
+        }
         if (!basePdfUrl) continue; 
 
         if (layout === 'A4_HALF_SPLIT' && docType !== 'omr') {
@@ -225,7 +232,7 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             }
             bulkSplitCounts[bufferKey].count++;
 
-       } else {
+        } else {
             // SEAT SPECIFIC MODE (Standard, Booklet, and all OMRs)
             // Track by basePdfUrl so combined sections sharing the same paper alternate series correctly
             const trackerKey = basePdfUrl;
@@ -240,10 +247,20 @@ async function compileSingleRoomPackage(center, date, roomName, allocations, doc
             const paperLinks = sectionPapers[assignedSeries] || sectionPapers["SERIES A"] || Object.values(sectionPapers)[0] || {};
             const pdfUrl = docType === 'omr' ? paperLinks.omr : paperLinks.qp;
 
+            if (docType === 'omr' && !pdfUrl) {
+                const subLabel = matchedSubKey ? ` (${matchedSubKey})` : ` (${assignedSeries})`;
+                missingOmrSections.add(`Class ${student.className} - Sec ${student.section}${subLabel}`);
+                continue;
+            }
             if (!pdfUrl) continue; 
             
             seatSpecificTasks.push({ seatId, student, assignedSeries, pdfUrl, layout, matchedSubKey });
         }
+    }
+
+    if (docType === 'omr' && missingOmrSections.size > 0) {
+        const missingList = Array.from(missingOmrSections).join(", ");
+        throw new Error(`OMR not available for section(s): ${missingList}`);
     }
 
  // PASS 2: Render Bulk Split Tasks First
