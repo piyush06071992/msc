@@ -4,8 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva | Staff Login</title>
-    <script src="tailwind-engine.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+     <script src="tailwind-engine.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; }
@@ -49,7 +51,7 @@
                         <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-2">Password</label>
                         <button type="button" onclick="openResetModal()" class="text-[10px] font-bold text-blue-600 hover:underline transition-all">Reset Password?</button>
                     </div>
-                    <div class="relative">
+              <div class="relative">
                         <input type="password" id="login-password" required autocomplete="current-password" placeholder="••••••••" class="w-full input-field pr-12">
                         <button type="button" onclick="togglePasswordVisibility('login-password')" class="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-blue-600 transition-colors">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
@@ -69,7 +71,7 @@
                 </button>
             </form>
 
-            <div class="flex items-center gap-4 my-8" id="google-divider">
+            <div class="flex items-center gap-4 my-8">
                 <div class="h-px bg-slate-100 flex-1"></div>
                 <span class="text-[10px] font-black text-slate-300 uppercase tracking-widest">OR</span>
                 <div class="h-px bg-slate-100 flex-1"></div>
@@ -110,176 +112,46 @@
     </div>
 
     <script>
-        const SUPABASE_URL = "https://lpccpiozrqgxgusculbs.supabase.co";
-        const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxwY2NwaW96cnFneGd1c2N1bGJzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM5NzMzNzQsImV4cCI6MjEwOTU0OTM3NH0.b2cNwu7y-uoFTOOK-Qy2-XX7QbrSMYzJ5Ja2EBO98Hc";
-        const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    
 
-        let targetResetRow = null;
-        let nativeFCMToken = null;
-        let handlingOAuthCallback = false;
+        const firebaseConfig = { apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", authDomain: "shop-portal-bbbbb.firebaseapp.com", projectId: "shop-portal-bbbbb", storageBucket: "shop-portal-bbbbb.firebasestorage.app", messagingSenderId: "701377739976", appId: "1:701377739976:web:99998220272090e56e79fd" };
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+      const auth = firebase.auth();
 
-        function isApprovedRow(row) {
-            const det = (row.details && typeof row.details === "object") ? row.details : {};
-            const statusVal = String(row.status ?? det.status ?? "approved").toLowerCase();
-            return statusVal === "approved";
-        }
+        let targetResetDocId = null;
+        let nativeFCMToken = null; // Global variable to hold the hardware token
 
-        function togglePasswordVisibility(inputId) {
-            const p = document.getElementById(inputId);
-            p.type = p.type === 'password' ? 'text' : 'password';
-        }
-
-        function showError(msg, elId = 'error-msg') {
-            const el = document.getElementById(elId);
-            el.innerText = msg;
-            el.classList.remove('hidden');
-        }
-
-        function generateSessionId() {
-            return Date.now().toString() + Math.random().toString(36).substr(2, 9);
-        }
-
-        function extractTeacherInfo(rowData) {
-            let staffName = rowData.email ? rowData.email.split('@')[0] : "Teacher";
-            let staffDept = rowData.hod_dept || rowData.hodDept || "General";
-
-            if (rowData.name) staffName = rowData.name;
-            if (rowData.TeacherName) staffName = rowData.TeacherName;
-            if (rowData.Department) staffDept = rowData.Department;
-
-            const det = (rowData.details && typeof rowData.details === "object") ? rowData.details : {};
-            for (let key in det) {
-                const lowerKey = key.toLowerCase();
-                if (lowerKey.includes('name')) staffName = det[key];
-                if (lowerKey.includes('depart') || lowerKey.includes('subject')) staffDept = det[key];
-            }
-
-            const centerKey = Object.keys(det).find(k => k.toLowerCase().includes('cent'));
-            const staffCenter = centerKey ? String(det[centerKey]).toUpperCase() : "GHUMARWIN";
-
-            return { name: staffName, dept: staffDept, center: staffCenter };
-        }
-
-        async function persistSessionAndTokens(userRow, updatePayload) {
-            const det = (userRow.details && typeof userRow.details === "object") ? { ...userRow.details } : {};
-            const payload = { ...updatePayload };
-
-            // Try updating top-level columns first; if any optional column doesn't exist in schema, fall back to storing inside `details`
-            const { error } = await sb
-                .from("staff_applications")
-                .update(payload)
-                .eq("id", userRow.id);
-
-            if (error && String(error.message || "").toLowerCase().includes("column")) {
-                const mergedDetails = { ...det, ...payload };
-                const { error: fallbackErr } = await sb
-                    .from("staff_applications")
-                    .update({ details: mergedDetails })
-                    .eq("id", userRow.id);
-                if (fallbackErr) throw fallbackErr;
-            } else if (error) {
-                throw error;
-            }
-        }
-
-        async function processLoginSuccess(userRow) {
-            const sessionId = generateSessionId();
-            const updatePayload = { currentSessionId: sessionId };
-
-            if (nativeFCMToken) {
-                const det = (userRow.details && typeof userRow.details === "object") ? userRow.details : {};
-                const existingTokens = Array.isArray(userRow.fcmTokens)
-                    ? userRow.fcmTokens
-                    : (Array.isArray(det.fcmTokens) ? det.fcmTokens : []);
-                if (!existingTokens.includes(nativeFCMToken)) existingTokens.push(nativeFCMToken);
-                updatePayload.fcmTokens = existingTokens;
-                updatePayload.tokenUpdatedAt = Date.now();
-                updatePayload.platform = 'Android App';
-            }
-
-            await persistSessionAndTokens(userRow, updatePayload);
-
-            const info = extractTeacherInfo(userRow);
-            const sessionData = {
-                uid: userRow.id,
-                email: userRow.email,
-                name: info.name,
-                dept: info.dept,
-                center: info.center,
-                sessionId: sessionId
-            };
-            localStorage.setItem('minervaActiveStaff', JSON.stringify(sessionData));
-
-            if (document.getElementById('remember-me').checked) {
-                localStorage.setItem('minervaSavedCreds', JSON.stringify({
-                    id: document.getElementById('login-identifier').value.trim(),
-                    password: document.getElementById('login-password').value
-                }));
-            } else {
-                localStorage.removeItem('minervaSavedCreds');
-            }
-
-            window.location.href = 'teacher-portal.html';
-        }
-
-        async function completeGoogleOAuthSignIn(email) {
-            if (handlingOAuthCallback) return;
-            handlingOAuthCallback = true;
-
-            const btn = document.getElementById('google-btn');
-            const originalText = btn.innerHTML;
-            btn.innerHTML = '<span class="loader border-slate-400 border-top-slate-700"></span> Validating...';
-            btn.disabled = true;
-            document.getElementById('error-msg').classList.add('hidden');
-
-            try {
-                const cleanEmail = String(email || "").trim().toLowerCase();
-                const { data, error } = await sb
-                    .from("staff_applications")
-                    .select("*")
-                    .ilike("email", cleanEmail);
-
-                if (error) throw error;
-                const approvedMatch = (data || []).find(isApprovedRow);
-
-                if (!approvedMatch) {
-                    await sb.auth.signOut();
-                    throw new Error("This Google account is not registered or approved.");
-                }
-
-                await processLoginSuccess(approvedMatch);
-            } catch (err) {
-                showError(err.message);
-                btn.innerHTML = originalText;
-                btn.disabled = false;
-                handlingOAuthCallback = false;
-            }
-        }
-
+      // 1. Initialize Native Push Notifications & UI Adjustments on load
         document.addEventListener('DOMContentLoaded', async () => {
+            // Check for saved credentials and auto-fill the form
             const savedCreds = localStorage.getItem('minervaSavedCreds');
             if (savedCreds) {
-                try {
-                    const creds = JSON.parse(savedCreds);
-                    document.getElementById('login-identifier').value = creds.id || '';
-                    document.getElementById('login-password').value = creds.password || '';
-                    document.getElementById('remember-me').checked = true;
-                } catch (_) {}
+                const creds = JSON.parse(savedCreds);
+                document.getElementById('login-identifier').value = creds.id;
+                document.getElementById('login-password').value = creds.password;
+                document.getElementById('remember-me').checked = true;
             }
 
             if (window.Capacitor && window.Capacitor.isNativePlatform()) {
+                // Hide Google Login in Android App to prevent Chrome breakout
                 document.getElementById('google-btn').style.display = 'none';
-                const orDivider = document.getElementById('google-divider');
-                if (orDivider) orDivider.style.display = 'none';
+                const orDivider = document.getElementById('google-btn').previousElementSibling;
+                if(orDivider) orDivider.style.display = 'none';
 
                 const PushNotifications = Capacitor.Plugins.PushNotifications;
                 try {
+                    // Capture token silently
                     PushNotifications.addListener('registration', (token) => {
                         nativeFCMToken = token.value;
                     });
+
+                    // Handle alerts while the teacher is looking at the screen
                     PushNotifications.addListener('pushNotificationReceived', (notification) => {
                         alert(`${notification.title}\n${notification.body}`);
                     });
+
+                    // Request Android lock screen permissions
                     let permStatus = await PushNotifications.checkPermissions();
                     if (permStatus.receive === 'prompt') {
                         permStatus = await PushNotifications.requestPermissions();
@@ -291,28 +163,82 @@
                     console.error('Push setup failed:', err);
                 }
             }
-
-            sb.auth.onAuthStateChange(async (event, session) => {
-                if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session?.user?.email) {
-                    await completeGoogleOAuthSignIn(session.user.email);
-                }
-            });
         });
 
-        async function handleEmailMobileLogin(e) {
+        function togglePasswordVisibility(inputId) { const p = document.getElementById(inputId); p.type = p.type === 'password' ? 'text' : 'password'; }
+        function showError(msg, elId = 'error-msg') { const el = document.getElementById(elId); el.innerText = msg; el.classList.remove('hidden'); }
+        function generateSessionId() { return Date.now().toString() + Math.random().toString(36).substr(2, 9); }
+
+        // --- AGGRESSIVE NAME/DEPT EXTRACTION ---
+        function extractTeacherInfo(docData) {
+            let staffName = docData.email ? docData.email.split('@')[0] : "Teacher";
+            let staffDept = "General";
+
+            // Check top level
+            if (docData.name) staffName = docData.name;
+            if (docData.TeacherName) staffName = docData.TeacherName;
+            if (docData.Department) staffDept = docData.Department;
+
+            // Check inside details deeply
+            const det = docData.details || {};
+            for (let key in det) {
+                let lowerKey = key.toLowerCase();
+                if (lowerKey.includes('name')) staffName = det[key];
+                if (lowerKey.includes('depart') || lowerKey.includes('subject')) staffDept = det[key];
+            }
+            return { name: staffName, dept: staffDept };
+        }
+
+       async function processLoginSuccess(userDoc) {
+            const userData = userDoc.data();
+            const sessionId = generateSessionId();
+            await db.collection("staff_applications").doc(userDoc.id).update({ currentSessionId: sessionId });
+
+       const info = extractTeacherInfo(userData);
+            const sessionData = { uid: userDoc.id, email: userData.email, name: info.name, dept: info.dept, sessionId: sessionId };
+            localStorage.setItem('minervaActiveStaff', JSON.stringify(sessionData));
+
+            // Handle Remember Me feature locally
+            if (document.getElementById('remember-me').checked) {
+                localStorage.setItem('minervaSavedCreds', JSON.stringify({
+                    id: document.getElementById('login-identifier').value.trim(),
+                    password: document.getElementById('login-password').value
+                }));
+            } else {
+                localStorage.removeItem('minervaSavedCreds');
+            }
+
+        // 2. Automatically link the captured hardware token to this staff member
+            if (nativeFCMToken) {
+                try {
+                    // Save directly to the teacher's profile so the backend can find it
+                   await db.collection('staff_applications').doc(userDoc.id).update({
+                        fcmTokens: firebase.firestore.FieldValue.arrayUnion(nativeFCMToken),
+                        tokenUpdatedAt: Date.now(),
+                        platform: 'Android App'
+                    });
+                } catch (e) {
+                    console.error("Token save error:", e);
+                }
+            }
+
+            window.location.href = 'teacher-portal.html';
+        }
+      async function handleEmailMobileLogin(e) {
             e.preventDefault();
             const btn = document.getElementById('login-btn');
             const idVal = document.getElementById('login-identifier').value.trim().toLowerCase();
             const passVal = document.getElementById('login-password').value;
 
-            btn.innerHTML = '<span class="loader"></span>';
-            btn.disabled = true;
+            btn.innerHTML = '<span class="loader"></span>'; btn.disabled = true;
             document.getElementById('error-msg').classList.add('hidden');
 
             try {
+                // 1. MANDATORY NOTIFICATION CHECK
                 if (window.Capacitor && window.Capacitor.isNativePlatform()) {
                     const PushNotifications = Capacitor.Plugins.PushNotifications;
                     let permStatus = await PushNotifications.checkPermissions();
+
                     if (permStatus.receive !== 'granted') {
                         permStatus = await PushNotifications.requestPermissions();
                         if (permStatus.receive !== 'granted') {
@@ -321,60 +247,56 @@
                     }
                 }
 
+                // 2. PROCEED WITH LOGIN
                 const isEmail = idVal.includes('@');
-                const query = isEmail
-                    ? sb.from('staff_applications').select('*').ilike('email', idVal)
-                    : sb.from('staff_applications').select('*').eq('mobile', idVal);
+                const queryField = isEmail ? 'email' : 'mobile';
+                const snapshot = await db.collection('staff_applications').where(queryField, '==', idVal).where('status', '==', 'approved').get();
+                if (snapshot.empty) throw new Error("No approved account found with this ID.");
 
-                const { data, error } = await query;
-                if (error) throw error;
+                const userDoc = snapshot.docs[0];
+                if (userDoc.data().password !== passVal) throw new Error("Incorrect Password.");
 
-                const approvedRow = (data || []).find(isApprovedRow);
-                if (!approvedRow) throw new Error("No approved account found with this ID.");
-
-                const det = (approvedRow.details && typeof approvedRow.details === "object") ? approvedRow.details : {};
-                const storedPassword = approvedRow.password ?? det.password;
-                if (storedPassword !== passVal) throw new Error("Incorrect Password.");
-
-                await processLoginSuccess(approvedRow);
+                await processLoginSuccess(userDoc);
             } catch (err) {
                 showError(err.message);
-                btn.innerHTML = 'Sign In Securely';
-                btn.disabled = false;
+                btn.innerHTML = 'Sign In Securely'; btn.disabled = false;
             }
         }
 
-        async function handleGoogleLogin() {
+async function handleGoogleLogin() {
             const btn = document.getElementById('google-btn');
             const originalText = btn.innerHTML;
-            btn.innerHTML = '<span class="loader border-slate-400 border-top-slate-700"></span> Redirecting...';
-            btn.disabled = true;
+            btn.innerHTML = '<span class="loader border-slate-400 border-top-slate-700"></span> Validating...'; btn.disabled = true;
             document.getElementById('error-msg').classList.add('hidden');
 
             try {
-                const redirectUrl = window.location.origin + window.location.pathname;
-                const { error } = await sb.auth.signInWithOAuth({
-                    provider: 'google',
-                    options: { redirectTo: redirectUrl }
-                });
-                if (error) throw error;
+                const provider = new firebase.auth.GoogleAuthProvider();
+                const result = await auth.signInWithPopup(provider);
+                const userEmail = result.user.email.toLowerCase();
+
+                const snapshot = await db.collection('staff_applications').where('email', '==', userEmail).where('status', '==', 'approved').get();
+
+                if (snapshot.empty) {
+                    await auth.signOut();
+                    throw new Error("This Google account is not registered or approved.");
+                }
+                await processLoginSuccess(snapshot.docs[0]);
             } catch (err) {
                 showError(err.message);
-                btn.innerHTML = originalText;
-                btn.disabled = false;
+                btn.innerHTML = originalText; btn.disabled = false;
             }
         }
-
-        function openResetModal() {
+       // Reset functions...
+        function openResetModal() { 
             document.getElementById('reset-modal').classList.replace('hidden', 'flex');
             document.getElementById('reset-step-1').classList.remove('hidden');
             document.getElementById('reset-step-2').classList.add('hidden');
             document.getElementById('reset-error').classList.add('hidden');
         }
 
-        function closeResetModal() {
-            document.getElementById('reset-modal').classList.replace('flex', 'hidden');
-            targetResetRow = null;
+        function closeResetModal() { 
+            document.getElementById('reset-modal').classList.replace('flex', 'hidden'); 
+            targetResetDocId = null;
         }
 
         async function verifyForReset() {
@@ -383,7 +305,7 @@
             const btn = document.getElementById('verify-btn');
             const errEl = document.getElementById('reset-error');
 
-            if (!email || !mobile) {
+            if(!email || !mobile) {
                 errEl.innerText = "Please enter both Email and Mobile.";
                 errEl.classList.remove('hidden');
                 return;
@@ -394,22 +316,24 @@
             errEl.classList.add('hidden');
 
             try {
-                const { data, error } = await sb
-                    .from("staff_applications")
-                    .select("*")
-                    .ilike("email", email)
-                    .eq("mobile", mobile);
+                // Check if a staff member exists with exactly this email AND mobile
+                const snap = await db.collection("staff_applications")
+                                     .where("email", "==", email)
+                                     .where("mobile", "==", mobile)
+                                     .where("status", "==", "approved")
+                                     .get();
 
-                if (error) throw error;
-                const matched = (data || []).find(isApprovedRow);
-                if (!matched) throw new Error("Details do not match any approved record.");
+                if(snap.empty) throw new Error("Details do not match any approved record.");
 
-                targetResetRow = matched;
+                // Keep track of which staff member we are resetting
+                targetResetDocId = snap.docs[0].id;
+
+                // Move to Step 2
                 document.getElementById('reset-step-1').classList.add('hidden');
                 document.getElementById('reset-step-2').classList.remove('hidden');
-            } catch (e) {
+            } catch(e) {
                 errEl.innerText = e.message;
-                errEl.classList.remove('hidden');
+                errEl.classList.add('hidden');
             } finally {
                 btn.innerText = "Verify Identity";
                 btn.disabled = false;
@@ -421,20 +345,20 @@
             const pass2 = document.getElementById('confirm-pass').value;
             const btn = document.getElementById('update-pass-btn');
 
-            if (pass1.length < 6) return alert("Password must be at least 6 characters.");
-            if (pass1 !== pass2) return alert("Passwords do not match!");
-            if (!targetResetRow) return alert("Session expired. Please verify again.");
+            if(pass1.length < 6) return alert("Password must be at least 6 characters.");
+            if(pass1 !== pass2) return alert("Passwords do not match!");
 
             btn.innerText = "Updating...";
             btn.disabled = true;
 
             try {
-                await persistSessionAndTokens(targetResetRow, { password: pass1 });
+                await db.collection("staff_applications").doc(targetResetDocId).update({ password: pass1 });
                 alert("Password updated successfully! You can now login with your new password.");
                 closeResetModal();
+
+                // Auto-fill the email in the main login box for convenience
                 document.getElementById('login-identifier').value = document.getElementById('reset-email').value;
-            } catch (e) {
-                console.error(e);
+            } catch(e) {
                 alert("Error updating password. Please try again.");
             } finally {
                 btn.innerText = "Update & Login";
