@@ -405,8 +405,24 @@
                         </div>
 
                         <div class="flex flex-wrap gap-2 justify-end">
+                            <button type="button" onclick="toggleInterviewerReassignBox()" class="px-4 py-2.5 rounded-xl bg-indigo-100 hover:bg-indigo-200 text-indigo-800 font-black text-xs uppercase tracking-wider">🔄 Reassign to Another Person</button>
                             <button type="button" onclick="completeAcademicRound('HOLD')" class="px-4 py-2.5 rounded-xl bg-amber-100 text-amber-800 font-black text-xs uppercase tracking-wider">Put On Hold</button>
                             <button type="button" onclick="completeAcademicRound('REJECT')" class="px-4 py-2.5 rounded-xl bg-rose-100 text-rose-700 font-black text-xs uppercase tracking-wider">Reject</button>
+                        </div>
+
+                        <!-- Reassign to Another Person (Carries Current Scores & Remarks to Next Person) -->
+                        <div id="interviewer-reassign-box" class="hidden bg-indigo-50/70 p-4 rounded-xl border border-indigo-200 space-y-3">
+                            <p class="text-[10px] font-black text-indigo-900 uppercase tracking-widest">Reassign Candidate to Another Interviewer (Previous Scores & Remarks Will Be Visible to Them)</p>
+                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                                <select id="reass-branch" onchange="populateReassignStaffList()" class="p-2.5 bg-white border border-indigo-200 rounded-xl text-xs font-bold text-slate-800"></select>
+                                <select id="reass-dept" onchange="populateReassignStaffList()" class="p-2.5 bg-white border border-indigo-200 rounded-xl text-xs font-bold text-slate-800"></select>
+                                <select id="reass-staff" class="p-2.5 bg-white border border-indigo-200 rounded-xl text-xs font-bold text-slate-800"></select>
+                            </div>
+                            <div class="flex justify-end">
+                                <button type="button" onclick="reassignToAnotherInterviewer()" class="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs uppercase tracking-widest shadow-sm">
+                                    Confirm Reassign (With Score)
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -586,6 +602,8 @@
             document.getElementById('m-route-branch').innerHTML = optionsHtml;
             document.getElementById('hr-allotted-branch').innerHTML = optionsHtml;
             document.getElementById('acc-branch').innerHTML = `<option value="">All Branches</option>` + optionsHtml;
+            const reassBranchEl = document.getElementById('reass-branch');
+            if (reassBranchEl) reassBranchEl.innerHTML = `<option value="">All Branches</option>` + optionsHtml;
         }
 
         // 3. Load Form Config (Searchable & Filterable fields from Staff Form Architect)
@@ -654,26 +672,40 @@
                 }
             });
 
-            // Resolve current staff user's page/interview permissions if not admin
-            if (!isAdminSession && currentActor.email) {
+            // Resolve exact login role: 'ADMIN' | 'PAGE_DELEGATED' | 'INTERVIEWER'
+            staffAccessFlags.activeRole = 'NONE';
+            if (isAdminSession) {
+                staffAccessFlags.activeRole = 'ADMIN';
+                staffAccessFlags.isAdmin = true;
+                staffAccessFlags.canAccessPendingPage = true;
+                staffAccessFlags.canConductInterview = true;
+            } else if (currentActor.email) {
                 const me = approved.find(s => s.email === currentActor.email);
-                const hasAnyAssignedApp = pending.some(p => String(p.assignedToEmail || '').toLowerCase() === currentActor.email);
+                const hasAssignedApps = pending.some(p => String(p.assignedToEmail || '').toLowerCase() === currentActor.email);
                 staffAccessFlags.canAccessPendingPage = Boolean(me && me.canAccessPendingPage);
-                staffAccessFlags.canConductInterview = Boolean((me && me.canConductInterview) || hasAnyAssignedApp);
+                staffAccessFlags.canConductInterview = Boolean((me && me.canConductInterview) || hasAssignedApps);
 
-                if (!staffAccessFlags.canAccessPendingPage && !staffAccessFlags.canConductInterview) {
+                if (staffAccessFlags.canAccessPendingPage && !staffAccessFlags.canConductInterview) {
+                    staffAccessFlags.activeRole = 'PAGE_DELEGATED';
+                } else if (staffAccessFlags.canConductInterview) {
+                    staffAccessFlags.activeRole = 'INTERVIEWER';
+                } else {
                     alert('You do not have Pending Staff or Interview access delegated yet.');
                     window.location.replace('teacher-portal.html');
                     return;
                 }
             }
 
-            const modeLabel = staffAccessFlags.isAdmin
-                ? 'Admin Full Access'
-                : (staffAccessFlags.canConductInterview
-                    ? 'Authorized Interviewer View'
-                    : 'Delegation Page Access (Basic Details & Delegate Only)');
-            document.getElementById('active-user-badge').textContent = `${currentActor.name} • ${modeLabel}`;
+            const roleBadgeMap = {
+                ADMIN: 'Admin Full Access',
+                PAGE_DELEGATED: 'Page-Delegated Coordinator (Basic Details & Routing Only)',
+                INTERVIEWER: 'Interviewer View (My Assigned Candidates Only)'
+            };
+            document.getElementById('active-user-badge').textContent = `${currentActor.name} • ${roleBadgeMap[staffAccessFlags.activeRole] || ''}`;
+
+            // Hide bulk delete button from non-admins
+            const bulkDelBtn = document.querySelector('button[onclick="bulkDeleteSelected()"]');
+            if (bulkDelBtn) bulkDelBtn.classList.toggle('hidden', staffAccessFlags.activeRole !== 'ADMIN');
 
             approved.sort((a, b) => a.name.localeCompare(b.name));
             registeredStaffList = approved;
@@ -705,6 +737,8 @@
             document.getElementById('del-dept').innerHTML = deptOptions;
             document.getElementById('m-route-dept').innerHTML = deptOptions;
             document.getElementById('acc-dept').innerHTML = deptOptions;
+            const reassDeptEl = document.getElementById('reass-dept');
+            if (reassDeptEl) reassDeptEl.innerHTML = deptOptions;
 
             // Populate HR Approver dropdown in Step B
             const hrSelect = document.getElementById('demo-next-hr');
@@ -840,12 +874,15 @@
             const searchableFields = formSchemaFields.filter(f => f.searchable).map(f => f.label);
 
             return pendingApplications.filter(app => {
-                // If staff only has Pending Page delegation (not Admin and not an Interviewer), scope to applications relevant to them or unassigned/delegated
-                if (!staffAccessFlags.isAdmin && !staffAccessFlags.canConductInterview && staffAccessFlags.canAccessPendingPage) {
-                    const isMine = String(app.assignedToEmail || '').toLowerCase() === currentActor.email;
-                    const delegatedByMe = Array.isArray(app.delegationHistory) &&
-                        app.delegationHistory.some(d => String(d.actorEmail || '').toLowerCase() === currentActor.email);
-                    if (!isMine && !delegatedByMe && app.assignedToEmail) return false;
+                // INTERVIEWER: Strictly see ONLY candidates designated/assigned to them (not anyone else)
+                if (staffAccessFlags.activeRole === 'INTERVIEWER') {
+                    const isAssignedToMe = String(app.assignedToEmail || '').toLowerCase() === currentActor.email;
+                    if (!isAssignedToMe) return false;
+                }
+
+                // PAGE_DELEGATED: Can view all in-process/unassigned applications to route them, without seeing scores/remarks/salary
+                if (staffAccessFlags.activeRole === 'PAGE_DELEGATED') {
+                    // Allowed to see applications for routing & delegation
                 }
 
                 const statusLower = String(app.status || 'pending').toLowerCase();
@@ -1038,7 +1075,8 @@
             if (!app) return;
             activeModalAppId = appId;
 
-            const isDelegationOnlyStaff = !staffAccessFlags.isAdmin && !staffAccessFlags.canConductInterview;
+            const isDelegationOnlyStaff = staffAccessFlags.activeRole === 'PAGE_DELEGATED';
+            const isInterviewerRole = staffAccessFlags.activeRole === 'INTERVIEWER';
             const isAssignedToMe = String(app.assignedToEmail || '').toLowerCase() === currentActor.email;
             const perms = Array.isArray(app.interviewerPerms) ? app.interviewerPerms : ['Contact', 'Address', 'Experience'];
 
@@ -1125,11 +1163,15 @@
 
             document.getElementById('m-profile-grid').innerHTML = gridCards.join('');
 
-            // Toggle Step B & Step C visibility:
-            // Delegation-only staff MUST NOT see scores, remarks, or salary
-            document.getElementById('step-a-delegation').classList.remove('hidden');
-            document.getElementById('step-b-academic').classList.toggle('hidden', isDelegationOnlyStaff);
-            document.getElementById('step-c-hr').classList.toggle('hidden', isDelegationOnlyStaff);
+            // Role-based Workflow Tabs & Sections:
+            // 1. PAGE_DELEGATED: Sees Step A (Route/Delegate) only; NO scores, remarks, or salary
+            // 2. INTERVIEWER: Sees Step B (Google Sheet style Scorecard, Interview Later/Now, Reassign to another person, Send to Management/HR) + previous scores/remarks in History; NO HR salary box unless stage === 'HR'
+            // 3. ADMIN: Sees all steps (A, B, C)
+            document.getElementById('step-a-delegation').classList.toggle('hidden', isInterviewerRole);
+            document.getElementById('step-b-academic').classList.toggle('hidden', isDelegationOnlyStaff || (isInterviewerRole && app.stage === 'HR'));
+            document.getElementById('step-c-hr').classList.toggle('hidden', isDelegationOnlyStaff || (isInterviewerRole && app.stage !== 'HR'));
+            document.getElementById('interviewer-reassign-box').classList.add('hidden');
+            populateReassignStaffList();
 
             // Pre-fill routing selects
             const appBranch = getApplicantBranch(app);
@@ -1293,8 +1335,65 @@
                 const el = document.getElementById(`sc-${idx + 1}`);
                 if (el) el.value = v;
             });
+            if (app.demoRemarks) {
+                document.getElementById('sc-remarks').value = `[Copied Previous]: ${app.demoRemarks}`;
+            }
             recalcDemoScore();
-            alert('Copied previous scorecard values.');
+            alert('Copied previous scorecard values & remarks.');
+        }
+
+        function toggleInterviewerReassignBox() {
+            const box = document.getElementById('interviewer-reassign-box');
+            box.classList.toggle('hidden');
+            if (!box.classList.contains('hidden')) {
+                populateReassignStaffList();
+            }
+        }
+
+        function populateReassignStaffList() {
+            const bVal = document.getElementById('reass-branch')?.value || '';
+            const dVal = document.getElementById('reass-dept')?.value || '';
+            const matches = filterRegisteredStaff(bVal, dVal).filter(s => s.email !== currentActor.email);
+            const sel = document.getElementById('reass-staff');
+            if (!sel) return;
+            sel.innerHTML = `<option value="">-- Select Next Interviewer (${matches.length}) --</option>` +
+                matches.map(s => `<option value="${escapeHtml(s.email)}">${escapeHtml(s.name)} (${escapeHtml(s.branch)} • ${escapeHtml(s.dept)})</option>`).join('');
+        }
+
+        async function reassignToAnotherInterviewer() {
+            if (!activeModalAppId) return;
+            const nextEmail = document.getElementById('reass-staff').value;
+            if (!nextEmail) return alert('Select a registered staff member to reassign to.');
+
+            const scores = [];
+            for (let i = 1; i <= 7; i++) scores.push(Number(document.getElementById(`sc-${i}`).value || 0));
+            const total = recalcDemoScore();
+            const mode = document.getElementById('demo-mode').value;
+            const remarks = document.getElementById('sc-remarks').value.trim();
+            const nextStaff = registeredStaffList.find(s => s.email === nextEmail);
+
+            const reassignAudit = buildDelegationAuditEntry(
+                'Reassigned (With Score)',
+                `[SCORECARD] ${scores.join(',')} [TOTAL] ${total}/70 [MODE] ${mode}${remarks ? ' [REM] ' + remarks : ''}\nReassigned by ${currentActor.name} to: ${nextStaff ? nextStaff.name : nextEmail}`,
+                { delegatedToEmail: nextEmail, delegatedToName: nextStaff ? nextStaff.name : nextEmail, round: 'Academic' }
+            );
+
+            await db.collection('staff_applications').doc(activeModalAppId).update({
+                stage: 'Academic',
+                status: 'reassigned',
+                assignedToEmail: nextEmail,
+                assignedToName: nextStaff ? nextStaff.name : nextEmail,
+                demoScores: scores,
+                demoTotal: total,
+                demoMode: mode,
+                demoRemarks: remarks,
+                history: firebase.firestore.FieldValue.arrayUnion(reassignAudit),
+                delegationHistory: firebase.firestore.FieldValue.arrayUnion(reassignAudit)
+            });
+
+            alert(`✅ Reassigned to ${nextStaff ? nextStaff.name : nextEmail}. Previous scores & remarks are saved for them.`);
+            closeCandidateModal();
+            await loadApplicationsAndStaff();
         }
 
         async function saveDemoScheduleLater() {
