@@ -392,6 +392,31 @@
                             </div>
                         </div>
 
+                        <!-- Formatted Previous Scores & Remarks Table (Shown When Previous Evaluation Exists) -->
+                        <div id="previous-scores-table-wrap" class="hidden space-y-2">
+                            <p class="text-[10px] font-black text-indigo-800 uppercase tracking-widest">Previous Evaluation Scores & Remarks</p>
+                            <div class="overflow-x-auto custom-scroll rounded-xl border border-indigo-200 bg-white">
+                                <table class="w-full text-left border-collapse text-xs">
+                                    <thead>
+                                        <tr class="bg-indigo-950 text-white text-[10px] font-black uppercase tracking-wider">
+                                            <th class="p-2.5">Evaluator</th>
+                                            <th class="p-2.5">Mode</th>
+                                            <th class="p-2.5 text-center">Intro</th>
+                                            <th class="p-2.5 text-center">Explain</th>
+                                            <th class="p-2.5 text-center">Subject</th>
+                                            <th class="p-2.5 text-center">Voice</th>
+                                            <th class="p-2.5 text-center">Attitude</th>
+                                            <th class="p-2.5 text-center">Confidence</th>
+                                            <th class="p-2.5 text-center">Speed</th>
+                                            <th class="p-2.5 text-center">Total</th>
+                                            <th class="p-2.5">Remarks</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="previous-scores-tbody" class="divide-y divide-slate-100 font-semibold text-slate-800"></tbody>
+                                </table>
+                            </div>
+                        </div>
+
                         <textarea id="sc-remarks" rows="2" placeholder="Final Remarks..." class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold outline-none"></textarea>
 
                         <!-- Forward to Branch -> Department -> Staff OR Directly to Admin -->
@@ -428,8 +453,8 @@
 
                         <div class="flex flex-wrap gap-2 justify-end">
                             <button type="button" onclick="toggleInterviewerReassignBox()" class="px-4 py-2.5 rounded-xl bg-indigo-100 hover:bg-indigo-200 text-indigo-800 font-black text-xs uppercase tracking-wider">🔄 Reassign to Another Person</button>
-                            <button type="button" onclick="completeAcademicRound('HOLD')" class="px-4 py-2.5 rounded-xl bg-amber-100 text-amber-800 font-black text-xs uppercase tracking-wider">Put On Hold</button>
-                            <button type="button" onclick="completeAcademicRound('REJECT')" class="px-4 py-2.5 rounded-xl bg-rose-100 text-rose-700 font-black text-xs uppercase tracking-wider">Reject</button>
+                            <button id="btn-demo-hold" type="button" onclick="completeAcademicRound('HOLD')" class="px-4 py-2.5 rounded-xl bg-amber-100 text-amber-800 font-black text-xs uppercase tracking-wider">Put On Hold</button>
+                            <button id="btn-demo-reject" type="button" onclick="completeAcademicRound('REJECT')" class="px-4 py-2.5 rounded-xl bg-rose-100 text-rose-700 font-black text-xs uppercase tracking-wider">Reject</button>
                         </div>
 
                         <!-- Reassign to Another Person (Carries Current Scores & Remarks to Next Person) -->
@@ -1183,15 +1208,20 @@
 
             document.getElementById('m-profile-grid').innerHTML = gridCards.join('');
 
+            const isAdminUser = staffAccessFlags.activeRole === 'ADMIN';
+
             // Role-based Workflow Tabs & Sections:
             // 1. PAGE_DELEGATED: Sees Step A (Route/Delegate) only; NO scores, remarks, or salary
-            // 2. INTERVIEWER: Sees Step B (Google Sheet style Scorecard, Interview Later/Now, Reassign to another person, Send to Management/HR) + previous scores/remarks in History; NO HR salary box unless stage === 'HR'
-            // 3. ADMIN: Sees all steps (A, B, C)
+            // 2. INTERVIEWER: Sees Step B (Scorecard, Interview Later/Now, Reassign to another person, Send to Admin) + formatted previous scores table; NO salary/HR box
+            // 3. ADMIN: Sees all steps (A, B, C) + can copy previous, reassign, or send/approve
             document.getElementById('step-a-delegation').classList.toggle('hidden', isInterviewerRole);
-            document.getElementById('step-b-academic').classList.toggle('hidden', isDelegationOnlyStaff || (isInterviewerRole && app.stage === 'HR'));
-            document.getElementById('step-c-hr').classList.toggle('hidden', isDelegationOnlyStaff || (isInterviewerRole && app.stage !== 'HR'));
+            document.getElementById('step-b-academic').classList.toggle('hidden', isDelegationOnlyStaff);
+            document.getElementById('step-c-hr').classList.toggle('hidden', !isAdminUser);
+            document.getElementById('btn-demo-hold').classList.toggle('hidden', !isAdminUser);
+            document.getElementById('btn-demo-reject').classList.toggle('hidden', !isAdminUser);
             document.getElementById('interviewer-reassign-box').classList.add('hidden');
             populateReassignStaffList();
+            renderPreviousScoresTable(app);
 
             // Pre-fill routing selects
             const appBranch = getApplicantBranch(app);
@@ -1406,17 +1436,73 @@
             return total;
         }
 
+        function getStructuredScoreEntries(app) {
+            if (!app) return [];
+            if (Array.isArray(app.scoreHistory) && app.scoreHistory.length > 0) {
+                return app.scoreHistory;
+            }
+            if (Array.isArray(app.demoScores) && app.demoScores.length > 0) {
+                return [{
+                    evaluator: app.lastEvaluatedBy || currentActor.name,
+                    at: app.lastEvaluatedAt || '',
+                    mode: app.demoMode || 'Offline',
+                    scores: app.demoScores,
+                    total: Number(app.demoTotal ?? app.demoScores.reduce((a, b) => a + Number(b || 0), 0)),
+                    remarks: app.demoRemarks || ''
+                }];
+            }
+            return [];
+        }
+
+        function renderPreviousScoresTable(app) {
+            const wrap = document.getElementById('previous-scores-table-wrap');
+            const tbody = document.getElementById('previous-scores-tbody');
+            if (!wrap || !tbody) return;
+
+            const entries = getStructuredScoreEntries(app);
+            if (entries.length === 0) {
+                wrap.classList.add('hidden');
+                tbody.innerHTML = '';
+                return;
+            }
+
+            wrap.classList.remove('hidden');
+            tbody.innerHTML = entries.map(item => {
+                const sc = Array.isArray(item.scores) ? item.scores : [];
+                const cells = [0, 1, 2, 3, 4, 5, 6].map(idx =>
+                    `<td class="p-2.5 text-center font-bold">${escapeHtml(sc[idx] ?? 0)}</td>`
+                ).join('');
+                const evalMeta = `${escapeHtml(item.evaluator || 'Staff')}${item.at ? `<div class="text-[10px] text-slate-400 font-semibold">${escapeHtml(new Date(item.at).toLocaleDateString('en-IN'))}</div>` : ''}`;
+
+                return `
+                    <tr>
+                        <td class="p-2.5 font-extrabold text-slate-900">${evalMeta}</td>
+                        <td class="p-2.5"><span class="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[10px] font-black uppercase">${escapeHtml(item.mode || 'Offline')}</span></td>
+                        ${cells}
+                        <td class="p-2.5 text-center font-black text-blue-700">${escapeHtml(item.total ?? 0)}/70</td>
+                        <td class="p-2.5 text-slate-700 whitespace-pre-wrap">${escapeHtml(item.remarks || '—')}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
         function copyLastScorecard() {
             const app = pendingApplications.find(a => a.id === activeModalAppId);
-            if (!app || !Array.isArray(app.demoScores) || app.demoScores.length === 0) {
+            const entries = getStructuredScoreEntries(app);
+            if (!app || entries.length === 0) {
                 return alert('No previous scorecard saved for this applicant.');
             }
-            app.demoScores.forEach((v, idx) => {
+            const latest = entries[entries.length - 1];
+            (latest.scores || []).forEach((v, idx) => {
                 const el = document.getElementById(`sc-${idx + 1}`);
                 if (el) el.value = v;
             });
-            if (app.demoRemarks) {
-                document.getElementById('sc-remarks').value = `[Copied Previous]: ${app.demoRemarks}`;
+            if (latest.mode) {
+                document.getElementById('demo-mode').value = latest.mode;
+                toggleMeetLinkBox();
+            }
+            if (latest.remarks) {
+                document.getElementById('sc-remarks').value = latest.remarks;
             }
             recalcDemoScore();
             alert('Copied previous scorecard values & remarks.');
@@ -1469,10 +1555,20 @@
             const mode = document.getElementById('demo-mode').value;
             const remarks = document.getElementById('sc-remarks').value.trim();
             const nextStaff = registeredStaffList.find(s => s.email === nextEmail);
+            const nowIso = new Date().toISOString();
+
+            const structuredScore = {
+                evaluator: currentActor.name,
+                at: nowIso,
+                mode,
+                scores,
+                total,
+                remarks
+            };
 
             const reassignAudit = buildDelegationAuditEntry(
                 'Reassigned (With Score)',
-                `[SCORECARD] ${scores.join(',')} [TOTAL] ${total}/70 [MODE] ${mode}${remarks ? ' [REM] ' + remarks : ''}\nReassigned by ${currentActor.name} to: ${nextStaff ? nextStaff.name : nextEmail}`,
+                `Reassigned by ${currentActor.name} to ${nextStaff ? nextStaff.name : nextEmail} (Total: ${total}/70, Mode: ${mode})`,
                 { delegatedToEmail: nextEmail, delegatedToName: nextStaff ? nextStaff.name : nextEmail, round: 'Academic' }
             );
 
@@ -1485,11 +1581,14 @@
                 demoTotal: total,
                 demoMode: mode,
                 demoRemarks: remarks,
+                lastEvaluatedBy: currentActor.name,
+                lastEvaluatedAt: nowIso,
+                scoreHistory: firebase.firestore.FieldValue.arrayUnion(structuredScore),
                 history: firebase.firestore.FieldValue.arrayUnion(reassignAudit),
                 delegationHistory: firebase.firestore.FieldValue.arrayUnion(reassignAudit)
             });
 
-            alert(`✅ Reassigned to ${nextStaff ? nextStaff.name : nextEmail}. Previous scores & remarks are saved for them.`);
+            alert(`✅ Reassigned to ${nextStaff ? nextStaff.name : nextEmail}. Previous scores & remarks are saved in table format for them.`);
             closeCandidateModal();
             await loadApplicationsAndStaff();
         }
@@ -1538,26 +1637,38 @@
                 return alert('Please enter remarks before putting on hold or rejecting.');
             }
 
+            const nowIso = new Date().toISOString();
             const hrStaff = registeredStaffList.find(s => s.email === nextHrEmail);
-            const scoreSummary = `[SCORECARD] ${scores.join(',')} [TOTAL] ${total}/70 [MODE] ${mode}${remarks ? ' [REM] ' + remarks : ''}`;
+            const structuredScore = {
+                evaluator: currentActor.name,
+                at: nowIso,
+                mode,
+                scores,
+                total,
+                remarks
+            };
+            const scoreSummary = `Total: ${total}/70 | Mode: ${mode}${remarks ? ' | Remarks: ' + remarks : ''}`;
 
             const updatePayload = {
                 demoScores: scores,
                 demoTotal: total,
                 demoMode: mode,
                 meetLink: outcome === 'RECOMMEND_HR' ? '' : meetLink,
-                demoRemarks: remarks
+                demoRemarks: remarks,
+                lastEvaluatedBy: currentActor.name,
+                lastEvaluatedAt: nowIso,
+                scoreHistory: firebase.firestore.FieldValue.arrayUnion(structuredScore)
             };
 
             if (outcome === 'RECOMMEND_HR') {
                 if (sendDirectToAdmin) {
                     const adminAudit = buildDelegationAuditEntry(
-                        'Academic Demo Approved → Sent Directly to Admin',
+                        'Interview Completed → Sent Directly to Admin',
                         `${scoreSummary}\nSent directly to Admin by ${currentActor.name}${nextBranch ? ' (' + nextBranch + ')' : ''}`,
-                        { delegatedToEmail: 'admin@minerva.com', delegatedToName: 'Admin', round: 'HR', branch: nextBranch }
+                        { delegatedToEmail: 'admin@minerva.com', delegatedToName: 'Admin', round: 'Admin', branch: nextBranch }
                     );
-                    updatePayload.stage = 'HR';
-                    updatePayload.status = 'hr_round';
+                    updatePayload.stage = 'Admin_Review';
+                    updatePayload.status = 'sent_to_admin';
                     updatePayload.assignedToEmail = 'admin@minerva.com';
                     updatePayload.assignedToName = 'Admin';
                     if (nextBranch) updatePayload.assignedBranch = nextBranch;
@@ -1565,8 +1676,8 @@
                     updatePayload.delegationHistory = firebase.firestore.FieldValue.arrayUnion(adminAudit);
                 } else {
                     const hrAudit = buildDelegationAuditEntry(
-                        'Academic Demo Approved → Sent Next',
-                        `${scoreSummary}\nDelegated by ${currentActor.name} to: ${hrStaff ? hrStaff.name : nextHrEmail}${nextBranch ? ' (' + nextBranch + (nextDept ? ' • ' + nextDept : '') + ')' : ''}`,
+                        'Interview Completed → Sent Next',
+                        `${scoreSummary}\nSent by ${currentActor.name} to: ${hrStaff ? hrStaff.name : nextHrEmail}${nextBranch ? ' (' + nextBranch + (nextDept ? ' • ' + nextDept : '') + ')' : ''}`,
                         { delegatedToEmail: nextHrEmail, delegatedToName: hrStaff ? hrStaff.name : nextHrEmail, round: 'HR', branch: nextBranch, dept: nextDept }
                     );
                     updatePayload.stage = 'HR';
@@ -1586,7 +1697,7 @@
                 updatePayload.stage = 'Rejected';
                 updatePayload.status = 'rejected';
                 updatePayload.history = firebase.firestore.FieldValue.arrayUnion(
-                    buildDelegationAuditEntry('Academic Round → Rejected', scoreSummary + ' [STATUS] Rejected')
+                    buildDelegationAuditEntry('Academic Round → Rejected', scoreSummary)
                 );
             }
 
