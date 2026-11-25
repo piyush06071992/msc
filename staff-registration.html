@@ -93,18 +93,8 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        let correctOrgCode = "";
-
-        async function fetchConfig() {
-            try {
-                const docSnap = await db.collection("configs").doc("staff_registration_form").get();
-                if (docSnap.exists) {
-                    const data = docSnap.data();
-                    correctOrgCode = data.orgCode;
-                    renderDynamicFields(data.fields);
-                }
-            } catch (e) { console.error(e); }
-        }
+        const STATIC_FORM_CONFIG = window.STATIC_FORM_CONFIG || { orgCode: "MINERVA-2026", fields: [] };
+        let correctOrgCode = STATIC_FORM_CONFIG.orgCode || "";
 
         // --- INSTANT DUPLICITY CHECKER ---
         async function checkSystemDuplicity(type, value, inputEl) {
@@ -198,35 +188,51 @@
         document.getElementById('main-form').onsubmit = async (e) => {
             e.preventDefault();
             const btn = document.getElementById('submit-btn');
-            btn.innerText = "Syncing..."; btn.disabled = true;
+            const cleanEmail = document.getElementById('sys-email').value.trim().toLowerCase();
+            const cleanMobile = String(document.getElementById('sys-mobile').value).trim();
 
-            const staffData = {
-                email: document.getElementById('sys-email').value,
-                mobile: document.getElementById('sys-mobile').value,
-                password: document.getElementById('sys-pass').value,
-                status: "pending",
-                appliedOn: firebase.firestore.FieldValue.serverTimestamp(),
-                details: {}
-            };
-
-            const elements = e.target.querySelectorAll('[name]');
-            elements.forEach(el => {
-                if(el.type === 'checkbox') {
-                    if(!staffData.details[el.name]) staffData.details[el.name] = [];
-                    if(el.checked) staffData.details[el.name].push(el.value);
-                } else {
-                    staffData.details[el.name] = el.value;
-                }
-            });
+            btn.innerText = "Checking Email & Saving...";
+            btn.disabled = true;
 
             try {
-                await db.collection("staff_applications").add(staffData);
-                alert("Success! Application PENDING approval.");
+                const dupSnap = await db.collection("staff_applications").where("email", "==", cleanEmail).get();
+                const hasActiveDup = dupSnap.docs.some(doc => doc.data().status !== "rejected");
+                if (hasActiveDup) {
+                    throw new Error("This Email ID is already associated with an active application.");
+                }
+
+                const cvId = 'CV-' + Math.floor(100000 + Math.random() * 900000);
+                const staffData = {
+                    cvId,
+                    email: cleanEmail,
+                    mobile: cleanMobile,
+                    password: document.getElementById('sys-pass').value,
+                    status: "pending",
+                    appliedOn: firebase.firestore.FieldValue.serverTimestamp(),
+                    details: {}
+                };
+
+                const elements = e.target.querySelectorAll('[name]');
+                elements.forEach(el => {
+                    if (el.type === 'checkbox') {
+                        if (!staffData.details[el.name]) staffData.details[el.name] = [];
+                        if (el.checked) staffData.details[el.name].push(el.value);
+                    } else {
+                        staffData.details[el.name] = el.value;
+                    }
+                });
+
+                await db.collection("staff_applications").doc(cvId).set(staffData);
+                alert("✅ Confirmed! Application saved to Firebase. Your ID is " + cvId + " (Pending approval).");
                 window.location.href = 'index.html';
-            } catch (err) { alert(err.message); btn.disabled = false; btn.innerText = "Submit Application"; }
+            } catch (err) {
+                alert(err.message);
+                btn.disabled = false;
+                btn.innerText = "Submit Application";
+            }
         };
 
-        fetchConfig();
+        renderDynamicFields(STATIC_FORM_CONFIG.fields || []);
     </script>
 </body>
 </html>
