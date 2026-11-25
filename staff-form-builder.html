@@ -10,6 +10,7 @@
     
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
 
     <style>
         .ghost { opacity: 0.4; background: #e0e7ff; border: 2px dashed #4f46e5; }
@@ -63,6 +64,10 @@
                 <div class="p-4 border-2 border-slate-50 rounded-2xl bg-white cursor-move hover:border-sky-300 flex items-center gap-3" data-type="link">
                     <div class="bg-sky-100 p-2 rounded-lg text-sky-600 font-bold text-[10px]">URL</div>
                     <span class="text-sm font-bold text-slate-700">Link Input</span>
+                </div>
+                <div class="p-4 border-2 border-slate-50 rounded-2xl bg-white cursor-move hover:border-cyan-300 flex items-center gap-3" data-type="file">
+                    <div class="bg-cyan-100 p-2 rounded-lg text-cyan-600 font-bold text-[10px]">FILE</div>
+                    <span class="text-sm font-bold text-slate-700">File Upload (JPG / PDF)</span>
                 </div>
             </div>
         </aside>
@@ -125,6 +130,27 @@
                 <div id="options-container" class="hidden">
                     <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Options (Comma separated)</label>
                     <textarea id="edit-options" placeholder="Maths, Physics, Chemistry" class="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl h-24 resize-none font-bold"></textarea>
+                </div>
+
+                <div id="file-settings-container" class="hidden space-y-4 bg-cyan-50/50 p-4 rounded-2xl border-2 border-cyan-100">
+                    <div>
+                        <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Allowed Formats</label>
+                        <select id="edit-file-types" class="w-full p-3 bg-white border-2 border-slate-100 rounded-xl font-bold text-sm outline-none focus:border-cyan-500">
+                            <option value="jpg,pdf">JPG & PDF (Default)</option>
+                            <option value="jpg">JPG Only</option>
+                            <option value="pdf">PDF Only</option>
+                        </select>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">JPG Max Width (px)</label>
+                            <input type="number" id="edit-jpg-max-px" value="1280" min="300" max="3000" class="w-full p-3 bg-white border-2 border-slate-100 rounded-xl font-bold text-sm outline-none focus:border-cyan-500">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Max Size (KB)</label>
+                            <input type="number" id="edit-max-file-kb" value="5120" min="100" max="25600" class="w-full p-3 bg-white border-2 border-slate-100 rounded-xl font-bold text-sm outline-none focus:border-cyan-500">
+                        </div>
+                    </div>
                 </div>
 
                 <div class="flex flex-col gap-3">
@@ -290,6 +316,18 @@
                         el.setAttribute('data-required', f.required === true);
                         el.setAttribute('data-searchable', f.searchable === true);
                         el.setAttribute('data-filterable', f.filterable === true);
+                        if (f.type === 'file') {
+                            const fileTypes = f.fileTypes || 'jpg,pdf';
+                            const maxPx = f.jpgMaxPx || 1280;
+                            const maxKb = f.maxFileKb || 5120;
+                            el.setAttribute('data-file-types', fileTypes);
+                            el.setAttribute('data-jpg-max-px', String(maxPx));
+                            el.setAttribute('data-max-file-kb', String(maxKb));
+                            const hintEl = el.querySelector('.field-file-hint');
+                            if (hintEl) {
+                                hintEl.innerText = `${fileTypes.toUpperCase().replace(',', ' & ')} • Firebase Storage (Max ${maxPx}px, ${maxKb} KB)`;
+                            }
+                        }
                         
                         updateUI(el);
                         dragZone.appendChild(el);
@@ -298,14 +336,108 @@
             } catch (e) { console.error("Load Error:", e); }
         }
 
-       // --- FIELD BUILDER ---
+       // Standardizes JPG (resize + compress) or validates PDF, uploads to Firebase Storage, and returns metadata for Firestore
+        async function standardizeAndUploadToStorage(file, {
+            folder = 'staff_documents',
+            maxPx = 1280,
+            quality = 0.80,
+            maxKb = 5120,
+            allowedTypes = 'jpg,pdf'
+        } = {}) {
+            if (!file) throw new Error("No file selected.");
+            const mime = (file.type || "").toLowerCase();
+            const isJpg = mime === "image/jpeg" || mime === "image/jpg" || /\.jpe?g$/i.test(file.name);
+            const isPdf = mime === "application/pdf" || /\.pdf$/i.test(file.name);
+
+            const allowJpg = allowedTypes.includes("jpg");
+            const allowPdf = allowedTypes.includes("pdf");
+
+            if (isJpg && !allowJpg) throw new Error("JPG files are not enabled for this field.");
+            if (isPdf && !allowPdf) throw new Error("PDF files are not enabled for this field.");
+            if (!isJpg && !isPdf) throw new Error("Only JPG and PDF files are supported.");
+
+            let uploadBlob = file;
+            let cleanName = file.name.replace(/[^a-zA-Z0-9.\-]/g, '_');
+            let format = isPdf ? 'pdf' : 'jpg';
+            let width = null;
+            let height = null;
+
+            if (isJpg) {
+                const dataUrl = await new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = () => resolve(reader.result);
+                    reader.onerror = () => reject(new Error("Could not read JPG file."));
+                    reader.readAsDataURL(file);
+                });
+
+                const img = await new Promise((resolve, reject) => {
+                    const image = new Image();
+                    image.onload = () => resolve(image);
+                    image.onerror = () => reject(new Error("Invalid JPG image."));
+                    image.src = dataUrl;
+                });
+
+                const scale = Math.min(1, maxPx / (img.width || maxPx));
+                width = Math.max(1, Math.round((img.width || maxPx) * scale));
+                height = Math.max(1, Math.round((img.height || maxPx) * scale));
+
+                const canvas = document.createElement("canvas");
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext("2d");
+                ctx.fillStyle = "#ffffff";
+                ctx.fillRect(0, 0, width, height);
+                ctx.drawImage(img, 0, 0, width, height);
+
+                let currentQuality = quality;
+                uploadBlob = await new Promise(res => canvas.toBlob(res, "image/jpeg", currentQuality));
+
+                while (uploadBlob && uploadBlob.size > maxKb * 1024 && currentQuality > 0.35) {
+                    currentQuality = Number((currentQuality - 0.1).toFixed(2));
+                    uploadBlob = await new Promise(res => canvas.toBlob(res, "image/jpeg", currentQuality));
+                }
+
+                cleanName = cleanName.replace(/\.[^.]+$/, "") + ".jpg";
+            }
+
+            const finalSizeKb = Math.ceil(uploadBlob.size / 1024);
+            if (finalSizeKb > maxKb) {
+                throw new Error(`File is ${finalSizeKb} KB (limit: ${maxKb} KB).`);
+            }
+
+            const storagePath = `${folder}/${Date.now()}_${cleanName}`;
+            const storageRef = firebase.storage().ref().child(storagePath);
+            await storageRef.put(uploadBlob, { contentType: isJpg ? "image/jpeg" : "application/pdf" });
+            const url = await storageRef.getDownloadURL();
+
+            return {
+                format,
+                fileName: cleanName,
+                mimeType: isJpg ? "image/jpeg" : "application/pdf",
+                sizeKb: finalSizeKb,
+                width,
+                height,
+                url,
+                storagePath
+            };
+        }
+        window.standardizeAndUploadToStorage = standardizeAndUploadToStorage;
+
+        // --- FIELD BUILDER ---
         function setupField(el, type) {
             el.className = "form-field-item group relative p-6 border-2 border-slate-100 rounded-3xl bg-white hover:border-blue-400 transition-all cursor-move mb-4 shadow-sm";
             el.setAttribute('data-field-type', type);
-            const labels = { text: 'TEXT', number: 'NUMERIC', date: 'CALENDAR', select: 'DROPDOWN', checkbox: 'MULTI-TICK', link: 'LINK / URL' };
+            if (type === 'file') {
+                el.setAttribute('data-file-types', 'jpg,pdf');
+                el.setAttribute('data-jpg-max-px', '1280');
+                el.setAttribute('data-max-file-kb', '5120');
+            }
+            const labels = { text: 'TEXT', number: 'NUMERIC', date: 'CALENDAR', select: 'DROPDOWN', checkbox: 'MULTI-TICK', link: 'LINK / URL', file: 'FILE (JPG / PDF)' };
             const hint = type === 'date'
                 ? '<p class="text-[10px] text-blue-500 font-bold mt-1">Format: 06 Jul 1992</p>'
-                : (type === 'link' ? '<p class="text-[10px] text-sky-600 font-bold mt-1">Paste URL (e.g. https://...)</p>' : '');
+                : (type === 'link'
+                    ? '<p class="text-[10px] text-sky-600 font-bold mt-1">Paste URL (e.g. https://...)</p>'
+                    : (type === 'file' ? '<p class="text-[10px] text-cyan-700 font-bold mt-1 field-file-hint">JPG & PDF • Firebase Storage (Max 1280px, 5120 KB)</p>' : ''));
             
             el.innerHTML = `
                 <div class="flex justify-between items-center mb-3">
@@ -340,14 +472,22 @@
             document.getElementById('edit-searchable').checked = el.getAttribute('data-searchable') === "true";
             document.getElementById('edit-filterable').checked = el.getAttribute('data-filterable') === "true";
 
-            document.getElementById('limit-container').classList.toggle('hidden', ['select', 'checkbox', 'date'].includes(type));
+            document.getElementById('limit-container').classList.toggle('hidden', ['select', 'checkbox', 'date', 'file'].includes(type));
             document.getElementById('options-container').classList.toggle('hidden', !['select', 'checkbox'].includes(type));
             document.getElementById('filter-option').classList.toggle('hidden', !['select', 'checkbox'].includes(type));
+            document.getElementById('file-settings-container').classList.toggle('hidden', type !== 'file');
+
+            if (type === 'file') {
+                document.getElementById('edit-file-types').value = el.getAttribute('data-file-types') || 'jpg,pdf';
+                document.getElementById('edit-jpg-max-px').value = el.getAttribute('data-jpg-max-px') || '1280';
+                document.getElementById('edit-max-file-kb').value = el.getAttribute('data-max-file-kb') || '5120';
+            }
             
             document.getElementById('settings-modal').classList.replace('hidden', 'flex');
         }
 
         window.applySettings = () => {
+            const type = activeField.getAttribute('data-field-type');
             const labelInput = document.getElementById('edit-label').value || "Unnamed Question";
             activeField.querySelector('.field-label').innerText = labelInput;
             activeField.setAttribute('data-label', labelInput);
@@ -356,6 +496,19 @@
             activeField.setAttribute('data-required', document.getElementById('edit-required').checked);
             activeField.setAttribute('data-searchable', document.getElementById('edit-searchable').checked);
             activeField.setAttribute('data-filterable', document.getElementById('edit-filterable').checked);
+
+            if (type === 'file') {
+                const fileTypes = document.getElementById('edit-file-types').value || 'jpg,pdf';
+                const maxPx = document.getElementById('edit-jpg-max-px').value || '1280';
+                const maxKb = document.getElementById('edit-max-file-kb').value || '5120';
+                activeField.setAttribute('data-file-types', fileTypes);
+                activeField.setAttribute('data-jpg-max-px', maxPx);
+                activeField.setAttribute('data-max-file-kb', maxKb);
+                const hintEl = activeField.querySelector('.field-file-hint');
+                if (hintEl) {
+                    hintEl.innerText = `${fileTypes.toUpperCase().replace(',', ' & ')} • Firebase Storage (Max ${maxPx}px, ${maxKb} KB)`;
+                }
+            }
             updateUI(activeField);
             closeSettings();
         };
@@ -386,15 +539,24 @@
             }];
 
             dragZone.querySelectorAll('.form-field-item').forEach(f => {
-                fieldsArr.push({
-                    type: f.getAttribute('data-field-type'),
+                const fieldType = f.getAttribute('data-field-type');
+                const fieldObj = {
+                    type: fieldType,
                     label: f.getAttribute('data-label') || f.querySelector('.field-label').innerText,
                     limit: f.getAttribute('data-limit') || "",
                     options: f.getAttribute('data-options') || "",
                     required: f.getAttribute('data-required') === "true",
                     searchable: f.getAttribute('data-searchable') === "true",
                     filterable: f.getAttribute('data-filterable') === "true"
-                });
+                };
+                if (fieldType === 'file') {
+                    fieldObj.fileTypes = f.getAttribute('data-file-types') || 'jpg,pdf';
+                    fieldObj.jpgMaxPx = Number(f.getAttribute('data-jpg-max-px') || 1280);
+                    fieldObj.maxFileKb = Number(f.getAttribute('data-max-file-kb') || 5120);
+                    fieldObj.storageBackend = 'firebase_storage';
+                    fieldObj.storageFolder = 'staff_documents';
+                }
+                fieldsArr.push(fieldObj);
             });
 
             try {
