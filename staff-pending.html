@@ -3,48 +3,387 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Minerva Admin | Pending Requests</title>
+    <title>Minerva Admin | Recruitment & Pending Applications</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <style>
-        .glass { background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(10px); }
-        /* We explicitly declare translate(-50%, ...) so it never loses its horizontal centering! */
-        .bulk-bar { transform: translate(-50%, 100px); transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
-        .bulk-bar.show { transform: translate(-50%, 0); }
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
+        .glass { background: rgba(255, 255, 255, 0.94); backdrop-filter: blur(12px); }
+        .custom-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        .loader { border: 3px solid #e2e8f0; border-top: 3px solid #2563eb; border-radius: 50%; width: 22px; height: 22px; animation: spin 0.9s linear infinite; display: inline-block; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
 </head>
-<body class="bg-slate-50 min-h-screen font-sans pb-32">
+<body class="min-h-screen bg-slate-50 pb-24">
 
-    <header class="h-20 bg-white border-b flex justify-between items-center px-6 sticky top-0 z-50 shadow-sm">
-        <div class="flex items-center gap-4">
-            <button onclick="window.location.href='admin.html'" class="p-2 hover:bg-slate-100 rounded-xl transition-colors">
-                <svg class="w-6 h-6 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-            </button>
-            <h1 class="text-xl font-black text-slate-800">New Staff Requests</h1>
-        </div>
-        <button onclick="toggleSelectAll()" id="select-all-btn" class="text-[10px] font-black uppercase tracking-widest text-blue-600 bg-blue-50 px-4 py-2 rounded-xl transition-all active:scale-95">Select All</button>
-    </header>
+    <!-- Top Header -->
+    <header class="bg-[#1e1b4b] text-white px-4 sm:px-8 py-4 sticky top-0 z-40 shadow-xl border-b-4 border-indigo-600">
+        <div class="max-w-7xl mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div class="flex items-center gap-3">
+                <button onclick="window.location.href='admin.html'" class="p-2.5 bg-indigo-800 hover:bg-indigo-700 rounded-xl transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 19l-7-7 7-7"/></svg>
+                </button>
+                <div>
+                    <h1 class="text-lg sm:text-xl font-black uppercase tracking-wider leading-none">Recruitment & Pending Staff</h1>
+                    <p id="active-user-badge" class="text-[11px] text-indigo-300 font-bold uppercase tracking-widest mt-1">100% Firestore Workflow</p>
+                </div>
+            </div>
 
-    <main class="max-w-4xl mx-auto p-4 sm:p-8">
-        <div id="request-list" class="space-y-6">
-            <div class="text-center py-20 text-slate-300 font-bold uppercase text-xs animate-pulse tracking-widest">
-                Checking for new applications...
+            <div class="flex flex-wrap items-center gap-2">
+                <select id="view-scope-filter" onchange="renderSerialTable()" class="px-3 py-2 rounded-xl bg-indigo-900 border border-indigo-700 text-xs font-extrabold text-white outline-none">
+                    <option value="ALL_ACTIVE">All In-Process Applications</option>
+                    <option value="MY_DELEGATED">Delegated to Me Only</option>
+                    <option value="UNASSIGNED">New / Unassigned Only</option>
+                    <option value="ON_HOLD">On Hold</option>
+                </select>
+                <button onclick="openDelegationDrawer()" class="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-black text-xs uppercase tracking-widest shadow-md transition-all">
+                    ⚡ Quick Delegate
+                </button>
             </div>
         </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto p-4 sm:p-8 space-y-6">
+
+        <!-- DELEGATION CONTROL PANEL (Branch -> Department -> Staff Person) -->
+        <section id="delegation-panel" class="glass rounded-3xl p-5 sm:p-6 border border-slate-200 shadow-sm">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 mb-4 border-b border-slate-100">
+                <div>
+                    <h2 class="text-sm sm:text-base font-black text-slate-900 uppercase tracking-wider">Delegation & Routing Hub</h2>
+                    <p class="text-xs font-semibold text-slate-500">Select Branch → Department → Registered Staff Member to delegate selected applicants</p>
+                </div>
+                <span id="selected-count-pill" class="text-[11px] font-black uppercase tracking-widest px-3 py-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 w-fit">
+                    0 Applications Selected
+                </span>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+                <div>
+                    <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">1. Select Branch</label>
+                    <select id="del-branch" onchange="onDelegationBranchChange()" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-800 outline-none focus:border-blue-500">
+                        <option value="">Loading branches...</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">2. Select Department</label>
+                    <select id="del-dept" onchange="onDelegationDeptChange()" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-800 outline-none focus:border-blue-500">
+                        <option value="">All Departments</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">3. Person to Delegate</label>
+                    <select id="del-staff" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-800 outline-none focus:border-blue-500">
+                        <option value="">-- Choose Registered Staff --</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">4. Target Round</label>
+                    <select id="del-round" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-800 outline-none focus:border-blue-500">
+                        <option value="Academic">Academic / Demo Round</option>
+                        <option value="HR">Direct HR Round</option>
+                    </select>
+                </div>
+
+                <div>
+                    <button onclick="bulkDelegateSelected()" class="w-full py-3 px-4 bg-blue-700 hover:bg-blue-800 text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-md transition-all active:scale-95">
+                        Delegate Selected
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- DYNAMIC SEARCH & FILTERS (Driven by Form Builder Schema) -->
+        <section class="glass rounded-3xl p-5 sm:p-6 border border-slate-200 shadow-sm space-y-4">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+                <h2 class="text-xs sm:text-sm font-black text-slate-800 uppercase tracking-widest">Quick Search & Form Filters</h2>
+                <div class="flex items-center gap-3">
+                    <span class="text-xs font-black text-slate-500 uppercase tracking-widest bg-slate-100 px-3 py-1 rounded-lg">
+                        Showing: <span id="visible-count" class="text-blue-600">0</span>
+                    </span>
+                    <button onclick="resetAllFilters()" class="text-[11px] font-black uppercase tracking-wider text-slate-500 hover:text-slate-900 underline">
+                        Reset
+                    </button>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-12 gap-3">
+                <div id="quick-search-wrapper" class="md:col-span-5">
+                    <input type="text" id="quick-search-input" oninput="renderSerialTable()" placeholder="Quick search by CV ID, Name, or searchable fields..." class="w-full p-3.5 bg-slate-100 border border-slate-200 rounded-2xl text-xs sm:text-sm font-bold text-slate-800 outline-none focus:bg-white focus:border-blue-500 transition-all">
+                </div>
+                <div id="dynamic-filter-bar" class="md:col-span-7 flex flex-wrap gap-2.5"></div>
+            </div>
+        </section>
+
+        <!-- SERIAL-WISE APPLICATIONS TABLE (S. No., Name, CV ID Only) -->
+        <section class="glass rounded-3xl border border-slate-200 shadow-lg overflow-hidden">
+            <div class="overflow-x-auto custom-scroll">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="bg-slate-900 text-white text-[10px] sm:text-xs font-black uppercase tracking-widest">
+                            <th class="p-4 w-12 text-center">
+                                <input type="checkbox" id="master-checkbox" onchange="toggleSelectAllVisible(this.checked)" class="w-4 h-4 accent-blue-500 rounded cursor-pointer">
+                            </th>
+                            <th class="p-4 w-24">S. No.</th>
+                            <th class="p-4">Applicant Name</th>
+                            <th class="p-4 w-44">CV ID</th>
+                            <th class="p-4 w-44 text-right">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="serial-table-body" class="divide-y divide-slate-100 text-sm">
+                        <tr>
+                            <td colspan="5" class="p-12 text-center text-slate-400 font-bold uppercase text-xs tracking-widest">
+                                <span class="loader mb-2"></span><br>Loading pending applications from Firestore...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
     </main>
 
- <div id="bulk-bar" class="bulk-bar fixed bottom-4 sm:bottom-6 left-1/2 w-[95%] max-w-md glass border border-blue-200 p-3 sm:p-5 rounded-[2rem] sm:rounded-[2.5rem] shadow-2xl z-[100] flex items-center justify-between gap-2">
-        <div class="pl-1 sm:pl-2 shrink-0">
-            <p id="selected-text" class="text-[9px] sm:text-[10px] font-black text-blue-600 uppercase tracking-widest">0 Selected</p>
-        </div>
-        <div class="flex gap-2 shrink-0">
-            <button onclick="bulkUpdate('rejected')" class="px-4 sm:px-6 py-3 bg-red-50 text-red-500 rounded-xl sm:rounded-2xl font-black text-[9px] sm:text-[10px] uppercase tracking-widest transition-all active:scale-95">Reject</button>
-            <button onclick="bulkUpdate('approved')" class="px-4 sm:px-8 py-3 bg-blue-700 text-white rounded-xl sm:rounded-2xl font-black text-[9px] sm:text-[10px] uppercase tracking-widest shadow-lg shadow-blue-200 transition-all active:scale-95">Approve All</button>
+    <!-- RESPONSIVE APPLICANT WORKFLOW MODAL (Mobile / Tablet / Laptop Optimized) -->
+    <div id="candidate-modal" class="fixed inset-0 bg-slate-900/75 backdrop-blur-sm z-50 hidden overflow-y-auto p-2 sm:p-6">
+        <div class="max-w-5xl mx-auto my-2 sm:my-6 bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden">
+            <!-- Modal Header -->
+            <div class="bg-[#1e1b4b] text-white px-5 py-4 sm:px-8 sm:py-5 flex items-center justify-between gap-4">
+                <div>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <h3 id="m-cand-name" class="text-lg sm:text-2xl font-black tracking-tight">Applicant Name</h3>
+                        <span id="m-cand-cvid" class="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-blue-600 text-white uppercase tracking-widest">CV-000000</span>
+                    </div>
+                    <p id="m-cand-sub" class="text-[11px] font-bold text-indigo-300 uppercase tracking-widest mt-1">Stage: New • Status: Pending</p>
+                </div>
+                <button onclick="closeCandidateModal()" class="w-10 h-10 rounded-full bg-white/10 hover:bg-rose-500 text-white font-black text-lg flex items-center justify-center transition-colors">✕</button>
+            </div>
+
+            <!-- Modal Navigation Tabs -->
+            <div class="bg-slate-100 px-4 sm:px-8 pt-3 flex gap-2 border-b border-slate-200 overflow-x-auto">
+                <button id="tab-btn-profile" onclick="switchModalTab('profile')" class="modal-tab-btn px-4 py-2.5 rounded-t-xl font-black text-xs uppercase tracking-widest bg-white text-blue-700 border-t border-x border-slate-200">
+                    1. Full Profile Grid
+                </button>
+                <button id="tab-btn-workflow" onclick="switchModalTab('workflow')" class="modal-tab-btn px-4 py-2.5 rounded-t-xl font-black text-xs uppercase tracking-widest text-slate-600 hover:text-slate-900">
+                    2. Delegation & Round Actions
+                </button>
+                <button id="tab-btn-history" onclick="switchModalTab('history')" class="modal-tab-btn px-4 py-2.5 rounded-t-xl font-black text-xs uppercase tracking-widest text-slate-600 hover:text-slate-900">
+                    3. Audit & Score History
+                </button>
+            </div>
+
+            <!-- TAB 1: RESPONSIVE PROFILE GRID (1 col Mobile, 2 col Tablet, 3 col Laptop) -->
+            <div id="tab-pane-profile" class="modal-tab-pane p-5 sm:p-8 space-y-6">
+                <!-- Quick Contact Bar -->
+                <div id="m-quick-actions" class="grid grid-cols-1 sm:grid-cols-3 gap-3"></div>
+
+                <!-- Responsive Key-Value Grid -->
+                <div id="m-profile-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+            </div>
+
+            <!-- TAB 2: WORKFLOW ACTIONS (Delegate -> Academic Demo -> HR -> Final Approve) -->
+            <div id="tab-pane-workflow" class="modal-tab-pane hidden p-5 sm:p-8 space-y-6">
+
+                <!-- Step A: Route / Delegate Choice (Academic Round OR Direct HR Round) -->
+                <div class="bg-slate-50 border border-slate-200 rounded-2xl p-5 space-y-4">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <h4 class="text-xs sm:text-sm font-black text-slate-900 uppercase tracking-wider">Step A: Route & Delegate Application</h4>
+                        <span id="m-current-assignee" class="text-[11px] font-bold text-indigo-700 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-200">Unassigned</span>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Route To Round</label>
+                            <select id="m-route-type" onchange="toggleRouteSpecificOptions()" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-800 outline-none">
+                                <option value="Academic">Academic / Demo Round</option>
+                                <option value="HR">Direct HR Round (Skip Academic)</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Branch</label>
+                            <select id="m-route-branch" onchange="populateModalStaffDropdown()" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-800 outline-none"></select>
+                        </div>
+
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Department</label>
+                            <select id="m-route-dept" onchange="populateModalStaffDropdown()" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-800 outline-none"></select>
+                        </div>
+
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Delegate To (Staff)</label>
+                            <select id="m-route-staff" class="w-full p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-800 outline-none"></select>
+                        </div>
+                    </div>
+
+                    <div id="m-academic-perms-box" class="flex flex-wrap items-center gap-4 bg-white p-3 rounded-xl border border-slate-200 text-xs font-bold text-slate-700">
+                        <span class="text-[10px] font-black uppercase tracking-widest text-slate-400">Interviewer Permissions:</span>
+                        <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="perm-contact" checked class="accent-blue-600"> Show Contact</label>
+                        <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="perm-addr" checked class="accent-blue-600"> Show Address</label>
+                        <label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="perm-exp" checked class="accent-blue-600"> Show Experience</label>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <input type="text" id="m-route-note" placeholder="Delegation note or instructions..." class="sm:col-span-2 p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold outline-none">
+                        <button onclick="saveSingleDelegation()" class="py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-md">
+                            Confirm Delegation
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Step B: Academic Demo & 7-Parameter Scorecard (Same parameters as Google Sheet setup) -->
+                <div class="bg-white border-2 border-blue-100 rounded-2xl p-5 space-y-4">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <h4 class="text-xs sm:text-sm font-black text-blue-900 uppercase tracking-wider">Step B: Academic Demo & Evaluation (70 Marks)</h4>
+                        <div class="flex gap-2">
+                            <button type="button" onclick="toggleDemoSubMode('later')" class="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-black text-[10px] uppercase tracking-wider">Schedule Later</button>
+                            <button type="button" onclick="toggleDemoSubMode('now')" class="px-3 py-1.5 rounded-lg bg-blue-600 text-white font-black text-[10px] uppercase tracking-wider">Evaluate Now</button>
+                            <button type="button" onclick="copyLastScorecard()" class="px-3 py-1.5 rounded-lg bg-indigo-50 text-indigo-700 border border-indigo-200 font-black text-[10px] uppercase tracking-wider">Copy Last Score</button>
+                        </div>
+                    </div>
+
+                    <!-- Schedule Later Box -->
+                    <div id="demo-later-box" class="hidden grid grid-cols-1 sm:grid-cols-3 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <input type="date" id="demo-sched-date" class="p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold">
+                        <input type="text" id="demo-sched-note" placeholder="Schedule remarks / time..." class="p-3 bg-white border border-slate-300 rounded-xl text-xs font-bold">
+                        <button type="button" onclick="saveDemoScheduleLater()" class="py-3 bg-slate-900 text-white rounded-xl font-black text-xs uppercase tracking-widest">Save Schedule</button>
+                    </div>
+
+                    <!-- Evaluate Now Box -->
+                    <div id="demo-now-box" class="space-y-4">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Demo Mode</label>
+                                <select id="demo-mode" onchange="toggleMeetLinkBox()" class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold">
+                                    <option value="Offline">Offline (In-Person Demo)</option>
+                                    <option value="Online">Online (Live Video Demo)</option>
+                                </select>
+                            </div>
+                            <div id="demo-meet-box" class="hidden space-y-2">
+                                <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest">Meeting Link</label>
+                                <div class="flex gap-2">
+                                    <input type="url" id="demo-meet-link" placeholder="https://meet.google.com/..." class="flex-1 p-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold">
+                                    <button type="button" onclick="shareMeetLink('wa')" class="px-3 py-2 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 font-black text-[10px]">WA</button>
+                                    <button type="button" onclick="shareMeetLink('email')" class="px-3 py-2 rounded-xl bg-rose-50 text-rose-700 border border-rose-200 font-black text-[10px]">Email</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 7 Scorecard Parameters (Out of 10 each = 70) -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-slate-50 p-4 rounded-2xl border border-slate-200">
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-600 uppercase mb-1">1. Intro to Topic (0-10)</label>
+                                <input type="number" min="0" max="10" id="sc-1" oninput="recalcDemoScore()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-black text-center">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-600 uppercase mb-1">2. Explanation Ability (0-10)</label>
+                                <input type="number" min="0" max="10" id="sc-2" oninput="recalcDemoScore()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-black text-center">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-600 uppercase mb-1">3. Subject Knowledge (0-10)</label>
+                                <input type="number" min="0" max="10" id="sc-3" oninput="recalcDemoScore()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-black text-center">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-600 uppercase mb-1">4. Voice Modulation (0-10)</label>
+                                <input type="number" min="0" max="10" id="sc-4" oninput="recalcDemoScore()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-black text-center">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-600 uppercase mb-1">5. Attitude (0-10)</label>
+                                <input type="number" min="0" max="10" id="sc-5" oninput="recalcDemoScore()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-black text-center">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-600 uppercase mb-1">6. Confidence (0-10)</label>
+                                <input type="number" min="0" max="10" id="sc-6" oninput="recalcDemoScore()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-black text-center">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-black text-slate-600 uppercase mb-1">7. Speed of Teaching (0-10)</label>
+                                <input type="number" min="0" max="10" id="sc-7" oninput="recalcDemoScore()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-sm font-black text-center">
+                            </div>
+                            <div class="flex flex-col justify-center items-center bg-blue-600 text-white rounded-xl p-2.5">
+                                <span class="text-[9px] font-black uppercase tracking-widest opacity-80">Total Score</span>
+                                <span class="text-xl font-black"><span id="sc-total">0</span> / 70</span>
+                            </div>
+                        </div>
+
+                        <textarea id="sc-remarks" rows="2" placeholder="Demo evaluation remarks..." class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold outline-none"></textarea>
+
+                        <!-- Forward to HR Person Selector -->
+                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end bg-emerald-50/70 p-3.5 rounded-xl border border-emerald-200">
+                            <div class="sm:col-span-2">
+                                <label class="block text-[10px] font-black text-emerald-800 uppercase tracking-widest mb-1">Select HR / Final Approver to Delegate Next</label>
+                                <select id="demo-next-hr" class="w-full p-2.5 bg-white border border-emerald-300 rounded-xl text-xs font-bold text-slate-800"></select>
+                            </div>
+                            <button type="button" onclick="completeAcademicRound('RECOMMEND_HR')" class="py-3 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-black text-xs uppercase tracking-widest shadow-md">
+                                Recommend & Send to HR
+                            </button>
+                        </div>
+
+                        <div class="flex flex-wrap gap-2 justify-end">
+                            <button type="button" onclick="completeAcademicRound('HOLD')" class="px-4 py-2.5 rounded-xl bg-amber-100 text-amber-800 font-black text-xs uppercase tracking-wider">Put On Hold</button>
+                            <button type="button" onclick="completeAcademicRound('REJECT')" class="px-4 py-2.5 rounded-xl bg-rose-100 text-rose-700 font-black text-xs uppercase tracking-wider">Reject Candidate</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Step C: HR / Final Offer, Salary, Branch Allotment & Final Approval into Staff List -->
+                <div class="bg-white border-2 border-emerald-200 rounded-2xl p-5 space-y-4">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <h4 class="text-xs sm:text-sm font-black text-emerald-900 uppercase tracking-wider">Step C: HR Offer, Package & Final Approval (Moves to Faculty Hub)</h4>
+                        <span class="text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800">Final Step</span>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Offer Status</label>
+                            <select id="hr-offer-status" class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold">
+                                <option value="Offer Accepted">Offer Accepted</option>
+                                <option value="Offer Sent">Offer Sent</option>
+                                <option value="Offer Pending">Offer Pending</option>
+                                <option value="On Hold">On Hold</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Salary / Package (LPA)</label>
+                            <input type="text" id="hr-package" placeholder="e.g. 4.8 LPA" class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Joining Date</label>
+                            <input type="date" id="hr-joining-date" class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Allotted Branch</label>
+                            <select id="hr-allotted-branch" class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold"></select>
+                        </div>
+                    </div>
+
+                    <textarea id="hr-final-remarks" rows="2" placeholder="HR notes, offer terms, or rejection/hold reason..." class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold outline-none"></textarea>
+
+                    <div class="flex flex-col sm:flex-row gap-3 justify-end">
+                        <button type="button" onclick="finalHrDecision('ON_HOLD')" class="px-5 py-3 rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-900 font-black text-xs uppercase tracking-widest">
+                            Save as On Hold
+                        </button>
+                        <button type="button" onclick="finalHrDecision('REJECTED')" class="px-5 py-3 rounded-xl bg-rose-100 hover:bg-rose-200 text-rose-800 font-black text-xs uppercase tracking-widest">
+                            Reject Application
+                        </button>
+                        <button type="button" onclick="finalHrDecision('APPROVED')" class="px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs uppercase tracking-widest shadow-lg">
+                            ✅ Final Approve & Add to Staff List
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 3: AUDIT & SCORE HISTORY -->
+            <div id="tab-pane-history" class="modal-tab-pane hidden p-5 sm:p-8">
+                <div id="m-history-list" class="space-y-3"></div>
+            </div>
         </div>
     </div>
 
     <script>
+        // 1. Firebase Initialization (100% Firestore — Zero Spreadsheet Calls)
         const firebaseConfig = {
             apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
             authDomain: "shop-portal-bbbbb.firebaseapp.com",
@@ -56,123 +395,798 @@
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        let selectedIds = [];
+        // Active User Context
+        const isAdminSession = sessionStorage.getItem('minervaAdminAuth') === 'true';
+        const activeStaffSession = JSON.parse(localStorage.getItem('minervaActiveStaff') || 'null');
+        if (!isAdminSession && !activeStaffSession) {
+            window.location.replace('admin-login.html');
+        }
 
-        async function loadRequests() {
-            const list = document.getElementById('request-list');
+        const currentActor = activeStaffSession
+            ? { name: activeStaffSession.name || activeStaffSession.email, email: (activeStaffSession.email || '').toLowerCase(), role: isAdminSession ? 'Admin' : 'Staff' }
+            : { name: 'Administrator', email: 'admin@minerva.com', role: 'Admin' };
+
+        document.getElementById('active-user-badge').textContent = `Logged in: ${currentActor.name} (${currentActor.role})`;
+
+        // Global State
+        let branchesList = [];         // [{ id, name, code, status }]
+        let registeredStaffList = [];  // Approved staff from staff_applications
+        let pendingApplications = [];  // Non-approved applications in workflow
+        let formSchemaFields = [];     // From configs/staff_registration_form
+        let selectedAppIds = new Set();
+        let activeModalAppId = null;
+
+        function escapeHtml(val) {
+            return String(val ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function getApplicantName(app) {
+            const det = app.details || {};
+            const nameKey = Object.keys(det).find(k => k.toLowerCase().includes('name'));
+            return (nameKey && det[nameKey]) ? String(det[nameKey]).trim() : (app.email || 'Unnamed Applicant');
+        }
+
+        function getApplicantBranch(app) {
+            const det = app.details || {};
+            const bKey = Object.keys(det).find(k => k.toLowerCase().includes('branch') || k.toLowerCase().includes('cent'));
+            return (bKey && det[bKey]) ? String(det[bKey]).trim() : 'Ghumarwin';
+        }
+
+        function getApplicantDept(app) {
+            const det = app.details || {};
+            const dKey = Object.keys(det).find(k => k.toLowerCase().includes('department') || k.toLowerCase().includes('subject'));
+            if (!dKey || !det[dKey]) return 'General';
+            return Array.isArray(det[dKey]) ? det[dKey].join(', ') : String(det[dKey]);
+        }
+
+        // 2. Load Branches Dynamically (Ghumarwin & Dharamshala preserved + any new active branches from admin-branches)
+        async function loadDynamicBranches() {
+            const coreMap = new Map([
+                ['ghumarwin', { id: 'branch_ghumarwin', name: 'Ghumarwin', code: 'GHUMARWIN', status: 'ACTIVE' }],
+                ['dharamshala', { id: 'branch_dharamshala', name: 'Dharamshala', code: 'DHARAMSHALA', status: 'ACTIVE' }]
+            ]);
+
             try {
-                const snapshot = await db.collection("staff_applications").where("status", "==", "pending").get();
-                
-                if (snapshot.empty) {
-                    list.innerHTML = `<div class="text-center py-20 bg-white rounded-[2rem] border-2 border-dashed border-slate-200 text-slate-400 font-bold uppercase text-[10px] tracking-widest">No pending requests</div>`;
-                    updateBulkBar();
-                    return;
-                }
-
-                list.innerHTML = "";
-                snapshot.forEach(doc => {
-                    const data = doc.data();
-                    const id = doc.id;
-                    const details = data.details || {};
-                    const cleanMobile = data.mobile ? data.mobile.replace(/\D/g, '') : '';
-                    
-                    let detailsHtml = "";
-                    for (const [key, value] of Object.entries(details)) {
-                        detailsHtml += `
-                            <div class="flex justify-between border-b border-slate-50 py-1.5">
-                                <span class="text-[8px] font-black text-slate-400 uppercase tracking-tighter">${key}</span>
-                                <span class="text-xs font-bold text-slate-700">${Array.isArray(value) ? value.join(', ') : value}</span>
-                            </div>`;
-                    }
-
-                    list.innerHTML += `
-                        <div class="glass p-6 rounded-[2.5rem] border-2 ${selectedIds.includes(id) ? 'border-blue-500' : 'border-white'} transition-all flex gap-4 items-start">
-                            <input type="checkbox" onchange="toggleSelect('${id}')" ${selectedIds.includes(id) ? 'checked' : ''} class="w-6 h-6 mt-1 rounded-lg accent-blue-600 shrink-0 cursor-pointer">
-                            
-                            <div class="flex-1">
-                                <div class="mb-4">
-                                    <h3 class="text-lg font-black text-slate-900 break-all leading-tight">${data.email}</h3>
-                                    <p class="text-blue-600 font-black text-xs">Ph: ${data.mobile}</p>
-                                </div>
-
-                                <div class="flex gap-2 mb-4">
-                                    <a href="tel:${cleanMobile}" class="flex-1 bg-blue-50 text-blue-700 py-2.5 rounded-xl flex items-center justify-center gap-2 hover:bg-blue-100 transition-colors">
-                                        <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M6.62 10.79a15.053 15.053 0 006.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>
-                                        <span class="text-[9px] font-black uppercase tracking-widest">Call</span>
-                                    </a>
-                                    <a href="https://wa.me/91${cleanMobile}" target="_blank" class="flex-1 bg-emerald-50 text-emerald-700 py-2.5 rounded-xl flex items-center justify-center gap-2 hover:bg-emerald-100 transition-colors">
-                                        <svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12.031 6.172c-3.181 0-5.767 2.586-5.768 5.766-.001 1.298.38 2.27 1.038 3.284l-.569 2.103 2.181-.545c1 .512 1.89.842 3.118.842 3.18 0 5.765-2.586 5.766-5.766 0-3.18-2.586-5.765-5.766-5.765zm3.377 8.272c-.14.393-.8.758-1.103.812-.275.053-.632.091-1.012-.047-.247-.09-.546-.192-1.254-.484-2.997-1.238-4.94-4.29-5.09-4.489-.15-.199-1.219-1.621-1.219-3.092 0-1.471.769-2.194 1.042-2.493.272-.299.593-.374.792-.374s.397.001.57.009c.177.007.414-.067.649.492.235.559.816 1.99.888 2.139.071.149.118.323.018.522-.1.199-.15.323-.3.497-.15.174-.314.388-.447.521-.149.149-.304.31-.131.608.174.299.771 1.269 1.657 2.057.886.789 1.635 1.032 1.868 1.144.233.111.37.094.507-.06.137-.154.588-.686.746-.919.157-.233.314-.196.531-.115.216.081 1.368.646 1.604.758.236.112.393.167.45.263.056.096.056.559-.084.952z"/></svg>
-                                        <span class="text-[9px] font-black uppercase tracking-widest">WhatsApp</span>
-                                    </a>
-                                </div>
-
-                                <div class="mt-2 bg-slate-50/50 p-4 rounded-2xl">
-                                    ${detailsHtml}
-                                </div>
-                            </div>
-                        </div>`;
-                });
-                updateBulkBar();
-            } catch (err) {
-                console.error("Fetch Error:", err);
-            }
-        }
-
-        function toggleSelect(id) {
-            if (selectedIds.includes(id)) selectedIds = selectedIds.filter(i => i !== id);
-            else selectedIds.push(id);
-            loadRequests();
-        }
-
-        async function toggleSelectAll() {
-            if (selectedIds.length > 0) {
-                selectedIds = [];
-            } else {
-                const snapshot = await db.collection("staff_applications").where("status", "==", "pending").get();
-                snapshot.forEach(doc => selectedIds.push(doc.id));
-            }
-            loadRequests();
-        }
-
-        function updateBulkBar() {
-            const bar = document.getElementById('bulk-bar');
-            const txt = document.getElementById('selected-text');
-            if (selectedIds.length > 0) {
-                bar.classList.add('show');
-                txt.innerText = `${selectedIds.length} Staff Selected`;
-            } else {
-                bar.classList.remove('show');
-            }
-        }
-
-       async function bulkUpdate(newStatus) {
-            if (!confirm(`Are you sure you want to ${newStatus.toUpperCase()} these ${selectedIds.length} applications?`)) return;
-            
-            const batch = db.batch();
-            selectedIds.forEach(id => {
-                const ref = db.collection("staff_applications").doc(id);
-                if (newStatus === 'rejected') {
-                    // Physically wipe the document from Firebase so they can cleanly re-apply
-                    batch.delete(ref);
-                } else {
-                    batch.update(ref, { 
-                        status: newStatus, 
-                        reviewedOn: firebase.firestore.FieldValue.serverTimestamp() 
+                const snap = await db.collection('branches').get();
+                snap.forEach(doc => {
+                    const b = doc.data() || {};
+                    const name = String(b.name || '').trim();
+                    if (!name) return;
+                    const key = name.toLowerCase();
+                    if (b.status === 'INACTIVE' && !coreMap.has(key)) return;
+                    coreMap.set(key, {
+                        id: doc.id,
+                        name,
+                        code: (b.code || name).toUpperCase(),
+                        status: b.status || 'ACTIVE'
                     });
+                });
+            } catch (e) {
+                console.error('Branches load fallback:', e);
+            }
+
+            branchesList = Array.from(coreMap.values());
+            const optionsHtml = branchesList.map(b => `<option value="${escapeHtml(b.name)}">${escapeHtml(b.name)}</option>`).join('');
+            document.getElementById('del-branch').innerHTML = `<option value="">-- All / Choose Branch --</option>` + optionsHtml;
+            document.getElementById('m-route-branch').innerHTML = optionsHtml;
+            document.getElementById('hr-allotted-branch').innerHTML = optionsHtml;
+        }
+
+        // 3. Load Form Config (Searchable & Filterable fields from Staff Form Architect)
+        async function loadFormConfig() {
+            try {
+                const snap = await db.collection('configs').doc('staff_registration_form').get();
+                if (snap.exists) {
+                    const data = snap.data() || {};
+                    formSchemaFields = Array.isArray(data.fields) ? data.fields : [];
+                }
+            } catch (e) {
+                console.error('Form config load error:', e);
+            }
+            buildDynamicFilterBar();
+        }
+
+        function buildDynamicFilterBar() {
+            const bar = document.getElementById('dynamic-filter-bar');
+            bar.innerHTML = '';
+
+            const searchableLabels = formSchemaFields.filter(f => f.searchable).map(f => f.label);
+            const searchInput = document.getElementById('quick-search-input');
+            if (searchableLabels.length > 0) {
+                searchInput.placeholder = `Quick search (CV ID, Name, ${searchableLabels.slice(0, 3).join(', ')}...)`;
+            }
+
+            formSchemaFields.filter(f => f.filterable).forEach(f => {
+                const sel = document.createElement('select');
+                sel.id = `dyn-filter-${f.label}`;
+                sel.className = 'px-3 py-2.5 bg-white border border-slate-300 rounded-xl text-xs font-extrabold text-slate-700 outline-none focus:border-blue-500';
+                sel.onchange = renderSerialTable;
+
+                let opts = `<option value="">All ${escapeHtml(f.label)}</option>`;
+                String(f.options || '').split(',').map(o => o.trim()).filter(Boolean).forEach(opt => {
+                    opts += `<option value="${escapeHtml(opt)}">${escapeHtml(opt)}</option>`;
+                });
+                sel.innerHTML = opts;
+                bar.appendChild(sel);
+            });
+        }
+
+        // 4. Load Registered Staff (Approved staff in Firestore) & Pending Applications
+        async function loadApplicationsAndStaff() {
+            const snap = await db.collection('staff_applications').get();
+            const approved = [];
+            const pending = [];
+
+            snap.forEach(doc => {
+                const raw = doc.data() || {};
+                const app = { id: doc.id, ...raw };
+                if (String(app.status || '').toLowerCase() === 'approved') {
+                    approved.push({
+                        id: doc.id,
+                        name: getApplicantName(app),
+                        email: (app.email || '').trim(),
+                        mobile: app.mobile || '',
+                        branch: getApplicantBranch(app),
+                        dept: getApplicantDept(app),
+                        isHOD: Boolean(app.isHOD),
+                        isLeaveIncharge: Boolean(app.isLeaveIncharge)
+                    });
+                } else {
+                    pending.push(app);
                 }
             });
-            
-            try {
-                await batch.commit();
-                alert(`Successfully processed ${selectedIds.length} applications!`);
-                selectedIds = [];
-                loadRequests();
-            } catch (err) {
-                alert("Update failed: " + err.message);
+
+            // Sort approved staff alphabetically
+            approved.sort((a, b) => a.name.localeCompare(b.name));
+            registeredStaffList = approved;
+
+            // Sort pending applications serially by appliedOn ascending (oldest first = S.No. 1)
+            pending.sort((a, b) => {
+                const ta = a.appliedOn && a.appliedOn.toMillis ? a.appliedOn.toMillis() : (Number(a.createdAtMs) || 0);
+                const tb = b.appliedOn && b.appliedOn.toMillis ? b.appliedOn.toMillis() : (Number(b.createdAtMs) || 0);
+                return ta - tb;
+            });
+            pendingApplications = pending;
+
+            populateAllDepartmentSelects();
+            onDelegationBranchChange();
+            renderSerialTable();
+        }
+
+        function populateAllDepartmentSelects() {
+            const deptSet = new Set();
+            registeredStaffList.forEach(s => {
+                s.dept.split(',').map(d => d.trim()).filter(Boolean).forEach(d => deptSet.add(d));
+            });
+            const deptField = formSchemaFields.find(f => f.label.toLowerCase().includes('department'));
+            if (deptField && deptField.options) {
+                deptField.options.split(',').map(d => d.trim()).filter(Boolean).forEach(d => deptSet.add(d));
+            }
+            const sortedDepts = Array.from(deptSet).sort();
+            const deptOptions = `<option value="">All Departments</option>` + sortedDepts.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('');
+            document.getElementById('del-dept').innerHTML = deptOptions;
+            document.getElementById('m-route-dept').innerHTML = deptOptions;
+
+            // Populate HR Approver dropdown in Step C
+            const hrSelect = document.getElementById('demo-next-hr');
+            const hrCandidates = registeredStaffList.filter(s =>
+                /hr|admin|reception|account|management/i.test(s.dept) || s.isHOD || s.isLeaveIncharge
+            );
+            const listToUse = hrCandidates.length > 0 ? hrCandidates : registeredStaffList;
+            hrSelect.innerHTML = `<option value="">-- Select HR / Admin Staff --</option>` +
+                listToUse.map(s => `<option value="${escapeHtml(s.email)}">${escapeHtml(s.name)} (${escapeHtml(s.branch)} • ${escapeHtml(s.dept)})</option>`).join('');
+        }
+
+        function filterRegisteredStaff(branchVal, deptVal) {
+            return registeredStaffList.filter(s => {
+                const matchBranch = !branchVal || s.branch.toLowerCase().includes(branchVal.toLowerCase());
+                const matchDept = !deptVal || s.dept.toLowerCase().includes(deptVal.toLowerCase());
+                return matchBranch && matchDept;
+            });
+        }
+
+        function onDelegationBranchChange() {
+            const branchVal = document.getElementById('del-branch').value;
+            const deptVal = document.getElementById('del-dept').value;
+            const matches = filterRegisteredStaff(branchVal, deptVal);
+            const staffSelect = document.getElementById('del-staff');
+            staffSelect.innerHTML = `<option value="">-- Choose Registered Staff (${matches.length}) --</option>` +
+                matches.map(s => `<option value="${escapeHtml(s.email)}">${escapeHtml(s.name)} (${escapeHtml(s.dept)})</option>`).join('');
+        }
+
+        function onDelegationDeptChange() {
+            onDelegationBranchChange();
+        }
+
+        function openDelegationDrawer() {
+            document.getElementById('delegation-panel').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function resetAllFilters() {
+            document.getElementById('quick-search-input').value = '';
+            document.getElementById('view-scope-filter').value = 'ALL_ACTIVE';
+            document.querySelectorAll('[id^="dyn-filter-"]').forEach(el => { el.value = ''; });
+            renderSerialTable();
+        }
+
+        // 5. Render Serial-Wise Compact Directory (S. No., Name, CV ID Only)
+        function getFilteredApplications() {
+            const scope = document.getElementById('view-scope-filter').value;
+            const query = document.getElementById('quick-search-input').value.trim().toLowerCase();
+            const searchableFields = formSchemaFields.filter(f => f.searchable).map(f => f.label);
+
+            return pendingApplications.filter(app => {
+                const statusLower = String(app.status || 'pending').toLowerCase();
+                if (scope === 'MY_DELEGATED' && String(app.assignedToEmail || '').toLowerCase() !== currentActor.email) return false;
+                if (scope === 'UNASSIGNED' && app.assignedToEmail) return false;
+                if (scope === 'ON_HOLD' && statusLower !== 'on_hold' && statusLower !== 'on hold') return false;
+
+                // Dynamic form filterable dropdowns
+                for (const f of formSchemaFields.filter(item => item.filterable)) {
+                    const filterEl = document.getElementById(`dyn-filter-${f.label}`);
+                    if (filterEl && filterEl.value) {
+                        const rawVal = (app.details || {})[f.label];
+                        if (Array.isArray(rawVal)) {
+                            if (!rawVal.map(v => v.trim()).includes(filterEl.value)) return false;
+                        } else if (String(rawVal || '').trim() !== filterEl.value) {
+                            return false;
+                        }
+                    }
+                }
+
+                // Quick search across CV ID, Name, Email, Mobile + all Form Builder searchable fields
+                if (query) {
+                    const haystack = [
+                        app.cvId || app.id,
+                        getApplicantName(app),
+                        app.email,
+                        app.mobile,
+                        ...searchableFields.map(lbl => {
+                            const v = (app.details || {})[lbl];
+                            return Array.isArray(v) ? v.join(' ') : String(v || '');
+                        })
+                    ].join(' ').toLowerCase();
+                    if (!haystack.includes(query)) return false;
+                }
+
+                return true;
+            });
+        }
+
+        function renderSerialTable() {
+            const tbody = document.getElementById('serial-table-body');
+            const filtered = getFilteredApplications();
+            document.getElementById('visible-count').textContent = filtered.length;
+            updateSelectedPill();
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="p-12 text-center text-slate-400 font-black uppercase text-xs tracking-widest">No matching pending applications found.</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = filtered.map((app, index) => {
+                const serialNo = index + 1;
+                const name = getApplicantName(app);
+                const cvId = app.cvId || app.id;
+                const isChecked = selectedAppIds.has(app.id);
+
+                return `
+                    <tr onclick="openCandidateModal('${escapeHtml(app.id)}')" class="hover:bg-blue-50/70 transition-colors cursor-pointer ${isChecked ? 'bg-blue-50/50' : ''}">
+                        <td class="p-4 text-center" onclick="event.stopPropagation()">
+                            <input type="checkbox" ${isChecked ? 'checked' : ''} onchange="toggleSingleCheckbox('${escapeHtml(app.id)}', this.checked)" class="w-4 h-4 accent-blue-600 rounded cursor-pointer">
+                        </td>
+                        <td class="p-4 font-black text-slate-500 text-xs sm:text-sm">${serialNo}</td>
+                        <td class="p-4 font-extrabold text-slate-900 text-sm sm:text-base">${escapeHtml(name)}</td>
+                        <td class="p-4">
+                            <span class="px-3 py-1 rounded-full text-xs font-black bg-indigo-50 text-indigo-700 border border-indigo-200 tracking-wider">
+                                ${escapeHtml(cvId)}
+                            </span>
+                        </td>
+                        <td class="p-4 text-right">
+                            <button type="button" onclick="event.stopPropagation(); openCandidateModal('${escapeHtml(app.id)}')" class="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-blue-700 text-white font-black text-[10px] uppercase tracking-widest transition-colors">
+                                Open Grid
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function toggleSingleCheckbox(appId, checked) {
+            if (checked) selectedAppIds.add(appId);
+            else selectedAppIds.delete(appId);
+            updateSelectedPill();
+        }
+
+        function toggleSelectAllVisible(checked) {
+            const visible = getFilteredApplications();
+            visible.forEach(app => {
+                if (checked) selectedAppIds.add(app.id);
+                else selectedAppIds.delete(app.id);
+            });
+            renderSerialTable();
+        }
+
+        function updateSelectedPill() {
+            document.getElementById('selected-count-pill').textContent = `${selectedAppIds.size} Application${selectedAppIds.size === 1 ? '' : 's'} Selected`;
+        }
+
+        // 6. Bulk Delegation from Top Panel
+        async function bulkDelegateSelected() {
+            if (selectedAppIds.size === 0) return alert('Select at least one application checkbox first.');
+            const staffEmail = document.getElementById('del-staff').value;
+            const roundType = document.getElementById('del-round').value;
+            const branchName = document.getElementById('del-branch').value;
+            if (!staffEmail) return alert('Please select a registered staff member to delegate.');
+
+            const targetStaff = registeredStaffList.find(s => s.email === staffEmail);
+            const batch = db.batch();
+            const logEntry = {
+                at: new Date().toISOString(),
+                actor: currentActor.name,
+                role: currentActor.role,
+                action: `Delegated to ${roundType} Round`,
+                remarks: `Assigned to ${targetStaff ? targetStaff.name : staffEmail}${branchName ? ' (' + branchName + ')' : ''}`
+            };
+
+            selectedAppIds.forEach(appId => {
+                const ref = db.collection('staff_applications').doc(appId);
+                batch.update(ref, {
+                    stage: roundType,
+                    status: roundType === 'HR' ? 'hr_round' : 'interview_assigned',
+                    assignedToEmail: staffEmail,
+                    assignedToName: targetStaff ? targetStaff.name : staffEmail,
+                    assignedBranch: branchName || (targetStaff ? targetStaff.branch : ''),
+                    history: firebase.firestore.FieldValue.arrayUnion(logEntry)
+                });
+            });
+
+            await batch.commit();
+            selectedAppIds.clear();
+            document.getElementById('master-checkbox').checked = false;
+            alert(`✅ Delegated to ${targetStaff ? targetStaff.name : staffEmail} (${roundType} Round).`);
+            await loadApplicationsAndStaff();
+        }
+
+        // 7. Responsive Candidate Detail Grid Modal
+        function openCandidateModal(appId) {
+            const app = pendingApplications.find(a => a.id === appId);
+            if (!app) return;
+            activeModalAppId = appId;
+
+            const name = getApplicantName(app);
+            const cvId = app.cvId || app.id;
+            const stage = app.stage || 'New';
+            const status = app.status || 'pending';
+
+            document.getElementById('m-cand-name').textContent = name;
+            document.getElementById('m-cand-cvid').textContent = cvId;
+            document.getElementById('m-cand-sub').textContent = `Stage: ${stage} • Status: ${String(status).toUpperCase()}`;
+            document.getElementById('m-current-assignee').textContent = app.assignedToName
+                ? `Assigned: ${app.assignedToName} (${app.stage || 'Academic'})`
+                : 'Unassigned';
+
+            // Quick Contact Cards
+            const cleanMobile = String(app.mobile || '').replace(/\D/g, '');
+            document.getElementById('m-quick-actions').innerHTML = `
+                <a href="tel:${cleanMobile}" class="p-3.5 rounded-2xl bg-blue-50 border border-blue-200 text-blue-800 font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-blue-100">
+                    📞 Call: ${escapeHtml(app.mobile || 'N/A')}
+                </a>
+                <a href="https://wa.me/91${cleanMobile}" target="_blank" class="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-800 font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-emerald-100">
+                    💬 WhatsApp Candidate
+                </a>
+                <a href="mailto:${escapeHtml(app.email || '')}" class="p-3.5 rounded-2xl bg-slate-100 border border-slate-200 text-slate-800 font-black text-xs uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-slate-200 truncate">
+                    ✉️ ${escapeHtml(app.email || 'No Email')}
+                </a>
+            `;
+
+            // Responsive Profile Grid (1 col mobile, 2 col tablet, 3 col laptop)
+            const details = app.details || {};
+            const gridCards = [];
+
+            gridCards.push(`
+                <div class="p-4 rounded-2xl bg-slate-50 border border-slate-200">
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">Application ID</p>
+                    <p class="text-sm font-black text-indigo-700 mt-1">${escapeHtml(cvId)}</p>
+                </div>
+                <div class="p-4 rounded-2xl bg-slate-50 border border-slate-200">
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">Email Address</p>
+                    <p class="text-sm font-bold text-slate-900 mt-1 break-all">${escapeHtml(app.email || '—')}</p>
+                </div>
+                <div class="p-4 rounded-2xl bg-slate-50 border border-slate-200">
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">Mobile Number</p>
+                    <p class="text-sm font-bold text-slate-900 mt-1">${escapeHtml(app.mobile || '—')}</p>
+                </div>
+            `);
+
+            Object.entries(details).forEach(([key, val]) => {
+                let displayHtml = '';
+                if (val && typeof val === 'object' && !Array.isArray(val) && val.url) {
+                    displayHtml = `<a href="${escapeHtml(val.url)}" target="_blank" class="inline-block mt-1 px-3 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-black uppercase tracking-wider">Open Attached File (${escapeHtml(val.format || 'File')})</a>`;
+                } else if (Array.isArray(val)) {
+                    displayHtml = val.length > 0
+                        ? `<ul class="mt-1 space-y-1 text-xs sm:text-sm font-bold text-slate-800 list-disc pl-4">${val.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+                        : `<p class="text-sm font-bold text-slate-400 mt-1">—</p>`;
+                } else if (typeof val === 'string' && val.startsWith('http')) {
+                    displayHtml = `<a href="${escapeHtml(val)}" target="_blank" class="text-sm font-bold text-blue-600 underline break-all mt-1 block">${escapeHtml(val)}</a>`;
+                } else {
+                    displayHtml = `<p class="text-sm font-bold text-slate-800 mt-1 break-words">${escapeHtml(val || '—')}</p>`;
+                }
+
+                gridCards.push(`
+                    <div class="p-4 rounded-2xl bg-slate-50 border border-slate-200">
+                        <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">${escapeHtml(key)}</p>
+                        ${displayHtml}
+                    </div>
+                `);
+            });
+
+            document.getElementById('m-profile-grid').innerHTML = gridCards.join('');
+
+            // Pre-fill routing selects
+            const appBranch = getApplicantBranch(app);
+            document.getElementById('m-route-branch').value = branchesList.some(b => b.name === appBranch) ? appBranch : (branchesList[0]?.name || '');
+            document.getElementById('hr-allotted-branch').value = document.getElementById('m-route-branch').value;
+            document.getElementById('m-route-type').value = app.stage === 'HR' ? 'HR' : 'Academic';
+            toggleRouteSpecificOptions();
+            populateModalStaffDropdown(app.assignedToEmail || '');
+
+            // Pre-fill existing scorecard if present
+            const scores = Array.isArray(app.demoScores) ? app.demoScores : [];
+            for (let i = 1; i <= 7; i++) {
+                document.getElementById(`sc-${i}`).value = scores[i - 1] !== undefined ? scores[i - 1] : '';
+            }
+            recalcDemoScore();
+            document.getElementById('sc-remarks').value = app.demoRemarks || '';
+            document.getElementById('demo-meet-link').value = app.meetLink || '';
+            document.getElementById('hr-package').value = app.package || '';
+            document.getElementById('hr-joining-date').value = app.joiningDate || '';
+            document.getElementById('hr-final-remarks').value = app.hrRemarks || '';
+
+            // Render Audit History
+            const hist = Array.isArray(app.history) ? [...app.history].reverse() : [];
+            document.getElementById('m-history-list').innerHTML = hist.length === 0
+                ? `<p class="text-center py-10 text-xs font-black uppercase tracking-widest text-slate-400">No workflow actions recorded yet.</p>`
+                : hist.map(h => `
+                    <div class="p-4 rounded-2xl bg-slate-50 border-l-4 border-indigo-600">
+                        <div class="flex justify-between items-center text-xs font-black text-slate-800">
+                            <span>${escapeHtml(h.action || 'Action')}</span>
+                            <span class="text-[10px] text-slate-400">${h.at ? new Date(h.at).toLocaleString('en-IN') : ''}</span>
+                        </div>
+                        <p class="text-[11px] font-bold text-indigo-600 mt-0.5">By: ${escapeHtml(h.actor || 'System')} (${escapeHtml(h.role || '')})</p>
+                        <p class="text-xs font-semibold text-slate-700 mt-1 whitespace-pre-wrap">${escapeHtml(h.remarks || '')}</p>
+                    </div>
+                `).join('');
+
+            switchModalTab('profile');
+            document.getElementById('candidate-modal').classList.remove('hidden');
+        }
+
+        function closeCandidateModal() {
+            document.getElementById('candidate-modal').classList.add('hidden');
+            activeModalAppId = null;
+        }
+
+        function switchModalTab(tabKey) {
+            document.querySelectorAll('.modal-tab-pane').forEach(p => p.classList.add('hidden'));
+            document.querySelectorAll('.modal-tab-btn').forEach(b => {
+                b.classList.remove('bg-white', 'text-blue-700', 'border-t', 'border-x', 'border-slate-200');
+                b.classList.add('text-slate-600');
+            });
+            document.getElementById(`tab-pane-${tabKey}`).classList.remove('hidden');
+            const activeBtn = document.getElementById(`tab-btn-${tabKey}`);
+            activeBtn.classList.add('bg-white', 'text-blue-700', 'border-t', 'border-x', 'border-slate-200');
+            activeBtn.classList.remove('text-slate-600');
+        }
+
+        function toggleRouteSpecificOptions() {
+            const isAcademic = document.getElementById('m-route-type').value === 'Academic';
+            document.getElementById('m-academic-perms-box').classList.toggle('hidden', !isAcademic);
+        }
+
+        function populateModalStaffDropdown(preselectEmail = '') {
+            const branchVal = document.getElementById('m-route-branch').value;
+            const deptVal = document.getElementById('m-route-dept').value;
+            const matches = filterRegisteredStaff(branchVal, deptVal);
+            const sel = document.getElementById('m-route-staff');
+            sel.innerHTML = `<option value="">-- Select Staff Member (${matches.length}) --</option>` +
+                matches.map(s => `<option value="${escapeHtml(s.email)}">${escapeHtml(s.name)} (${escapeHtml(s.dept)})</option>`).join('');
+            if (preselectEmail) sel.value = preselectEmail;
+        }
+
+        // 8. Save Single Delegation (Academic OR Direct HR)
+        async function saveSingleDelegation() {
+            if (!activeModalAppId) return;
+            const routeType = document.getElementById('m-route-type').value;
+            const branchName = document.getElementById('m-route-branch').value;
+            const staffEmail = document.getElementById('m-route-staff').value;
+            const note = document.getElementById('m-route-note').value.trim();
+
+            if (!staffEmail) return alert('Please choose a registered staff member to delegate.');
+            const targetStaff = registeredStaffList.find(s => s.email === staffEmail);
+
+            const perms = [];
+            if (document.getElementById('perm-contact').checked) perms.push('Contact');
+            if (document.getElementById('perm-addr').checked) perms.push('Address');
+            if (document.getElementById('perm-exp').checked) perms.push('Experience');
+
+            const logEntry = {
+                at: new Date().toISOString(),
+                actor: currentActor.name,
+                role: currentActor.role,
+                action: routeType === 'HR' ? 'Sent Directly to HR Round' : 'Delegated to Academic Round',
+                remarks: `Assigned to ${targetStaff ? targetStaff.name : staffEmail} (${branchName})${note ? ' — ' + note : ''}`
+            };
+
+            await db.collection('staff_applications').doc(activeModalAppId).update({
+                stage: routeType,
+                status: routeType === 'HR' ? 'hr_round' : 'interview_assigned',
+                assignedToEmail: staffEmail,
+                assignedToName: targetStaff ? targetStaff.name : staffEmail,
+                assignedBranch: branchName,
+                interviewerPerms: perms,
+                history: firebase.firestore.FieldValue.arrayUnion(logEntry)
+            });
+
+            alert(`✅ Delegated to ${targetStaff ? targetStaff.name : staffEmail} (${routeType} Round).`);
+            await loadApplicationsAndStaff();
+            openCandidateModal(activeModalAppId);
+        }
+
+        // 9. Academic Demo Helpers & 7-Parameter Scorecard
+        function toggleDemoSubMode(mode) {
+            document.getElementById('demo-later-box').classList.toggle('hidden', mode !== 'later');
+            document.getElementById('demo-now-box').classList.toggle('hidden', mode !== 'now');
+        }
+
+        function toggleMeetLinkBox() {
+            const isOnline = document.getElementById('demo-mode').value === 'Online';
+            document.getElementById('demo-meet-box').classList.toggle('hidden', !isOnline);
+        }
+
+        function shareMeetLink(channel) {
+            const app = pendingApplications.find(a => a.id === activeModalAppId);
+            const link = document.getElementById('demo-meet-link').value.trim();
+            if (!app || !link) return alert('Enter a valid meeting link first.');
+            const msg = `Hello ${getApplicantName(app)}, please join your Minerva Study Circle demo/interview (${app.cvId || app.id}): ${link}`;
+            if (channel === 'wa') {
+                const mob = String(app.mobile || '').replace(/\D/g, '');
+                window.open(`https://wa.me/91${mob}?text=${encodeURIComponent(msg)}`, '_blank');
+            } else {
+                window.open(`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(app.email || '')}&su=${encodeURIComponent('Minerva Demo Interview Link')}&body=${encodeURIComponent(msg)}`, '_blank');
             }
         }
 
-        loadRequests();
+        function recalcDemoScore() {
+            let total = 0;
+            for (let i = 1; i <= 7; i++) {
+                const el = document.getElementById(`sc-${i}`);
+                let val = Number(el.value || 0);
+                if (val < 0) val = 0;
+                if (val > 10) val = 10;
+                if (el.value !== '') el.value = val;
+                total += val;
+            }
+            document.getElementById('sc-total').textContent = total;
+            return total;
+        }
+
+        function copyLastScorecard() {
+            const app = pendingApplications.find(a => a.id === activeModalAppId);
+            if (!app || !Array.isArray(app.demoScores) || app.demoScores.length === 0) {
+                return alert('No previous scorecard saved for this applicant.');
+            }
+            app.demoScores.forEach((v, idx) => {
+                const el = document.getElementById(`sc-${idx + 1}`);
+                if (el) el.value = v;
+            });
+            recalcDemoScore();
+            alert('Copied previous scorecard values.');
+        }
+
+        async function saveDemoScheduleLater() {
+            if (!activeModalAppId) return;
+            const dt = document.getElementById('demo-sched-date').value;
+            const note = document.getElementById('demo-sched-note').value.trim();
+            if (!dt) return alert('Select a scheduled date.');
+
+            const logEntry = {
+                at: new Date().toISOString(),
+                actor: currentActor.name,
+                role: currentActor.role,
+                action: 'Academic Demo Scheduled',
+                remarks: `Date: ${dt}${note ? ' | ' + note : ''}`
+            };
+
+            await db.collection('staff_applications').doc(activeModalAppId).update({
+                stage: 'Academic',
+                status: 'demo_scheduled',
+                scheduledDate: dt,
+                history: firebase.firestore.FieldValue.arrayUnion(logEntry)
+            });
+
+            alert('✅ Demo schedule saved in Firestore.');
+            await loadApplicationsAndStaff();
+            openCandidateModal(activeModalAppId);
+        }
+
+        async function completeAcademicRound(outcome) {
+            if (!activeModalAppId) return;
+            const scores = [];
+            for (let i = 1; i <= 7; i++) scores.push(Number(document.getElementById(`sc-${i}`).value || 0));
+            const total = recalcDemoScore();
+            const mode = document.getElementById('demo-mode').value;
+            const meetLink = document.getElementById('demo-meet-link').value.trim();
+            const remarks = document.getElementById('sc-remarks').value.trim();
+            const nextHrEmail = document.getElementById('demo-next-hr').value;
+
+            if (outcome === 'RECOMMEND_HR' && !nextHrEmail) {
+                return alert('Please select the HR / Final Approver to delegate this candidate to.');
+            }
+            if ((outcome === 'REJECT' || outcome === 'HOLD') && !remarks) {
+                return alert('Please enter remarks before putting on hold or rejecting.');
+            }
+
+            const hrStaff = registeredStaffList.find(s => s.email === nextHrEmail);
+            const scoreSummary = `[DEMO ${mode}] Scores: ${scores.join(',')} | Total: ${total}/70${remarks ? ' | Remarks: ' + remarks : ''}`;
+
+            const updatePayload = {
+                demoScores: scores,
+                demoTotal: total,
+                demoMode: mode,
+                meetLink: outcome === 'RECOMMEND_HR' ? '' : meetLink,
+                demoRemarks: remarks
+            };
+
+            if (outcome === 'RECOMMEND_HR') {
+                updatePayload.stage = 'HR';
+                updatePayload.status = 'hr_round';
+                updatePayload.assignedToEmail = nextHrEmail;
+                updatePayload.assignedToName = hrStaff ? hrStaff.name : nextHrEmail;
+                updatePayload.history = firebase.firestore.FieldValue.arrayUnion({
+                    at: new Date().toISOString(),
+                    actor: currentActor.name,
+                    role: currentActor.role,
+                    action: 'Academic Demo Passed → Sent to HR',
+                    remarks: `${scoreSummary}\nDelegated to HR: ${hrStaff ? hrStaff.name : nextHrEmail}`
+                });
+            } else if (outcome === 'HOLD') {
+                updatePayload.status = 'on_hold';
+                updatePayload.history = firebase.firestore.FieldValue.arrayUnion({
+                    at: new Date().toISOString(),
+                    actor: currentActor.name,
+                    role: currentActor.role,
+                    action: 'Academic Round → On Hold',
+                    remarks: scoreSummary
+                });
+            } else {
+                updatePayload.stage = 'Rejected';
+                updatePayload.status = 'rejected';
+                updatePayload.history = firebase.firestore.FieldValue.arrayUnion({
+                    at: new Date().toISOString(),
+                    actor: currentActor.name,
+                    role: currentActor.role,
+                    action: 'Academic Round → Rejected',
+                    remarks: scoreSummary
+                });
+            }
+
+            await db.collection('staff_applications').doc(activeModalAppId).update(updatePayload);
+            alert('✅ Academic round evaluation saved.');
+            await loadApplicationsAndStaff();
+            if (outcome === 'REJECT') closeCandidateModal();
+            else openCandidateModal(activeModalAppId);
+        }
+
+        // 10. HR / Final Approval (Moves Applicant to Approved Staff List in Firestore)
+        async function finalHrDecision(decision) {
+            if (!activeModalAppId) return;
+            const app = pendingApplications.find(a => a.id === activeModalAppId);
+            if (!app) return;
+
+            const offerStatus = document.getElementById('hr-offer-status').value;
+            const pkg = document.getElementById('hr-package').value.trim();
+            const joiningDate = document.getElementById('hr-joining-date').value;
+            const allottedBranch = document.getElementById('hr-allotted-branch').value;
+            const hrRemarks = document.getElementById('hr-final-remarks').value.trim();
+
+            if (decision === 'APPROVED') {
+                if (!pkg || !joiningDate) {
+                    return alert('Please enter Salary / Package and Joining Date before final approval.');
+                }
+                if (!confirm(`Approve ${getApplicantName(app)} and add to Faculty Hub (${allottedBranch})?`)) return;
+
+                // Preserve all registration details & sync allotted centre/branch so staff-list.html displays them cleanly
+                const updatedDetails = { ...(app.details || {}) };
+                const centreKey = Object.keys(updatedDetails).find(k => k.toLowerCase().includes('cent'));
+                const branchKey = Object.keys(updatedDetails).find(k => k.toLowerCase().includes('branch'));
+                if (centreKey) updatedDetails[centreKey] = allottedBranch;
+                else updatedDetails['Centre'] = allottedBranch;
+                if (branchKey) updatedDetails[branchKey] = allottedBranch;
+
+                updatedDetails['Package'] = pkg;
+                updatedDetails['Joining Date'] = joiningDate;
+
+                await db.collection('staff_applications').doc(activeModalAppId).update({
+                    status: 'approved',
+                    stage: 'Approved',
+                    offerStatus,
+                    package: pkg,
+                    joiningDate,
+                    allottedBranch,
+                    hrRemarks,
+                    details: updatedDetails,
+                    approvedOn: firebase.firestore.FieldValue.serverTimestamp(),
+                    approvedBy: currentActor.email,
+                    history: firebase.firestore.FieldValue.arrayUnion({
+                        at: new Date().toISOString(),
+                        actor: currentActor.name,
+                        role: currentActor.role,
+                        action: 'Final Approved → Added to Staff List',
+                        remarks: `Branch: ${allottedBranch} | Package: ${pkg} | Joining: ${joiningDate}${hrRemarks ? ' | ' + hrRemarks : ''}`
+                    })
+                });
+
+                alert(`🎉 ${getApplicantName(app)} is now APPROVED and active in the Faculty Hub!`);
+                closeCandidateModal();
+                await loadApplicationsAndStaff();
+                return;
+            }
+
+            if (decision === 'ON_HOLD') {
+                await db.collection('staff_applications').doc(activeModalAppId).update({
+                    stage: 'HR',
+                    status: 'on_hold',
+                    offerStatus,
+                    package: pkg,
+                    joiningDate,
+                    hrRemarks,
+                    history: firebase.firestore.FieldValue.arrayUnion({
+                        at: new Date().toISOString(),
+                        actor: currentActor.name,
+                        role: currentActor.role,
+                        action: 'HR Round → On Hold',
+                        remarks: hrRemarks || 'Placed on hold by HR'
+                    })
+                });
+                alert('Application placed On Hold.');
+                await loadApplicationsAndStaff();
+                openCandidateModal(activeModalAppId);
+                return;
+            }
+
+            if (decision === 'REJECTED') {
+                if (!hrRemarks) return alert('Please enter a rejection reason in HR remarks.');
+                if (!confirm('Reject this application?')) return;
+                await db.collection('staff_applications').doc(activeModalAppId).update({
+                    stage: 'Rejected',
+                    status: 'rejected',
+                    hrRemarks,
+                    history: firebase.firestore.FieldValue.arrayUnion({
+                        at: new Date().toISOString(),
+                        actor: currentActor.name,
+                        role: currentActor.role,
+                        action: 'HR Round → Rejected',
+                        remarks: hrRemarks
+                    })
+                });
+                alert('Application marked as Rejected.');
+                closeCandidateModal();
+                await loadApplicationsAndStaff();
+            }
+        }
+
+        // Boot
+        (async function initPage() {
+            await loadDynamicBranches();
+            await loadFormConfig();
+            await loadApplicationsAndStaff();
+        })();
     </script>
 </body>
 </html>
