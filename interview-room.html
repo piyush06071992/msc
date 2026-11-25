@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minerva Live Demo & Interview Room</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #0f172a; color: #f8fafc; }
+        #whiteboard-canvas { touch-action: none; cursor: crosshair; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col overflow-x-hidden">
+
+    <!-- Top Control Bar -->
+    <header class="bg-slate-900 border-b border-slate-800 px-4 py-3 flex flex-wrap items-center justify-between gap-3 shrink-0">
+        <div class="flex items-center gap-3">
+            <span class="w-3 h-3 rounded-full bg-emerald-400 animate-pulse"></span>
+            <div>
+                <h1 class="text-sm sm:text-base font-black uppercase tracking-wider text-white leading-none">
+                    Minerva Live Demo Room <span id="room-cvid-badge" class="ml-1.5 px-2.5 py-0.5 rounded-full bg-indigo-600 text-[11px]">---</span>
+                </h1>
+                <p id="room-status-text" class="text-[11px] font-bold text-slate-400 mt-1">Initializing camera & room...</p>
+            </div>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+            <button id="btn-toggle-mic" onclick="toggleMic()" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-black uppercase tracking-wider">🎤 Mic On</button>
+            <button id="btn-toggle-cam" onclick="toggleCam()" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-black uppercase tracking-wider">📷 Cam On</button>
+            <button id="btn-share-screen" onclick="toggleScreenShare()" class="px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-xs font-black uppercase tracking-wider">🖥️ Share Screen</button>
+            <button id="btn-copy-invite" onclick="copyCandidateInvite()" class="hidden px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-black uppercase tracking-wider">🔗 Copy Applicant Link</button>
+            <button onclick="leaveOrEndRoom()" class="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-xs font-black uppercase tracking-wider">End / Leave</button>
+        </div>
+    </header>
+
+    <!-- Main Split Workspace: Video Feeds + Synchronized Handwriting Board -->
+    <main class="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4">
+
+        <!-- Left Column: Video & Screen Share -->
+        <section class="lg:col-span-5 flex flex-col gap-4">
+            <div class="relative bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden aspect-video shadow-xl">
+                <video id="remote-video" autoplay playsinline class="w-full h-full object-contain bg-black"></video>
+                <span id="remote-label" class="absolute bottom-3 left-3 px-3 py-1 rounded-lg bg-slate-900/80 text-[11px] font-black uppercase tracking-wider">Waiting for participant...</span>
+            </div>
+
+            <div class="relative bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden aspect-video shadow-xl">
+                <video id="local-video" autoplay muted playsinline class="w-full h-full object-cover"></video>
+                <span id="local-label" class="absolute bottom-3 left-3 px-3 py-1 rounded-lg bg-indigo-900/85 text-[11px] font-black uppercase tracking-wider">You</span>
+            </div>
+        </section>
+
+        <!-- Right Column: Live Synchronized Handwriting Whiteboard (Mouse / Touch / Stylus) -->
+        <section class="lg:col-span-7 bg-white rounded-2xl border border-slate-300 shadow-xl flex flex-col overflow-hidden min-h-[420px]">
+            <div class="bg-slate-100 border-b border-slate-200 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-slate-900">
+                <div class="flex items-center gap-2">
+                    <span class="text-xs font-black uppercase tracking-wider text-slate-700">✍️ Live Demo Board</span>
+                    <button onclick="setPenTool('#0f172a', 3)" class="w-6 h-6 rounded-full bg-slate-900 border-2 border-white shadow" title="Black Pen"></button>
+                    <button onclick="setPenTool('#2563eb', 3)" class="w-6 h-6 rounded-full bg-blue-600 border-2 border-white shadow" title="Blue Pen"></button>
+                    <button onclick="setPenTool('#dc2626', 3)" class="w-6 h-6 rounded-full bg-red-600 border-2 border-white shadow" title="Red Pen"></button>
+                    <button onclick="setPenTool('#16a34a', 3)" class="w-6 h-6 rounded-full bg-green-600 border-2 border-white shadow" title="Green Pen"></button>
+                    <button onclick="setPenTool('#ffffff', 22)" class="px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-[10px] font-black uppercase">Eraser</button>
+                </div>
+
+                <div class="flex items-center gap-2">
+                    <button onclick="clearBoardAll()" class="px-3 py-1 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-800 text-[10px] font-black uppercase tracking-wider">Clear Board</button>
+                </div>
+            </div>
+
+            <div class="relative flex-1 bg-white">
+                <canvas id="whiteboard-canvas" class="w-full h-full block"></canvas>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const firebaseConfig = {
+            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
+            authDomain: "shop-portal-bbbbb.firebaseapp.com",
+            projectId: "shop-portal-bbbbb",
+            storageBucket: "shop-portal-bbbbb.firebasestorage.app",
+            messagingSenderId: "701377739976",
+            appId: "1:701377739976:web:99998220272090e56e79fd"
+        };
+        if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        const params = new URLSearchParams(window.location.search);
+        const cvId = (params.get('cvId') || '').trim();
+        const roomKey = (params.get('key') || '').trim();
+        const isHost = params.get('role') === 'host';
+        const hostName = params.get('hostName') || 'Interviewer';
+
+        if (!cvId || !roomKey) {
+            alert('Invalid or missing room link parameters.');
+            window.location.replace('index.html');
+        }
+
+        const roomId = `${cvId}_${roomKey}`;
+        const roomRef = db.collection('interview_rooms').doc(roomId);
+        document.getElementById('room-cvid-badge').textContent = cvId;
+        document.getElementById('local-label').textContent = isHost ? `${hostName} (Host)` : `Applicant (${cvId})`;
+        if (isHost) document.getElementById('btn-copy-invite').classList.remove('hidden');
+
+        // WebRTC Setup (1-on-1 isolated per roomId)
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+        let pc = new RTCPeerConnection(rtcConfig);
+        let localStream = null;
+        let screenStream = null;
+        let isMicEnabled = true;
+        let isCamEnabled = true;
+        let isScreenSharing = false;
+
+        async function initMediaAndSignaling() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            } catch (e) {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true }).catch(() => new MediaStream());
+            }
+
+            document.getElementById('local-video').srcObject = localStream;
+            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+            const remoteStream = new MediaStream();
+            document.getElementById('remote-video').srcObject = remoteStream;
+            pc.ontrack = event => {
+                event.streams[0].getTracks().forEach(track => remoteStream.addTrack(track));
+                document.getElementById('remote-label').textContent = isHost ? `Applicant (${cvId})` : hostName;
+                document.getElementById('room-status-text').textContent = 'Connected Live';
+            };
+
+            if (isHost) {
+                await setupHostSignaling();
+            } else {
+                await setupGuestSignaling();
+            }
+        }
+
+        async function setupHostSignaling() {
+            document.getElementById('room-status-text').textContent = 'Waiting for applicant to open their link...';
+            const offerCandidates = roomRef.collection('offerCandidates');
+            const answerCandidates = roomRef.collection('answerCandidates');
+
+            pc.onicecandidate = event => {
+                if (event.candidate) offerCandidates.add(event.candidate.toJSON());
+            };
+
+            const offerDesc = await pc.createOffer();
+            await pc.setLocalDescription(offerDesc);
+
+            await roomRef.set({
+                cvId,
+                roomKey,
+                hostName,
+                offer: { sdp: offerDesc.sdp, type: offerDesc.type },
+                createdAt: Date.now()
+            });
+
+            roomRef.onSnapshot(snap => {
+                const data = snap.data();
+                if (!pc.currentRemoteDescription && data && data.answer) {
+                    pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                }
+            });
+
+            answerCandidates.onSnapshot(snap => {
+                snap.docChanges().forEach(change => {
+                    if (change.type === 'added') {
+                        pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(() => {});
+                    }
+                });
+            });
+        }
+
+        async function setupGuestSignaling() {
+            document.getElementById('room-status-text').textContent = 'Connecting to interviewer...';
+            const roomSnap = await roomRef.get();
+            if (!roomSnap.exists || !roomSnap.data().offer) {
+                document.getElementById('room-status-text').textContent = 'Waiting for interviewer to start room...';
+                roomRef.onSnapshot(async snap => {
+                    if (snap.exists && snap.data().offer && !pc.currentRemoteDescription) {
+                        await completeGuestAnswer(snap.data().offer);
+                    }
+                });
+                return;
+            }
+            await completeGuestAnswer(roomSnap.data().offer);
+        }
+
+        async function completeGuestAnswer(offer) {
+            const offerCandidates = roomRef.collection('offerCandidates');
+            const answerCandidates = roomRef.collection('answerCandidates');
+
+            pc.onicecandidate = event => {
+                if (event.candidate) answerCandidates.add(event.candidate.toJSON());
+            };
+
+            await pc.setRemoteDescription(new RTCSessionDescription(offer));
+            const answerDesc = await pc.createAnswer();
+            await pc.setLocalDescription(answerDesc);
+
+            await roomRef.update({
+                answer: { type: answerDesc.type, sdp: answerDesc.sdp }
+            });
+
+            offerCandidates.onSnapshot(snap => {
+                snap.docChanges().forEach(change => {
+                    if (change.type === 'added') {
+                        pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(() => {});
+                    }
+                });
+            });
+        }
+
+        function toggleMic() {
+            isMicEnabled = !isMicEnabled;
+            localStream.getAudioTracks().forEach(t => t.enabled = isMicEnabled);
+            document.getElementById('btn-toggle-mic').textContent = isMicEnabled ? '🎤 Mic On' : '🔇 Mic Muted';
+        }
+
+        function toggleCam() {
+            isCamEnabled = !isCamEnabled;
+            localStream.getVideoTracks().forEach(t => t.enabled = isCamEnabled);
+            document.getElementById('btn-toggle-cam').textContent = isCamEnabled ? '📷 Cam On' : '🚫 Cam Off';
+        }
+
+        async function toggleScreenShare() {
+            const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+            if (!isScreenSharing) {
+                try {
+                    screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+                    const screenTrack = screenStream.getVideoTracks()[0];
+                    if (videoSender) await videoSender.replaceTrack(screenTrack);
+                    document.getElementById('local-video').srcObject = screenStream;
+                    isScreenSharing = true;
+                    document.getElementById('btn-share-screen').textContent = '🛑 Stop Share';
+                    screenTrack.onended = () => { if (isScreenSharing) toggleScreenShare(); };
+                } catch (e) { console.error(e); }
+            } else {
+                const camTrack = localStream.getVideoTracks()[0];
+                if (videoSender && camTrack) await videoSender.replaceTrack(camTrack);
+                document.getElementById('local-video').srcObject = localStream;
+                if (screenStream) screenStream.getTracks().forEach(t => t.stop());
+                isScreenSharing = false;
+                document.getElementById('btn-share-screen').textContent = '🖥️ Share Screen';
+            }
+        }
+
+        function copyCandidateInvite() {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('role');
+            url.searchParams.delete('hostName');
+            navigator.clipboard.writeText(url.toString());
+            alert('✅ Applicant link copied to clipboard.');
+        }
+
+        async function leaveOrEndRoom() {
+            if (localStream) localStream.getTracks().forEach(t => t.stop());
+            if (screenStream) screenStream.getTracks().forEach(t => t.stop());
+            pc.close();
+
+            if (isHost) {
+                // Clean up temporary signaling & whiteboard strokes for this room
+                const strokesSnap = await roomRef.collection('strokes').get();
+                const batch = db.batch();
+                strokesSnap.forEach(d => batch.delete(d.ref));
+                batch.delete(roomRef);
+                await batch.commit().catch(() => {});
+                await db.collection('staff_applications').doc(cvId).update({ roomActive: false }).catch(() => {});
+            }
+            window.close();
+        }
+
+        // Synchronized Handwriting Whiteboard (Normalized 0..1 coordinates so mobile & laptop align)
+        const canvas = document.getElementById('whiteboard-canvas');
+        const ctx = canvas.getContext('2d');
+        let penColor = '#0f172a';
+        let penSize = 3;
+        let drawing = false;
+        let currentStroke = [];
+        let flushTimer = null;
+
+        function resizeCanvas() {
+            const rect = canvas.parentElement.getBoundingClientRect();
+            const imgData = canvas.width > 0 ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            if (imgData) ctx.putImageData(imgData, 0, 0);
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        function setPenTool(color, size) {
+            penColor = color;
+            penSize = size;
+        }
+
+        function getNormCoords(e) {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            return {
+                x: Number(((clientX - rect.left) / rect.width).toFixed(4)),
+                y: Number(((clientY - rect.top) / rect.height).toFixed(4))
+            };
+        }
+
+        function drawSegment(pts, color, size) {
+            if (!pts || pts.length < 2) return;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = size;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x * canvas.width, pts[0].y * canvas.height);
+            for (let i = 1; i < pts.length; i++) {
+                ctx.lineTo(pts[i].x * canvas.width, pts[i].y * canvas.height);
+            }
+            ctx.stroke();
+        }
+
+        function flushStrokeBatch() {
+            if (currentStroke.length < 2) return;
+            const ptsToSend = [...currentStroke];
+            currentStroke = [ptsToSend[ptsToSend.length - 1]];
+            roomRef.collection('strokes').add({
+                pts: ptsToSend,
+                color: penColor,
+                size: penSize,
+                ts: Date.now()
+            }).catch(() => {});
+        }
+
+        canvas.addEventListener('pointerdown', e => {
+            drawing = true;
+            currentStroke = [getNormCoords(e)];
+        });
+
+        canvas.addEventListener('pointermove', e => {
+            if (!drawing) return;
+            const pt = getNormCoords(e);
+            currentStroke.push(pt);
+            drawSegment(currentStroke.slice(-2), penColor, penSize);
+            if (!flushTimer) {
+                flushTimer = setTimeout(() => {
+                    flushTimer = null;
+                    flushStrokeBatch();
+                }, 90);
+            }
+        });
+
+        window.addEventListener('pointerup', () => {
+            if (!drawing) return;
+            drawing = false;
+            flushStrokeBatch();
+            currentStroke = [];
+        });
+
+        async function clearBoardAll() {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            const snap = await roomRef.collection('strokes').get();
+            const batch = db.batch();
+            snap.forEach(d => batch.delete(d.ref));
+            await batch.commit().catch(() => {});
+        }
+
+        // Listen for incoming handwriting strokes from the other participant
+        roomRef.collection('strokes').orderBy('ts').onSnapshot(snap => {
+            if (snap.empty) {
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                return;
+            }
+            snap.docChanges().forEach(change => {
+                if (change.type === 'added') {
+                    const d = change.doc.data();
+                    drawSegment(d.pts, d.color || '#0f172a', d.size || 3);
+                }
+            });
+        });
+
+        initMediaAndSignaling();
+    </script>
+</body>
+</html>
