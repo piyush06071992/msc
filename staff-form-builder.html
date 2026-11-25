@@ -76,6 +76,26 @@
                         <p class="font-bold text-slate-800">Password (with Eye Toggle)</p>
                     </div>
 
+                    <div id="preferred-branch-card" class="system-field p-6 rounded-2xl border border-blue-200 shadow-sm space-y-3" data-field-type="select" data-label="Preferred Branch" data-required="true" data-searchable="true" data-filterable="true" data-options="">
+                        <div class="flex items-center justify-between gap-2">
+                            <p class="text-[9px] font-black text-blue-600 uppercase tracking-widest">System Default • Dynamic Branches</p>
+                            <span class="text-[8px] font-black px-2 py-0.5 bg-purple-100 text-purple-700 rounded uppercase tracking-widest">SEARCHABLE DROPDOWN</span>
+                        </div>
+                        <p class="font-bold text-slate-800 text-lg">Preferred Branch</p>
+                        
+                        <div class="relative max-w-md">
+                            <input type="text" id="branch-preview-search" oninput="filterBranchPreviewDropdown()" onfocus="openBranchPreviewDropdown()" placeholder="Search & select branch..." autocomplete="off" class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 bg-white text-xs font-bold text-slate-800 outline-none focus:border-blue-500">
+                            <div id="branch-preview-menu" class="hidden absolute left-0 right-0 mt-1 max-h-40 overflow-y-auto bg-white border border-slate-200 rounded-xl shadow-lg z-20 divide-y divide-slate-100"></div>
+                        </div>
+
+                        <p id="branch-sync-status" class="text-[11px] font-bold text-slate-500">Loading branches from Firebase...</p>
+                        <div class="flex flex-wrap gap-2 pt-1">
+                            <span class="text-[8px] font-black px-2 py-0.5 bg-red-50 text-red-600 border border-red-200 rounded uppercase">Compulsory</span>
+                            <span class="text-[8px] font-black px-2 py-0.5 bg-indigo-50 text-indigo-600 border border-indigo-200 rounded uppercase">Searchable</span>
+                            <span class="text-[8px] font-black px-2 py-0.5 bg-purple-50 text-purple-600 border border-purple-200 rounded uppercase">Filter</span>
+                        </div>
+                    </div>
+
                     <div id="drag-zone" class="space-y-4 pt-4 min-h-[300px]">
                         </div>
                 </div>
@@ -143,10 +163,106 @@
 
         const dragZone = document.getElementById('drag-zone');
         const toolbox = document.getElementById('toolbox');
+        const preferredBranchCard = document.getElementById('preferred-branch-card');
         let activeField = null;
+        let dynamicBranchesList = [];
+
+        function renderBranchPreviewOptions(query = "") {
+            const menu = document.getElementById('branch-preview-menu');
+            if (!menu) return;
+            const q = query.trim().toLowerCase();
+            const matches = dynamicBranchesList.filter(name => name.toLowerCase().includes(q));
+
+            if (matches.length === 0) {
+                menu.innerHTML = `<div class="px-3.5 py-2.5 text-xs font-bold text-slate-400">No matching branch found</div>`;
+                return;
+            }
+
+            menu.innerHTML = matches.map(name => `
+                <button type="button" onclick="selectBranchPreviewOption('${name.replace(/'/g, "\\'")}')" class="w-full text-left px-3.5 py-2 text-xs font-bold text-slate-700 hover:bg-blue-50 hover:text-blue-700 transition-colors">
+                    ${name}
+                </button>
+            `).join('');
+        }
+
+        function openBranchPreviewDropdown() {
+            const menu = document.getElementById('branch-preview-menu');
+            if (!menu) return;
+            renderBranchPreviewOptions(document.getElementById('branch-preview-search')?.value || "");
+            menu.classList.remove('hidden');
+        }
+
+        function filterBranchPreviewDropdown() {
+            openBranchPreviewDropdown();
+        }
+
+        function selectBranchPreviewOption(name) {
+            const input = document.getElementById('branch-preview-search');
+            const menu = document.getElementById('branch-preview-menu');
+            if (input) input.value = name;
+            if (menu) menu.classList.add('hidden');
+        }
+
+        document.addEventListener('click', (e) => {
+            const card = document.getElementById('preferred-branch-card');
+            const menu = document.getElementById('branch-preview-menu');
+            if (card && menu && !card.contains(e.target)) {
+                menu.classList.add('hidden');
+            }
+        });
+
+        function syncPreferredBranchCard(branchNames) {
+            dynamicBranchesList = branchNames;
+            const csv = branchNames.join(", ");
+            if (preferredBranchCard) {
+                preferredBranchCard.setAttribute('data-options', csv);
+            }
+            const statusEl = document.getElementById('branch-sync-status');
+            if (statusEl) {
+                statusEl.textContent = branchNames.length > 0
+                    ? `Active Branches (${branchNames.length}): ${csv}`
+                    : "No active branches found. Add branches in Manage Branches.";
+            }
+            renderBranchPreviewOptions("");
+        }
+
+        async function loadDynamicBranchesFromFirebase() {
+            try {
+                const snap = await db.collection("branches").get();
+                let names = [];
+                snap.forEach(doc => {
+                    const b = doc.data();
+                    if (b && b.status !== "INACTIVE" && b.name && b.name.trim() !== "") {
+                        names.push(b.name.trim());
+                    }
+                });
+
+                if (names.length === 0) {
+                    const cached = JSON.parse(localStorage.getItem('minervaBranchesCache_v1') || '[]');
+                    names = cached
+                        .filter(b => b && b.status !== "INACTIVE" && b.name)
+                        .map(b => b.name.trim());
+                }
+
+                if (names.length === 0) {
+                    names = ["Ghumarwin", "Dharamshala"];
+                }
+
+                syncPreferredBranchCard(names);
+            } catch (err) {
+                console.error("Branches fetch error:", err);
+                const cached = JSON.parse(localStorage.getItem('minervaBranchesCache_v1') || '[]');
+                const fallback = cached.length > 0
+                    ? cached.filter(b => b && b.status !== "INACTIVE" && b.name).map(b => b.name.trim())
+                    : ["Ghumarwin", "Dharamshala"];
+                syncPreferredBranchCard(fallback);
+            }
+        }
 
         // --- FETCH FROM CLOUD ---
         async function loadExistingDesign() {
+            await loadDynamicBranchesFromFirebase();
+
             try {
                 const docSnap = await db.collection("configs").doc("staff_registration_form").get();
                 if (docSnap.exists) {
@@ -156,7 +272,9 @@
                     // Clear canvas before rebuilding to avoid duplicates
                     dragZone.innerHTML = "";
                     
-                    data.fields.forEach(f => {
+                    (data.fields || []).forEach(f => {
+                        if ((f.label || "").trim().toLowerCase() === "preferred branch") return;
+
                         const el = document.createElement('div');
                         setupField(el, f.type);
                         
@@ -250,7 +368,17 @@
             btn.innerText = "Syncing..."; 
             btn.disabled = true;
 
-            const fieldsArr = [];
+            const fieldsArr = [{
+                type: "select",
+                label: "Preferred Branch",
+                limit: "",
+                options: preferredBranchCard ? (preferredBranchCard.getAttribute('data-options') || dynamicBranchesList.join(", ")) : dynamicBranchesList.join(", "),
+                required: true,
+                searchable: true,
+                filterable: true,
+                dynamicSource: "branches"
+            }];
+
             dragZone.querySelectorAll('.form-field-item').forEach(f => {
                 fieldsArr.push({
                     type: f.getAttribute('data-field-type'),
