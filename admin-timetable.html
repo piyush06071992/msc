@@ -942,21 +942,17 @@ function updateTeacherDropdown(skipRender = false) {
     if (isAdmin && authBtn) {
         authBtn.classList.remove('hidden');
     }
-// 3. Load the rest of the timetable
-   await checkAndApplyFutureMaster(); 
+// 3. Load only what is needed for Today's initial view (lazy-load other dates, live master & tools on demand)
+    await checkAndApplyFutureMaster();
     await Promise.all([fetchStructure(), fetchTeachers(), fetchRooms()]);
-    await fetchTimetable();
-    await fetchLiveMasterCache(); // Cache pure master for audit checks
-   await fetchHolidays();
-    await fetchBellTemplates();
-    
-    // Auto-load Today's Schedule by default
-    const todayIso = new Date().toISOString().split('T')[0];
-    document.getElementById('context-date-input').value = todayIso;
-    await confirmDateContext(); // This internally renders the dashboard
 
-    // Run this AFTER the context is confirmed so it doesn't trigger a double-render loop
-    populateFilterDropdowns(); 
+    const todayIso = new Date().toISOString().split('T')[0];
+    const todayDayName = new Date(todayIso + "T00:00:00").toLocaleDateString('en-US', { weekday: 'long' });
+    document.getElementById('context-date-input').value = todayIso;
+
+    await fetchHolidaysForDate(todayIso);
+    await loadScheduleForDate(todayIso, todayDayName);
+    populateFilterDropdowns();
 }
 
 async function checkAndApplyFutureMaster() {
@@ -1062,40 +1058,188 @@ async function checkAndApplyFutureMaster() {
         }
 
      async function fetchTimetable() {
-            // 1. Context-Aware Draft Check
             const draftKey = `draft_${activeCenter}_LIVE`;
             const draftSnap = await db.collection("timetable_drafts").doc(draftKey).get();
-            
+
             if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
                 globalTimetable = draftSnap.data().schedule;
                 document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED MASTER DRAFT</span>`;
-                oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
+                oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
                 return;
-            } 
+            }
 
-            // 2. Load Live Master via Native Cache
-            console.log("🔄 Fetching Timetable via Firebase Native Cache...");
-            const snap = await getCollection("timetable").get();
-            globalTimetable = snap.docs.map(d => ({id: d.id, ...d.data()}));
-            oldTimetableState = JSON.parse(JSON.stringify(globalTimetable)); 
+            if (liveMasterTimetable.length === 0) {
+                const snap = await getCollection("timetable").get();
+                liveMasterTimetable = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            }
+            globalTimetable = liveMasterTimetable.map(d => ({ ...d }));
+            oldTimetableState = JSON.parse(JSON.stringify(globalTimetable));
         }
 
-    async function fetchLiveMasterCache() {
-            try {
+        async function ensureLiveMasterLoaded() {
+            if (liveMasterTimetable.length === 0) {
                 const snap = await getCollection("timetable").get();
-                liveMasterTimetable = snap.docs.map(d => d.data());
-            } catch(e) {
-                console.error("Master cache fetch error:", e);
+                liveMasterTimetable = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            }
+            return liveMasterTimetable;
+        }
+
+        async function fetchHolidaysForDate(targetDateIso) {
+            try {
+                const snap = await getCollection("school_holidays").where("startDate", "<=", targetDateIso).get();
+                holidaysData = snap.docs
+                    .map(d => ({ id: d.id, ...d.data() }))
+                    .filter(h => (h.endDate || h.startDate) >= targetDateIso);
+            } catch (e) {
+                console.error("Date Holiday Fetch Error:", e);
             }
         }
 
-     // --- HOLIDAY OVERLAY ENGINE ---
         async function fetchHolidays() {
-            console.log("🔄 Fetching Holidays via Firebase Native Cache...");
             try {
                 const snap = await getCollection("school_holidays").get();
                 holidaysData = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-            } catch(e) { console.error("Holiday Fetch Error:", e); }
+            } catch (e) {
+                console.error("Holiday Fetch Error:", e);
+            }
+        }
+
+        async function loadScheduleForDate(dateVal, dayName) {
+            const [year, month, day] = dateVal.split('-');
+            const dateObj = new Date(year, month - 1, day);
+            const prettyDate = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            const todayISO = new Date().toISOString().split('T')[0];
+
+            const nameTagInp = document.getElementById('schedule-name-tag');
+            if (nameTagInp) {
+                nameTagInp.classList.remove('hidden');
+                nameTagInp.value = "";
+            }
+
+            const draftKey = `draft_${activeCenter}_${dateVal}`;
+            const draftSnap = await db.collection("timetable_drafts").doc(draftKey).get();
+
+            if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
+                globalTimetable = draftSnap.data().schedule;
+                document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED OVERRIDE DRAFT:</span> ${prettyDate}`;
+            } else {
+                const historySnap = await getCollection("timetable_history").doc(dateVal).get();
+                if (historySnap.exists && historySnap.data().status !== "CANCELLED" && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
+                    const hData = historySnap.data();
+                    globalTimetable = (hData.schedule || []).filter(slot => slot.day === dayName);
+                    if (nameTagInp) nameTagInp.value = hData.tag || "";
+                    document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
+                } else {
+                    const masterSnap = await getCollection("timetable_history").where("type", "in", ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"]).get();
+                    if (dateVal >= todayISO) {
+                        let futureMasters = [];
+                        masterSnap.docs.forEach(doc => {
+                            const d = doc.data();
+                            if (d.type === "FUTURE_MASTER" && d.status !== "CANCELLED" && d.date > todayISO && d.date <= dateVal) {
+                                futureMasters.push(d);
+                            }
+                        });
+                        if (futureMasters.length > 0) {
+                            futureMasters.sort((a, b) => b.date.localeCompare(a.date));
+                            globalTimetable = (futureMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                            document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 font-bold">📅 FUTURE MASTER (From ${futureMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
+                        } else {
+                            const dayMasterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                            globalTimetable = dayMasterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                            document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
+                        }
+                    } else {
+                        let pastMasters = [];
+                        masterSnap.docs.forEach(doc => {
+                            const d = doc.data();
+                            if (d.date <= dateVal && d.status !== "CANCELLED") pastMasters.push(d);
+                        });
+                        if (pastMasters.length > 0) {
+                            pastMasters.sort((a, b) => b.date.localeCompare(a.date));
+                            globalTimetable = (pastMasters[0].schedule || []).filter(slot => slot.day === dayName);
+                            document.getElementById('view-label').innerHTML = `<span class="text-slate-600 font-bold">🕰️ HISTORICAL MASTER (From ${pastMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
+                        } else {
+                            const dayMasterSnap = await getCollection("timetable").where("day", "==", dayName).get();
+                            globalTimetable = dayMasterSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                            document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
+                        }
+                    }
+                }
+            }
+
+            // Apply accepted leave substitutions only for this selected date
+            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+            const leaveSnap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get();
+            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+            leaveSnap.forEach(doc => {
+                const leaveData = doc.data();
+                if (!leaveData.adjustments) return;
+                leaveData.adjustments.forEach(adj => {
+                    if (adj.date === dateVal && adj.substituteResponse === "ACCEPTED") {
+                        const parts = (adj.sub || "").split('|');
+                        const cName = parts[0] ? parts[0].trim() : "";
+                        const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : "";
+
+                        const targetSlot = globalTimetable.find(slot => {
+                            if (slot.day !== dayName) return false;
+                            if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adj.title)) return false;
+                            if (slot.start24 && slot.end24) {
+                                const [sh, sm] = slot.start24.split(':').map(Number);
+                                const [eh, em] = slot.end24.split(':').map(Number);
+                                const slotStartMins = sh * 60 + sm;
+                                const slotEndMins = eh * 60 + em;
+                                if (adj.end <= slotStartMins - 15 || adj.start >= slotEndMins + 15) return false;
+                            }
+                            return true;
+                        });
+
+                        if (targetSlot) {
+                            targetSlot.origTeacher = targetSlot.teacher;
+                            targetSlot.origTeacherName = targetSlot.teacherName;
+                            targetSlot.origTeacherEmail = targetSlot.teacherEmail;
+                            targetSlot.origRemark = targetSlot.remark;
+                            targetSlot.isTemporarySub = true;
+
+                            targetSlot.teacher = adj.adjustedTo;
+                            targetSlot.teacherName = adj.adjustedTo;
+                            targetSlot.teacherEmail = adj.adjustedEmail;
+
+                            let subNote = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
+                            if (adj.assignedTimeWindow) subNote += ` [${adj.assignedTimeWindow}]`;
+                            targetSlot.remark = subNote;
+                        } else {
+                            const existingDuty = globalTimetable.find(slot =>
+                                norm(slot.className) === "extraduty" &&
+                                norm(slot.subject) === norm(adj.title) &&
+                                norm(slot.teacher) === norm(adj.adjustedTo) &&
+                                slot.start24 === minsTo24(adj.start)
+                            );
+                            if (!existingDuty) {
+                                globalTimetable.push({
+                                    day: dayName,
+                                    className: "Extra Duty",
+                                    section: "Task",
+                                    subject: adj.title || "Substitution",
+                                    teacher: adj.adjustedTo,
+                                    teacherName: adj.adjustedTo,
+                                    teacherEmail: adj.adjustedEmail,
+                                    start24: minsTo24(adj.start),
+                                    end24: minsTo24(adj.end),
+                                    remark: adj.sub || "(Assigned to " + adj.adjustedTo.split(' ')[0] + ")",
+                                    room: "TBD",
+                                    isTemporaryDuty: true
+                                });
+                                if (!structureData.some(s => s.className === "Extra Duty")) {
+                                    structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adj.title || "Substitution"] });
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+
+            renderDirectDashboard(true);
         }
 
      function openHolidayModal() {
@@ -3763,8 +3907,7 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                     const snap = await getCollection("timetable").where("day", "==", selectedDay).get();
                     allData = snap.docs.map(d => d.data());
                 } else {
-                    const snap = await getCollection("timetable").get();
-                    allData = snap.docs.map(d => d.data());
+                    allData = await ensureLiveMasterLoaded();
                 }
 
                let targetStructures = structureData;
@@ -3966,171 +4109,20 @@ async function confirmDateContext() {
         if (!dateVal) return alert("Please select a date.");
 
         currentContextDate = dateVal;
-        currentContextMode = pendingMode || 'OVERRIDE'; // SAFETY LOCK
-        
-        // --- SAFE DATE PARSER ---
+        currentContextMode = pendingMode || 'OVERRIDE';
+
         const [year, month, day] = dateVal.split('-');
         const dateObj = new Date(year, month - 1, day);
-        
         const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'long' });
-        const prettyDate = dateObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
         document.getElementById('date-picker-modal').classList.replace('flex', 'hidden');
-        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Syncing Master Slots & Scaling Splits...</div>`;
+        document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Loading Schedule for ${dateVal}...</div>`;
 
         try {
-            const nameTagInp = document.getElementById('schedule-name-tag');
-            if (nameTagInp) {
-                nameTagInp.classList.remove('hidden');
-                nameTagInp.value = ""; // Reset first
-            }
-
-       // High-Speed Parallel Query Execution
-            const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-            const draftKey = `draft_${activeCenter}_${dateVal}`;
-            
-            const [draftSnap, historySnap, masterSnap, leaveSnap] = await Promise.all([
-                db.collection("timetable_drafts").doc(draftKey).get(),
-                getCollection("timetable_history").doc(dateVal).get(),
-                getCollection("timetable_history").where("type", "in", ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"]).get(),
-                db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get()
+            await Promise.all([
+                fetchHolidaysForDate(dateVal),
+                loadScheduleForDate(dateVal, dayName)
             ]);
-            
-         if (draftSnap.exists && draftSnap.data().schedule && draftSnap.data().schedule.length > 0) {
-                globalTimetable = draftSnap.data().schedule;
-                document.getElementById('view-label').innerHTML = `<span class="text-amber-500 font-bold animate-pulse">☁️ VIEWING UNSAVED OVERRIDE DRAFT:</span> ${prettyDate}`;
-            } else {
-                if (historySnap.exists && historySnap.data().status !== "CANCELLED" && (historySnap.data().type === "DAILY_OVERRIDE" || historySnap.data().type === "EXAM_OVERRIDE")) {
-                    const hData = historySnap.data();
-                    globalTimetable = (hData.schedule || []).filter(slot => slot.day === dayName);
-                    if (nameTagInp) nameTagInp.value = hData.tag || "";
-                    document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
-            } else {
-                    const todayISO = new Date().toISOString().split('T')[0];
-                    
-                    if (dateVal >= todayISO) {
-                        // FOR TODAY & FUTURE: Always use the current Live Master as baseline
-                        let futureMasters = [];
-                        masterSnap.docs.forEach(doc => { 
-                            const d = doc.data();
-                            if (d.type === "FUTURE_MASTER" && d.status !== "CANCELLED" && d.date > todayISO && d.date <= dateVal) {
-                                futureMasters.push(d);
-                            }
-                        });
-
-                        if (futureMasters.length > 0) {
-                            // If a Future Master kicks in before the selected date, use it
-                            futureMasters.sort((a, b) => b.date.localeCompare(a.date));
-                            globalTimetable = (futureMasters[0].schedule || []).filter(slot => slot.day === dayName);
-                            document.getElementById('view-label').innerHTML = `<span class="text-indigo-600 font-bold">📅 FUTURE MASTER (From ${futureMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
-                        } else {
-                            // Default to exactly what the Live Master currently holds
-                            globalTimetable = liveMasterTimetable.filter(t => t.day === dayName);
-                            document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
-                        }
-                    } else {
-                        // FOR PAST DATES: Look for historical snapshots
-                        let pastMasters = [];
-                        masterSnap.docs.forEach(doc => { 
-                            const d = doc.data();
-                            if (d.date <= dateVal && d.status !== "CANCELLED") pastMasters.push(d); 
-                        });
-
-                        if (pastMasters.length > 0) {
-                            pastMasters.sort((a, b) => b.date.localeCompare(a.date));
-                            globalTimetable = (pastMasters[0].schedule || []).filter(slot => slot.day === dayName);
-                            document.getElementById('view-label').innerHTML = `<span class="text-slate-600 font-bold">🕰️ HISTORICAL MASTER (From ${pastMasters[0].date}):</span> ${dayName}, ${prettyDate}`;
-                        } else {
-                            globalTimetable = liveMasterTimetable.filter(t => t.day === dayName);
-                            document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
-                        }
-                    }
-                }
-            }
-            // --- THE LIVE LEAVE PATCHER FOR ADMIN ---
-
-            leaveSnap.forEach(doc => {
-                const leaveData = doc.data();
-                if (leaveData.status === "PENDING" || leaveData.status === "APPROVED") {
-                    if (leaveData.adjustments) {
-                        leaveData.adjustments.forEach(adj => {
-                            if (adj.date === dateVal && adj.substituteResponse === "ACCEPTED") {
-                    const parts = (adj.sub || "").split('|');
-                                    const cName = parts[0] ? parts[0].trim() : "";
-                                    const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : "";
-                                    const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-
-                                    // Try to find the exact class in globalTimetable
-                                    const targetSlot = globalTimetable.find(slot => {
-                                        if (slot.day !== dayName) return false; // STRICT DAY LOCK
-                                        if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adj.title)) return false;
-                                        if (slot.start24 && slot.end24) {
-                                            const [sh, sm] = slot.start24.split(':').map(Number);
-                                            const [eh, em] = slot.end24.split(':').map(Number);
-                                            const slotStartMins = sh * 60 + sm;
-                                            const slotEndMins = eh * 60 + em;
-                                            
-                                            // Check if substitution time overlaps with the class time block
-                                            if (adj.end <= slotStartMins - 15 || adj.start >= slotEndMins + 15) return false;
-                                        }
-                                        return true;
-                                    });
-
-                                if (targetSlot) {
-                                        // Backup the original data so it isn't permanently saved if cloned!
-                                        targetSlot.origTeacher = targetSlot.teacher;
-                                        targetSlot.origTeacherName = targetSlot.teacherName;
-                                        targetSlot.origTeacherEmail = targetSlot.teacherEmail;
-                                        targetSlot.origRemark = targetSlot.remark;
-                                        targetSlot.isTemporarySub = true;
-
-                                        // Override Teacher Name to the Substitute!
-                                        targetSlot.teacher = adj.adjustedTo;
-                                        targetSlot.teacherName = adj.adjustedTo;
-                                        targetSlot.teacherEmail = adj.adjustedEmail;
-                                        
-                                        let subNote = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
-                                        if (adj.assignedTimeWindow) subNote += ` [${adj.assignedTimeWindow}]`;
-                                        targetSlot.remark = subNote;
-                                    } else {
-                                        // Catch-all Failsafe: Render as Extra Duty if standard class match fails
-                                        const existingDuty = globalTimetable.find(slot => 
-                                            norm(slot.className) === "extraduty" && 
-                                            norm(slot.subject) === norm(adj.title) && 
-                                            norm(slot.teacher) === norm(adj.adjustedTo) &&
-                                            slot.start24 === minsTo24(adj.start)
-                                        );
-                                        
-                                        if (!existingDuty) {
-                                            // Inject Extra Duty into the Timetable view!
-                                            globalTimetable.push({
-                                                day: dayName,
-                                                className: "Extra Duty",
-                                                section: "Task",
-                                                subject: adj.title || "Substitution",
-                                                teacher: adj.adjustedTo,
-                                                teacherName: adj.adjustedTo,
-                                                teacherEmail: adj.adjustedEmail,
-                                                start24: minsTo24(adj.start),
-                                                end24: minsTo24(adj.end),
-                                                remark: adj.sub || "(Assigned to " + adj.adjustedTo.split(' ')[0] + ")",
-                                                room: "TBD",
-                                                isTemporaryDuty: true
-                                            });
-                                            // Force structure injection so it renders on screen
-                                            if (!structureData.some(s => s.className === "Extra Duty")) {
-                                                structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adj.title || "Substitution"] });
-                                            }
-                                        }
-                                    }
-                            }
-                        });
-                    }
-                }
-            });
-
-            renderDirectDashboard();
-
         } catch (error) {
             alert("Error loading schedule: " + error.message);
             console.error(error);
@@ -5391,7 +5383,8 @@ async function executeImport() {
             } catch (e) { alert("Error: " + e.message); console.error(e); } finally { btn.innerHTML = origBtnText; btn.disabled = false; }
         }
         // --- BELL SCHEDULE MASTER ENGINE (MODAL UI & DATA) ---
-        function openBellConfig() {
+        async function openBellConfig() {
+            await fetchBellTemplates();
             document.getElementById('bell-config-modal').classList.replace('hidden', 'flex');
         }
 
