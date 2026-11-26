@@ -160,21 +160,6 @@
         let activeStaff = null, mySessions = [], myDuties = [], currentPlannerData = null;
         let activeSubjectId = null, activeSessionMins = 0;
         let holidaysData = []; window.teacherTimetable = null; window.fullTimetable = [];
-        let structuresCache = null;
-        let plannerSettingsCache = null;
-
-        function getBranchCache(key) {
-            try {
-                const raw = sessionStorage.getItem(`${activeCenter}_${key}`);
-                return raw ? JSON.parse(raw) : null;
-            } catch (e) { return null; }
-        }
-
-        function setBranchCache(key, value) {
-            try {
-                sessionStorage.setItem(`${activeCenter}_${key}`, JSON.stringify(value));
-            } catch (e) {}
-        }
         let isDemoMode = false;
         let globalAutoLock = true;
         let enableDailyBlock = false; 
@@ -192,19 +177,9 @@
             const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
             
             try {
-                const profileCacheKey = `minerva_staff_profile_${activeStaff.email}`;
-                let data = null;
-                const cachedProfile = sessionStorage.getItem(profileCacheKey);
-                if (cachedProfile) {
-                    data = JSON.parse(cachedProfile);
-                } else {
-                    const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).limit(1).get();
-                    if (!staffSnap.empty) {
-                        data = staffSnap.docs[0].data();
-                        sessionStorage.setItem(profileCacheKey, JSON.stringify(data));
-                    }
-                }
-                if (data) {
+                const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                if (!staffSnap.empty) {
+                    const data = staffSnap.docs[0].data();
                     
                     // 1. Bulletproof Branch Detection
                     const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
@@ -269,49 +244,26 @@
             try {
                 console.log("🔄 Fetching planner data via Firebase Native Cache & Targeted Queries...");
                 const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                const todayDateObj = new Date();
-                const offset = todayDateObj.getTimezoneOffset() * 60000;
-                const todayIsoStr = (new Date(todayDateObj - offset)).toISOString().split('T')[0];
 
-                const timetableQuery = getCollection("timetable").where("day", "==", todayName);
+                // Target timetable directly to the logged-in teacher to eliminate heavy global reads
+                const timetableQuery = getCollection("timetable").where("teacherName", "==", safeName);
 
-                const cachedHolidays = getBranchCache("holidays");
-                const cachedStructs = getBranchCache("structures");
-
-                const [holSnap, todayHistDoc, ttSnap, ownLeaveSnap, lockDoc, structSnap] = await Promise.all([
-                    cachedHolidays ? Promise.resolve(null) : getCollection("school_holidays").get(),
-                    getCollection("timetable_history").doc(todayIsoStr).get(),
+               let structures = [];
+                const [holSnap, histSnap, ttSnap, plannerSnap, leaveSnap, lockDoc, structSnap] = await Promise.all([
+                    getCollection("school_holidays").get({ source: 'server' }).catch(() => getCollection("school_holidays").get()),
+                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get({ source: 'server' }).catch(() => getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get()),
                     timetableQuery.get(),
-                    db.collection(prefix + "leave_requests").where("teacherEmail", "==", activeStaff.email).get(),
+                    getCollection("lesson_planners").get(),
+                    db.collection(prefix + "leave_requests").get(),
                     getCollection("configs").doc("lesson_planner_settings").get(),
-                    cachedStructs ? Promise.resolve(null) : getCollection("institute_structure").get()
-                ]);
+                    getCollection("institute_structure").get()
+                ]);;
 
-                if (cachedHolidays) {
-                    holidaysData = cachedHolidays;
-                } else {
-                    holidaysData = (holSnap?.docs || []).map(d => d.data()).filter(h => h.status !== "CANCELLED");
-                    setBranchCache("holidays", holidaysData);
-                }
-
-                window.historyOverrides = [];
-                window.fullHistoryLoaded = false;
-                if (todayHistDoc && todayHistDoc.exists) {
-                    const hData = todayHistDoc.data();
-                    if (hData.status !== "CANCELLED") {
-                        window.historyOverrides = [{ date: todayIsoStr, ...hData }];
-                    }
-                }
-                window.fullTimetable = (ttSnap?.docs || []).map(d => d.data());
-                window.allPlanners = window.allPlanners || [];
-
-                if (cachedStructs) {
-                    structuresCache = cachedStructs;
-                } else {
-                    structuresCache = (structSnap?.docs || []).map(d => ({id: d.id, ...d.data()}));
-                    setBranchCache("structures", structuresCache);
-                }
-                const structures = structuresCache;
+               holidaysData = holSnap.docs.map(d => d.data()).filter(h => h.status !== "CANCELLED");
+                window.historyOverrides = histSnap.docs.map(d => d.data()).filter(h => h.status !== "CANCELLED");
+                window.fullTimetable = ttSnap.docs.map(d => d.data());
+                window.allPlanners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
 
                 globalAutoLock = true;
                 enableDailyBlock = false;
@@ -323,9 +275,7 @@
                 window.myAbsences = [];
                 window.mySubstitutions = [];
                 
-                const relevantLeaveDocs = ownLeaveSnap?.docs || [];
-
-                relevantLeaveDocs.forEach(doc => {
+                leaveSnap.forEach(doc => {
                     const leaveData = doc.data();
                     
                     if (leaveData.status === "APPROVED" && leaveData.teacherEmail === activeStaff.email) {
@@ -369,6 +319,9 @@
                 );
 
                 // --- OVERRIDE ENGINE FOR TEACHER DASHBOARD ---
+                const todayDateObj = new Date();
+                const offset = todayDateObj.getTimezoneOffset() * 60000;
+                const todayIsoStr = (new Date(todayDateObj - offset)).toISOString().split('T')[0];
                 
                 const todayDocsRaw = getScheduleSnapshotForDate(todayIsoStr, todayName);
                 
@@ -530,7 +483,7 @@
                         </button>`;
                     } else {
                         let redAlertBadge = '';
-                        if (!isDemoMode && Array.isArray(window.allPlanners) && window.allPlanners.length > 0) {
+                        if (!isDemoMode && window.allPlanners) {
                             const planner = window.allPlanners.find(p => p.id === sess.assignmentId);
                             let hasSyllabus = planner && planner.syllabusData && planner.syllabusData.length > 0;
                             let isStartedAny = hasSyllabus && planner.syllabusData.some(topic => topic.isDone || topic.chapterStartDate);
@@ -623,31 +576,16 @@ const offset = new Date().getTimezoneOffset() * 60000;
                     window.teacherTimetable = ttSnap.docs.map(d => d.data());
                 }
 
-                const needsHistory = !window.fullHistoryLoaded;
-                const needsSettings = !plannerSettingsCache;
-
-                const [doc, assignDoc, lockDoc, fullHistSnap] = await Promise.all([
+                // Fetch only the specific active planner document instead of loading a broad query
+                const [doc, assignDoc, lockDoc] = await Promise.all([
                     getCollection("lesson_planners").doc(activeSubjectId).get(),
                     getCollection("lesson_planner_assignments").doc(activeSubjectId).get(),
-                    needsSettings ? getCollection("configs").doc("lesson_planner_settings").get() : Promise.resolve(null),
-                    needsHistory
-                        ? getCollection("timetable_history")
-                            .where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"])
-                            .get()
-                        : Promise.resolve(null)
+                    getCollection("configs").doc("lesson_planner_settings").get()
                 ]);
 
-                if (fullHistSnap) {
-                    window.historyOverrides = (fullHistSnap.docs || []).map(d => d.data()).filter(h => h.status !== "CANCELLED");
-                    window.fullHistoryLoaded = true;
-                }
-
-                if (lockDoc && lockDoc.exists) {
-                    plannerSettingsCache = lockDoc.data();
-                }
-                if (plannerSettingsCache) {
-                    if (plannerSettingsCache.autoLockEnabled === false) globalAutoLock = false;
-                    if (plannerSettingsCache.dailyComplianceBlockEnabled === true) enableDailyBlock = true;
+                if (lockDoc.exists) {
+                    if (lockDoc.data().autoLockEnabled === false) globalAutoLock = false;
+                    if (lockDoc.data().dailyComplianceBlockEnabled === true) enableDailyBlock = true;
                 }
                 window.currentAssignment = assignDoc.exists ? assignDoc.data() : {};
                 
@@ -721,15 +659,12 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 // Determine where to start building our forward chain
                 let scanStartDate = new Date(todayISO);
                 if (lastLoggedDateStr) {
-                    scanStartDate = new Date(lastLoggedDateStr + "T00:00:00");
-                    scanStartDate.setDate(scanStartDate.getDate() + 1);
+                    // Start the queue from the VERY NEXT DAY after their last log
+                    scanStartDate = new Date(lastLoggedDateStr);
+                    scanStartDate.setDate(scanStartDate.getDate() + 1); 
                 } else {
-                    scanStartDate = new Date(todayISO + "T00:00:00");
-                    scanStartDate.setDate(scanStartDate.getDate() - 14);
+                    scanStartDate.setDate(scanStartDate.getDate() - 14); // Fallback for brand new subjects
                 }
-                const maxBacklogStart = new Date(todayISO + "T00:00:00");
-                maxBacklogStart.setDate(maxBacklogStart.getDate() - 60);
-                if (scanStartDate < maxBacklogStart) scanStartDate = maxBacklogStart;
 
                 window.catchUpDates = [];
                 let iterDate = new Date(scanStartDate); 
