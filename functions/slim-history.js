@@ -21,9 +21,10 @@ const HISTORY_COLLECTIONS = [
     "dharamshala_timetable_history",   // DHARAMSHALA
 ];
 
-// Only these history types are used by the lesson planner (same list it always loaded).
-// Other types (FUTURE_MASTER, APPLIED_MASTER, ...) are not mirrored.
-const SLIM_TYPES = ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"];
+// Format 1 mirrored only the 4 types the teacher planner uses. Format 2 mirrors EVERY history
+// document (the admin Planner Hub also uses APPLIED_MASTER / FUTURE_MASTER and documents of any
+// type). Each page still filters the types it needs, so extra mirrors never change its results.
+const SLIM_TYPES = ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]; // kept for reference
 
 // PACKING: every distinct value is stored ONCE in `values` (e.g. "Wednesday", "Biology",
 // "09:00"), and each slot is a list of numbers pointing into it. Both are stored as JSON
@@ -34,16 +35,17 @@ const SLIM_TYPES = ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_M
 const SLOT_FIELDS = [
     "day", "className", "section", "subject", "start24", "end24",
     "duration", "remark", "teacher", "teacherName", "timeRange", "id",
+    "teacherEmail",                      // added in format 2 (admin on-leave detection)
 ];
-const SLIM_FORMAT_VERSION = 1;
+const SLIM_FORMAT_VERSION = 2;
 
 function slimCollectionName(historyCollection) {
     return `${historyCollection}_slim`;
 }
 
-// Returns the slim document for a history document, or null if it should not be mirrored.
+// Returns the slim document for a history document (every history document is mirrored).
 function toSlim(historyData, docId) {
-    if (!historyData || !SLIM_TYPES.includes(historyData.type)) return null;
+    if (!historyData) return null;
     const schedule = Array.isArray(historyData.schedule) ? historyData.schedule : [];
     const values = [];
     const indexOf = new Map(); // JSON-encoded value -> index (keeps "45" and 45 distinct)
@@ -57,7 +59,7 @@ function toSlim(historyData, docId) {
     return {
         sourceId: docId,
         date: historyData.date !== undefined ? historyData.date : null,
-        type: historyData.type,
+        type: historyData.type !== undefined ? historyData.type : null,
         status: historyData.status !== undefined ? historyData.status : null,
         tag: historyData.tag !== undefined ? historyData.tag : null,
         sourceLastUpdated: historyData.lastUpdated !== undefined ? historyData.lastUpdated : null,

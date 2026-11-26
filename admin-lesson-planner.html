@@ -436,7 +436,8 @@
         async function bumpPlannerVersion() {
             if (!navigator.onLine) return;
             try {
-                await db.collection("system_metadata").doc("planners_version").set({ lastUpdated: Date.now() }, { merge: true });
+                // Per-branch version stamp, so a save in one branch no longer invalidates every branch's cache
+                await db.collection("system_metadata").doc("planners_version").set({ [`lastUpdated_${activeCenter}`]: Date.now() }, { merge: true });
             } catch(e) { console.warn("Failed to bump version", e); }
         }
 
@@ -512,84 +513,131 @@
         function closeModal(id) { const el = document.getElementById(id); el.classList.add('hidden'); el.classList.remove('flex'); }
 
   // --- DATABASE ENGINE ---
+        // READ / SPEED OPTIMIZATION
+        //  - Timetable history comes from the slim mirror (format 2 = every history document,
+        //    ~17x smaller) when its switch is ON; otherwise the full history exactly as before.
+        //  - Leaves: only APPROVED ones (the only ones this page uses).
+        //  - FIRST OPEN of the page: planners + target dates are re-downloaded only when a teacher
+        //    or admin of THIS branch saved something (per-branch version stamp); the rest
+        //    (timetable, history, holidays, leaves, structure, staff, settings) is reused from the
+        //    device for up to 10 minutes.
+        //  - Every later reload (after an admin action) downloads everything fresh, as before.
+        const SHARED_DATA_MAX_AGE_MS = 10 * 60 * 1000;
+        const SLIM_FIELDS_V2 = ["day", "className", "section", "subject", "start24", "end24", "duration", "remark",
+                                "teacher", "teacherName", "timeRange", "id", "teacherEmail"];
+        let adminFirstLoadDone = false;
+
+        function expandSlimHistoryDoc(s) {
+            let rows = [], values = [];
+            try { rows = JSON.parse(s.rows || "[]"); values = JSON.parse(s.values || "[]"); } catch (e) { rows = []; values = []; }
+            const h = {};
+            ["date", "type", "status", "tag"].forEach(k => { if (s[k] !== null && s[k] !== undefined) h[k] = s[k]; });
+            h.schedule = rows.map(r => {
+                const slot = {};
+                SLIM_FIELDS_V2.forEach((f, i) => { const v = values[r[i]]; if (v !== null && v !== undefined) slot[f] = v; });
+                return slot;
+            });
+            return h;
+        }
+
+        async function fetchSharedPlannerData(useSlim) {
+            const [configDoc, structSnap, staffSnap, ttSnap, holSnap, histSnap, leaveSnap] = await Promise.all([
+                getCollection("configs").doc("lesson_planner_settings").get(),
+                getCollection("institute_structure").get(),
+                getCollection("staff_applications").where("status", "==", "approved").get(),
+                getCollection("timetable").get(),
+                getCollection("school_holidays").get(),
+                useSlim ? getCollection("timetable_history_slim").get() : getCollection("timetable_history").get(),
+                getCollection("leave_requests").where("status", "==", "APPROVED").get()
+            ]);
+            const structureList = structSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+            structureList.sort((a, b) => a.className.localeCompare(b.className) || a.sectionName.localeCompare(b.sectionName));
+            return {
+                dailyBlockEnabled: configDoc.exists && configDoc.data().dailyComplianceBlockEnabled === true,
+                structureData: structureList,
+                staffList: staffSnap.docs.map(doc => {
+                    const d = doc.data(); const det = d.details || {}; let n = d.email;
+                    for (let key in det) { if (key.toLowerCase().includes('name')) n = det[key]; }
+                    return { email: d.email, name: n };
+                }),
+                timetableData: ttSnap.docs.map(d => d.data()),
+                holidaysData: holSnap.docs.map(d => d.data()),
+                // Slim docs are kept packed (small) in the cache and expanded after loading
+                historyRaw: useSlim ? histSnap.docs.filter(d => d.id !== "__status").map(d => d.data()) : histSnap.docs.map(d => d.data()),
+                allLeaveRequests: leaveSnap.docs.map(d => d.data())
+            };
+        }
+
         async function loadAllData() {
+            const isFirstLoad = !adminFirstLoadDone;
+            adminFirstLoadDone = true;
             try {
-                const metaDoc = await db.collection("system_metadata").doc("planners_version").get();
-                const serverVersion = metaDoc.exists ? (metaDoc.data().lastUpdated || 0) : 0;
-                
-                const cachePrefix = `admin_planner_${activeCenter}_`;
-                const localVersion = await IDB.get(cachePrefix + "version");
-                const cachedBundle = await IDB.get(cachePrefix + "bundle");
+                const [metaDoc, slimStatusDoc] = await Promise.all([
+                    db.collection("system_metadata").doc("planners_version").get(),
+                    getCollection("timetable_history_slim").doc("__status").get().catch(() => null)
+                ]);
+                const meta = metaDoc.exists ? metaDoc.data() : {};
+                // Old-style global stamp + this branch's stamp
+                const serverVersion = `${meta.lastUpdated || 0}|${meta[`lastUpdated_${activeCenter}`] || 0}`;
+                const slimStatus = slimStatusDoc && slimStatusDoc.exists ? slimStatusDoc.data() : null;
+                const useSlim = !!(slimStatus && slimStatus.ready === true && (slimStatus.format || 1) >= 2);
+                const historyKind = useSlim ? "slim2" : "full";
 
-                if (cachedBundle && localVersion === serverVersion) {
-                    console.log("⚡ Planner Data loaded from IndexedDB cache");
-                    dailyBlockEnabled = cachedBundle.dailyBlockEnabled;
-                    if (dailyBlockEnabled) {
-                        const dbBtn = document.getElementById('daily-block-btn');
-                        if (dbBtn) {
-                            dbBtn.innerText = "🛑 Block: ON";
-                            dbBtn.classList.replace('text-slate-500', 'text-rose-600');
-                            dbBtn.classList.replace('border-slate-300', 'border-rose-300');
-                        }
-                    }
-                    timetableData = cachedBundle.timetableData;
-                    holidaysData = cachedBundle.holidaysData;
-                    window.historyOverrides = cachedBundle.historyOverrides;
-                    window.allLeaveRequests = cachedBundle.allLeaveRequests;
-                    structureData = cachedBundle.structureData;
-                    assignments = cachedBundle.assignments;
-                    planners = cachedBundle.planners;
-                    staffList = cachedBundle.staffList;
-                } else {
-                    console.log("🔄 Fetching fresh planner data from server...");
-                    const configDoc = await getCollection("configs").doc("lesson_planner_settings").get();
-                    dailyBlockEnabled = configDoc.exists && configDoc.data().dailyComplianceBlockEnabled === true;
-                    if (dailyBlockEnabled) {
-                        const dbBtn = document.getElementById('daily-block-btn');
-                        if (dbBtn) {
-                            dbBtn.innerText = "🛑 Block: ON";
-                            dbBtn.classList.replace('text-slate-500', 'text-rose-600');
-                            dbBtn.classList.replace('border-slate-300', 'border-rose-300');
-                        }
-                    }
-
-                    const [structSnap, assignSnap, plannerSnap, staffSnap, ttSnap, holSnap, histSnap, leaveSnap] = await Promise.all([
-                        getCollection("institute_structure").get(),
-                        getCollection("lesson_planner_assignments").get(),
-                        getCollection("lesson_planners").get(),
-                        getCollection("staff_applications").where("status", "==", "approved").get(),
-                        getCollection("timetable").get(),
-                        getCollection("school_holidays").get(),
-                        getCollection("timetable_history").get(),
-                        getCollection("leave_requests").get()
-                    ]);
-                    
-                    timetableData = ttSnap.docs.map(d => d.data());
-                    holidaysData = holSnap.docs.map(d => d.data());
-                    window.historyOverrides = histSnap.docs.map(d => d.data());
-                    window.allLeaveRequests = leaveSnap.docs.map(d => d.data());
-                    structureData = structSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                    structureData.sort((a, b) => a.className.localeCompare(b.className) || a.sectionName.localeCompare(b.sectionName));
-                    assignments = assignSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                    planners = plannerSnap.docs.map(d => ({ id: d.id, ...d.data() }));
-                    
-                    staffList = staffSnap.docs.map(doc => {
-                        const d = doc.data(); const det = d.details || {}; let n = d.email;
-                        for (let key in det) { if (key.toLowerCase().includes('name')) n = det[key]; }
-                        return { email: d.email, name: n };
-                    });
-
-                    // Save to IDB
-                    await IDB.set(cachePrefix + "bundle", {
-                        dailyBlockEnabled, timetableData, holidaysData, historyOverrides: window.historyOverrides,
-                        allLeaveRequests: window.allLeaveRequests, structureData, assignments, planners, staffList
-                    });
-                    await IDB.set(cachePrefix + "version", serverVersion);
+                const cachePrefix = `admin_planner_v2_${activeCenter}_`;
+                const cached = isFirstLoad ? await IDB.get(cachePrefix + "bundle") : null;
+                if (isFirstLoad) {
+                    // Free the old cache format (it stored the full ~150 MB history on this device)
+                    IDB.set(`admin_planner_${activeCenter}_bundle`, null).catch(() => {});
                 }
-                
+
+                let shared, sharedSavedAt;
+                if (cached && cached.shared && cached.historyKind === historyKind && (Date.now() - cached.sharedSavedAt) < SHARED_DATA_MAX_AGE_MS) {
+                    console.log("⚡ Timetable / history / holidays / leaves reused from device cache");
+                    shared = cached.shared; sharedSavedAt = cached.sharedSavedAt;
+                } else {
+                    console.log(`🔄 Fetching timetable / history (${historyKind}) / holidays / leaves from server...`);
+                    shared = await fetchSharedPlannerData(useSlim); sharedSavedAt = Date.now();
+                }
+
+                let plannerList, assignmentList;
+                if (cached && cached.plannerVersion === serverVersion && cached.planners && cached.assignments) {
+                    console.log("⚡ Planners reused from device cache (no saves since last visit)");
+                    plannerList = cached.planners; assignmentList = cached.assignments;
+                } else {
+                    const [plannerSnap, assignSnap] = await Promise.all([
+                        getCollection("lesson_planners").get(),
+                        getCollection("lesson_planner_assignments").get()
+                    ]);
+                    plannerList = plannerSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    assignmentList = assignSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+                }
+
+                dailyBlockEnabled = shared.dailyBlockEnabled;
+                if (dailyBlockEnabled) {
+                    const dbBtn = document.getElementById('daily-block-btn');
+                    if (dbBtn) {
+                        dbBtn.innerText = "🛑 Block: ON";
+                        dbBtn.classList.replace('text-slate-500', 'text-rose-600');
+                        dbBtn.classList.replace('border-slate-300', 'border-rose-300');
+                    }
+                }
+                timetableData = shared.timetableData;
+                holidaysData = shared.holidaysData;
+                window.historyOverrides = historyKind === "slim2" ? shared.historyRaw.map(expandSlimHistoryDoc) : shared.historyRaw;
+                window.allLeaveRequests = shared.allLeaveRequests;
+                structureData = shared.structureData;
+                staffList = shared.staffList;
+                planners = plannerList;
+                assignments = assignmentList;
+
+                try {
+                    await IDB.set(cachePrefix + "bundle", { plannerVersion: serverVersion, planners: plannerList, assignments: assignmentList,
+                                                             shared, sharedSavedAt, historyKind });
+                } catch (e) { console.warn("Planner cache save skipped:", e); }
+
                 await fetchGlobalUnlockRequests();
                 await runGlobalAdminScanner();
-                
+
             } catch(e) { console.error("Data Load Error:", e); }
         }
 
@@ -968,26 +1016,97 @@
 
         // --- DASHBOARD SUMMARY (Deep Accordion Hierarchy) ---
         function toggleDemoMode(val) { isDemoMode = val; document.getElementById('demo-mode-indicator').classList.toggle('hidden', !val); renderSummary(); }
-// --- 🕰️ SMART TIME MACHINE ENGINE ---
+// --- 🕰️ SMART TIME MACHINE ENGINE (memoized) ---
+        // PERFORMANCE: the analytics loop asks "what was the timetable on date X / is this class
+        // scheduled / excluded / teacher on leave" tens of thousands of times. The answers are the
+        // same as before, but each is now computed once per date & subject and remembered, and
+        // slot searches use a prepared index instead of scanning ~1,100 slots every time.
+        // The memory is cleared automatically whenever the underlying data is reloaded.
+        const normKey = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+        let plannerMemo = null;
+        function getPlannerMemo() {
+            if (!plannerMemo || plannerMemo.hist !== window.historyOverrides || plannerMemo.tt !== timetableData ||
+                plannerMemo.hol !== holidaysData || plannerMemo.leaves !== window.allLeaveRequests) {
+                plannerMemo = { hist: window.historyOverrides, tt: timetableData, hol: holidaysData, leaves: window.allLeaveRequests,
+                                snapshot: new Map(), exclusion: new Map(), working: new Map(), onLeave: new Map(),
+                                overrideByDate: null, sortedMasters: null };
+            }
+            return plannerMemo;
+        }
+
+        // Index per schedule array: "Day|class|section|subject" -> slots (original order kept)
+        const slotIndexCache = new WeakMap();
+        function findSlotsIndexed(schedule, dayName, className, sectionName, subjectName) {
+            if (!Array.isArray(schedule)) return [];
+            let index = slotIndexCache.get(schedule);
+            if (!index) {
+                index = new Map();
+                schedule.forEach(t => {
+                    const key = `${t.day}|${normKey(t.className)}|${normKey(t.section)}|${normKey(t.subject)}`;
+                    if (!index.has(key)) index.set(key, []);
+                    index.get(key).push(t);
+                });
+                slotIndexCache.set(schedule, index);
+            }
+            return index.get(`${dayName}|${normKey(className)}|${normKey(sectionName)}|${normKey(subjectName)}`) || [];
+        }
+
         function getScheduleSnapshotForDate(dateIso) {
             if (!window.historyOverrides || window.historyOverrides.length === 0) {
-                return typeof timetableData !== 'undefined' ? timetableData : (window.fullTimetable || window.teacherTimetable || []);
+                return timetableData; // Fallback to current Live Master if no history
             }
-            
-            const exactOverride = window.historyOverrides.find(h => h.date === dateIso && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE"));
-            if (exactOverride && exactOverride.schedule) return exactOverride.schedule;
-            
-            const masterSnapshots = window.historyOverrides.filter(h => h.type === "LIVE_MASTER_UPDATE" || h.type === "APPLIED_MASTER" || h.type === "FUTURE_MASTER");
-            const sortedMasters = masterSnapshots.sort((a, b) => b.date.localeCompare(a.date));
-            
-            const validMaster = sortedMasters.find(h => h.date <= dateIso);
-            if (validMaster && validMaster.schedule) return validMaster.schedule;
-            
-            return typeof timetableData !== 'undefined' ? timetableData : (window.fullTimetable || window.teacherTimetable || []);
+            const memo = getPlannerMemo();
+            if (memo.snapshot.has(dateIso)) return memo.snapshot.get(dateIso);
+
+            if (!memo.overrideByDate) {
+                // 1. First matching 1-Day Override per date (same as .find() in array order)
+                memo.overrideByDate = new Map();
+                window.historyOverrides.forEach(h => {
+                    if ((h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE") && !memo.overrideByDate.has(h.date)) memo.overrideByDate.set(h.date, h);
+                });
+                // 2. Master snapshots, newest first (sorted once instead of on every call)
+                memo.sortedMasters = window.historyOverrides
+                    .filter(h => h.type === "LIVE_MASTER_UPDATE" || h.type === "APPLIED_MASTER" || h.type === "FUTURE_MASTER")
+                    .sort((a, b) => b.date.localeCompare(a.date));
+            }
+
+            let result = timetableData;
+            const exactOverride = memo.overrideByDate.get(dateIso);
+            if (exactOverride && exactOverride.schedule) {
+                result = exactOverride.schedule;
+            } else {
+                const validMaster = memo.sortedMasters.find(h => h.date <= dateIso);
+                if (validMaster && validMaster.schedule) result = validMaster.schedule;
+            }
+            memo.snapshot.set(dateIso, result);
+            return result;
+        }
+
+        function memoDateKey(dateObj) {
+            const offset = dateObj.getTimezoneOffset() * 60000;
+            return (new Date(dateObj.getTime() - offset)).toISOString().split('T')[0];
+        }
+        function checkDateExclusion(dateObj, className, sectionName, subjectName) {
+            const memo = getPlannerMemo();
+            const key = `${memoDateKey(dateObj)}|${className}|${sectionName}|${subjectName}`;
+            if (!memo.exclusion.has(key)) memo.exclusion.set(key, checkDateExclusionRaw(dateObj, className, sectionName, subjectName));
+            return { ...memo.exclusion.get(key) };
+        }
+        function isTimetableWorkingDay(dateObj, className, sectionName, subjectName) {
+            const memo = getPlannerMemo();
+            const key = `${memoDateKey(dateObj)}|${className}|${sectionName}|${subjectName}`;
+            if (!memo.working.has(key)) memo.working.set(key, isTimetableWorkingDayRaw(dateObj, className, sectionName, subjectName));
+            return memo.working.get(key);
+        }
+        function isTeacherOnLeave(dateIso, className, sectionName, subjectName) {
+            const memo = getPlannerMemo();
+            const key = `${dateIso}|${className}|${sectionName}|${subjectName}`;
+            if (!memo.onLeave.has(key)) memo.onLeave.set(key, isTeacherOnLeaveRaw(dateIso, className, sectionName, subjectName));
+            return memo.onLeave.get(key);
         }
 
       // --- SMART EXCLUSION ENGINE (Holidays, OTs, & Unscheduled Days) ---
-        function checkDateExclusion(dateObj, className, sectionName, subjectName) {
+        function checkDateExclusionRaw(dateObj, className, sectionName, subjectName) {
             if (dateObj.getDay() === 0) return { isExcluded: true, reason: "Sunday (Weekly Off)" };
 
             const offset = dateObj.getTimezoneOffset() * 60000;
@@ -1017,15 +1136,11 @@
                             const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                             const dayName = daysArr[dateObj.getDay()];
                             
-                            let classSlots = scheduleToCheck.filter(t => 
-                                t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName)
-                            );
+                            let classSlots = findSlotsIndexed(scheduleToCheck, dayName, className, sectionName, subjectName);
                             
                             if (classSlots.length === 0) {
                                 const masterArray = typeof timetableData !== 'undefined' ? timetableData : (window.fullTimetable || window.teacherTimetable || []);
-                                classSlots = masterArray.filter(t => 
-                                    t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName)
-                                );
+                                classSlots = findSlotsIndexed(masterArray, dayName, className, sectionName, subjectName);
                             }
                             
                             if (classSlots.length > 0) {
@@ -1056,36 +1171,14 @@
             const dayName = daysArr[checkDate.getDay()];
             const scheduleToCheck = getScheduleSnapshotForDate(curStr);
             
-            const masterSlot = scheduleToCheck.find(t => 
-                t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName)
-            );
+            const masterSlot = findSlotsIndexed(scheduleToCheck, dayName, className, sectionName, subjectName)[0];
             
             if (!masterSlot) return { isExcluded: true, reason: "Class Not Scheduled" };
             if (masterSlot.remark && masterSlot.remark.toLowerCase().includes("doubt session")) return { isExcluded: true, reason: "Doubt Session" };
             
             return { isExcluded: false, reason: "" };
         }
-     // --- 🕰️ SMART TIME MACHINE ENGINE ---
-function getScheduleSnapshotForDate(dateIso) {
-    if (!window.historyOverrides || window.historyOverrides.length === 0) {
-        return timetableData; // Fallback to current Live Master if no history
-    }
-    
-    // 1. Check for a specific 1-Day Override on this exact date (like an OT or Event day)
-    const exactOverride = window.historyOverrides.find(h => h.date === dateIso && (h.type === "DAILY_OVERRIDE" || h.type === "EXAM_OVERRIDE"));
-    if (exactOverride && exactOverride.schedule) return exactOverride.schedule;
-    
-    // 2. If no 1-Day override exists, find the most recent Master Schedule that was active
-    const masterSnapshots = window.historyOverrides.filter(h => h.type === "LIVE_MASTER_UPDATE" || h.type === "APPLIED_MASTER" || h.type === "FUTURE_MASTER");
-    const sortedMasters = masterSnapshots.sort((a, b) => b.date.localeCompare(a.date));
-    
-    const validMaster = sortedMasters.find(h => h.date <= dateIso);
-    if (validMaster && validMaster.schedule) return validMaster.schedule;
-    
-    return timetableData;
-}
-
-       function isTeacherOnLeave(dateIso, className, sectionName, subjectName) {
+       function isTeacherOnLeaveRaw(dateIso, className, sectionName, subjectName) {
             if (!window.allLeaveRequests) return false;
             const schedule = getScheduleSnapshotForDate(dateIso);
             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
@@ -1093,7 +1186,7 @@ function getScheduleSnapshotForDate(dateIso) {
             const dObj = new Date(dateIso);
             const dayName = daysArr[dObj.getDay()];
             
-            const slot = schedule.find(t => t.day === dayName && norm(t.className) === norm(className) && norm(t.section) === norm(sectionName) && norm(t.subject) === norm(subjectName));
+            const slot = findSlotsIndexed(schedule, dayName, className, sectionName, subjectName)[0];
             if (!slot) return false;
             
             const teacherEmail = (slot.teacherEmail || "").toLowerCase();
@@ -1119,7 +1212,7 @@ function getScheduleSnapshotForDate(dateIso) {
             });
         }
 
-        function isTimetableWorkingDay(dateObj, className, sectionName, subjectName) {
+        function isTimetableWorkingDayRaw(dateObj, className, sectionName, subjectName) {
     if (dateObj.getDay() === 0) return false; 
     
     // 1. Calculate the Iso string for the date being checked
@@ -1134,12 +1227,7 @@ function getScheduleSnapshotForDate(dateIso) {
     const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const dayName = daysArr[dateObj.getDay()];
 
-    return scheduleToCheck.some(t => 
-        t.day === dayName && 
-        norm(t.className) === norm(className) && 
-        norm(t.section) === norm(sectionName) && 
-        norm(t.subject) === norm(subjectName)
-    );
+    return findSlotsIndexed(scheduleToCheck, dayName, className, sectionName, subjectName).length > 0;
 }
       
 
@@ -1260,7 +1348,7 @@ function getScheduleSnapshotForDate(dateIso) {
                                             const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                                             const dayName = daysArr[cur.getDay()];
                                             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                                            const slot = scheduleToCheck.find(t => t.day === dayName && norm(t.className) === norm(st.className) && norm(t.section) === norm(st.sectionName) && norm(t.subject) === norm(sub));
+                                            const slot = findSlotsIndexed(scheduleToCheck, dayName, st.className, st.sectionName, sub)[0];
                                             
                                             let dailyMins = 0;
                                             if (isDemoMode) {
@@ -1742,7 +1830,7 @@ let chStartStr = rows[0]?.chapterStartDate; let chStart = chStartStr ? new Date(
                                 const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                                 const dayName = daysArr[cur.getDay()];
                                 const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                                const slot = scheduleToCheck.find(t => t.day === dayName && norm(t.className) === norm(cls) && norm(t.section) === norm(sec) && norm(t.subject) === norm(sub));
+                                const slot = findSlotsIndexed(scheduleToCheck, dayName, cls, sec, sub)[0];
                                 
                                 let dailyMins = 0;
                                 if (isDemoMode) {
@@ -2127,8 +2215,11 @@ let chStartStr = rows[0]?.chapterStartDate; let chStart = chStartStr ? new Date(
 
         function handleAdminUntick(cb, idx) {
             if (!cb.checked) {
-                document.getElementById(`dd-date-${idx}`).value = "";
-                document.getElementById(`dd-min-${idx}`).value = "";
+                // Inputs have classes + data-idx (no ids), so the old getElementById() calls crashed
+                const dateEl = document.querySelector(`.dd-date[data-idx="${idx}"]`);
+                const minEl = document.querySelector(`.dd-min[data-idx="${idx}"]`);
+                if (dateEl) dateEl.value = "";
+                if (minEl) minEl.value = "";
             }
         }
 
@@ -2586,7 +2677,7 @@ let actDays = 0;
                                                     const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                                                     const dayName = daysArr[cur.getDay()];
                                                     const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                                                    const slot = scheduleToCheck.find(t => t.day === dayName && norm(t.className) === norm(st.className) && norm(t.section) === norm(st.sectionName) && norm(t.subject) === norm(sub));
+                                                    const slot = findSlotsIndexed(scheduleToCheck, dayName, st.className, st.sectionName, sub)[0];
                                                     
                                                     let dailyMins = 0;
                                                     if (slot && slot.duration) {
@@ -2601,7 +2692,7 @@ let actDays = 0;
                                         }
                                     }
                                     
-                                    totalMinGap += (tMins - actMins);
+                                    totalMinGap += (targetMins - actMins); // was tMins (undefined here) -> Excel export crashed
                                 }
                             });
 
