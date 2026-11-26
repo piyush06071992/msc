@@ -167,6 +167,100 @@
         // Add the Active Tab tracker
         window.activeSyllabusTab = 'syllabus';
 
+        // ============================================================
+        // READ-OPTIMIZATION HELPERS
+        // ============================================================
+        function plannerLocalIso(dateObj = new Date()) {
+            return new Date(dateObj.getTime() - dateObj.getTimezoneOffset() * 60000).toISOString().split('T')[0];
+        }
+
+        // Small localStorage cache with expiry. Same format + key as teacher-portal.html,
+        // so the class structure cached by the portal is reused here (and vice versa).
+        function plannerCacheGet(key, maxAgeMs) {
+            try {
+                const raw = localStorage.getItem(key);
+                if (!raw) return null;
+                const item = JSON.parse(raw);
+                if (!item || (Date.now() - item.savedAt) > maxAgeMs) return null;
+                return item.value;
+            } catch (e) { return null; }
+        }
+        function plannerCacheSet(key, value) {
+            try { localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), value })); } catch (e) {}
+        }
+
+        async function loadInstituteStructure(forceFresh = false) {
+            const key = `minerva_portal_struct_${activeCenter}`;
+            if (!forceFresh) {
+                const cached = plannerCacheGet(key, 12 * 60 * 60 * 1000);
+                if (cached && cached.length > 0) return { structures: cached, fromCache: true };
+            }
+            const snap = await getCollection("institute_structure").get();
+            const structures = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+            if (structures.length > 0) plannerCacheSet(key, structures);
+            return { structures, fromCache: false };
+        }
+
+        // Same history types the page always used; everything else is ignored exactly as before.
+        const PLANNER_HISTORY_TYPES = ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"];
+        const isUsableHistory = (h) => h && PLANNER_HISTORY_TYPES.includes(h.type) && h.status !== "CANCELLED";
+
+        // Timetable history needed by the tracker, loaded only from the earliest date the opened
+        // subject actually uses (plus the last master snapshot before that date), instead of
+        // downloading every snapshot of the whole session on every page load.
+        const plannerHistoryCache = { fromIso: null, docs: [] };
+        async function loadHistoryFrom(fromIso) {
+            if (plannerHistoryCache.fromIso && plannerHistoryCache.fromIso <= fromIso) return plannerHistoryCache.docs;
+
+            const histCol = getCollection("timetable_history");
+            const recentSnap = await histCol.where("date", ">=", fromIso).get();
+            const docs = recentSnap.docs.map(d => d.data()).filter(isUsableHistory);
+
+            // Latest master snapshot dated before fromIso (what the schedule looked like at that point)
+            let cursor = null;
+            for (let page = 0; page < 20; page++) {
+                let q = histCol.where("date", "<", fromIso).orderBy("date", "desc").limit(10);
+                if (cursor) q = q.startAfter(cursor);
+                const snap = await q.get();
+                if (snap.empty) break;
+                const base = snap.docs.map(d => d.data()).find(h => isUsableHistory(h) && h.type === "LIVE_MASTER_UPDATE");
+                if (base) { docs.push(base); break; }
+                cursor = snap.docs[snap.docs.length - 1];
+            }
+
+            plannerHistoryCache.fromIso = fromIso;
+            plannerHistoryCache.docs = docs;
+            return docs;
+        }
+
+        // Holidays that overlap [fromIso, today and later]: any such holiday ends on/after fromIso.
+        const plannerHolidayCache = { fromIso: null, docs: [] };
+        async function loadHolidaysFrom(fromIso) {
+            if (plannerHolidayCache.fromIso && plannerHolidayCache.fromIso <= fromIso) return plannerHolidayCache.docs;
+            const snap = await getCollection("school_holidays").where("endDate", ">=", fromIso).get();
+            plannerHolidayCache.fromIso = fromIso;
+            plannerHolidayCache.docs = snap.docs.map(d => d.data()).filter(h => h.status !== "CANCELLED");
+            return plannerHolidayCache.docs;
+        }
+
+        // Earliest date the tracker / pace maths can look at for this subject
+        function getEarliestTrackerDate(syllabusRows, activityLogs) {
+            const fallback = new Date();
+            fallback.setDate(fallback.getDate() - 15); // covers the "today - 14 days" catch-up window
+            let earliest = plannerLocalIso(fallback);
+            const consider = (d) => {
+                if (!d || typeof d !== 'string') return;
+                const iso = d.slice(0, 10);
+                if (/^\d{4}-\d{2}-\d{2}$/.test(iso) && iso < earliest) earliest = iso;
+            };
+            (syllabusRows || []).forEach(r => { consider(r.chapterStartDate); consider(r.completedDate); });
+            (activityLogs || []).forEach(l => consider(l.date));
+            // One extra day of margin for timezone-shifted date maths
+            const d = new Date(earliest + "T00:00:00");
+            d.setDate(d.getDate() - 1);
+            return plannerLocalIso(d);
+        }
+
         window.onload = async () => {
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
             if (!activeStaff) return window.location.replace('staff-login.html');
@@ -248,22 +342,41 @@
                 // Target timetable directly to the logged-in teacher to eliminate heavy global reads
                 const timetableQuery = getCollection("timetable").where("teacherName", "==", safeName);
 
-               let structures = [];
-                const [holSnap, histSnap, ttSnap, plannerSnap, leaveSnap, lockDoc, structSnap] = await Promise.all([
-                    getCollection("school_holidays").get({ source: 'server' }).catch(() => getCollection("school_holidays").get()),
-                    getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get({ source: 'server' }).catch(() => getCollection("timetable_history").where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"]).get()),
-                    timetableQuery.get(),
-                    getCollection("lesson_planners").get(),
-                    db.collection(prefix + "leave_requests").get(),
-                    getCollection("configs").doc("lesson_planner_settings").get(),
-                    getCollection("institute_structure").get()
-                ]);;
+                // READ OPTIMIZATION: the class grid only needs TODAY. Previously this downloaded every
+                // lesson planner of the branch, every leave request, every timetable-history snapshot
+                // and every holiday (bypassing the cache) on each page open. Now:
+                //  - holidays: only those that have not ended,
+                //  - history: only today's override document (1 read),
+                //  - leaves: only this teacher's own leaves + leaves that have not ended (for today's substitutions),
+                //  - planners: only the ones for today's classes (fetched after the sessions are known),
+                //  - class structure: cached on the device for 12h.
+                // The full history/holidays are loaded lazily when a subject's tracker is opened.
+                const todayIsoForLoad = plannerLocalIso();
+                const leaveCol = db.collection(prefix + "leave_requests");
 
-               holidaysData = holSnap.docs.map(d => d.data()).filter(h => h.status !== "CANCELLED");
-                window.historyOverrides = histSnap.docs.map(d => d.data()).filter(h => h.status !== "CANCELLED");
+                let [holidays, todayHistDoc, ttSnap, myLeaveSnap, activeLeaveSnap, lockDoc, structResult] = await Promise.all([
+                    loadHolidaysFrom(todayIsoForLoad),
+                    getCollection("timetable_history").doc(todayIsoForLoad).get(),
+                    timetableQuery.get(),
+                    leaveCol.where("teacherEmail", "==", activeStaff.email).get(),
+                    leaveCol.where("endDate", ">=", todayIsoForLoad).get(),
+                    getCollection("configs").doc("lesson_planner_settings").get(),
+                    loadInstituteStructure()
+                ]);
+
+                holidaysData = holidays;
+                const todayHist = todayHistDoc.exists ? todayHistDoc.data() : null;
+                // Only a DAILY/EXAM override for today changes today's schedule; otherwise the live
+                // timetable (window.fullTimetable) is today's schedule.
+                window.historyOverrides = (isUsableHistory(todayHist) && (todayHist.type === "DAILY_OVERRIDE" || todayHist.type === "EXAM_OVERRIDE")) ? [todayHist] : [];
                 window.fullTimetable = ttSnap.docs.map(d => d.data());
-                window.allPlanners = plannerSnap.docs.map(d => ({id: d.id, ...d.data()}));
-                structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
+                let structures = structResult.structures;
+
+                // Merge both leave queries (a teacher's own leave can appear in both)
+                const leaveDocsById = new Map();
+                myLeaveSnap.docs.forEach(d => leaveDocsById.set(d.id, d));
+                activeLeaveSnap.docs.forEach(d => leaveDocsById.set(d.id, d));
+                const leaveSnap = Array.from(leaveDocsById.values());
 
                 globalAutoLock = true;
                 enableDailyBlock = false;
@@ -309,6 +422,34 @@
                         }
                     }
                 });
+
+                // Substitution classes today belong to OTHER teachers' timetable rows, which are not in this
+                // teacher's own rows. Only on such days, load today's full timetable (once) so the grid can
+                // still tell whether that class is scheduled, exactly as before.
+                const todaySubs = window.mySubstitutions.filter(adj => adj.date === todayIsoForLoad);
+                if (window.historyOverrides.length === 0 && todaySubs.length > 0) {
+                    const normT = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                    const subTargets = todaySubs.map(adj => {
+                        const parts = (adj.sub || "").split('|');
+                        return { c: parts[0] ? parts[0].trim() : "", s: parts[1] ? parts[1].replace('Sec', '').trim() : "" };
+                    });
+                    // Cheap path: only the substituted classes' rows for today
+                    const classNames = [...new Set(subTargets.map(t => t.c).filter(Boolean))];
+                    const classSnaps = await Promise.all(classNames.map(c =>
+                        getCollection("timetable").where("day", "==", todayName).where("className", "==", c).get()));
+                    let dayRows = classSnaps.flatMap(snap => snap.docs.map(d => d.data()));
+                    const allFound = subTargets.every(t => dayRows.some(r => normT(r.className) === normT(t.c) && normT(r.section) === normT(t.s)));
+                    if (!allFound) {
+                        // Name stored slightly differently: fall back to today's full timetable (old behaviour)
+                        const daySnap = await getCollection("timetable").where("day", "==", todayName).get();
+                        dayRows = daySnap.docs.map(d => d.data());
+                    }
+                    window.historyOverrides = [{
+                        type: "LIVE_MASTER_UPDATE",
+                        date: todayIsoForLoad,
+                        schedule: [...dayRows, ...window.fullTimetable.filter(t => t.day !== todayName)]
+                    }];
+                }
 
                 const mySafeNameMatch = safeName.trim().toLowerCase();
 
@@ -406,10 +547,29 @@
                         };
                     });
                 } else {
-                    mySessions = []; 
+                    mySessions = [];
                 }
                 myDuties = [];
-                
+
+                // If the device-cached class structure is missing a section (e.g. admin just added it),
+                // refresh it once from the server and rebuild the assignment IDs.
+                if (structResult.fromCache && mySessions.some(s => s.assignmentId.startsWith('MATCH_FAILED_'))) {
+                    const fresh = await loadInstituteStructure(true);
+                    const normS = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                    mySessions.forEach(s => {
+                        if (!s.assignmentId.startsWith('MATCH_FAILED_')) return;
+                        const st = fresh.structures.find(x => normS(x.className) === normS(s.className) && normS(x.sectionName) === normS(s.section));
+                        if (!st) return;
+                        const sub = (st.subjects || []).find(x => normS(x) === normS(s.subject)) || s.subject;
+                        s.assignmentId = `${st.id}_${sub}`.replace(/\s+/g, '_');
+                    });
+                }
+
+                // READ OPTIMIZATION: planners only for today's classes (was: every planner of the branch)
+                const todayAssignmentIds = [...new Set(mySessions.map(s => s.assignmentId).filter(id => !id.startsWith('MATCH_FAILED_')))];
+                const plannerDocs = await Promise.all(todayAssignmentIds.map(id => getCollection("lesson_planners").doc(id).get()));
+                window.allPlanners = plannerDocs.filter(d => d.exists).map(d => ({ id: d.id, ...d.data() }));
+
                 renderClassesGrid();
             } catch(e) { 
                 console.error(e); 
@@ -632,7 +792,17 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 }
                 window.unlockRequested = docData.unlockRequested === true;
                 window.lockedDateStr = docData.lockedDate || null;
-                
+
+                // READ OPTIMIZATION: load timetable history + holidays only now, and only from the
+                // earliest date this subject's tracker uses (cached for the rest of the page visit).
+                const trackerFromIso = getEarliestTrackerDate(currentPlannerData, window.currentActivityLogs);
+                const [trackerHistory, trackerHolidays] = await Promise.all([
+                    loadHistoryFrom(trackerFromIso),
+                    loadHolidaysFrom(trackerFromIso)
+                ]);
+                window.historyOverrides = trackerHistory;
+                holidaysData = trackerHolidays;
+
                 const currSession = mySessions.find(s => s.assignmentId === activeSubjectId);
                 const cName = currSession ? currSession.className : "";
                 const sName = currSession ? currSession.section : "";
