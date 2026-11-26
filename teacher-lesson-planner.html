@@ -161,6 +161,7 @@
         let activeSubjectId = null, activeSessionMins = 0;
         let holidaysData = []; window.teacherTimetable = null; window.fullTimetable = [];
         let structuresCache = null;
+        let plannerSettingsCache = null;
 
         function getBranchCache(key) {
             try {
@@ -620,19 +621,30 @@ const offset = new Date().getTimezoneOffset() * 60000;
                     window.teacherTimetable = ttSnap.docs.map(d => d.data());
                 }
 
+                const needsHistory = !Array.isArray(window.historyOverrides) || window.historyOverrides.length === 0;
+                const needsSettings = !plannerSettingsCache;
+
                 const [doc, assignDoc, lockDoc, fullHistSnap] = await Promise.all([
                     getCollection("lesson_planners").doc(activeSubjectId).get(),
                     getCollection("lesson_planner_assignments").doc(activeSubjectId).get(),
-                    getCollection("configs").doc("lesson_planner_settings").get(),
-                    getCollection("timetable_history")
-                        .where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"])
-                        .get()
+                    needsSettings ? getCollection("configs").doc("lesson_planner_settings").get() : Promise.resolve(null),
+                    needsHistory
+                        ? getCollection("timetable_history")
+                            .where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"])
+                            .get()
+                        : Promise.resolve(null)
                 ]);
-                window.historyOverrides = (fullHistSnap?.docs || []).map(d => d.data()).filter(h => h.status !== "CANCELLED");
 
-                if (lockDoc.exists) {
-                    if (lockDoc.data().autoLockEnabled === false) globalAutoLock = false;
-                    if (lockDoc.data().dailyComplianceBlockEnabled === true) enableDailyBlock = true;
+                if (fullHistSnap) {
+                    window.historyOverrides = (fullHistSnap.docs || []).map(d => d.data()).filter(h => h.status !== "CANCELLED");
+                }
+
+                if (lockDoc && lockDoc.exists) {
+                    plannerSettingsCache = lockDoc.data();
+                }
+                if (plannerSettingsCache) {
+                    if (plannerSettingsCache.autoLockEnabled === false) globalAutoLock = false;
+                    if (plannerSettingsCache.dailyComplianceBlockEnabled === true) enableDailyBlock = true;
                 }
                 window.currentAssignment = assignDoc.exists ? assignDoc.data() : {};
                 
@@ -706,12 +718,15 @@ const offset = new Date().getTimezoneOffset() * 60000;
                 // Determine where to start building our forward chain
                 let scanStartDate = new Date(todayISO);
                 if (lastLoggedDateStr) {
-                    // Start the queue from the VERY NEXT DAY after their last log
-                    scanStartDate = new Date(lastLoggedDateStr);
-                    scanStartDate.setDate(scanStartDate.getDate() + 1); 
+                    scanStartDate = new Date(lastLoggedDateStr + "T00:00:00");
+                    scanStartDate.setDate(scanStartDate.getDate() + 1);
                 } else {
-                    scanStartDate.setDate(scanStartDate.getDate() - 14); // Fallback for brand new subjects
+                    scanStartDate = new Date(todayISO + "T00:00:00");
+                    scanStartDate.setDate(scanStartDate.getDate() - 14);
                 }
+                const maxBacklogStart = new Date(todayISO + "T00:00:00");
+                maxBacklogStart.setDate(maxBacklogStart.getDate() - 60);
+                if (scanStartDate < maxBacklogStart) scanStartDate = maxBacklogStart;
 
                 window.catchUpDates = [];
                 let iterDate = new Date(scanStartDate); 
