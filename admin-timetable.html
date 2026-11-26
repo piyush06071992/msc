@@ -997,9 +997,17 @@ async function checkAndApplyFutureMaster() {
     }
 }
     async function fetchStructure() {
-            console.log("🔄 Fetching Structure via Firebase Native Cache...");
+            const cacheKey = `minerva_struct_${activeCenter}`;
+            const cached = sessionStorage.getItem(cacheKey);
+            if (cached) {
+                structureData = JSON.parse(cached);
+            }
             const snap = await getCollection("institute_structure").orderBy("className").get();
-            structureData = snap.docs.map(d => d.data());
+            const freshData = snap.docs.map(d => d.data());
+            if (freshData.length > 0 || !cached) {
+                structureData = freshData;
+                sessionStorage.setItem(cacheKey, JSON.stringify(structureData));
+            }
             
             const pScope = document.getElementById('p-scope');
             if(pScope) {
@@ -1026,10 +1034,7 @@ async function checkAndApplyFutureMaster() {
                 allTeachers = JSON.parse(cached);
                 return;
             }
-            if (!approvedStaffDocsCache) {
-                const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
-                approvedStaffDocsCache = snap.docs.map(d => d.data());
-            }
+            const snap = await db.collection("staff_applications").where("status", "==", "approved").get();
             let tempTeachers = [];
             
             snap.docs.forEach(doc => {
@@ -1186,10 +1191,16 @@ async function checkAndApplyFutureMaster() {
 
             // Apply accepted leave substitutions only for this selected date
             const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-            const leaveSnap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get();
+            let leaveDocs = [];
+            try {
+                const leaveSnap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get();
+                leaveDocs = leaveSnap.docs;
+            } catch (e) {
+                console.warn("Leave lookup skipped:", e);
+            }
             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-            leaveSnap.forEach(doc => {
+            leaveDocs.forEach(doc => {
                 const leaveData = doc.data();
                 if (!leaveData.adjustments) return;
                 leaveData.adjustments.forEach(adj => {
@@ -1838,8 +1849,8 @@ async function saveHoliday() {
             });
             
            checkGlobalClash();
-            checkGlobalLunchBreaks(); // ADDED: Scans for missing lunch breaks
-            applyVisualFilters(); // <--- NEW: Trigger the visual cleanup!
+            applyVisualFilters();
+            requestAnimationFrame(() => checkGlobalLunchBreaks());
         }
 
     function buildTeacherWorkloadHtml(selectedTea, selectedSub) {
