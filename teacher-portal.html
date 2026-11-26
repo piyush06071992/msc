@@ -682,14 +682,14 @@ try {
             const center = staffObj.center || "GHUMARWIN";
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
 
-            db.collection(prefix + "leave_requests")
-              .where("status", "in", ["PENDING", "APPROVED"])
-              .onSnapshot(snap => {
+            // READ OPTIMIZATION: shares the single "active leaves" listener (see subscribeActiveLeaves)
+            subscribeActiveLeaves(prefix, snap => {
                   let pendingEmergencyCount = 0;
                   const todayIso = new Date(new Date().getTime() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0];
 
                   snap.forEach(doc => {
                       const req = doc.data();
+                      if (req.status !== "PENDING" && req.status !== "APPROVED") return;
                       if (req.adjustments) {
                           req.adjustments.forEach(adj => {
                               // If it is in the future/today, is requested by incharge, and hasn't been handled yet
@@ -730,6 +730,71 @@ try {
                       updateLiveTickerHub();
                   }
               });
+        }
+
+        // ============================================================
+        // READ-OPTIMIZATION HELPERS (shared by the dashboard widgets)
+        // ============================================================
+
+        function portalLocalIso(dateObj = new Date()) {
+            return new Date(dateObj.getTime() - dateObj.getTimezoneOffset() * 60000).toISOString().split('T')[0];
+        }
+
+        // ONE shared live listener for leaves that have not ended yet.
+        // Previously 2-3 separate listeners downloaded every PENDING/APPROVED leave of the
+        // whole session on every page load. Leaves that ended before today can never carry
+        // a substitution for today or later, so they are skipped entirely.
+        const activeLeaveSubscribers = [];
+        let activeLeaveSnap = null;
+        let activeLeaveListenerStarted = false;
+
+        function subscribeActiveLeaves(prefix, callback) {
+            activeLeaveSubscribers.push(callback);
+            if (activeLeaveSnap) {
+                try { callback(activeLeaveSnap); } catch (e) { console.error("Leave subscriber error:", e); }
+            }
+            if (activeLeaveListenerStarted) return;
+            activeLeaveListenerStarted = true;
+
+            db.collection(prefix + "leave_requests")
+                .where("endDate", ">=", portalLocalIso())
+                .onSnapshot(snap => {
+                    activeLeaveSnap = snap;
+                    activeLeaveSubscribers.forEach(fn => {
+                        try { fn(snap); } catch (e) { console.error("Leave subscriber error:", e); }
+                    });
+                }, err => console.error("Active leave listener error:", err));
+        }
+
+        // Small localStorage cache with expiry (survives app restarts, unlike sessionStorage)
+        function portalCacheGet(key, maxAgeMs) {
+            try {
+                const raw = localStorage.getItem(key);
+                if (!raw) return null;
+                const item = JSON.parse(raw);
+                if (!item || (Date.now() - item.savedAt) > maxAgeMs) return null;
+                return item.value;
+            } catch (e) { return null; }
+        }
+        function portalCacheSet(key, value) {
+            try { localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), value })); } catch (e) {}
+        }
+
+        // The logged-in teacher's own timetable rows, fetched ONCE per page load and shared by
+        // the lesson-compliance, exam-syllabus and manual-grades checks (they used to query it twice).
+        let myTimetablePromise = null;
+        function getMyTimetableRows(prefix, safeName) {
+            if (!myTimetablePromise) {
+                myTimetablePromise = db.collection(prefix + "timetable")
+                    .where("teacherName", "==", safeName)
+                    .get()
+                    .then(snap => {
+                        window.fullTimetable = snap.docs.map(d => d.data());
+                        return window.fullTimetable;
+                    })
+                    .catch(err => { myTimetablePromise = null; throw err; });
+            }
+            return myTimetablePromise;
         }
 
 
@@ -775,9 +840,10 @@ try {
                 const todayDayName = daysOfWeek[now.getDay()];
                 const todayDateIso = now.toISOString().split('T')[0];
 
-                // Check Holidays that started on or before today (avoids downloading future/past-only holiday docs)
+                // READ OPTIMIZATION: only holidays that have not ended yet (endDate >= today).
+                // "startDate <= today" kept growing all session long; past holidays can never match today.
                 const holSnap = await getCollection("school_holidays")
-                    .where("startDate", "<=", todayDateIso)
+                    .where("endDate", ">=", todayDateIso)
                     .get();
                 const holidays = holSnap.docs.map(d => d.data());
                 const todayDateOnly = new Date(todayDateIso + "T00:00:00");
@@ -846,7 +912,12 @@ try {
                     processAndRender();
                 });
 
-                liveMasterUnsubscribe = db.collection(prefix + "timetable").where("day", "==", todayDayName).onSnapshot(snap => {
+                // READ OPTIMIZATION: only THIS teacher's slots for today (was: every section's slots for today).
+                // processAndRender() filters to this teacher anyway, so the result on screen is identical.
+                liveMasterUnsubscribe = db.collection(prefix + "timetable")
+                    .where("day", "==", todayDayName)
+                    .where("teacherName", "==", teacherName)
+                    .onSnapshot(snap => {
                     masterSlots = snap.docs.map(d => d.data());
                     processAndRender();
                 });
@@ -1137,12 +1208,14 @@ function listenForUnconfiguredExams() {
 
                 latestLeaveSnap.forEach(doc => {
                     const data = doc.data();
+                    if (data.status !== "PENDING" && data.status !== "APPROVED") return;
                     if(data.adjustments) {
                         data.adjustments.forEach(adj => {
                             const adjEmail = (adj.adjustedEmail || "").trim().toLowerCase();
                             if (adjEmail === myEmail) {
                                 if (!adj.substituteResponse || adj.substituteResponse === "PENDING") {
-                                    pendingCount++;
+                                    // Same rule as teacher-leave.html: requests for past dates are no longer actionable
+                                    if (adj.date >= todayIsoStr) pendingCount++;
                                 } else if (adj.substituteResponse === "ACCEPTED") {
                                     if (adj.date === todayIsoStr) {
                                         const dutyId = `duty_${doc.id}_${adj.start}`;
@@ -1306,9 +1379,9 @@ function listenForUnconfiguredExams() {
                 }
             };
 
-            db.collection(prefix + "leave_requests")
-              .where("status", "in", ["PENDING", "APPROVED"])
-              .onSnapshot(snap => { latestLeaveSnap = snap; evaluateDuties(); }, err => console.error(err));
+            // READ OPTIMIZATION: shared listener on leaves that have not ended yet
+            // (was: every PENDING/APPROVED leave of the whole session).
+            subscribeActiveLeaves(prefix, snap => { latestLeaveSnap = snap; evaluateDuties(); });
 
             const weekStartObj = new Date(Date.now() - offset);
             weekStartObj.setDate(weekStartObj.getDate() - 6);
@@ -1361,7 +1434,10 @@ window.ackDuty = function(dutyId) {
             const center = activeStaff.center || "GHUMARWIN";
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
             
-            let staffDeptMap = JSON.parse(sessionStorage.getItem('minervaStaffDepts_' + center)) || {};
+            // READ OPTIMIZATION: department map cached in localStorage for 24h
+            // (sessionStorage was wiped on every new tab / app launch, re-reading every staff profile).
+            const STAFF_DEPT_CACHE_KEY = 'minerva_portal_staffdepts_' + center;
+            let staffDeptMap = portalCacheGet(STAFF_DEPT_CACHE_KEY, 24 * 60 * 60 * 1000) || {};
             if (Object.keys(staffDeptMap).length === 0) {
                 try {
                     const staffSnap = await db.collection("staff_applications").where("status", "==", "approved").get();
@@ -1370,7 +1446,7 @@ window.ackDuty = function(dutyId) {
                         const dept = data.details?.Department || data.details?.Subject || data.dept || "General";
                         staffDeptMap[(data.email || "").toLowerCase()] = dept;
                     });
-                    sessionStorage.setItem('minervaStaffDepts_' + center, JSON.stringify(staffDeptMap));
+                    portalCacheSet(STAFF_DEPT_CACHE_KEY, staffDeptMap);
                 } catch(e) { console.error("Error fetching staff depts", e); }
             }
             
@@ -1381,9 +1457,8 @@ window.ackDuty = function(dutyId) {
             nextWeek.setDate(d.getDate() + 7);
             const nextWeekIso = `${nextWeek.getFullYear()}-${String(nextWeek.getMonth()+1).padStart(2,'0')}-${String(nextWeek.getDate()).padStart(2,'0')}`;
 
-            db.collection(prefix + "leave_requests")
-                .where("endDate", ">=", todayIso)
-                .onSnapshot(snap => {
+            // READ OPTIMIZATION: reuses the shared active-leaves listener (same endDate >= today query)
+            subscribeActiveLeaves(prefix, snap => {
                 const board = document.getElementById('leave-notice-board');
                 if (!board) return;
 
@@ -1490,7 +1565,7 @@ window.ackDuty = function(dutyId) {
                 });
 
                board.innerHTML = html;
-            }, error => console.error("Notice board error:", error));
+            });
         }
 
 async function checkMissingManualGradesTeacher(safeName) {
@@ -1513,6 +1588,16 @@ async function checkMissingManualGradesTeacher(safeName) {
                 startObj.setDate(startObj.getDate() - 30);
                 const START_DATE = startObj.toISOString().split('T')[0];
 
+                // READ OPTIMIZATION: this check only looks at exams dated BEFORE today, so once it has
+                // found "nothing pending" that answer cannot change for the rest of the day.
+                // Skip the exam + OMR-submission scan on repeat visits today. (If something IS pending,
+                // we re-check on every visit so the banner disappears as soon as marks are entered.)
+                const GRADES_OK_KEY = `minerva_portal_grades_ok_${center}_${safeName}`;
+                if (localStorage.getItem(GRADES_OK_KEY) === todayIso) {
+                    banner.classList.add('hidden');
+                    return;
+                }
+
                 // 2. Fetch Exams past date but after START_DATE
                 const examsSnap = await db.collection(prefix + "exam_schedules")
                     .where("date", ">=", START_DATE)
@@ -1521,15 +1606,12 @@ async function checkMissingManualGradesTeacher(safeName) {
 
                 if (examsSnap.empty) {
                     banner.classList.add('hidden');
+                    localStorage.setItem(GRADES_OK_KEY, todayIso);
                     return;
                 }
 
-               // 3. Match exams to this teacher's subject footprint (reuses window.fullTimetable when available)
-                let ttRows = window.fullTimetable;
-                if (!ttRows || ttRows.length === 0) {
-                    const ttSnap = await db.collection(prefix + "timetable").where("teacherName", "==", safeName).get();
-                    ttRows = ttSnap.docs.map(d => d.data());
-                }
+               // 3. Match exams to this teacher's subject footprint (shared single timetable query)
+                const ttRows = await getMyTimetableRows(prefix, safeName);
                 let myClasses = [];
                 ttRows.forEach(data => {
                     if(!myClasses.some(c => norm(c.c)===norm(data.className) && norm(c.s)===norm(data.section) && norm(c.sub)===norm(data.subject))) {
@@ -1537,7 +1619,7 @@ async function checkMissingManualGradesTeacher(safeName) {
                     }
                 });
 
-                if (myClasses.length === 0) return;
+                if (myClasses.length === 0) { localStorage.setItem(GRADES_OK_KEY, todayIso); return; }
 
                 let pendingExams = [];
                 examsSnap.docs.forEach(doc => {
@@ -1553,7 +1635,7 @@ async function checkMissingManualGradesTeacher(safeName) {
                     });
                 });
 
-                if (pendingExams.length === 0) return;
+                if (pendingExams.length === 0) { localStorage.setItem(GRADES_OK_KEY, todayIso); return; }
 
                 // 4. Group fetches to check omr_submissions efficiently
                 let missingLogs = [];
@@ -1627,6 +1709,7 @@ async function checkMissingManualGradesTeacher(safeName) {
                     banner.classList.add('hidden');
                     banner.classList.remove('block');
                     globalSystemAlerts = globalSystemAlerts.filter(a => a.id !== 'missing_grades');
+                    localStorage.setItem(GRADES_OK_KEY, todayIso);
                 }
 
             } catch (e) { console.error("Error scanning missing grades:", e); }
@@ -1955,39 +2038,41 @@ async function checkMissingAttendanceTeacher(safeName) {
                 lookbackDate.setDate(lookbackDate.getDate() - 30);
                 const minHistoryDate = lookbackDate.toISOString().split('T')[0];
 
-                const structCacheKey = `minerva_struct_${activeStaff.center || "GHUMARWIN"}`;
-                const cachedStruct = JSON.parse(sessionStorage.getItem(structCacheKey) || "null");
+                const branchKey = activeStaff.center || "GHUMARWIN";
 
-                const [ttSnap, structSnap, holSnap, histSnap] = await Promise.all([
-                    db.collection(prefix + "timetable").where("teacherName", "==", safeName).get(),
+                // READ OPTIMIZATION: class structure cached in localStorage for 12h
+                // (sessionStorage was wiped on every new tab / app launch).
+                const structCacheKey = `minerva_portal_struct_${branchKey}`;
+                const cachedStruct = portalCacheGet(structCacheKey, 12 * 60 * 60 * 1000);
+
+                const [myRows, structures] = await Promise.all([
+                    getMyTimetableRows(prefix, safeName), // shared with the manual-grades check
                     cachedStruct
-                        ? Promise.resolve({ docs: cachedStruct.map(s => ({ id: s.id, data: () => s })) })
-                        : getCollection("institute_structure").get(),
-                    window.holidaysData && window.holidaysData.length > 0
-                        ? Promise.resolve({ docs: window.holidaysData.map(h => ({ data: () => h })) })
-                        : getCollection("school_holidays").where("startDate", "<=", todayISO).get(),
-                    getCollection("timetable_history").where("date", ">=", minHistoryDate).get()
+                        ? Promise.resolve(cachedStruct)
+                        : getCollection("institute_structure").get().then(snap => {
+                            const arr = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                            if (arr.length > 0) portalCacheSet(structCacheKey, arr);
+                            return arr;
+                        })
                 ]);
 
                 let myClasses = [];
-                const structures = structSnap.docs.map(d => ({id: d.id, ...d.data()}));
-                if (!cachedStruct && structures.length > 0) {
-                    sessionStorage.setItem(structCacheKey, JSON.stringify(structures));
-                }
-                window.holidaysData = holSnap.docs.map(d => d.data());
-                const holidays = window.holidaysData;
-                window.historyOverrides = histSnap.docs.map(d => d.data());
-                const historyOverrides = window.historyOverrides;
-                window.fullTimetable = ttSnap.docs.map(d => d.data());
-                const myFullTimetable = window.fullTimetable;
                 const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-                ttSnap.docs.forEach(d => {
-                    const data = d.data();
+                myRows.forEach(data => {
                     if(!myClasses.some(c => norm(c.c)===norm(data.className) && norm(c.s)===norm(data.section) && norm(c.sub)===norm(data.subject))) {
                         myClasses.push({ c: data.className, s: data.section, sub: data.subject });
                     }
                 });
+
+                // READ OPTIMIZATION: missing days are only counted up to YESTERDAY, so once today's
+                // check finds nothing missing, the answer cannot change until tomorrow.
+                // Skip the planner / history / holiday reads on repeat visits today.
+                const LESSON_OK_KEY = `minerva_portal_lesson_ok_${branchKey}_${safeName}`;
+                if (localStorage.getItem(LESSON_OK_KEY) === todayISO) {
+                    await checkExamSyllabusCompliance(safeName, myClasses);
+                    return;
+                }
 
                 const daysArr = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                 let missingLogs = [];
@@ -2022,20 +2107,51 @@ async function checkMissingAttendanceTeacher(safeName) {
                     });
                 }
 
+                const getLastLog = (planner) => {
+                    let lastLog = null;
+                    planner.syllabusData.forEach(r => {
+                        if (r.chapterStartDate && (!lastLog || r.chapterStartDate > lastLog)) lastLog = r.chapterStartDate;
+                        if (r.isDone && r.completedDate && (!lastLog || r.completedDate > lastLog)) lastLog = r.completedDate;
+                    });
+                    if (planner.activityLogs) {
+                        planner.activityLogs.forEach(log => {
+                            if (!lastLog || log.date > lastLog) lastLog = log.date;
+                        });
+                    }
+                    return lastLog;
+                };
+
+                // READ OPTIMIZATION: holidays + timetable history are only needed to scan the gap
+                // between a planner's last log and yesterday. If every planner is up to date
+                // (last log = yesterday or today), skip those two reads completely.
+                const yesterdayObj = new Date(today.getTime() - offset);
+                yesterdayObj.setDate(yesterdayObj.getDate() - 1);
+                const yesterdayISO = yesterdayObj.toISOString().split('T')[0];
+
+                let earliestLastLog = null;
+                allPlanners.forEach(planner => {
+                    if (!uniqueAssignments.has(planner.id) || !planner.syllabusData || planner.syllabusData.length === 0) return;
+                    const lastLog = getLastLog(planner);
+                    if (lastLog && lastLog < yesterdayISO && (!earliestLastLog || lastLog < earliestLastLog)) {
+                        earliestLastLog = lastLog;
+                    }
+                });
+
+                if (earliestLastLog) {
+                    const [holSnap, histSnap] = await Promise.all([
+                        // Any holiday that overlaps the scanned range must end on/after the earliest last log
+                        getCollection("school_holidays").where("endDate", ">=", earliestLastLog).get(),
+                        getCollection("timetable_history").where("date", ">=", minHistoryDate).get()
+                    ]);
+                    window.holidaysData = holSnap.docs.map(d => d.data());
+                    window.historyOverrides = histSnap.docs.map(d => d.data());
+                }
+
                 uniqueAssignments.forEach((classInfo, assignmentId) => {
                     const planner = allPlanners.find(p => p.id === assignmentId);
                     if(planner && planner.syllabusData && planner.syllabusData.length > 0) {
-                        let lastLog = null;
-                        planner.syllabusData.forEach(r => {
-                            if (r.chapterStartDate && (!lastLog || r.chapterStartDate > lastLog)) lastLog = r.chapterStartDate;
-                            if (r.isDone && r.completedDate && (!lastLog || r.completedDate > lastLog)) lastLog = r.completedDate;
-                        });
-                        if (planner.activityLogs) {
-                            planner.activityLogs.forEach(log => {
-                                if (!lastLog || log.date > lastLog) lastLog = log.date;
-                            });
-                        }
-                        
+                        const lastLog = getLastLog(planner);
+
                         if (lastLog && lastLog < todayISO) {
                             const [ly, lm, ld] = lastLog.split('-');
                             let scanDate = new Date(parseInt(ly), parseInt(lm)-1, parseInt(ld));
@@ -2084,6 +2200,8 @@ async function checkMissingAttendanceTeacher(safeName) {
                         link: 'teacher-lesson-planner.html'
                     });
                     updateLiveTickerHub();
+                } else {
+                    localStorage.setItem(LESSON_OK_KEY, todayISO);
                 }
 
                 await checkExamSyllabusCompliance(safeName, myClasses);
@@ -2103,7 +2221,19 @@ async function checkMissingAttendanceTeacher(safeName) {
                 const offset = today.getTimezoneOffset() * 60000;
                 const todayISO = new Date(today - offset).toISOString().slice(0, 10);
 
-                db.collection(prefix + "exam_schedules").where("date", ">=", todayISO).onSnapshot(examSnap => {
+                // Teachers without classes can never have a missing exam syllabus: skip the listener.
+                if (!myClasses || myClasses.length === 0) return;
+
+                // READ OPTIMIZATION: look 30 days ahead instead of at every future exam of the branch
+                // (same window the "unconfigured exams" watcher already uses).
+                const horizonObj = new Date(today.getTime() - offset);
+                horizonObj.setDate(horizonObj.getDate() + 30);
+                const horizonISO = horizonObj.toISOString().slice(0, 10);
+
+                db.collection(prefix + "exam_schedules")
+                    .where("date", ">=", todayISO)
+                    .where("date", "<=", horizonISO)
+                    .onSnapshot(examSnap => {
                     if (examSnap.empty) return;
 
                     const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
@@ -2112,7 +2242,7 @@ async function checkMissingAttendanceTeacher(safeName) {
 
                     examSnap.docs.forEach(doc => {
                         const data = doc.data();
-                        data.subjects.forEach(sub => {
+                        (data.subjects || []).forEach(sub => {
                             const isMine = myClasses.some(c => norm(c.c) === norm(data.className) && norm(c.s) === norm(data.section) && norm(c.sub) === norm(sub));
                             
                             if (isMine) {
