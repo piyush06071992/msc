@@ -537,3 +537,47 @@ exports.compileSingleRoomOnDemand = onRequest({
         res.status(500).send({ error: err.message });
     }
 });
+
+// ============================================================================
+// SLIM TIMETABLE HISTORY MIRROR
+// Whenever a timetable_history document is created, changed or deleted (from ANY page:
+// admin-timetable, sandbox-timetable, HOD mapping, ...), write/delete its slim mirror
+// in `<collection>_slim`. Each run handles exactly ONE document (Firestore caps a
+// document at 1 MB), so it finishes in about a second and cannot time out midway.
+// Pages that read the slim mirror fall back to the full history automatically if the
+// mirror is not marked ready (see functions/tools/backfill-slim-history.js).
+// ============================================================================
+const { onDocumentWritten } = require("firebase-functions/v2/firestore");
+const { HISTORY_COLLECTIONS, slimCollectionName, toSlim } = require("./slim-history");
+
+async function mirrorHistoryDocument(collectionName, docId) {
+    const db = admin.firestore();
+    // Always read the CURRENT version (not the event payload), so that if two saves
+    // happen within a second the mirror still ends up matching the latest one.
+    const sourceSnap = await db.collection(collectionName).doc(docId).get();
+    const slimRef = db.collection(slimCollectionName(collectionName)).doc(docId);
+    const slim = sourceSnap.exists ? toSlim(sourceSnap.data(), docId) : null;
+    if (slim) {
+        await slimRef.set(slim);
+    } else {
+        await slimRef.delete(); // deleted, or a type the pages never use
+    }
+}
+
+HISTORY_COLLECTIONS.forEach(collectionName => {
+    const exportName = "mirrorSlimHistory_" + collectionName.replace(/[^a-zA-Z0-9]/g, "_");
+    exports[exportName] = onDocumentWritten({
+        document: `${collectionName}/{docId}`,
+        region: "asia-south1",
+        memory: "512MiB",
+        timeoutSeconds: 60,
+        retry: true // Firebase re-runs it automatically if it ever fails
+    }, async (event) => {
+        try {
+            await mirrorHistoryDocument(collectionName, event.params.docId);
+        } catch (err) {
+            console.error(`Slim mirror failed for ${collectionName}/${event.params.docId}:`, err);
+            throw err; // rethrow so the retry happens
+        }
+    });
+});

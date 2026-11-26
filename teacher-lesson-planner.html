@@ -209,12 +209,55 @@
         // subject actually uses (plus the last master snapshot before that date), instead of
         // downloading every snapshot of the whole session on every page load.
         const plannerHistoryCache = { fromIso: null, docs: [] };
+        // ---------------------------------------------------------------
+        // SLIM HISTORY: a Cloud Function keeps a slim mirror of every history document in
+        // `timetable_history_slim` (same IDs, only the 12 slot fields this page uses, packed
+        // into one string -> ~10x smaller to download and parse). It is used ONLY when the
+        // mirror's switch document (__status.ready) is ON; otherwise this page reads the
+        // full history exactly as before. Turning the switch OFF is an instant rollback.
+        // ---------------------------------------------------------------
+        const SLIM_SLOT_FIELDS = ["day", "className", "section", "subject", "start24", "end24",
+                                  "duration", "remark", "teacher", "teacherName", "timeRange", "id"];
+        let slimHistoryReadyPromise = null;
+        function isSlimHistoryReady() {
+            if (!slimHistoryReadyPromise) {
+                slimHistoryReadyPromise = getCollection("timetable_history_slim").doc("__status").get()
+                    .then(doc => doc.exists && doc.data().ready === true)
+                    .catch(() => false);
+            }
+            return slimHistoryReadyPromise;
+        }
+        function expandSlimHistory(s) {
+            if (!s) return null;
+            let rows = [], values = [];
+            try { rows = JSON.parse(s.rows || "[]"); values = JSON.parse(s.values || "[]"); } catch (e) { rows = []; values = []; }
+            // Each row holds positions into `values` (every distinct value is stored once)
+            const schedule = rows.map(r => {
+                const slot = {};
+                SLIM_SLOT_FIELDS.forEach((f, i) => { const v = values[r[i]]; if (v !== null && v !== undefined) slot[f] = v; });
+                return slot;
+            });
+            const h = { type: s.type, schedule };
+            if (s.date !== null && s.date !== undefined) h.date = s.date;
+            if (s.status !== null && s.status !== undefined) h.status = s.status;
+            if (s.tag !== null && s.tag !== undefined) h.tag = s.tag;
+            return h;
+        }
+        // Returns { col, toHistory } for the history source to use (slim mirror or full history)
+        async function getHistorySource() {
+            if (await isSlimHistoryReady()) {
+                return { col: getCollection("timetable_history_slim"), toHistory: d => expandSlimHistory(d.data()), slim: true };
+            }
+            return { col: getCollection("timetable_history"), toHistory: d => d.data(), slim: false };
+        }
+
         async function loadHistoryFrom(fromIso) {
             if (plannerHistoryCache.fromIso && plannerHistoryCache.fromIso <= fromIso) return plannerHistoryCache.docs;
 
-            const histCol = getCollection("timetable_history");
+            const source = await getHistorySource();
+            const histCol = source.col;
             const recentSnap = await histCol.where("date", ">=", fromIso).get();
-            const docs = recentSnap.docs.map(d => d.data()).filter(isUsableHistory);
+            const docs = recentSnap.docs.map(source.toHistory).filter(isUsableHistory);
 
             // Latest master snapshot dated before fromIso (what the schedule looked like at that point)
             let cursor = null;
@@ -223,7 +266,7 @@
                 if (cursor) q = q.startAfter(cursor);
                 const snap = await q.get();
                 if (snap.empty) break;
-                const base = snap.docs.map(d => d.data()).find(h => isUsableHistory(h) && h.type === "LIVE_MASTER_UPDATE");
+                const base = snap.docs.map(source.toHistory).find(h => isUsableHistory(h) && h.type === "LIVE_MASTER_UPDATE");
                 if (base) { docs.push(base); break; }
                 cursor = snap.docs[snap.docs.length - 1];
             }
@@ -354,9 +397,10 @@
                 const todayIsoForLoad = plannerLocalIso();
                 const leaveCol = db.collection(prefix + "leave_requests");
 
+                const historySource = await getHistorySource();
                 let [holidays, todayHistDoc, ttSnap, myLeaveSnap, activeLeaveSnap, lockDoc, structResult] = await Promise.all([
                     loadHolidaysFrom(todayIsoForLoad),
-                    getCollection("timetable_history").doc(todayIsoForLoad).get(),
+                    historySource.col.doc(todayIsoForLoad).get(),
                     timetableQuery.get(),
                     leaveCol.where("teacherEmail", "==", activeStaff.email).get(),
                     leaveCol.where("endDate", ">=", todayIsoForLoad).get(),
@@ -365,7 +409,7 @@
                 ]);
 
                 holidaysData = holidays;
-                const todayHist = todayHistDoc.exists ? todayHistDoc.data() : null;
+                const todayHist = todayHistDoc.exists ? historySource.toHistory(todayHistDoc) : null;
                 // Only a DAILY/EXAM override for today changes today's schedule; otherwise the live
                 // timetable (window.fullTimetable) is today's schedule.
                 window.historyOverrides = (isUsableHistory(todayHist) && (todayHist.type === "DAILY_OVERRIDE" || todayHist.type === "EXAM_OVERRIDE")) ? [todayHist] : [];
