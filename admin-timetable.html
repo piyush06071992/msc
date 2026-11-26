@@ -133,7 +133,7 @@
             
           <div class="flex-1">
                 <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1 ml-1">Filter by Teacher</label>
-                <select id="filter-teacher" onchange="renderDirectDashboard(true)" class="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 outline-none focus:border-blue-500 cursor-pointer transition-colors">
+                <select id="filter-teacher" onchange="applyVisualFilters(); updateTeacherWorkloadBanner();" class="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 outline-none focus:border-blue-500 cursor-pointer transition-colors">
                     <option value="ALL">All Teachers</option>
                 </select>
             </div>
@@ -901,8 +901,10 @@ function updateTeacherDropdown(skipRender = false) {
                 teaSelect.innerHTML += `<option value="${t.name}">${t.name}</option>`;
             });
             
-            // Pass true to prevent destructive scraping when just filtering!
-            if (!skipRender) renderDirectDashboard(true); 
+            if (!skipRender) {
+                applyVisualFilters();
+                updateTeacherWorkloadBanner();
+            }
         }
 
  async function init() {
@@ -950,8 +952,10 @@ function updateTeacherDropdown(skipRender = false) {
     const todayDayName = new Date(todayIso + "T00:00:00").toLocaleDateString('en-US', { weekday: 'long' });
     document.getElementById('context-date-input').value = todayIso;
 
-    await fetchHolidaysForDate(todayIso);
-    await loadScheduleForDate(todayIso, todayDayName);
+    await Promise.all([
+        fetchHolidaysForDate(todayIso),
+        loadScheduleForDate(todayIso, todayDayName)
+    ]);
     populateFilterDropdowns();
 }
 
@@ -1130,15 +1134,15 @@ async function checkAndApplyFutureMaster() {
                     if (nameTagInp) nameTagInp.value = hData.tag || "";
                     document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
                 } else {
-                    const masterSnap = await getCollection("timetable_history").where("type", "in", ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"]).get();
                     if (dateVal >= todayISO) {
-                        let futureMasters = [];
-                        masterSnap.docs.forEach(doc => {
-                            const d = doc.data();
-                            if (d.type === "FUTURE_MASTER" && d.status !== "CANCELLED" && d.date > todayISO && d.date <= dateVal) {
-                                futureMasters.push(d);
-                            }
-                        });
+                        const futureSnap = await getCollection("timetable_history")
+                            .where("type", "==", "FUTURE_MASTER")
+                            .where("date", "<=", dateVal)
+                            .get();
+                        let futureMasters = futureSnap.docs
+                            .map(doc => doc.data())
+                            .filter(d => d.status !== "CANCELLED" && d.date > todayISO);
+
                         if (futureMasters.length > 0) {
                             futureMasters.sort((a, b) => b.date.localeCompare(a.date));
                             globalTimetable = (futureMasters[0].schedule || []).filter(slot => slot.day === dayName);
@@ -1149,11 +1153,13 @@ async function checkAndApplyFutureMaster() {
                             document.getElementById('view-label').innerHTML = `<span class="text-blue-600 font-bold">📅 DAILY SCHEDULE:</span> ${dayName}, ${prettyDate}`;
                         }
                     } else {
-                        let pastMasters = [];
-                        masterSnap.docs.forEach(doc => {
-                            const d = doc.data();
-                            if (d.date <= dateVal && d.status !== "CANCELLED") pastMasters.push(d);
-                        });
+                        const histSnap = await getCollection("timetable_history")
+                            .where("date", "<=", dateVal)
+                            .get();
+                        let pastMasters = histSnap.docs
+                            .map(doc => doc.data())
+                            .filter(d => d.status !== "CANCELLED" && Array.isArray(d.schedule) && ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"].includes(d.type));
+
                         if (pastMasters.length > 0) {
                             pastMasters.sort((a, b) => b.date.localeCompare(a.date));
                             globalTimetable = (pastMasters[0].schedule || []).filter(slot => slot.day === dayName);
@@ -1654,60 +1660,7 @@ async function saveHoliday() {
                     renderGroups[item.className][item.section].push(item);
                 }
             });
-            // --- NEW: TEACHER WORKLOAD SUMMARY ---
-            let teacherSummaryHtml = "";
-            if (selectedTea !== 'ALL') {
-                let totalMins = 0;
-                let classCount = 0;
-                
-                // Automatically figure out what day we are looking at
-                let targetDay = "";
-                if (currentContextDate) {
-                    targetDay = new Date(currentContextDate).toLocaleDateString('en-US', { weekday: 'long' });
-                } else {
-                    targetDay = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-                }
-                
-                globalTimetable.forEach(item => {
-                    // Check if the slot belongs to the teacher AND falls on the TARGET DAY
-                    if (item.teacher === selectedTea && item.day === targetDay && (selectedSub === 'ALL' || (item.subject && item.subject.toUpperCase() === selectedSub.toUpperCase()))) {
-                        classCount++;
-                        if(item.start24 && item.end24) {
-                            const [sh, sm] = item.start24.split(':').map(Number);
-                            const [eh, em] = item.end24.split(':').map(Number);
-                            let mins = (eh * 60 + em) - (sh * 60 + sm);
-                            if(mins > 0) totalMins += mins;
-                        }
-                    }
-                });
-
-                const hrs = Math.floor(totalMins / 60);
-                const rMins = totalMins % 60;
-                const timeString = hrs > 0 ? `${hrs} hr ${rMins} min` : `${rMins} min`;
-
-                teacherSummaryHtml = `
-                    <div class="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-200 p-4 sm:p-6 rounded-[2rem] mb-8 shadow-md flex flex-col sm:flex-row items-center justify-between gap-6">
-                        <div class="flex items-center gap-4">
-                            <div class="bg-indigo-600 text-white w-12 h-12 rounded-full flex items-center justify-center font-black text-xl shadow-inner">👨🏫</div>
-                            <div>
-                                <h3 class="font-black text-indigo-900 uppercase tracking-tighter text-xl leading-none">${selectedTea}</h3>
-                                <p class="text-[10px] font-bold text-indigo-600 uppercase tracking-widest mt-1">Workload For: ${targetDay}</p>
-                            </div>
-                        </div>
-                        <div class="flex gap-3 w-full sm:w-auto">
-                            <div class="bg-white px-5 py-3 rounded-2xl border border-indigo-100 text-center shadow-sm flex-1 sm:flex-none">
-                                <div class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Classes</div>
-                                <div class="font-black text-indigo-700 text-2xl leading-none">${classCount}</div>
-                            </div>
-                            <div class="bg-white px-5 py-3 rounded-2xl border border-indigo-100 text-center shadow-sm flex-1 sm:flex-none">
-                                <div class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Duration</div>
-                                <div class="font-black text-emerald-600 text-2xl leading-none">${timeString}</div>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }
-            // -------------------------------------
+            const teacherSummaryHtml = buildTeacherWorkloadHtml(selectedTea, selectedSub);
             // 1. Build the Pinned Comparison Board HTML
             const layoutIcon = isPinnedHorizontal ? '🔲 Switch to 2-Column' : '⏸️ Switch to Stacked';
             const layoutClasses = isPinnedHorizontal 
@@ -1876,6 +1829,75 @@ async function saveHoliday() {
            checkGlobalClash();
             checkGlobalLunchBreaks(); // ADDED: Scans for missing lunch breaks
             applyVisualFilters(); // <--- NEW: Trigger the visual cleanup!
+        }
+
+    function buildTeacherWorkloadHtml(selectedTea, selectedSub) {
+            if (!selectedTea || selectedTea === 'ALL') return "";
+            let totalMins = 0;
+            let classCount = 0;
+
+            const targetDay = currentContextDate
+                ? new Date(currentContextDate + "T00:00:00").toLocaleDateString('en-US', { weekday: 'long' })
+                : new Date().toLocaleDateString('en-US', { weekday: 'long' });
+
+            for (let i = 0; i < globalTimetable.length; i++) {
+                const item = globalTimetable[i];
+                if (item.teacher === selectedTea && item.day === targetDay && (selectedSub === 'ALL' || (item.subject && item.subject.toUpperCase() === selectedSub.toUpperCase()))) {
+                    classCount++;
+                    if (item.start24 && item.end24) {
+                        const [sh, sm] = item.start24.split(':').map(Number);
+                        const [eh, em] = item.end24.split(':').map(Number);
+                        const mins = (eh * 60 + em) - (sh * 60 + sm);
+                        if (mins > 0) totalMins += mins;
+                    }
+                }
+            }
+
+            const hrs = Math.floor(totalMins / 60);
+            const rMins = totalMins % 60;
+            const timeString = hrs > 0 ? `${hrs} hr ${rMins} min` : `${rMins} min`;
+
+            return `
+                <div class="bg-gradient-to-r from-indigo-50 to-blue-50 border-2 border-indigo-200 p-4 sm:p-6 rounded-[2rem] mb-8 shadow-md flex flex-col sm:flex-row items-center justify-between gap-6">
+                    <div class="flex items-center gap-4">
+                        <div class="bg-indigo-600 text-white w-12 h-12 rounded-full flex items-center justify-center font-black text-xl shadow-inner">👨🏫</div>
+                        <div>
+                            <h3 class="font-black text-indigo-900 uppercase tracking-tighter text-xl leading-none">${selectedTea}</h3>
+                            <p class="text-[10px] font-bold text-indigo-600 uppercase tracking-widest mt-1">Workload For: ${targetDay}</p>
+                        </div>
+                    </div>
+                    <div class="flex gap-3 w-full sm:w-auto">
+                        <div class="bg-white px-5 py-3 rounded-2xl border border-indigo-100 text-center shadow-sm flex-1 sm:flex-none">
+                            <div class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Classes</div>
+                            <div class="font-black text-indigo-700 text-2xl leading-none">${classCount}</div>
+                        </div>
+                        <div class="bg-white px-5 py-3 rounded-2xl border border-indigo-100 text-center shadow-sm flex-1 sm:flex-none">
+                            <div class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Duration</div>
+                            <div class="font-black text-emerald-600 text-2xl leading-none">${timeString}</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function updateTeacherWorkloadBanner() {
+            const selectedSub = document.getElementById('filter-subject') ? document.getElementById('filter-subject').value : 'ALL';
+            const selectedTea = document.getElementById('filter-teacher') ? document.getElementById('filter-teacher').value : 'ALL';
+            const container = document.getElementById('timetable-container');
+            if (!container) return;
+
+            const existingBanner = container.querySelector('.teacher-workload-banner');
+            const newHtml = buildTeacherWorkloadHtml(selectedTea, selectedSub);
+
+            if (newHtml) {
+                const wrapper = document.createElement('div');
+                wrapper.className = 'teacher-workload-banner';
+                wrapper.innerHTML = newHtml;
+                if (existingBanner) existingBanner.replaceWith(wrapper);
+                else container.prepend(wrapper);
+            } else if (existingBanner) {
+                existingBanner.remove();
+            }
         }
 
     // --- MAGNETIC COLLAPSE FILTER ENGINE ---
@@ -2823,14 +2845,14 @@ function generateReadHTML(blockData, className, sectionName) {
             }
 
             // Build Room Dropdown Options
-            let roomOptions = '<option value="">- RM -</option>';
             const cleanNorm = (str) => (str || "").replace(/\s+/g, "").toUpperCase();
             const normalizedCurrentRoom = cleanNorm(entryData.room);
-
-            allRooms.forEach(r => {
-                const isSelected = cleanNorm(r.name) === normalizedCurrentRoom;
-                roomOptions += `<option value="${r.name}" ${isSelected ? 'selected' : ''}>${r.name}</option>`;
-            });
+            let roomOptions = '<option value="">- RM -</option>';
+            for (let i = 0; i < allRooms.length; i++) {
+                const r = allRooms[i];
+                const isSelected = cleanNorm(r.name) === normalizedCurrentRoom ? 'selected' : '';
+                roomOptions += `<option value="${r.name}" ${isSelected}>${r.name}</option>`;
+            }
 
             // Build Micro-Day Toggles
             const daysHtml = DAYS_OF_WEEK.map(d => `
