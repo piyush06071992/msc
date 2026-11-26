@@ -11,7 +11,8 @@
 //     "ready" switch that makes the lesson planner use the slim copies.
 //
 // Run in Google Cloud Shell (project shop-portal-bbbbb):
-//   node tools/backfill-slim-history.js            -> copy + verify + switch ON
+//   node tools/backfill-slim-history.js            -> copy + verify + switch ON (8 documents at a time)
+//   node tools/backfill-slim-history.js --run --parallel=12   -> same, 12 at a time
 //   node tools/backfill-slim-history.js --off      -> switch OFF (planner goes back to full history instantly)
 //   node tools/backfill-slim-history.js --on       -> switch ON again (only if a previous run verified OK)
 //   node tools/backfill-slim-history.js --verify   -> re-check mirrors without writing anything
@@ -19,12 +20,17 @@
 const fs = require("fs");
 const path = require("path");
 const admin = require("firebase-admin");
-const { HISTORY_COLLECTIONS, slimCollectionName, toSlim } = require("../slim-history");
+// Works both from the repo (functions/tools/) and when copied next to slim-history.js
+let slimLib;
+try { slimLib = require("../slim-history"); } catch (e) { slimLib = require("./slim-history"); }
+const { HISTORY_COLLECTIONS, slimCollectionName, toSlim } = slimLib;
 
 admin.initializeApp({ projectId: "shop-portal-bbbbb" });
 const db = admin.firestore();
 const STATUS_ID = "__status"; // switch document inside each *_slim collection (has no "date", so pages never query it as history)
-const mode = process.argv[2] || "--run";
+const mode = process.argv.slice(2).find(a => ["--run", "--off", "--on", "--verify"].includes(a)) || "--run";
+// How many documents to copy at the same time (each is one small, independent job).
+const PARALLEL = Math.max(1, Math.min(20, parseInt((process.argv.find(a => a.startsWith("--parallel=")) || "--parallel=8").split("=")[1], 10) || 8));
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 async function withRetry(fn, label) {
@@ -77,20 +83,24 @@ async function backfill(col) {
     const ids = list.docs.map(d => d.id);
     console.log(`   ${ids.length} history documents (${done.size} already done in an earlier run)`);
 
-    let n = 0;
-    for (const id of ids) {
-        n++;
-        if (done.has(id)) continue;
-        await withRetry(async () => {
-            const snap = await db.collection(col).doc(id).get();          // ONE document
-            const slim = snap.exists ? toSlim(snap.data(), id) : null;
-            const ref = db.collection(slimCol).doc(id);
-            if (slim) await ref.set(slim); else await ref.delete();
-            process.stdout.write(`   [${n}/${ids.length}] ${id}  ${slim ? `${slim.type}, ${slim.slotCount} slots` : "skipped (type not used)"}\n`);
-        }, id);
-        done.add(id);
-        fs.writeFileSync(progressFile, JSON.stringify([...done]));
-    }
+    const todo = ids.filter(id => !done.has(id));
+    console.log(`   copying ${todo.length} documents, ${PARALLEL} at a time...`);
+    let next = 0;
+    const worker = async () => {
+        while (next < todo.length) {
+            const id = todo[next++];
+            await withRetry(async () => {
+                const snap = await db.collection(col).doc(id).get();      // ONE document per job
+                const slim = snap.exists ? toSlim(snap.data(), id) : null;
+                const ref = db.collection(slimCol).doc(id);
+                if (slim) await ref.set(slim); else await ref.delete();
+                done.add(id);
+                fs.writeFileSync(progressFile, JSON.stringify([...done]));
+                process.stdout.write(`   [${done.size}/${ids.length}] ${id}  ${slim ? `${slim.type}, ${slim.slotCount} slots` : "skipped (type not used)"}\n`);
+            }, id);
+        }
+    };
+    await Promise.all(Array.from({ length: PARALLEL }, worker));
 }
 
 (async () => {
