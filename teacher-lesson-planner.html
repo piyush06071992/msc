@@ -263,21 +263,19 @@
                 const offset = todayDateObj.getTimezoneOffset() * 60000;
                 const todayIsoStr = (new Date(todayDateObj - offset)).toISOString().split('T')[0];
 
-                // Target timetable directly to the logged-in teacher to eliminate heavy global reads
-                const timetableQuery = getCollection("timetable").where("teacherName", "==", safeName);
+                const timetableQuery = getCollection("timetable").where("day", "==", todayName);
 
                 const cachedHolidays = getBranchCache("holidays");
                 const cachedStructs = getBranchCache("structures");
 
-                const [holSnap, histSnap, ttSnap, ownLeaveSnap, subLeaveSnap, lockDoc, structSnap] = await Promise.all([
+                const [holSnap, histSnap, ttSnap, ownLeaveSnap, lockDoc, structSnap] = await Promise.all([
                     cachedHolidays ? Promise.resolve(null) : getCollection("school_holidays").get(),
                     getCollection("timetable_history")
                         .where("type", "in", ["EXAM_OVERRIDE", "SPECIFIC_DATES", "DAILY_OVERRIDE", "LIVE_MASTER_UPDATE"])
-                        .where("date", "<=", todayIsoStr)
-                        .get(),
+                        .get()
+                        .catch(() => ({ docs: [] })),
                     timetableQuery.get(),
                     db.collection(prefix + "leave_requests").where("teacherEmail", "==", activeStaff.email).get(),
-                    db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get(),
                     getCollection("configs").doc("lesson_planner_settings").get(),
                     cachedStructs ? Promise.resolve(null) : getCollection("institute_structure").get()
                 ]);
@@ -289,7 +287,9 @@
                     setBranchCache("holidays", holidaysData);
                 }
 
-                window.historyOverrides = (histSnap?.docs || []).map(d => d.data()).filter(h => h.status !== "CANCELLED");
+                window.historyOverrides = (histSnap?.docs || [])
+                    .map(d => d.data())
+                    .filter(h => h.status !== "CANCELLED" && (!h.date || h.date <= todayIsoStr));
                 window.fullTimetable = (ttSnap?.docs || []).map(d => d.data());
                 window.allPlanners = window.allPlanners || [];
 
@@ -311,17 +311,7 @@
                 window.myAbsences = [];
                 window.mySubstitutions = [];
                 
-                const seenLeaveIds = new Set();
-                const relevantLeaveDocs = [];
-                (ownLeaveSnap?.docs || []).forEach(d => {
-                    if (!seenLeaveIds.has(d.id)) { seenLeaveIds.add(d.id); relevantLeaveDocs.push(d); }
-                });
-                (subLeaveSnap?.docs || []).forEach(d => {
-                    const adjList = d.data().adjustments || [];
-                    if (adjList.some(a => a.substituteResponse === "ACCEPTED" && a.adjustedEmail === activeStaff.email)) {
-                        if (!seenLeaveIds.has(d.id)) { seenLeaveIds.add(d.id); relevantLeaveDocs.push(d); }
-                    }
-                });
+                const relevantLeaveDocs = ownLeaveSnap?.docs || [];
 
                 relevantLeaveDocs.forEach(doc => {
                     const leaveData = doc.data();
