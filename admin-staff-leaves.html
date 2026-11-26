@@ -73,6 +73,7 @@
      <div class="flex gap-2 w-full md:w-auto justify-end overflow-x-auto custom-scroll pb-1 md:pb-0">
             <button onclick="openPrintLeaveModal()" class="bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100 font-black text-[9px] sm:text-xs uppercase tracking-widest px-3 py-2 rounded-xl shadow-sm transition-all whitespace-nowrap">🖨️ Print</button>
             <button onclick="openModal('comp-modal')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 font-black text-[9px] sm:text-xs uppercase tracking-widest px-3 py-2 rounded-xl shadow-sm transition-all whitespace-nowrap">+ Comp.</button>
+            <button onclick="openWorkingSundayModal()" class="bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 font-black text-[9px] sm:text-xs uppercase tracking-widest px-3 py-2 rounded-xl shadow-sm transition-all whitespace-nowrap">☀️ Working Sunday</button>
             <button onclick="openModal('baseline-modal')" class="bg-slate-800 text-white hover:bg-slate-700 font-black text-[9px] sm:text-xs uppercase tracking-widest px-3 py-2 rounded-xl shadow-sm transition-all whitespace-nowrap">⚙️ Baseline</button>
             <div class="w-px h-6 bg-slate-200 mx-1 my-auto hidden sm:block"></div>
             <button onclick="openModal('leave-config-modal')" class="bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 font-black text-[9px] sm:text-xs uppercase tracking-widest px-3 py-2 rounded-xl shadow-sm transition-all whitespace-nowrap">🛠️ Leave Config</button>
@@ -343,6 +344,29 @@
         </div>
     </div>
 
+ <!-- Working Sunday Modal -->
+    <div id="working-sunday-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[100] hidden items-center justify-center p-4">
+        <div class="bg-white rounded-[2rem] p-6 sm:p-8 max-w-md w-full shadow-2xl">
+            <h3 class="text-xl font-black uppercase text-amber-600 tracking-tighter mb-1">Mark Working Sunday</h3>
+            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-6">Only leaves on this exact Sunday date will be counted</p>
+            <div class="space-y-4">
+                <div>
+                    <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Select Sunday Date</label>
+                    <input type="date" id="working-sunday-date" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold outline-none cursor-pointer">
+                </div>
+                <div>
+                    <label class="text-[10px] font-black text-slate-500 uppercase tracking-widest block mb-1">Note / Reason (Optional)</label>
+                    <input type="text" id="working-sunday-note" placeholder="e.g. Sunday Test / Extra Class" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold outline-none focus:border-amber-500">
+                </div>
+                <div id="working-sunday-list" class="max-h-36 overflow-y-auto custom-scroll space-y-1.5 text-xs"></div>
+            </div>
+            <div class="flex gap-4 mt-8">
+                <button onclick="closeModal('working-sunday-modal')" class="flex-1 py-3 font-black uppercase text-xs text-slate-500 border border-slate-200 rounded-xl hover:bg-slate-50">Close</button>
+                <button onclick="confirmWorkingSunday()" class="flex-[2] py-3 font-black uppercase text-xs text-white bg-amber-600 shadow-md rounded-xl hover:bg-amber-700">Confirm Sunday</button>
+            </div>
+        </div>
+    </div>
+
  <!-- Printable Area Container -->
     <div id="printable-leave-area" class="hidden"></div>
 
@@ -553,6 +577,7 @@
         let leavePolicies = [];
         let routingNumbers = {}; // NEW: Store WhatsApp Routing
         let holidaysData = []; // NEW: Memory for Holiday Overlaps
+        let workingSundays = []; // Specific Sunday dates marked working for this center
 
         window.onload = async () => {
             const authStatus = sessionStorage.getItem('minervaAdminAuth');
@@ -692,6 +717,13 @@
                 if(allLeaves.length > 0) renderPending(); // Re-render if new holidays are added
             });
 
+            // Listen for Center-Specific Working Sundays
+            db.collection(collPrefix + "working_sundays").onSnapshot(snap => {
+                workingSundays = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                renderWorkingSundaysList();
+                if(allLeaves.length > 0) renderPending();
+            });
+
             db.collection("staff_applications").where("status", "==", "approved").get().then(snap => {
                 let tempStaff = [];
                 snap.docs.forEach(d => {
@@ -775,6 +807,71 @@
             });
         }
 
+        function isConfirmedWorkingSunday(dateIso) {
+            const parts = dateIso.split('-');
+            if (parts.length !== 3) return false;
+            const dt = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+            if (dt.getDay() !== 0) return false;
+            return workingSundays.some(w => w.date === dateIso && w.active !== false);
+        }
+
+        function openWorkingSundayModal() {
+            const d = new Date();
+            const todayIso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+            document.getElementById('working-sunday-date').value = todayIso;
+            document.getElementById('working-sunday-note').value = '';
+            renderWorkingSundaysList();
+            openModal('working-sunday-modal');
+        }
+
+        function renderWorkingSundaysList() {
+            const box = document.getElementById('working-sunday-list');
+            if (!box) return;
+            const activeList = workingSundays.filter(w => w.active !== false).sort((a,b) => a.date.localeCompare(b.date));
+            if (activeList.length === 0) {
+                box.innerHTML = `<p class="text-[10px] font-bold text-slate-400 text-center py-2 bg-slate-50 rounded-lg">No working Sundays marked yet.</p>`;
+                return;
+            }
+            box.innerHTML = activeList.map(w => `
+                <div class="flex justify-between items-center bg-amber-50/70 border border-amber-200 px-3 py-2 rounded-xl">
+                    <div>
+                        <span class="font-black text-slate-800">${w.date}</span>
+                        ${w.note ? `<span class="text-[10px] text-slate-500 font-bold ml-2">(${w.note})</span>` : ''}
+                    </div>
+                    <button type="button" onclick="removeWorkingSunday('${w.id}')" class="text-[10px] font-black text-rose-600 hover:underline uppercase">Remove</button>
+                </div>
+            `).join('');
+        }
+
+        async function confirmWorkingSunday() {
+            const dateIso = document.getElementById('working-sunday-date').value;
+            const note = document.getElementById('working-sunday-note').value.trim();
+            if (!dateIso) return alert("Please select a date.");
+
+            const parts = dateIso.split('-');
+            const dt = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+            if (dt.getDay() !== 0) {
+                return alert(`${dateIso} is not a Sunday. Only Sunday dates can be marked as a Working Sunday.`);
+            }
+
+            if (!confirm(`Confirm ${dateIso} as a Working Sunday? Only leaves on ${dateIso} will be counted.`)) return;
+
+            await db.collection(collPrefix + "working_sundays").doc(dateIso).set({
+                date: dateIso,
+                note: note || "Working Sunday",
+                active: true,
+                confirmedBy: activeAdminName,
+                confirmedAt: Date.now()
+            });
+
+            alert(`✅ ${dateIso} confirmed as a Working Sunday. Leaves on this date will now be counted.`);
+        }
+
+        async function removeWorkingSunday(docId) {
+            if (!confirm("Unmark this Working Sunday?")) return;
+            await db.collection(collPrefix + "working_sundays").doc(docId).delete();
+        }
+
         // --- RENDER ENGINE ---
        function renderPending() {
             const pendingList = document.getElementById('pending-list');
@@ -810,8 +907,9 @@
                         let validDays = 0; let curr = new Date(sd);
                         while (curr <= ed) {
                             let yyyy = curr.getFullYear(); let mm = String(curr.getMonth() + 1).padStart(2, '0'); let dd = String(curr.getDate()).padStart(2, '0');
-                            leaveDates.push(`${yyyy}-${mm}-${dd}`);
-                            if (curr.getDay() !== 0) validDays++; // Skip Sundays
+                            const isoDay = `${yyyy}-${mm}-${dd}`;
+                            leaveDates.push(isoDay);
+                            if (curr.getDay() !== 0 || isConfirmedWorkingSunday(isoDay)) validDays++;
                             curr.setDate(curr.getDate() + 1);
                         }
                         calcAmt = validDays * -1;
@@ -933,7 +1031,12 @@
                     if (mod.newType === 'EARLY_RETURN') {
                         let sd = new Date(req.startDate); let ed = new Date(mod.newEndDate);
                         let validDays = 0; let curr = new Date(sd);
-                        while (curr <= ed) { if (curr.getDay() !== 0) validDays++; curr.setDate(curr.getDate() + 1); }
+                        while (curr <= ed) {
+                            let yyyy = curr.getFullYear(); let mm = String(curr.getMonth() + 1).padStart(2, '0'); let dd = String(curr.getDate()).padStart(2, '0');
+                            const isoDay = `${yyyy}-${mm}-${dd}`;
+                            if (curr.getDay() !== 0 || isConfirmedWorkingSunday(isoDay)) validDays++;
+                            curr.setDate(curr.getDate() + 1);
+                        }
                         newAmt = validDays * -1;
                     } else if (mod.newType !== 'CANCEL') {
                         newAmt = leaveValues[mod.newType] || 0;
