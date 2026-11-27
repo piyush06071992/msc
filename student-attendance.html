@@ -1403,7 +1403,7 @@ if (isAdmin) {
             // Live listener for Teacher: Show banner when Admin approves an edit/unmark request
             db.collection("attendance_edit_requests")
               .where("teacherEmail", "==", activeStaff.email)
-              .where("status", "in", ["APPROVED", "APPROVED_AND_UNMARKED"])
+              .where("status", "in", ["APPROVED", "APPROVED_AND_UNMARKED", "APPROVED_AND_APPLIED"])
               .onSnapshot(snap => {
                   const banner = document.getElementById('approved-requests-banner');
                   const textEl = document.getElementById('approved-req-text');
@@ -1416,7 +1416,9 @@ if (isAdmin) {
                       const latest = unacked[0].data();
                       const docId = unacked[0].id;
                       const prettyDate = new Date(latest.date).toLocaleDateString('en-GB', {day:'numeric', month:'short', year:'numeric'});
-                      let actionText = latest.status === "APPROVED_AND_UNMARKED" ? "Unmark Request Approved & Deleted" : "Edit Request Approved & Unlocked";
+                      let actionText = latest.status === "APPROVED_AND_UNMARKED" ? "Unmark Request Approved & Deleted"
+                                     : latest.status === "APPROVED_AND_APPLIED" ? `Correction approved & applied: #${latest.rollNo || ''} ${latest.studentName || ''} → ${latest.newStatus === 'P' ? 'Present' : 'Leave'}`
+                                     : "Edit Request Approved & Unlocked";
                       
                       textEl.innerHTML = `Your request for <strong>Class ${latest.className} - Sec ${latest.section} (${latest.subject})</strong> on <strong>${prettyDate}</strong> has been processed.<br><span class="text-emerald-900 font-black bg-emerald-400 px-2 py-0.5 rounded mt-1.5 inline-block">${actionText}</span>`;
                       
@@ -4123,6 +4125,9 @@ function getActiveTeacherName() {
 
             const select = document.getElementById('corr-student-select');
             const dateStr = document.getElementById('daily-date-picker').value || todayISO;
+            // The correction is for the register date already open (no second date to pick)
+            const corrDateEl = document.getElementById('corr-date');
+            if (corrDateEl) { corrDateEl.value = dateStr; corrDateEl.disabled = true; corrDateEl.classList.add('opacity-60'); }
             select.innerHTML = `<option value="">Loading students...</option>`;
             document.getElementById('correction-modal').style.display = 'flex';
 
@@ -4216,6 +4221,26 @@ function getActiveTeacherName() {
                 // Allow if the teacher explicitly requested this date and the Admin unlocked it
                 const isCurrentlyUnlocked = window.approvedEditUnlocked && document.getElementById('daily-date-picker').value === dateStr;
                 
+                if (!isCurrentlyUnlocked && !currentReg.isExamRoom) {
+                    const stuObj = (getActiveStudentsForDate(currentReg.c, currentReg.s, dateStr) || []).find(x => x.id === stuId) || (studentsData || []).find(x => x.id === stuId) || {};
+                    const oldStatus = ((currentMonthDoc || {})[dateStr] || {})[stuId] || '';
+                    if (oldStatus && oldStatus === newStatus) return alert("That student is already marked " + (newStatus === 'P' ? 'Present' : 'Leave') + " on this date.");
+                    const label = (x) => x === 'P' ? 'Present' : (x ? 'Leave' : 'Not marked');
+                    if (!confirm(`Send this correction to the Admin?\n\n#${stuObj.rollNo || 'N/A'} ${stuObj.name || ''}\n${currentReg.c} | Sec ${currentReg.s} · ${currentReg.sub} · ${dateStr}\n${label(oldStatus)} → ${label(newStatus)}\n\nIt is applied to the register as soon as the Admin approves.`)) return;
+                    try {
+                        const reqPayload = {
+                            center: activeCenter, className: currentReg.c, section: currentReg.s, subject: currentReg.sub, date: dateStr,
+                            teacherEmail: activeStaff.email, teacherName: getActiveTeacherName(), reason,
+                            status: "PENDING", requestType: "CORRECTION", timestamp: Date.now(),
+                            studentId: stuId, studentName: stuObj.name || '', rollNo: stuObj.rollNo || '', oldStatus, newStatus
+                        };
+                        await getCollection("attendance_edit_requests").add(reqPayload);
+                        sendEditRequestEmailNotification({ type: "ATTENDANCE_EDIT_REQUEST", ...reqPayload });
+                        document.getElementById('correction-modal').style.display = 'none';
+                        document.getElementById('corr-reason').value = '';
+                        return alert("✅ Correction sent to the Admin. It will be applied to the register as soon as it is approved.");
+                    } catch (err) { return alert("Failed to send the correction."); }
+                }
                 if (!isCurrentlyUnlocked) {
                     if (!confirm("Direct correction for past dates is locked.\n\nDo you want to send an Edit Request to the Admin to unlock this date?")) return;
                     
@@ -6554,8 +6579,11 @@ schedule.forEach(slot => {
 
                 let requests = snap.docs.map(d => ({ id: d.id, ...d.data() }));
                 requests.sort((a,b) => b.timestamp - a.timestamp); // Safely sort latest first locally
+                window.pendingEditRequests = requests;
 
                let html = "";
+                const corrCount = requests.filter(r => r.requestType === 'CORRECTION').length;
+                if (corrCount > 1) html += `<div class="flex justify-end"><button onclick="approveAllCorrections()" class="bg-emerald-600 text-white hover:bg-emerald-500 px-4 py-2.5 rounded-lg font-black text-xs uppercase tracking-widest shadow-md">✅ Approve all ${corrCount} corrections</button></div>`;
                 requests.forEach(data => {
                     const reqDate = new Date(data.timestamp).toLocaleDateString('en-GB', {day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'});
                     const targetDate = new Date(data.date).toLocaleDateString('en-GB', {weekday:'short', day:'numeric', month:'short', year:'numeric'});
@@ -6565,6 +6593,28 @@ schedule.forEach(slot => {
                     if (tObj && tObj.details) {
                         const nameKey = Object.keys(tObj.details).find(k => k.toLowerCase().includes('name'));
                         if (nameKey) tName = tObj.details[nameKey];
+                    }
+
+                    if (data.requestType === 'CORRECTION') {
+                        const lab = (x) => x === 'P' ? 'P' : (x ? 'L' : '—');
+                        html += `
+                    <div class="bg-sky-50 border border-sky-200 rounded-xl p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                        <div>
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="bg-sky-100 text-sky-700 px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest">✏️ Correction</span>
+                                <span class="text-[10px] font-bold text-slate-400">${reqDate}</span>
+                            </div>
+                            <h4 class="font-black text-slate-800 text-sm uppercase">${data.className} | Sec ${data.section} <span class="text-purple-600">(${data.subject})</span> · ${targetDate}</h4>
+                            <p class="text-sm font-black text-slate-900 mt-1">#${data.rollNo || 'N/A'} ${data.studentName || data.studentId}
+                                <span class="ml-2 px-2 py-0.5 rounded ${data.newStatus === 'P' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${lab(data.oldStatus)} → ${lab(data.newStatus)}</span></p>
+                            <p class="text-[10px] font-bold text-slate-500 mt-1">Teacher: <span class="font-black text-slate-700 uppercase">${tName}</span> · Reason: <span class="italic">"${data.reason}"</span></p>
+                        </div>
+                        <div class="flex gap-2 w-full sm:w-auto shrink-0">
+                            <button onclick="rejectEditRequest('${data.id}')" class="flex-1 sm:flex-none bg-white text-rose-600 hover:bg-rose-50 px-4 py-2.5 rounded-lg font-black text-xs uppercase tracking-widest border border-rose-200">Reject</button>
+                            <button onclick="approveCorrectionRequest('${data.id}')" class="flex-1 sm:flex-none bg-emerald-600 text-white hover:bg-emerald-500 px-4 py-2.5 rounded-lg font-black text-xs uppercase tracking-widest shadow-md">Approve &amp; apply</button>
+                        </div>
+                    </div>`;
+                        return;
                     }
 
      const actionButtons = data.requestType === 'UNMARK' 
@@ -6597,6 +6647,45 @@ schedule.forEach(slot => {
                 console.error(e);
                 container.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest text-xs">Error loading requests.</div>`;
             }
+        }
+
+        // Apply an approved CORRECTION request to the register (same steps as a direct correction:
+        // change the student's mark, log it in attendance_corrections, re-sync the Class Incharge register)
+        async function applyCorrectionRequest(req) {
+            const [y, m] = req.date.split('-');
+            const monthKey = `${y}_${m}`;
+            const docId = `att_${activeCenter}_${normDoc(req.className)}_${normDoc(req.section)}_${normDoc(req.subject)}_${monthKey}`;
+            const docRef = getCollection("attendance_records").doc(docId);
+            const snap = await docRef.get();
+            if (!snap.exists) throw new Error(`No ${req.subject} register found for ${req.className}-${req.section} in that month.`);
+            const data = snap.data();
+            data.records = data.records || {};
+            if (!data.records[req.date]) data.records[req.date] = {};
+            const oldStatus = data.records[req.date][req.studentId] || "P";
+            data.records[req.date][req.studentId] = req.newStatus;
+            await getCollection("attendance_corrections").add({
+                center: activeCenter, className: req.className, section: req.section, subject: req.subject,
+                studentId: req.studentId, date: req.date, oldStatus, newStatus: req.newStatus, reason: req.reason,
+                author: req.teacherEmail || '', approvedBy: (sessionStorage.getItem('minervaAdminName') || 'Admin'), viaRequest: req.id, timestamp: Date.now()
+            });
+            await docRef.set(data);
+            if (normMatch(req.subject) !== 'classincharge') await backgroundSyncClassIncharge(req.date, monthKey, req.className, req.section);
+            await db.collection("attendance_edit_requests").doc(req.id).update({ status: "APPROVED_AND_APPLIED", approvedAt: Date.now(), appliedOldStatus: oldStatus });
+        }
+        async function approveCorrectionRequest(id) {
+            const req = (window.pendingEditRequests || []).find(r => r.id === id);
+            if (!req) return;
+            try { await applyCorrectionRequest(req); alert(`✅ Applied: #${req.rollNo || ''} ${req.studentName || ''} → ${req.newStatus === 'P' ? 'Present' : 'Leave'} (${req.date}).`); }
+            catch (e) { alert("Could not apply: " + e.message); }
+            loadAttendanceEditRequests();
+        }
+        async function approveAllCorrections() {
+            const list = (window.pendingEditRequests || []).filter(r => r.requestType === 'CORRECTION');
+            if (!list.length || !confirm(`Approve and apply all ${list.length} correction(s)?`)) return;
+            let ok = 0; const failed = [];
+            for (const req of list) { try { await applyCorrectionRequest(req); ok++; } catch (e) { failed.push(`${req.studentName || req.studentId} (${req.date}): ${e.message}`); } }
+            alert(`✅ Applied ${ok} correction(s).` + (failed.length ? `\n\n⚠️ Not applied:\n${failed.join('\n')}` : ''));
+            loadAttendanceEditRequests();
         }
 
         async function approveEditRequest(id) {
