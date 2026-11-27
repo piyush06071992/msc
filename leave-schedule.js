@@ -74,6 +74,7 @@
         const docIdField = () => global.firebase.firestore.FieldPath.documentId();
 
         const dayRowsByDate = new Map();      // dateIso -> rows for that weekday
+        const sourceByDate = new Map();       // dateIso -> "OVERRIDE" | "FUTURE_MASTER" | "LIVE" | "PAST_MASTER"
         const datePromises = new Map();       // dateIso -> loading promise
         const liveByDay = new Map();          // dayName -> promise of live rows
         const rosterById = new Map();         // roster doc id -> { id, ...data }
@@ -150,20 +151,20 @@
             const sameDay = await src.col.where("date", "==", dateIso).get();
             const override = sameDay.docs.map(src.toHistory)
                 .find(h => h && h.status !== "CANCELLED" && OVERRIDE_TYPES.includes(h.type) && h.schedule);
-            if (override) return forDay(override.schedule, dayName);
+            if (override) return { rows: forDay(override.schedule, dayName), source: "OVERRIDE" };
 
             if (dateIso >= todayIso) {
                 // 2. Future master starting after today and by this date, else the live timetable
                 const fm = (await futureMasters())
                     .filter(h => h.date > todayIso && h.date <= dateIso)
                     .sort((a, b) => b.date.localeCompare(a.date))[0];
-                if (fm) return forDay(fm.schedule, dayName);
-                return liveRows(dayName);
+                if (fm) return { rows: forDay(fm.schedule, dayName), source: "FUTURE_MASTER", fromDate: fm.date };
+                return { rows: await liveRows(dayName), source: "LIVE" };
             }
             // 3. Past date: the master that applied then
             const master = await pastMaster(dateIso);
-            if (master) return forDay(master.schedule, dayName);
-            return liveRows(dayName);
+            if (master) return { rows: forDay(master.schedule, dayName), source: "PAST_MASTER" };
+            return { rows: await liveRows(dayName), source: "LIVE" };
         }
 
         function loadRosters(dateIso) {
@@ -191,7 +192,7 @@
             const unique = [...new Set((dates || []).filter(Boolean))];
             await Promise.all(unique.map(dateIso => {
                 if (!datePromises.has(dateIso)) {
-                    const p = loadDate(dateIso).then(rows => { dayRowsByDate.set(dateIso, rows); });
+                    const p = loadDate(dateIso).then(r => { dayRowsByDate.set(dateIso, r.rows); sourceByDate.set(dateIso, r); });
                     p.catch(() => datePromises.delete(dateIso)); // allow a retry after a failure
                     datePromises.set(dateIso, p);
                 }
@@ -232,7 +233,13 @@
             return "";
         }
 
-        return { ensureDates, isLoaded, dayRows, dutyRosters, dutyDateOf };
+        // Which timetable applies on a loaded date: { source, fromDate? }
+        function dayInfo(dateIso) {
+            const r = sourceByDate.get(dateIso);
+            return r ? { source: r.source, fromDate: r.fromDate } : null;
+        }
+
+        return { ensureDates, isLoaded, dayRows, dayInfo, dutyRosters, dutyDateOf };
     }
 
     // ------------------------------------------------------------------------
@@ -266,12 +273,16 @@
         return adj.adjustedTo === "INCHARGE" && adj.substituteResponse !== "ACCEPTED";
     }
     // Does this entry cover the class? Accepted or still waiting for the substitute's answer.
+    // A substitute flagged by a timetable change (clash / class changed) does not count until fixed.
     function adjCovers(adj) {
         if (isWaitingForIncharge(adj)) return false;
+        if (adj.subFlag === "CLASH" || adj.subFlag === "CLASS_CHANGED") return false;
         const r = adj.substituteResponse;
         return r === "ACCEPTED" || !r || r === "PENDING";
     }
     function adjStatusText(adj) {
+        if (adj.subFlag === "CLASH") return "⚠️ Clash – reassign" + (adj.subFlagNote ? ` (${adj.subFlagNote})` : "");
+        if (adj.subFlag === "CLASS_CHANGED") return "⚠️ Class changed – check";
         if (isWaitingForIncharge(adj)) return "🚨 Waiting for Incharge";
         const r = adj.substituteResponse;
         if (r === "ACCEPTED") return "✅ Accepted";
@@ -300,10 +311,56 @@
         const name = isWaitingForIncharge(adj) ? "Not assigned yet" : (adj.adjustedTo || "-");
         const parts = [adjStatusText(adj), assignedByText(adj)];
         if (adj.replacedFrom) parts.push(`🔁 replaced ${adj.replacedFrom}`);
+        if (adj.movedFrom) parts.push(`🔁 moved from ${adj.movedFrom}`);
         return `${name}${dept ? ` (${dept})` : ""} [${parts.join(" | ")}]`;
     }
 
-    global.MinervaLeaveSchedule = { create, localIso, dayNameOf, mondayOf, addDays,
+    // ------------------------------------------------------------------------
+    // WHICH CLASS DOES A SUBSTITUTION BELONG TO?
+    // A substitution belongs to the absent teacher's class (class + section + subject) on that date,
+    // not to a clock time. If that teacher has the same subject in that section twice that day,
+    // substitutions overlapping a period stay with it; the rest are paired in time order.
+    //   rows:  timetable rows that apply on that date (any days; filtered to that weekday here)
+    //   leave: { teacherName, teacherEmail, adjustments }
+    // Returns [{ adj, idx, slot }]  (slot = null when the class is no longer there)
+    // ------------------------------------------------------------------------
+    function slotMins(t) { const [h, m] = String(t || "").split(":").map(Number); return (h || 0) * 60 + (m || 0); }
+    function placeLeaveSubs(rows, dateIso, leave) {
+        const day = dayNameOf(dateIso);
+        const teacherN = normTxt(leave.teacherName), teacherE = String(leave.teacherEmail || "").toLowerCase();
+        const isHers = (r) => normTxt(r.teacherName || r.teacher) === teacherN ||
+                              (teacherE && String(r.teacherEmail || "").toLowerCase() === teacherE) ||
+                              (r.origTeacherName && normTxt(r.origTeacherName) === teacherN);
+        const out = [];
+        const groups = new Map();
+        (leave.adjustments || []).forEach((adj, idx) => {
+            if (!isClassAdj(adj) || adj.date !== dateIso) return;
+            const c = adjClass(adj);
+            const key = `${normTxt(c.cls)}|${normTxt(c.sec)}|${normTxt(adj.title)}`;
+            if (!groups.has(key)) groups.set(key, { cls: c.cls, sec: c.sec, subject: adj.title, subs: [] });
+            groups.get(key).subs.push({ adj, idx });
+        });
+        groups.forEach(g => {
+            const slots = (rows || []).filter(r => (!r.day || String(r.day).trim() === day) &&
+                normTxt(r.className) === normTxt(g.cls) && normTxt(r.section) === normTxt(g.sec) &&
+                normTxt(r.subject) === normTxt(g.subject) && isHers(r))
+                .sort((a, b) => slotMins(a.start24) - slotMins(b.start24));
+            const subs = g.subs.slice().sort((a, b) => (a.adj.start || 0) - (b.adj.start || 0));
+            const used = new Set(), placed = new Map();
+            // 1) substitutions that still overlap a period stay with it (split covers can share one period)
+            subs.forEach(s => {
+                const hit = slots.find(sl => slotMins(sl.start24) < s.adj.end && slotMins(sl.end24) > s.adj.start);
+                if (hit) { placed.set(s, hit); used.add(hit); }
+            });
+            // 2) the rest follow the remaining periods in time order
+            const free = slots.filter(sl => !used.has(sl));
+            subs.filter(s => !placed.has(s)).forEach(s => { const sl = free.shift(); if (sl) placed.set(s, sl); });
+            subs.forEach(s => out.push({ adj: s.adj, idx: s.idx, slot: placed.get(s) || null }));
+        });
+        return out;
+    }
+
+    global.MinervaLeaveSchedule = { create, localIso, dayNameOf, mondayOf, addDays, placeLeaveSubs, slotMins,
         adjClass, isClassAdj, adjMatchesClass, adjCovers, isWaitingForIncharge, adjStatusText, assignedByOf, assignedByText, subLine,
-        VERSION: 2 };
+        VERSION: 4 };
 })(typeof window !== "undefined" ? window : globalThis);
