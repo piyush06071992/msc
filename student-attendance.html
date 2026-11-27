@@ -1127,6 +1127,42 @@ async function getCachedMonthAttendanceDocs(monthKey, className = null, sectionN
     }
 }
 
+// Month registers of the sections that have students in an exam room.
+// Registers are saved under the Class Structure's class/section names, so seated students are
+// matched to the structure first; if any student's section can't be matched, read the whole month (old way).
+async function getRoomSectionMonthDocs(students, monthKey) {
+    const structs = window.instituteStructures || [];
+    const pairs = new Map(); let unmatched = false;
+    students.forEach(stu => {
+        const st = structs.find(x => normMatch(x.className) === normMatch(stu.className) && normMatch(x.sectionName || x.section) === normMatch(stu.section));
+        if (!st) { unmatched = true; return; }
+        pairs.set(`${st.className}|${st.sectionName || st.section}`, [st.className, st.sectionName || st.section]);
+    });
+    if (unmatched || !pairs.size) {
+        const snap = await getCollection("attendance_records").where("monthKey", "==", monthKey).get();
+        return snap.docs;
+    }
+    const snaps = await Promise.all([...pairs.values()].map(([c, sec]) =>
+        getCollection("attendance_records").where("monthKey", "==", monthKey).where("className", "==", c).where("section", "==", sec).get()));
+    return snaps.flatMap(sn => sn.docs);
+}
+
+// Past-month registers for the "Pct Filter" audit, kept in memory for this page visit
+// (repeat filters cost no reads; reloading the page reads them fresh)
+const pastMonthDocsMemo = {};
+function getPastMonthDocsMemo(monthKey, className, sectionName) {
+    const allKey = `${monthKey}||`;
+    const key = `${monthKey}|${className || ''}|${sectionName || ''}`;
+    if (pastMonthDocsMemo[key]) return pastMonthDocsMemo[key];
+    // the whole school's month already loaded -> filter it instead of reading again
+    if (pastMonthDocsMemo[allKey] && className) {
+        return pastMonthDocsMemo[allKey].then(list => list.filter(it => it.data.className === className && (!sectionName || it.data.section === sectionName)));
+    }
+    pastMonthDocsMemo[key] = getCachedMonthAttendanceDocs(monthKey, className, sectionName);
+    pastMonthDocsMemo[key].then(list => { if (!list.length) delete pastMonthDocsMemo[key]; });
+    return pastMonthDocsMemo[key];
+}
+
 async function bumpAttendanceMetadata(monthKey) {
     // Deleted! Firebase native cache tracks document timestamps invisibly.
     // No more manual version bumping required.
@@ -1611,10 +1647,14 @@ function switchMainTab(tab) {
         async function populateExamRoomDates() {
             const dateSelect = document.getElementById('exam-room-date-filter');
             try {
-                const snap = await getCollection("exam_schedules").get();
+                // Exam dates are read once per page visit (re-opening the tab costs no reads)
+                if (!window.__examSchedulesOnce) {
+                    window.__examSchedulesOnce = getCollection("exam_schedules").get().then(sn => sn.docs.map(d => d.data()));
+                    window.__examSchedulesOnce.catch(() => { window.__examSchedulesOnce = null; });
+                }
+                const examDocs = await window.__examSchedulesOnce;
                 let examMap = {};
-                snap.forEach(doc => {
-                    const data = doc.data();
+                examDocs.forEach(data => {
                     if (data.date) {
                         if (!examMap[data.date]) examMap[data.date] = new Set();
                         if (data.type) examMap[data.date].add(data.type);
@@ -2497,7 +2537,8 @@ function updateAuditSectionFilter() {
                 }
                 
                 // Use IndexedDB Cache to fetch all past records rapidly
-                let prevDocsArrays = await Promise.all(pastMonthKeys.map(mk => getCachedMonthAttendanceDocs(mk)));
+                // Past months: only the chosen class/section (if picked), and kept in memory while this page is open
+                let prevDocsArrays = await Promise.all(pastMonthKeys.map(mk => getPastMonthDocsMemo(mk, filterClass || null, (filterClass && filterSection) || null)));
                 let prevDocsArray = prevDocsArrays.flat();
 
                 let lowAttRows = [];
@@ -3086,7 +3127,8 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
 
                 const [y, m, d] = dateStr.split('-');
                 const monthKey = `${y}_${m}`;
-                const querySnap = await getCollection("attendance_records").where("monthKey", "==", monthKey).get();
+                // Only the registers of the sections seated in this room (not the whole school's month)
+                const querySnap = await getRoomSectionMonthDocs(seatedStudents, monthKey);
                 
             let sectionAttendanceMap = {};
                 querySnap.forEach(doc => {
