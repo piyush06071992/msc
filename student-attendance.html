@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva | Unified Attendance Hub</title>
-    <script src="tailwind-engine.js"></script>
+    <link rel="stylesheet" href="style.css">
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <style>
@@ -1279,7 +1279,7 @@ async function bumpAttendanceMetadata(monthKey) {
             return snap.docs.map(d => d.data());
       }
 
-      async function getCachedMasterConfig(prefix, teacherName, userIsAdmin) {
+      async function getCachedMasterConfig(prefix, teacherName, userIsAdmin, onStructures) {
             try {
                 console.log("🔄 Fetching targeted configs via Firebase Native Cache...");
                 
@@ -1299,7 +1299,7 @@ async function bumpAttendanceMetadata(monthKey) {
 
                 const [ttSnap, structSnap, holSnap, staffSnap, histDocs, remSnap, splSnap] = await Promise.all([
                     timetableQuery.get(),
-                    getCollection("institute_structure").get(),
+                    getCollection("institute_structure").get().then(sn => { if (onStructures) onStructures(sn.docs.map(d => ({ id: d.id, ...d.data() }))); return sn; }),
                     getCollection("school_holidays").where("endDate", ">=", sessionStartIso).get(),
                     userIsAdmin
                         ? db.collection("staff_applications").where("status", "==", "approved").get()
@@ -1422,19 +1422,34 @@ if (isAdmin) {
                 document.getElementById('header-title').innerText = "My Attendance Register";
                 await fetchDataForStudent(activeStudent);
    } else {
+            // Faster start: the staff record and the registers load at the same time. The branch saved by the
+            // teacher portal is used to start; if the staff record says another branch, registers reload for it.
+            window.__myStaffQuery = db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+            const savedCenter = activeStaff.center ? (String(activeStaff.center).toUpperCase().includes('DHARAMSHALA') ? 'DHARAMSHALA' : 'GHUMARWIN') : null;
+            let earlyLoad = null;
+            if (savedCenter) {
+                activeCenter = savedCenter;
+                document.getElementById('user-badge').innerText = `Teacher: ${safeName} (${activeCenter})`;
+                earlyLoad = fetchData(safeName);
+            }
+            let staffCenter = savedCenter || activeCenter;
             try {
-                const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+                const staffSnap = await window.__myStaffQuery;
                 if (!staffSnap.empty) {
                     const data = staffSnap.docs[0].data();
                     window.myDutyStart = data.dutyStartTime || "08:00";   // shift set in Admin Staff Leaves -> Staff Config
                     window.myDutyEnd = data.dutyEndTime || "17:00";
                     const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
-                    if (centerKey) activeCenter = String(data.details[centerKey]).toUpperCase().includes('DHARAMSHALA') ? 'DHARAMSHALA' : 'GHUMARWIN';
+                    staffCenter = centerKey ? (String(data.details[centerKey]).toUpperCase().includes('DHARAMSHALA') ? 'DHARAMSHALA' : 'GHUMARWIN') : "GHUMARWIN";
                 }
             } catch (e) { console.error(e); }
+            if (earlyLoad) { try { await earlyLoad; } catch (e) { console.error(e); } }
+            if (!earlyLoad || staffCenter !== activeCenter) {
+                activeCenter = staffCenter;
+                await fetchData(safeName);
+            }
           document.getElementById('user-badge').innerText = `Teacher: ${safeName} (${activeCenter})`;
             document.getElementById('my-saves-btn').classList.remove('hidden');
-            await fetchData(safeName);
             
             // Live listener for Teacher: Show banner when Admin approves an edit/unmark request
             db.collection("attendance_edit_requests")
@@ -1821,8 +1836,20 @@ function switchMainTab(tab) {
           try {
        const centerPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
 
+                // Teacher: duty rosters and today's substitutions load together with the main data (not after it)
+                const teacherPrefetch = !isAdmin ? {
+                    rosters: getCollection("duty_rosters").get(),
+                    leaves: getCollection("leave_requests").where("status", "in", ["APPROVED", "PENDING"]).where("endDate", ">=", todayISO).get()
+                } : null;
+                if (teacherPrefetch) Object.values(teacherPrefetch).forEach(p => p.catch(() => {}));
+
+                // Registers opened before everything has arrived wait for it
+                window.__masterReady = new Promise(r => { window.__masterReadyMark = r; });
+
                 // 1. Fetch Master Configuration Bundle (Targeted by Teacher or Global for Admin)
-                const masterBundle = await getCachedMasterConfig(centerPrefix, safeName, isAdmin);
+                // Admin: the register list is drawn as soon as Class Structure arrives; teacher names follow.
+                const masterBundle = await getCachedMasterConfig(centerPrefix, safeName, isAdmin,
+                    isAdmin ? (structs) => { try { renderAdminShelfPreview(structs); } catch (e) { console.warn(e); } } : null);
 
                 timetableData = masterBundle.timetable;
                 const structures = masterBundle.structures;
@@ -1983,14 +2010,18 @@ function switchMainTab(tab) {
                     });
                     html += `</div></details>`;
                 });
+                // keep the classes/sections the admin already opened in the quick list
+                const shelfKey = (d) => { const own = d.querySelector(':scope > summary h2, :scope > summary h3'); const cls = d.parentElement && d.parentElement.closest('details'); const clsH = cls && cls.querySelector(':scope > summary h2'); return (clsH ? clsH.textContent.trim() + ' / ' : '') + (own ? own.textContent.trim() : ''); };
+                const openNow = new Set([...container.querySelectorAll('details[open]')].map(shelfKey));
                 container.innerHTML = html;
+                if (openNow.size) container.querySelectorAll('details').forEach(d => { if (openNow.has(shelfKey(d))) d.open = true; });
      } else {
                 let regMap = new Map();
                 let myRegMap = new Map();
                 
          let myExamDuties = [];
                 try {
-                    const rostersSnap = await getCollection("duty_rosters").get();
+                    const rostersSnap = await (teacherPrefetch ? teacherPrefetch.rosters : getCollection("duty_rosters").get());
                     let dutyMap = {};
                     
                  rostersSnap.forEach(doc => {
@@ -2083,6 +2114,9 @@ function switchMainTab(tab) {
                 });
 
           let staffPermDoc = staffList.find(st => st.email === activeStaff.email);
+                if (!staffPermDoc && window.__myStaffQuery && activeStaff && activeStaff.uid) {
+                    try { const mine = (await window.__myStaffQuery).docs.find(d => d.id === activeStaff.uid); if (mine) staffPermDoc = mine.data(); } catch (e) {}
+                }
                 if (!staffPermDoc && activeStaff && activeStaff.uid) {
                     const myStaffSnap = await db.collection("staff_applications").doc(activeStaff.uid).get();
                     if (myStaffSnap.exists) staffPermDoc = myStaffSnap.data();
@@ -2105,10 +2139,10 @@ function switchMainTab(tab) {
                     });
                 }
 
-               const leaveSnap = await getCollection("leave_requests")
+               const leaveSnap = await (teacherPrefetch ? teacherPrefetch.leaves : getCollection("leave_requests")
                     .where("status", "in", ["APPROVED", "PENDING"])
                     .where("endDate", ">=", todayISO)
-                    .get();
+                    .get());
                     leaveSnap.forEach(doc => {
                         const lData = doc.data();
                         if (lData.adjustments) {
@@ -2135,7 +2169,42 @@ function switchMainTab(tab) {
                     renderBookshelfView();
                 }
             } catch (e) { console.error(e); }
+            finally { if (window.__masterReadyMark) { window.__masterReadyMark(); window.__masterReadyMark = null; } }
         }
+
+     // Admin: quick register list from Class Structure while the timetable is still loading
+     // (same cards; teacher names show "loading…" until the full list replaces it a moment later)
+     function renderAdminShelfPreview(structures) {
+            const container = document.getElementById('bookshelf-container');
+            if (!container || container.querySelector('[onclick*="openRegister"]')) return;
+            const SPECIAL = ['BREAK', 'LUNCH BREAK', 'FRUIT BREAK', 'ASSEMBLY', 'EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM', 'EVENT'];
+            const grouped = {};
+            structures.forEach(st => {
+                grouped[st.className] = grouped[st.className] || {};
+                const list = (grouped[st.className][st.sectionName] = grouped[st.className][st.sectionName] || []);
+                if (!window.adminShowInchargeOnly || st.secInchargeName) list.push({ sub: "CLASS INCHARGE", teacher: st.secInchargeName || st.classInchargeName || "Unassigned", inch: true });
+                if (!window.adminShowInchargeOnly) (st.subjects || []).forEach(sub => { if (!SPECIAL.includes((sub || '').toUpperCase())) list.push({ sub, teacher: "loading…", inch: false }); });
+            });
+            let html = "";
+            Object.keys(grouped).sort().forEach(className => {
+                html += `<details class="bg-white rounded-[2rem] shadow-sm border border-slate-200 mb-6 group overflow-hidden transition-all duration-300"><summary class="p-6 bg-gradient-to-r from-slate-800 to-slate-900 text-white cursor-pointer select-none flex justify-between items-center outline-none"><div class="flex items-center gap-4"><h2 class="text-2xl font-black tracking-tight uppercase leading-none">Class ${className}</h2></div><span class="text-white/50 text-xl group-open:rotate-180 transition-transform">▼</span></summary><div class="p-4 sm:p-6 bg-slate-50/50 space-y-4">`;
+                Object.keys(grouped[className]).sort().forEach(sectionName => {
+                    html += `<details class="bg-white rounded-2xl shadow-sm border border-slate-200 group/sec overflow-hidden"><summary class="p-4 bg-sky-50 text-sky-900 cursor-pointer select-none flex justify-between items-center outline-none hover:bg-sky-100 transition-colors"><h3 class="font-black uppercase tracking-widest text-sm">Section ${sectionName}</h3><span class="text-sky-500 text-sm group-open/sec:rotate-180 transition-transform">▼</span></summary><div class="p-4 bg-white grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">`;
+                    grouped[className][sectionName].forEach(r => {
+                        const safeArgs = `'${String(className).replace(/'/g, "\\'")}', '${String(sectionName).replace(/'/g, "\\'")}', '${String(r.sub).replace(/'/g, "\\'")}', true`;
+                        const cardClass = r.inch ? 'wood-frame-admin hover:brightness-110' : 'bg-slate-50 border-slate-200 hover:bg-purple-50 hover:border-purple-300';
+                        const textClass = r.inch ? 'text-amber-100' : 'text-slate-800';
+                        const tClass = r.inch ? 'text-amber-200/80 border-amber-700/50' : 'text-slate-500 border-slate-200';
+                        html += `<div onclick="openRegister(${safeArgs})" class="cursor-pointer border rounded-xl p-4 text-center transition-all duration-300 shadow-sm group/card ${cardClass} flex flex-col justify-between h-full">
+                                <div><div class="text-2xl mb-1">📘</div><div class="text-[10px] font-black ${textClass} uppercase tracking-widest line-clamp-2">${r.sub}</div></div>
+                                <div class="mt-2 pt-1.5 border-t ${tClass}"><div class="text-[9px] font-bold uppercase truncate tracking-widest">${String(r.teacher).toUpperCase()}</div></div></div>`;
+                    });
+                    html += `</div></details>`;
+                });
+                html += `</div></details>`;
+            });
+            if (html) container.innerHTML = html;
+     }
 
      function switchToAdminGodMode() {
             sessionStorage.setItem('minervaAdminAuth', 'true');
@@ -3318,6 +3387,7 @@ async function openExamRoomRegister(roomName, dateStr = null, timingStr = null) 
             }
         }
     async function openRegister(c, s, sub, canEdit) {
+            if (window.__masterReadyMark && window.__masterReady) await window.__masterReady;   // still loading the timetable
             if (activeStudent) canEdit = false;
             currentReg = { c, s, sub, canEdit };
             document.getElementById('reg-title').innerText = `${c} | Sec ${s}`;
