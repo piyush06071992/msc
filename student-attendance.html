@@ -6264,10 +6264,164 @@ rowHtml += `<td class="border border-black" style="${inlineStyle}">${cellContent
                     </table>`;
 
                 container.innerHTML = tableHtml;
+                await applyFinalisedView(monthVal);
             } catch (e) { 
                 console.error(e); 
                 container.innerHTML = `<div class="text-center py-10 text-rose-500 font-bold uppercase tracking-widest text-xs">Error loading ledger.</div>`; 
             }
+        }
+
+        // ============================================================================
+        // FINALISED (PRINTED) MONTHS
+        // The first time a completed month is printed, the exact sheet is saved. From then on
+        // the ledger shows and reprints that saved copy, so a printed + stamped sheet never
+        // changes because of later edits or program changes. Anything that differs today is
+        // listed above it as "amended after finalisation" (with the correction log: who / when).
+        // Admin can replace the saved copy with the current sheet (e.g. after reprinting).
+        // ============================================================================
+        window.ledgerFrozen = null;
+        function finalisedDocId(monthKey) {
+            return `fin_${activeCenter}_${normDoc(currentReg.c)}_${normDoc(currentReg.s)}_${normDoc(currentReg.sub)}_${monthKey}`;
+        }
+        function isMonthCompletedKey(monthKey) {
+            const [y, m] = monthKey.split('_');
+            const last = `${y}-${m}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+            return last < todayISO;
+        }
+        async function packHtml(html) {
+            try {
+                if (typeof CompressionStream === 'undefined') throw 0;
+                const buf = await new Response(new Blob([html]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+                let bin = ''; const bytes = new Uint8Array(buf);
+                for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+                return { enc: 'gzip-b64', html: btoa(bin) };
+            } catch (e) { return { enc: 'raw', html }; }
+        }
+        async function unpackHtml(d) {
+            if (d.enc !== 'gzip-b64') return d.html || '';
+            const bin = atob(d.html); const bytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+            return await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+        }
+        // Rows of a rendered ledger table: { "admNo|name": [cell texts] } + day numbers of the date columns
+        function readLedgerRows(root) {
+            const rows = {};
+            const table = root.querySelector('table.ledger-table');
+            if (!table) return { rows, days: [] };
+            const dayRow = table.querySelectorAll('thead tr');
+            const days = dayRow.length ? Array.from(dayRow[dayRow.length - 1].querySelectorAll('th')).map(th => th.textContent.trim()) : [];
+            table.querySelectorAll('tbody tr').forEach(tr => {
+                const cells = Array.from(tr.querySelectorAll('td')).map(td => td.textContent.trim());
+                if (cells.length > 4) rows[`${cells[1]}|${cells[3]}`] = cells;
+            });
+            return { rows, days };
+        }
+        const LEDGER_SUMMARY_COLS = ['Leaves', 'Attendance (month)', 'Previous attendance', 'G. Total attendance', 'Total working days'];
+        function diffLedgerRows(frozen, live, days) {
+            const out = [];
+            const nDays = days.length;
+            Object.keys(frozen).forEach(k => {
+                const a = frozen[k], b = live[k];
+                const label = `#${a[2]} ${a[3]}`;
+                if (!b) { out.push({ label, changes: ['not on the current sheet'] }); return; }
+                const changes = [];
+                for (let i = 0; i < nDays; i++) {
+                    const x = a[4 + i] || '', y = b[4 + i] || '';
+                    if (x !== y) changes.push(`${days[i]}: ${x || '–'} → ${y || '–'}`);
+                }
+                LEDGER_SUMMARY_COLS.forEach((name, j) => {
+                    const x = a[4 + nDays + j], y = b[4 + nDays + j];
+                    if (x !== y) changes.push(`${name}: ${x} → ${y}`);
+                });
+                if (changes.length) out.push({ label, changes });
+            });
+            Object.keys(live).forEach(k => { if (!frozen[k]) out.push({ label: `#${live[k][2]} ${live[k][3]}`, changes: ['added after finalisation'] }); });
+            return out;
+        }
+        async function saveLedgerSnapshot(monthKey, replacing) {
+            const container = document.getElementById('ledger-table-container');
+            const liveHtml = (window.ledgerLiveHtml != null) ? window.ledgerLiveHtml : container.innerHTML;
+            const tmp = document.createElement('div'); tmp.innerHTML = liveHtml;
+            const { rows, days } = readLedgerRows(tmp);
+            const packed = await packHtml(liveHtml);
+            const who = (activeStaff && (activeStaff.name || activeStaff.email)) || sessionStorage.getItem('minervaAdminName') || (isAdmin ? 'Admin' : '');
+            const rec = {
+                center: activeCenter, className: currentReg.c, section: currentReg.s, subject: currentReg.sub, monthKey,
+                enc: packed.enc, html: packed.html, rows: JSON.stringify(rows), days: JSON.stringify(days),
+                finalisedAt: Date.now(), finalisedBy: who, finalisedByEmail: (activeStaff && activeStaff.email) || ''
+            };
+            if (replacing) { rec.replacedPrevious = true; }
+            await getCollection("attendance_finalised").doc(finalisedDocId(monthKey)).set(rec);
+            return rec;
+        }
+        async function applyFinalisedView(monthKey) {
+            window.ledgerFrozen = null;
+            window.ledgerLiveHtml = null;
+            const container = document.getElementById('ledger-table-container');
+            let snap;
+            try { snap = await getCollection("attendance_finalised").doc(finalisedDocId(monthKey)).get(); }
+            catch (e) { console.warn("Finalised copy check failed:", e); return; }
+            if (!snap.exists) {
+                if (isMonthCompletedKey(monthKey)) {
+                    container.insertAdjacentHTML('afterbegin', `<div class="no-print mb-3 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold">
+                        📄 Not finalised yet. The first print of this month saves this sheet as the printed copy; after that it will not change.</div>`);
+                }
+                return;
+            }
+            const fin = snap.data();
+            const liveHtml = container.innerHTML;
+            let frozenHtml;
+            try { frozenHtml = await unpackHtml(fin); } catch (e) { console.warn(e); return; }
+            const liveRows = readLedgerRows(container).rows;
+            let frozenRows = {}, days = [];
+            try { frozenRows = JSON.parse(fin.rows || '{}'); days = JSON.parse(fin.days || '[]'); } catch (e) {}
+            const diffs = diffLedgerRows(frozenRows, liveRows, days);
+
+            let logHtml = '';
+            if (diffs.length) {
+                try {
+                    const cs = await getCollection("attendance_corrections").where("className", "==", currentReg.c).where("section", "==", currentReg.s).get();
+                    const [y, m] = monthKey.split('_');
+                    const nameById = {}; studentsData.forEach(st => nameById[st.id] = `#${st.rollNo || ''} ${st.name || ''}`);
+                    const log = cs.docs.map(d => d.data())
+                        .filter(c => normMatch(c.subject) === normMatch(currentReg.sub) && String(c.date || '').startsWith(`${y}-${m}`) && (c.timestamp || 0) > (fin.finalisedAt || 0))
+                        .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                    if (log.length) logHtml = `<div class="mt-2 pt-2 border-t border-rose-200"><p class="font-black uppercase tracking-widest text-[10px] mb-1">Corrections after finalisation</p>` +
+                        log.map(c => `<div>${c.date.split('-')[2]}: ${nameById[c.studentId] || c.studentId} ${c.oldStatus} → ${c.newStatus} · by ${c.approvedBy ? `${c.author || '?'}, approved by ${c.approvedBy}` : (c.author || '?')} · ${new Date(c.timestamp).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}${c.reason ? ` · "${c.reason}"` : ''}</div>`).join('') + `</div>`;
+                } catch (e) { console.warn("Corrections log:", e); }
+            }
+
+            const when = new Date(fin.finalisedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+            const amendHtml = diffs.length ? `<div class="mt-2 p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-[11px] font-bold">
+                    <p class="font-black uppercase tracking-widest text-[10px] mb-1">⚠️ Amended after finalisation — ${diffs.length} student(s) differ from the printed copy</p>
+                    ${diffs.map(d => `<div>${d.label}: ${d.changes.join(' · ')}</div>`).join('')}${logHtml}</div>`
+                : `<p class="mt-1 text-emerald-700">✅ No changes since it was printed.</p>`;
+            const adminBtns = isAdmin ? `<div class="flex gap-2 mt-2 flex-wrap">
+                    <button onclick="toggleLedgerLive()" id="btn-ledger-live" class="bg-slate-700 hover:bg-slate-800 text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest">👁 Show current sheet</button>
+                    ${diffs.length ? `<button onclick="replaceFinalisedCopy()" class="bg-rose-600 hover:bg-rose-700 text-white px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest">♻️ Replace printed copy with current</button>` : ''}
+                </div>` : '';
+            window.ledgerFrozen = { monthKey, html: frozenHtml, fin };
+            window.ledgerLiveHtml = liveHtml;
+            window.ledgerShowingLive = false;
+            container.innerHTML = `<div id="ledger-fin-banner" class="no-print mb-3 p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-indigo-900 text-[11px] font-bold">
+                    <p>🔒 Finalised (printed) on ${when} by ${fin.finalisedBy || '?'} — showing the printed copy. Printing again gives the same sheet.</p>
+                    ${amendHtml}${adminBtns}</div><div id="ledger-sheet-holder">${frozenHtml}</div>`;
+        }
+        function toggleLedgerLive() {
+            if (!window.ledgerFrozen) return;
+            window.ledgerShowingLive = !window.ledgerShowingLive;
+            document.getElementById('ledger-sheet-holder').innerHTML = window.ledgerShowingLive ? window.ledgerLiveHtml : window.ledgerFrozen.html;
+            const b = document.getElementById('btn-ledger-live');
+            if (b) b.textContent = window.ledgerShowingLive ? '🔒 Show printed copy' : '👁 Show current sheet';
+        }
+        async function replaceFinalisedCopy() {
+            if (!isAdmin || !window.ledgerFrozen) return;
+            if (!confirm("Replace the saved printed copy with the CURRENT sheet?\n\nDo this only if you are reprinting this month and replacing the stamped sheets.")) return;
+            try {
+                await saveLedgerSnapshot(window.ledgerFrozen.monthKey, true);
+                alert("✅ Printed copy replaced. Print it now and replace the sheets in the register.");
+                loadLedger();
+            } catch (e) { alert("Could not replace: " + e.message); }
         }
 async function listenForMissingAttendance() {
             if (!isAdmin) return;
@@ -7051,6 +7205,14 @@ async function loadDiscrepancies() {
 async function printLedgerPDF() {
             if (!currentReg) return;
             const monthVal = document.getElementById('ledger-month').value; 
+            if (window.ledgerFrozen && window.ledgerFrozen.monthKey === monthVal) {
+                // Finalised month: always print the saved printed copy
+                if (window.ledgerShowingLive) toggleLedgerLive();
+                document.body.classList.add('allow-print');
+                window.print();
+                setTimeout(() => document.body.classList.remove('allow-print'), 1000);
+                return;
+            }
             const [y, m] = monthVal.split('_');
             const daysInMonth = new Date(y, m, 0).getDate();
 
@@ -7120,6 +7282,16 @@ async function printLedgerPDF() {
                 return;
             }
 
+            if (isMonthCompletedKey(monthVal)) {
+                // First print of a completed month: save this exact sheet as the printed copy
+                if (!confirm("This is the first print of a completed month.\n\nThis sheet will be saved as the PRINTED COPY and will not change later (later corrections are shown separately).\n\nContinue?")) return;
+                try {
+                    const banner = document.querySelector('#ledger-table-container > .no-print');
+                    if (banner) banner.remove();
+                    await saveLedgerSnapshot(monthVal, false);
+                } catch (e) { return alert("Could not save the printed copy, so printing was stopped: " + e.message); }
+                await applyFinalisedView(monthVal);
+            }
             document.body.classList.add('allow-print');
             window.print();
             setTimeout(() => document.body.classList.remove('allow-print'), 1000);
