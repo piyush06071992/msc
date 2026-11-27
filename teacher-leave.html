@@ -7,6 +7,8 @@
     <script src="tailwind-engine.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="planner-date-rules.js?v=1"></script>
+    <script src="leave-schedule.js?v=1"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; -webkit-tap-highlight-color: transparent; }
@@ -76,6 +78,12 @@
                 <span class="relative flex h-2 w-2 shrink-0"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span><span class="relative inline-flex rounded-full h-2 w-2 bg-rose-600"></span></span>
                 Incharge Desk
             </button>
+        </div>
+
+        <div id="leave-load-error" class="hidden bg-rose-50 border-2 border-rose-200 rounded-[2rem] p-6 shadow-sm text-center">
+            <p class="font-black text-rose-800 text-xs uppercase tracking-widest mb-1">⚠️ Could not load leave data</p>
+            <p class="text-[10px] font-bold text-rose-600 mb-3">Check the internet connection. Leaves cannot be applied until the page loads fully.</p>
+            <button onclick="window.location.reload()" class="text-[10px] font-black bg-rose-600 text-white px-5 py-2 rounded-xl uppercase tracking-widest shadow-sm">Reload Page</button>
         </div>
 
         <div id="pending-action-container" class="hidden bg-rose-50 border-2 border-rose-200 rounded-[2rem] p-6 shadow-sm animate-fade-in">
@@ -250,7 +258,17 @@
         const db = firebase.firestore();
 
     let activeStaff = null, leaveType = null;
-        let timetableData = [], dutyData = [], staffData = [], historyData = [], holidaysData = [];
+        let staffData = [], holidaysData = [];
+        // Timetable & duty charts are loaded only for the dates being checked (leave-schedule.js)
+        let leaveSched = null;
+        // Resolves when staff, policies, holidays and the leave list have loaded (the class check waits for it)
+        let baseDataResolve, baseDataReject, baseDataFailed = false;
+        const baseDataReady = new Promise((res, rej) => { baseDataResolve = res; baseDataReject = rej; });
+        baseDataReady.catch(() => {});
+        let latestLeavesSnap = null, adjRequestsEnabled = false;
+        // The class check must finish for the exact dates/times on screen before Submit is allowed
+        let analysisSeq = 0;
+        let analysisResult = { ok: false, key: null };
         let selectedAdjustments = {};
         let assignedExtraDuties = []; 
 
@@ -269,7 +287,16 @@
             activeStaff = JSON.parse(localStorage.getItem('minervaActiveStaff'));
             if (!activeStaff) return window.location.replace('staff-login.html');
             
-            const staffDoc = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+            let staffDoc;
+            try {
+                staffDoc = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
+            } catch (e) {
+                baseDataFailed = true;
+                baseDataReject(e);
+                console.error("Leave page data failed to load", e);
+                showLeaveLoadError();
+                return;
+            }
             if(!staffDoc.empty) {
                 const sData = staffDoc.docs[0].data();
                 activeStaff.isLeaveIncharge = sData.isLeaveIncharge === true;
@@ -285,7 +312,15 @@
 
             document.getElementById('pref-name').innerText = (activeStaff.name || activeStaff.email) + " • " + (activeStaff.center || "GHUMARWIN");
             
-            await loadDatabases();
+            loadDatabases().then(baseDataResolve, baseDataReject);
+            try {
+                await baseDataReady;
+            } catch (e) {
+                baseDataFailed = true;
+                console.error("Leave page data failed to load", e);
+                showLeaveLoadError();
+                return;
+            }
             listenForMyAdjustmentRequests();
             renderFullStaffList();
             listenForMyLedger(); 
@@ -312,7 +347,7 @@
             document.getElementById('view-balances').style.display = tabId === 'balances' ? 'block' : 'none';
             document.getElementById('view-incharge').style.display = tabId === 'incharge' ? 'block' : 'none';
             
-            if(tabId === 'incharge') runAdminAnalysis();
+            if(tabId === 'incharge' && typeof runAdminAnalysis === 'function') runAdminAnalysis();
         }
 
         function listenForMyLedger() {
@@ -599,14 +634,29 @@
 async function loadDatabases() {
             const center = activeStaff.center || "GHUMARWIN";
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
-            const [tt, staff, hist, rosters, leavesSnap, holSnap, policySnap] = await Promise.all([
-                db.collection(prefix + "timetable").get(),
+            const todayIso = MinervaLeaveSchedule.localIso(new Date());
+            leaveSched = MinervaLeaveSchedule.create({ db, prefix });
+
+            // ONE live list of leaves that have not ended yet. Feeds substitute checks, the
+            // "Pending Action" cards and the incharge share list. (Ended leaves are never needed here.)
+            const firstLeaves = new Promise((resolve, reject) => {
+                let first = true;
+                db.collection(prefix + "leave_requests").where("endDate", ">=", todayIso).onSnapshot(snap => {
+                    allLeaves = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                    latestLeavesSnap = snap;
+                    if (first) { first = false; resolve(); }
+                    if (adjRequestsEnabled) renderAdjustmentRequests(snap);
+                }, err => {
+                    console.error("Leave list error", err);
+                    if (first) { first = false; reject(err); }
+                });
+            });
+
+            const [staff, holSnap, policySnap] = await Promise.all([
                 db.collection("staff_applications").where("status", "==", "approved").get(),
-                db.collection(prefix + "timetable_history").get(),
-                db.collection(prefix + "duty_rosters").get(),
-                db.collection(prefix + "leave_requests").get(),
-                db.collection("school_holidays").get(),
-                db.collection("configs").doc("leave_policies").get()
+                db.collection(prefix + "school_holidays").where("endDate", ">=", todayIso).get(),
+                db.collection("configs").doc("leave_policies").get(),
+                firstLeaves
             ]);
             
        // Populate Dynamic Leave Policies
@@ -624,10 +674,6 @@ async function loadDatabases() {
             }
             leavePolicies.forEach(p => leaveValues[p.id] = -Math.abs(p.deduction));
 
-            timetableData = tt.docs.map(d => d.data());
-            historyData = hist.docs.map(d => d.data());
-            dutyData = rosters.docs.map(d => ({ id: d.id, ...d.data() }));
-            allLeaves = leavesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
             holidaysData = holSnap.docs.map(d => d.data());
 
             staffData = staff.docs.map(d => {
@@ -644,6 +690,22 @@ async function loadDatabases() {
                     dept: (det.Department || det.Subject || "General").toString() 
                 };
             }).filter(s => s.center === center);
+        }
+
+        function showLeaveLoadError() {
+            const box = document.getElementById('leave-load-error');
+            if (box) box.classList.remove('hidden');
+        }
+
+        // Everything that changes which classes are affected
+        function analysisKey() {
+            const v = id => (document.getElementById(id) || {}).value || "";
+            return [leaveType, v('l-date'), leaveType === 'FULL' ? v('l-end-date') : '', leaveType === 'FULL' ? '' : v('l-time'), leaveType === 'FULL' ? '' : v('l-end-time')].join('|');
+        }
+
+        function retryLeaveCheck() {
+            if (baseDataFailed) return window.location.reload();
+            runAnalysis();
         }
 
         function setLeaveType(type) {
@@ -705,34 +767,10 @@ async function loadDatabases() {
       function minsTo12H(m) { let h=Math.floor(m/60)%24; let mn=m%60; let mod=h>=12?'PM':'AM'; h=h%12||12; return `${h.toString().padStart(2,'0')}:${mn.toString().padStart(2,'0')} ${mod}`; }
 
        // --- DYNAMIC MASTER TIMETABLE ROUTER ---
-        // Intelligently finds the correct schedule for ANY past, present, or future date!
+        // Which timetable applies on a date (override/exam day, future master, live, or past master)
+        // is worked out in leave-schedule.js. Only dates loaded with leaveSched.ensureDates() can be asked for.
         function getScheduleForDate(targetDateIso, dayName) {
-            // 1. Exact Date Overrides win first (e.g., UT/OT Days) - Ignoring Cancelled Zombies!
-            const exactOverride = historyData.find(o => o.date === targetDateIso && o.status !== "CANCELLED" && (o.type === "DAILY_OVERRIDE" || o.type === "EXAM_OVERRIDE"));
-            if (exactOverride && exactOverride.schedule) {
-                return exactOverride.schedule.filter(t => (t.day || "").trim() === dayName);
-            }
-            
-            const todayIso = new Date().toISOString().split('T')[0];
-            
-            if (targetDateIso >= todayIso) {
-                // FOR TODAY & FUTURE: Always use the current Live Master as baseline
-                let futureMasters = historyData.filter(h => h.type === "FUTURE_MASTER" && h.status !== "CANCELLED" && h.date > todayIso && h.date <= targetDateIso);
-                if (futureMasters.length > 0) {
-                    futureMasters.sort((a, b) => b.date.localeCompare(a.date));
-                    return (futureMasters[0].schedule || []).filter(t => (t.day || "").trim() === dayName);
-                }
-                // Default to exactly what the Live Master currently holds
-                return timetableData.filter(t => (t.day || "").trim() === dayName);
-            } else {
-                // FOR PAST DATES: Look for historical snapshots
-                let pastMasters = historyData.filter(h => h.date <= targetDateIso && h.status !== "CANCELLED" && ["FUTURE_MASTER", "LIVE_MASTER_UPDATE", "APPLIED_MASTER"].includes(h.type));
-                if (pastMasters.length > 0) {
-                    pastMasters.sort((a, b) => b.date.localeCompare(a.date)); // Sort newest to oldest
-                    return (pastMasters[0].schedule || []).filter(t => (t.day || "").trim() === dayName);
-                }
-                return timetableData.filter(t => (t.day || "").trim() === dayName);
-            }
+            return leaveSched.dayRows(targetDateIso);
         }
 
         function selectReplacement(clashId, name, email, rowEl, calcSMins, calcEMins, calcTimeStr, isCustomMode) {
@@ -799,6 +837,8 @@ async function loadDatabases() {
             const dateVal = document.getElementById('l-date').value;
             const startTime = document.getElementById('l-time').value;
             const endTime = document.getElementById('l-end-time').value;
+            const mySeq = ++analysisSeq;
+            analysisResult = { ok: false, key: null };
             if (!dateVal || !leaveType) return;
 
             const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
@@ -897,10 +937,28 @@ async function loadDatabases() {
                 }
             } else { allDates.push(dateVal); }
 
+            // --- LOAD ONLY THESE DATES (timetable + duty charts). Nothing is decided on missing data. ---
+            const checkTodayIso = MinervaLeaveSchedule.localIso(new Date());
+            const datesToLoad = allDates.filter(d => d >= checkTodayIso && MinervaLeaveSchedule.dayNameOf(d) !== 'Sunday');
+            if (datesToLoad.length > 0) feed.innerHTML = '<div class="flex flex-col items-center gap-3 p-10"><div class="loader border-t-indigo-500"></div><p class="text-[10px] font-black text-slate-400 uppercase tracking-widest">Checking your classes…</p></div>';
+            try {
+                await baseDataReady;
+                await leaveSched.ensureDates(datesToLoad);
+            } catch (e) {
+                if (mySeq !== analysisSeq) return;
+                console.error("Class check failed", e);
+                feed.innerHTML = `<div class="bg-rose-50 text-rose-700 p-6 rounded-2xl text-center border border-rose-200 shadow-sm">
+                    <p class="font-black text-xs uppercase tracking-widest mb-1">⚠️ Could not load your timetable</p>
+                    <p class="text-[10px] font-bold mb-3">Check the internet connection. The leave cannot be submitted until your classes are checked.</p>
+                    <button onclick="retryLeaveCheck()" class="text-[10px] font-black bg-rose-600 text-white px-5 py-2 rounded-xl uppercase tracking-widest shadow-sm">Try Again</button></div>`;
+                return;
+            }
+            if (mySeq !== analysisSeq) return; // the dates/times were changed while loading
+
             // --- CHECK HOLIDAYS OR HALF-DAYS DURING LEAVE RANGE ---
             let holidayNotices = [];
             allDates.forEach(tDate => {
-                const hol = holidaysData.find(h => h.date === tDate || (h.startDate <= tDate && h.endDate >= tDate));
+                const hol = holidaysData.find(h => h.status !== 'CANCELLED' && (h.date === tDate || (h.startDate <= tDate && h.endDate >= tDate)));
                 if (hol) {
                     holidayNotices.push(`📅 ${tDate}: ${hol.title || hol.type || 'School Holiday / Event'}`);
                 }
@@ -970,19 +1028,15 @@ async function loadDatabases() {
                     const targetCls = `${normCls(className)}|${normCls(sectionName)}`;
                     
                     for (let h of holidaysData) {
-                        if (h.suspendClasses === false || !h.startDate) continue;
+                        if (h.suspendClasses === false || !h.startDate || h.status === "CANCELLED") continue; // a cancelled holiday is not a holiday
                         const [sy, sm_h, sd] = h.startDate.split('-').map(Number);
                         const hStart = new Date(sy, sm_h - 1, sd);
                         const [ey, em_h, ed] = (h.endDate || h.startDate).split('-').map(Number);
                         const hEnd = new Date(ey, em_h - 1, ed, 23, 59, 59);
                         
                         if (ctxDate >= hStart && ctxDate <= hEnd) {
-                            const matchesClass = (h.targetClasses || []).some(tc => {
-                                if (tc === 'ALL') return true;
-                                const parts = tc.split('|');
-                                const tcNorm = normCls(parts[0]) + (parts[1] ? '|' + normCls(parts[1]) : '');
-                                return tcNorm === targetCls || normCls(parts[0]) === normCls(className);
-                            });
+                            // Same rule as every other page: a one-section holiday affects only that section
+                            const matchesClass = MinervaDateRules.holidayTargetsClass(h, className, sectionName);
                             
                             if (matchesClass) {
                                 if (h.isFullDay) return true;
@@ -1023,7 +1077,7 @@ async function loadDatabases() {
                 });
 
                 // 2. Check Assigned Exam & Lunch Duties
-                dutyData.forEach(roster => {
+                leaveSched.dutyRosters([tDate]).forEach(roster => {
                     if (roster.rosterData) {
                         Object.keys(roster.rosterData).forEach(roomName => {
                             const roomObj = roster.rosterData[roomName];
@@ -1033,17 +1087,12 @@ async function loadDatabases() {
                                     const sEmail = (shift.staff.email || "").trim().toLowerCase();
                                     const sName = norm(shift.staff.name || "");
                                     if (sEmail === myEmail || sName === myName || sName === myRealName) {
+                                        // Exam charts: that date (also shift charts like exam_duty_<date>_9AM).
+                                        // Lunch charts: week of that Monday, column = weekday (local date, no UTC shift).
                                         let dutyDate = "";
-                                        if (roster.type === 'EXAM' && roster.id.startsWith('exam_duty_')) {
-                                            dutyDate = roster.id.replace('exam_duty_', '');
-                                        } else if (roster.type === 'LUNCH' && roster.id.startsWith('lunch_duty_')) {
-                                            const monStr = roster.id.replace('lunch_duty_', '');
-                                            const monDate = new Date(monStr + "T00:00:00");
-                                            const dayOffsets = { 'Monday': 0, 'Tuesday': 1, 'Wednesday': 2, 'Thursday': 3, 'Friday': 4, 'Saturday': 5 };
-                                            if (dayOffsets[colKey] !== undefined) {
-                                                monDate.setDate(monDate.getDate() + dayOffsets[colKey]);
-                                                dutyDate = monDate.toISOString().split('T')[0];
-                                            }
+                                        if ((roster.type === 'EXAM' && roster.id.startsWith('exam_duty_')) ||
+                                            (roster.type === 'LUNCH' && roster.id.startsWith('lunch_duty_'))) {
+                                            dutyDate = leaveSched.dutyDateOf(roster, colKey);
                                         }
 
                                         if (dutyDate === tDate) {
@@ -1296,12 +1345,21 @@ async function loadDatabases() {
                     ? `<div class="bg-sky-50 text-sky-700 p-6 rounded-2xl font-black text-center text-xs uppercase border border-sky-200 tracking-widest mt-10 shadow-sm">ℹ️ Past leave detected — adjustments skipped (already handled manually).</div>`
                     : `<div class="bg-emerald-50 text-emerald-600 p-6 rounded-2xl font-black text-center text-sm uppercase border border-emerald-200 tracking-widest mt-10 shadow-sm">✅ All classes covered for this leave request!</div>`;
             }
+            if (mySeq !== analysisSeq) return;
             feed.innerHTML = analysisHtml;
+            analysisResult = { ok: true, key: analysisKey() };
         }
 
      async function submitLeave() {
             const reason = document.getElementById('l-reason').value.trim();
             if(!reason) return alert("Please enter reason.");
+
+            // Never submit before the class check has finished for exactly these dates/times
+            if (!analysisResult.ok || analysisResult.key !== analysisKey()) {
+                alert("⏳ Your classes for the selected date(s) are still being checked.\n\nPlease wait until the class list appears, assign substitutes, and press Submit again.");
+                if (leaveType) runAnalysis();
+                return;
+            }
 
             const items = document.querySelectorAll('.clash-item');
             
@@ -1500,9 +1558,28 @@ async function loadDatabases() {
             const prefix = activeStaff.center === "GHUMARWIN" ? "" : activeStaff.center.toLowerCase() + "_";
             const myEmail = (activeStaff.email || "").trim().toLowerCase();
 
-            db.collection(prefix + "leave_requests")
-              .where("status", "in", ["PENDING", "APPROVED"])
-              .onSnapshot(snap => {
+            adjRequestsEnabled = true;
+            if (latestLeavesSnap) renderAdjustmentRequests(latestLeavesSnap);
+        }
+
+        let adjRenderSeq = 0;
+        async function renderAdjustmentRequests(snap) {
+                  const seq = ++adjRenderSeq;
+                  const myEmail = (activeStaff.email || "").trim().toLowerCase();
+                  const tIso = MinervaLeaveSchedule.localIso(new Date());
+                  // Incharge cards list free teachers, so load the timetable of those dates first
+                  if (activeStaff.isLeaveIncharge) {
+                      const need = [];
+                      snap.forEach(doc => {
+                          const r = doc.data();
+                          if (r.status !== "PENDING" && r.status !== "APPROVED") return;
+                          (r.adjustments || []).forEach(a => {
+                              if (a.isEmergency && a.date >= tIso && (!a.substituteResponse || a.substituteResponse === "PENDING")) need.push(a.date);
+                          });
+                      });
+                      try { await leaveSched.ensureDates(need, { rosters: false }); } catch (e) { console.warn("Incharge timetable load failed", e); }
+                      if (seq !== adjRenderSeq) return;
+                  }
                   const list = document.getElementById('pending-requests-list');
                   if (!list) return; 
                   
@@ -1517,6 +1594,7 @@ async function loadDatabases() {
 
                 snap.forEach(doc => {
                     const req = doc.data();
+                    if (req.status !== "PENDING" && req.status !== "APPROVED") return;
                     
                     // --- BUILD SHARE LIST FOR INCHARGE DESK ---
                     if (activeStaff.isLeaveIncharge) {
@@ -1579,9 +1657,10 @@ async function loadDatabases() {
                                     const localDateObj = new Date(dParts[0], dParts[1] - 1, dParts[2]);
                                     const dayName = localDateObj.toLocaleDateString('en-US', { weekday: 'long' });
                                     
-                                    let activeSchedule = getScheduleForDate(adj.date, dayName);
+                                    let activeSchedule = null;
+                                    try { activeSchedule = getScheduleForDate(adj.date, dayName); } catch (e) { activeSchedule = null; }
 
-                                    const subs = staffData.filter(staff => {
+                                    const subs = !activeSchedule ? [] : staffData.filter(staff => {
                                         if ((staff.name || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase() === (req.teacherName || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase()) return false;
                                         const staffTt = activeSchedule.filter(s => (s.teacherName || s.teacher || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase() === (staff.name || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase());
                                         
@@ -1597,7 +1676,7 @@ async function loadDatabases() {
                                     let deptMap = {};
                                     subs.forEach(s => { let d = s.dept.split(',')[0].trim(); if(!deptMap[d]) deptMap[d] = []; deptMap[d].push(s); });
                                     
-                                    let staffOptions = `<option value="">-- Assign Force Replacement --</option>`;
+                                    let staffOptions = activeSchedule ? `<option value="">-- Assign Force Replacement --</option>` : `<option value="">⚠️ Timetable not loaded - reopen this page</option>`;
                                     Object.keys(deptMap).sort().forEach(dN => {
                                         staffOptions += `<optgroup label="${dN} (${deptMap[dN].length} Free)">`;
                                         deptMap[dN].forEach(s => { staffOptions += `<option value="${s.email}|${s.name}">${s.name}</option>`; });
@@ -1637,7 +1716,6 @@ async function loadDatabases() {
                           shareFeed.innerHTML = shareHtml;
                       }
                   }
-              });
         }
 
      async function handleAdjustmentResponse(docId, clashId, response) {
@@ -1721,7 +1799,9 @@ async function loadDatabases() {
             } catch(e) { alert("Error: " + e.message); btn.innerText = orig; btn.disabled = false; }
         }
 
-        function viewTeacherDay(teacherName, dateIso) {
+        async function viewTeacherDay(teacherName, dateIso) {
+            try { await leaveSched.ensureDates([dateIso], { rosters: false }); }
+            catch (e) { return alert("Could not load the timetable for this date. Check the internet and try again."); }
             const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
             const tNameNorm = norm(teacherName);
             
@@ -1810,11 +1890,12 @@ async function loadDatabases() {
             const todayIso = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
             const prettyToday = new Date(todayIso).toLocaleDateString('en-GB', {weekday:'short', day:'2-digit', month:'short', year:'numeric'});
 
-            const snap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get();
+            const snap = await db.collection(prefix + "leave_requests").where("endDate", ">=", todayIso).get();
             let todayLeaves = [];
 
             snap.forEach(doc => {
                 const req = doc.data();
+                if (req.status !== "PENDING" && req.status !== "APPROVED") return;
                 const lStart = req.startDate;
                 const lEnd = req.endDate || req.startDate;
                 const hasTodayAdj = (req.adjustments || []).some(a => a.date === todayIso);
@@ -1908,9 +1989,11 @@ async function loadDatabases() {
             window.open(waLink, '_blank');
         }
 
-       function openTodayTimetable() {
+       async function openTodayTimetable() {
             const today = new Date();
-            const todayIso = today.toISOString().split('T')[0];
+            const todayIso = MinervaLeaveSchedule.localIso(today);
+            try { await leaveSched.ensureDates([todayIso], { rosters: false }); }
+            catch (e) { return alert("Could not load today's timetable. Check the internet and try again."); }
             const dayName = today.toLocaleDateString('en-US', { weekday: 'long' });
             
             let activeSchedule = getScheduleForDate(todayIso, dayName);

@@ -7,6 +7,7 @@
     <script src="tailwind-engine.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="leave-schedule.js?v=1"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
@@ -570,7 +571,9 @@
         const collPrefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
 
  let allLeaves = [], allTransactions = [], allStaff = [], activeAdminName = "Admin";
-        let timetableData = [], historyData = []; // NEW: Memory for the Coordination Engine
+        // Coordination engine: timetable loaded only for the dates of the leave being managed (leave-schedule.js)
+        let leaveSched = null;
+        let adminAnalysisSeq = 0;
         
        // BUG FIX: Added CANCEL: 0 to mathematically handle full refunds without throwing NaN
         let leaveValues = { 'CANCEL': 0 };
@@ -708,11 +711,12 @@
                 renderPending(); // Re-render math in case ratios changed
             });
 
-        db.collection(collPrefix + "timetable").get().then(snap => timetableData = snap.docs.map(d => d.data()));
-            db.collection(collPrefix + "timetable_history").get().then(snap => historyData = snap.docs.map(d => d.data()));
+            // (The whole timetable + timetable history are no longer downloaded here.
+            //  "Manage Subs" and the 👁️ view load only the dates they need.)
+            leaveSched = MinervaLeaveSchedule.create({ db, prefix: collPrefix });
             
-            // Listen for Calendar Holidays & Events
-            db.collection("school_holidays").onSnapshot(snap => {
+            // Listen for Calendar Holidays & Events (this branch's own holidays)
+            db.collection(collPrefix + "school_holidays").onSnapshot(snap => {
                 holidaysData = snap.docs.map(d => ({id: d.id, ...d.data()}));
                 if(allLeaves.length > 0) renderPending(); // Re-render if new holidays are added
             });
@@ -922,7 +926,7 @@
                     // -- NEW: CHECK HOLIDAYS OVERLAP --
                     let holidayNotices = [];
                     leaveDates.forEach(tDate => {
-                        const hol = holidaysData.find(h => h.date === tDate || (h.startDate <= tDate && (h.endDate || h.startDate) >= tDate));
+                        const hol = holidaysData.find(h => h.status !== 'CANCELLED' && (h.date === tDate || (h.startDate <= tDate && (h.endDate || h.startDate) >= tDate)));
                         if (hol) {
                             let timeStr = hol.isFullDay ? "Full Day" : `${hol.startTime} - ${hol.endTime}`;
                             let staffStr = hol.staffStatus === 'OFF' ? 'Staff Off' : (hol.staffStatus === 'FULL' ? 'Full Staff' : 'Custom Staff');
@@ -1009,7 +1013,7 @@
                     // -- NEW: CHECK HOLIDAYS OVERLAP FOR MODS --
                     let holidayNotices = [];
                     leaveDates.forEach(tDate => {
-                        const hol = holidaysData.find(h => h.date === tDate || (h.startDate <= tDate && (h.endDate || h.startDate) >= tDate));
+                        const hol = holidaysData.find(h => h.status !== 'CANCELLED' && (h.date === tDate || (h.startDate <= tDate && (h.endDate || h.startDate) >= tDate)));
                         if (hol) {
                             let timeStr = hol.isFullDay ? "Full Day" : `${hol.startTime} - ${hol.endTime}`;
                             let staffStr = hol.staffStatus === 'OFF' ? 'Staff Off' : (hol.staffStatus === 'FULL' ? 'Full Staff' : 'Custom Staff');
@@ -1852,6 +1856,18 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
                 }
             }
 
+            // Load the timetable of only these dates (never decide on missing data)
+            const mySeq = ++adminAnalysisSeq;
+            try {
+                await leaveSched.ensureDates(allDates.filter(d => MinervaLeaveSchedule.dayNameOf(d) !== 'Sunday'), { rosters: false });
+            } catch (e) {
+                if (mySeq !== adminAnalysisSeq) return;
+                console.error("Timetable load failed", e);
+                feed.innerHTML = `<div class="text-center py-16"><p class="text-rose-400 font-black text-xs uppercase tracking-widest mb-3">⚠️ Could not load the timetable for these dates</p><button onclick="runAdminAnalysis()" class="text-[10px] font-black bg-rose-600 text-white px-5 py-2 rounded-xl uppercase tracking-widest">Try Again</button></div>`;
+                return;
+            }
+            if (mySeq !== adminAnalysisSeq) return;
+
             let virtualSchedule = [];
             allLeaves.forEach(l => {
                 if (l.status === "APPROVED" || l.status === "PENDING") {
@@ -1875,10 +1891,8 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
                 const dayName = localDateObj.toLocaleDateString('en-US', { weekday: 'long' });
                 if(dayName === 'Sunday') return;
 
-                const override = historyData.find(o => o.date === tDate);
-                let activeSchedule = (override && override.schedule) 
-                    ? override.schedule.filter(t => (t.day || "").trim() === dayName)
-                    : timetableData.filter(t => (t.day || "").trim() === dayName);
+                // Same timetable choice as the teacher's leave page (override/exam day, future master, live, past master)
+                let activeSchedule = leaveSched.dayRows(tDate);
 
                 let userConflicts = [];
                 activeSchedule.forEach(slot => {
@@ -1955,8 +1969,8 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
 
                            const staffVirtual = virtualSchedule.filter(v => v.date === tDate && norm(v.teacherName) === norm(staff.name));
                             staffVirtual.forEach(v => {
-                                const vs = timeToMins(v.start24);
-                                const ve = timeToMins(v.end24);
+                                const vs = v.sMins !== undefined ? v.sMins : timeToMins(v.start24);
+                                const ve = v.eMins !== undefined ? v.eMins : timeToMins(v.end24);
                                 busySpans.push({ s: vs, e: ve, cls: v.className || 'Duty', sec: v.section || '' });
                                 if (vs < lEnd && ve > lStart) windowClasses.push({ s: vs, e: ve });
                             });
@@ -2275,7 +2289,9 @@ let accordionHtml = `
                 
             } catch(e) { alert("Error: " + e.message); btn.innerText = "Assign"; btn.disabled = false; }
         }
-function viewTeacherDay(teacherName, dateIso) {
+async function viewTeacherDay(teacherName, dateIso) {
+            try { await leaveSched.ensureDates([dateIso], { rosters: false }); }
+            catch (e) { return alert("Could not load the timetable for this date. Check the internet and try again."); }
             const norm = (s) => (s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
             const tNameNorm = norm(teacherName);
             
@@ -2284,10 +2300,7 @@ function viewTeacherDay(teacherName, dateIso) {
             const dayName = localDateObj.toLocaleDateString('en-US', { weekday: 'long' });
             
             // 1. Grab Base Schedule
-            const override = historyData.find(o => o.date === dateIso);
-            const baseSchedule = (override && override.schedule) 
-                ? override.schedule.filter(t => (t.day || "").trim() === dayName)
-                : timetableData.filter(t => (t.day || "").trim() === dayName);
+            const baseSchedule = leaveSched.dayRows(dateIso);
                 
             let teacherClasses = baseSchedule.filter(s => norm(s.teacherName || s.teacher) === tNameNorm);
             
