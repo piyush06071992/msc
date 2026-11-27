@@ -907,6 +907,8 @@ function updateTeacherDropdown(skipRender = false) {
             }
         }
 
+ let ttBaseDataReady = Promise.resolve(); // resolves when the data the timetable drawing needs is loaded
+
  async function init() {
     // Set the dropdown to match the active session storage
     const dropdown = document.getElementById('global-center-switch');
@@ -949,13 +951,16 @@ function updateTeacherDropdown(skipRender = false) {
     const todayDayName = new Date(todayIso + "T00:00:00").toLocaleDateString('en-US', { weekday: 'long' });
     document.getElementById('context-date-input').value = todayIso;
 
-    await Promise.all([
+    // Downloads run in parallel, but the timetable is drawn only after classes, teachers, rooms
+    // and holidays are ready (it could previously be drawn first and miss sections / teachers).
+    const baseData = Promise.all([
         fetchStructure(),
         fetchTeachers(),
         fetchRooms(),
-        fetchHolidaysForDate(todayIso),
-        loadScheduleForDate(todayIso, todayDayName)
+        fetchHolidaysForDate(todayIso)
     ]);
+    ttBaseDataReady = baseData;
+    await Promise.all([baseData, loadScheduleForDate(todayIso, todayDayName)]);
     populateFilterDropdowns();
     checkAndApplyFutureMaster();
 }
@@ -963,11 +968,23 @@ function updateTeacherDropdown(skipRender = false) {
 async function checkAndApplyFutureMaster() {
     const todayIso = new Date().toISOString().split('T')[0];
     try {
-        const histSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
-        if (histSnap.empty) return;
-
+        // READ OPTIMIZATION: check the slim mirror (small) for a due future master and download the
+        // full copy only when one is actually due. Falls back to the full history if the mirror
+        // (format 2, which includes FUTURE_MASTER) is not ready.
         let pendingMasters = [];
-        histSnap.forEach(doc => { if (doc.id <= todayIso) pendingMasters.push(doc.data()); });
+        const slimStatus = await getCollection("timetable_history_slim").doc("__status").get().catch(() => null);
+        const slimReady = !!(slimStatus && slimStatus.exists && slimStatus.data().ready === true && (slimStatus.data().format || 1) >= 2);
+        if (slimReady) {
+            const slimSnap = await getCollection("timetable_history_slim").where("type", "==", "FUTURE_MASTER").get();
+            const dueIds = slimSnap.docs.filter(doc => doc.id <= todayIso).map(doc => doc.id);
+            if (dueIds.length === 0) return;
+            const fullDocs = await Promise.all(dueIds.map(id => getCollection("timetable_history").doc(id).get()));
+            fullDocs.forEach(doc => { if (doc.exists && doc.data().type === "FUTURE_MASTER") pendingMasters.push(doc.data()); });
+        } else {
+            const histSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+            if (histSnap.empty) return;
+            histSnap.forEach(doc => { if (doc.id <= todayIso) pendingMasters.push(doc.data()); });
+        }
         if (pendingMasters.length === 0) return;
 
         // Get the most recent valid future master
@@ -1105,10 +1122,12 @@ async function checkAndApplyFutureMaster() {
 
         async function fetchHolidaysForDate(targetDateIso) {
             try {
-                const snap = await getCollection("school_holidays").where("startDate", "<=", targetDateIso).get();
+                // READ OPTIMIZATION: "endDate >= date" instead of "startDate <= date" (which grew all session).
+                // Every holiday is saved with an endDate (single-day holidays use endDate = startDate).
+                const snap = await getCollection("school_holidays").where("endDate", ">=", targetDateIso).get();
                 holidaysData = snap.docs
                     .map(d => ({ id: d.id, ...d.data() }))
-                    .filter(h => (h.endDate || h.startDate) >= targetDateIso);
+                    .filter(h => h.startDate && h.startDate <= targetDateIso);
             } catch (e) {
                 console.error("Date Holiday Fetch Error:", e);
             }
@@ -1150,13 +1169,18 @@ async function checkAndApplyFutureMaster() {
                     document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
                 } else {
                     if (dateVal >= todayISO) {
-                        const futureSnap = await getCollection("timetable_history")
-                            .where("type", "==", "FUTURE_MASTER")
-                            .where("date", "<=", dateVal)
-                            .get();
-                        let futureMasters = futureSnap.docs
-                            .map(doc => doc.data())
-                            .filter(d => d.status !== "CANCELLED" && d.date > todayISO);
+                        // READ OPTIMIZATION: only masters dated after today and up to dateVal can apply,
+                        // so for today itself there is nothing to look up (each one is a full school copy).
+                        let futureMasters = [];
+                        if (dateVal > todayISO) {
+                            const futureSnap = await getCollection("timetable_history")
+                                .where("type", "==", "FUTURE_MASTER")
+                                .where("date", "<=", dateVal)
+                                .get();
+                            futureMasters = futureSnap.docs
+                                .map(doc => doc.data())
+                                .filter(d => d.status !== "CANCELLED" && d.date > todayISO);
+                        }
 
                         if (futureMasters.length > 0) {
                             futureMasters.sort((a, b) => b.date.localeCompare(a.date));
@@ -1189,12 +1213,17 @@ async function checkAndApplyFutureMaster() {
                 }
             }
 
+            // Classes / teachers / holidays must be loaded before substitutions are merged and drawn
+            await ttBaseDataReady;
+
             // Apply accepted leave substitutions only for this selected date
             const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
             let leaveDocs = [];
             try {
-                const leaveSnap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get();
-                leaveDocs = leaveSnap.docs;
+                // READ OPTIMIZATION: substitutions for dateVal belong to leaves that have not ended before
+                // dateVal (was: every PENDING/APPROVED leave of the whole session).
+                const leaveSnap = await db.collection(prefix + "leave_requests").where("endDate", ">=", dateVal).get();
+                leaveDocs = leaveSnap.docs.filter(d => ["PENDING", "APPROVED"].includes(d.data().status));
             } catch (e) {
                 console.warn("Leave lookup skipped:", e);
             }
@@ -1781,6 +1810,8 @@ async function saveHoliday() {
             }
 
          // 4. Fill the grids with the actual Time Blocks
+            clashChecksSuspended = true; // one clash check at the end instead of one per entry
+            try {
             Object.keys(renderGroups).forEach(className => {
                 Object.keys(renderGroups[className]).forEach(sectionName => {
                     const secId = `sec_${className.replace(/\s+/g, '')}_${sectionName.replace(/\s+/g, '')}`;
@@ -1847,6 +1878,7 @@ async function saveHoliday() {
                     }
                 });
             });
+            } finally { clashChecksSuspended = false; }
             
            checkGlobalClash();
             applyVisualFilters();
@@ -3012,21 +3044,22 @@ function handleEntrySubject(blockId, entId) {
                 tSel.value = "NONE";
             } else {
                 tWrap.classList.remove('hidden'); 
-                tSel.innerHTML = '<option value="NONE">- Teacher -</option>';
+               let teacherOptionsHtml = '<option value="NONE">- Teacher -</option>';
                let foundPrev = false;
                 allTeachers.forEach(t => {
                     const deptStr = Array.isArray(t.dept) ? t.dept.join(',').toLowerCase() : t.dept.toLowerCase();
                     if (showAll || deptStr.includes(sub.toLowerCase())) {
                         const isSelected = (t.name === prevSel) ? 'selected' : '';
                         if (isSelected) foundPrev = true;
-                        tSel.innerHTML += `<option value="${t.name}" ${isSelected}>${t.name}</option>`;
+                        teacherOptionsHtml += `<option value="${t.name}" ${isSelected}>${t.name}</option>`;
                     }
                 });
                 
                 // Force substitute teacher into the dropdown even if their department doesn't match
                 if (prevSel && prevSel !== "NONE" && !foundPrev) {
-                    tSel.innerHTML += `<option value="${prevSel}" selected>${prevSel}</option>`;
+                    teacherOptionsHtml += `<option value="${prevSel}" selected>${prevSel}</option>`;
                 }
+                tSel.innerHTML = teacherOptionsHtml; // set once (was re-parsed for every teacher)
                 
                 tSel.setAttribute('data-selected', ''); 
             }
@@ -3046,7 +3079,7 @@ function handleEntrySubject(blockId, entId) {
                 tSel.style.color = getDynamicColor(tSel.value);
             }
 
-            checkGlobalClash();
+            checkGlobalClashUnlessSuspended();
         }
 
         function toggleEditMode(blockId, isEditing) {
@@ -3369,6 +3402,11 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
             return false;
         }
 
+        // While a whole timetable is being drawn, individual entries skip the clash check;
+        // the drawing code runs it ONCE at the end (was: once per entry -> very slow first load).
+        let clashChecksSuspended = false;
+        function checkGlobalClashUnlessSuspended() { if (!clashChecksSuspended) checkGlobalClash(); }
+
         function checkGlobalClash() {
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             const virtualDb = [];
@@ -3399,6 +3437,17 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                         });
                     }
                 });
+            });
+
+            // PERFORMANCE: group once instead of scanning the whole list for every entry.
+            // Same comparisons, same order (groups keep the original list order).
+            const virtualByEnt = new Map(), virtualByTeacherDay = new Map();
+            virtualDb.forEach(v => {
+                if (!virtualByEnt.has(v.entId)) virtualByEnt.set(v.entId, []);
+                virtualByEnt.get(v.entId).push(v);
+                const k = v.day + '|' + v.teacher;
+                if (!virtualByTeacherDay.has(k)) virtualByTeacherDay.set(k, []);
+                virtualByTeacherDay.get(k).push(v);
             });
 
             allBlocks.forEach(b => {
@@ -3436,12 +3485,12 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                     const tea = ent.querySelector('.ent-tea').value;
                     if(tea === "NONE" || tea === "") return; 
                     
-                    const myVirtuals = virtualDb.filter(v => v.entId === ent.id);
+                    const myVirtuals = virtualByEnt.get(ent.id) || [];
                     if(myVirtuals.length === 0) return;
                     
                     let clashes = [];
                     myVirtuals.forEach(myV => {
-                        const overlaps = virtualDb.filter(otherV => {
+                        const overlaps = (virtualByTeacherDay.get(myV.day + '|' + myV.teacher) || []).filter(otherV => {
                            if(otherV.entId === myV.entId) return false;
                             if(otherV.day !== myV.day) return false; 
                             if(otherV.teacher !== myV.teacher) return false; 
@@ -4161,8 +4210,10 @@ async function confirmDateContext() {
         document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Loading Schedule for ${dateVal}...</div>`;
 
         try {
+            const holidaysForDate = fetchHolidaysForDate(dateVal);
+            ttBaseDataReady = holidaysForDate; // draw only after this date's holidays are known
             await Promise.all([
-                fetchHolidaysForDate(dateVal),
+                holidaysForDate,
                 loadScheduleForDate(dateVal, dayName)
             ]);
         } catch (error) {
@@ -4826,6 +4877,8 @@ const batch = db.batch();
             const targetSection = targetSelectText.split(' - Section ')[1];
             
             // 3. Copy each block perfectly
+            clashChecksSuspended = true;
+            try {
             sourceGrid.querySelectorAll('.time-block').forEach(b => {
                 const s24 = b.getAttribute('data-s24');
                 const e24 = b.querySelector('.tb-e24').value;
@@ -4845,6 +4898,7 @@ const batch = db.batch();
                 injectSmartBlock(targetClass, targetSection, targetId, { start24: s24, end24: e24, entries: entries });
             });
             
+            } finally { clashChecksSuspended = false; }
             sortSectionBlocks(targetId);
             checkGlobalClash();
             
