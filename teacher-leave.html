@@ -8,7 +8,7 @@
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <script src="planner-date-rules.js?v=1"></script>
-    <script src="leave-schedule.js?v=1"></script>
+    <script src="leave-schedule.js?v=2"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; -webkit-tap-highlight-color: transparent; }
@@ -1401,7 +1401,9 @@ async function loadDatabases() {
                             adjustedTo: selection.name, 
                             adjustedEmail: selection.email, 
                             isEmergency: selection.requestIncharge,
-                            assignedTimeWindow: selection.customTime || ""
+                            assignedTimeWindow: selection.customTime || "",
+                            assignedBy: "APPLICANT",
+                            assignedByName: activeStaff.name || ""
                         });
                         if(!selection.requestIncharge) {
                             emailList.push({ name: selection.name, email: selection.email, date: clashData.date, time: selection.customTime ? selection.customTime : `${minsTo12H(clashData.start)} - ${minsTo12H(clashData.end)}`, section: clashData.sub, subject: clashData.title });
@@ -1411,7 +1413,7 @@ async function loadDatabases() {
             });
 
             assignedExtraDuties.forEach(duty => {
-                finalAdjustments.push(duty);
+                finalAdjustments.push({ ...duty, assignedBy: "APPLICANT", assignedByName: activeStaff.name || "" });
                 emailList.push({ name: duty.adjustedTo, email: duty.adjustedEmail, date: duty.date, time: "Custom", section: "Responsibility", subject: duty.sub });
             });
 
@@ -1791,6 +1793,8 @@ async function loadDatabases() {
                         data.adjustments[adjIndex].adjustedEmail = selectedEmail;
                         data.adjustments[adjIndex].substituteResponse = 'ACCEPTED';
                         data.adjustments[adjIndex].substituteMessage = 'Force Assigned by Leave Incharge';
+                        data.adjustments[adjIndex].assignedBy = 'INCHARGE';             // incharge orders are auto-accepted
+                        data.adjustments[adjIndex].assignedByName = activeStaff.name || '';
                         transaction.update(docRef, { adjustments: data.adjustments });
                     }
                 });
@@ -1926,22 +1930,9 @@ async function loadDatabases() {
                     msg += `   *📋 Adjustments (${todayAdjs.length}):*\n`;
                     todayAdjs.sort((a,b) => (a.start || 0) - (b.start || 0)).forEach((adj) => {
                         let timeWin = adj.assignedTimeWindow || `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`;
-                        let subDept = adj.adjustedEmail && adj.adjustedEmail !== 'ADMIN' ? ` (${getStaffDept(adj.adjustedEmail)})` : '';
-                        
-                        let assignTag = "By Teacher";
-                        if (adj.substituteMessage && adj.substituteMessage.includes("Force Assigned")) {
-                            assignTag = "⚡ Force Assigned";
-                        } else if (adj.isEmergency && adj.adjustedTo === "INCHARGE") {
-                            assignTag = "🚨 Needs Incharge Assign";
-                        }
-
-                        let subResp = "⏳ Pending";
-                        if (adj.substituteResponse === "ACCEPTED") subResp = "✅ Accepted";
-                        else if (adj.substituteResponse === "DECLINED") subResp = "❌ Declined";
-
                         msg += `     • *${adj.title}* (${adj.sub})\n`;
                         msg += `       🕒 ${timeWin}\n`;
-                        msg += `       👉 *Sub:* ${adj.adjustedTo}${subDept} [${subResp} | ${assignTag}]\n`;
+                        msg += `       👉 *Sub:* ${MinervaLeaveSchedule.subLine(adj, getStaffDept)}\n`;
                     });
                 } else {
                     msg += `   *📋 Adjustments:* None for today\n`;
@@ -1971,13 +1962,11 @@ async function loadDatabases() {
 
             if (req.adjustments && req.adjustments.length > 0) {
                 msg += `*📋 SUBSTITUTION DETAILS:*\n`;
-                req.adjustments.forEach((adj, idx) => {
+                [...req.adjustments].sort((a, b) => String(a.date).localeCompare(String(b.date)) || (a.start || 0) - (b.start || 0)).forEach((adj, idx) => {
                     let adjDate = new Date(adj.date).toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
-                    let status = adj.substituteResponse === 'ACCEPTED' ? '✅' : '⏳';
-                    
                     let timeWin = adj.assignedTimeWindow || `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`;
 
-                    msg += `${idx + 1}. ${adj.title} (${adj.sub})\n   Date: ${adjDate} | Time: ${timeWin}\n   *Sub Assigned:* ${adj.adjustedTo} ${status}\n\n`;
+                    msg += `${idx + 1}. ${adj.title} (${adj.sub})\n   Date: ${adjDate} | Time: ${timeWin}\n   *Sub:* ${MinervaLeaveSchedule.subLine(adj, getStaffDept)}\n\n`;
                 });
             } else {
                 msg += `*📋 SUBSTITUTION DETAILS:*\nNo substitutions required.\n\n`;
