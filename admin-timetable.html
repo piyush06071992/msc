@@ -907,6 +907,9 @@ function updateTeacherDropdown(skipRender = false) {
             }
         }
 
+ let ttBaseDataReady = Promise.resolve(); // resolves when the data the timetable drawing needs is loaded
+ let ttInitialBaseData = Promise.resolve(); // classes / teachers / rooms (first load)
+
  async function init() {
     // Set the dropdown to match the active session storage
     const dropdown = document.getElementById('global-center-switch');
@@ -949,13 +952,17 @@ function updateTeacherDropdown(skipRender = false) {
     const todayDayName = new Date(todayIso + "T00:00:00").toLocaleDateString('en-US', { weekday: 'long' });
     document.getElementById('context-date-input').value = todayIso;
 
-    await Promise.all([
+    // Downloads run in parallel, but the timetable is drawn only after classes, teachers, rooms
+    // and holidays are ready (it could previously be drawn first and miss sections / teachers).
+    const baseData = Promise.all([
         fetchStructure(),
         fetchTeachers(),
         fetchRooms(),
-        fetchHolidaysForDate(todayIso),
-        loadScheduleForDate(todayIso, todayDayName)
+        fetchHolidaysForDate(todayIso)
     ]);
+    ttInitialBaseData = baseData;
+    ttBaseDataReady = baseData;
+    await Promise.all([baseData, loadScheduleForDate(todayIso, todayDayName)]);
     populateFilterDropdowns();
     checkAndApplyFutureMaster();
 }
@@ -963,33 +970,36 @@ function updateTeacherDropdown(skipRender = false) {
 async function checkAndApplyFutureMaster() {
     const todayIso = new Date().toISOString().split('T')[0];
     try {
-        const histSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
-        if (histSnap.empty) return;
-
+        // READ OPTIMIZATION: check the slim mirror (small) for a due future master and download the
+        // full copy only when one is actually due. Falls back to the full history if the mirror
+        // (format 2, which includes FUTURE_MASTER) is not ready.
         let pendingMasters = [];
-        histSnap.forEach(doc => { if (doc.id <= todayIso) pendingMasters.push(doc.data()); });
+        const slimStatus = await getCollection("timetable_history_slim").doc("__status").get().catch(() => null);
+        const slimReady = !!(slimStatus && slimStatus.exists && slimStatus.data().ready === true && (slimStatus.data().format || 1) >= 2);
+        if (slimReady) {
+            const slimSnap = await getCollection("timetable_history_slim").where("type", "==", "FUTURE_MASTER").get();
+            const dueIds = slimSnap.docs.filter(doc => doc.id <= todayIso).map(doc => doc.id);
+            if (dueIds.length === 0) return;
+            const fullDocs = await Promise.all(dueIds.map(id => getCollection("timetable_history").doc(id).get()));
+            fullDocs.forEach(doc => { if (doc.exists && doc.data().type === "FUTURE_MASTER") pendingMasters.push(doc.data()); });
+        } else {
+            const histSnap = await getCollection("timetable_history").where("type", "==", "FUTURE_MASTER").get();
+            if (histSnap.empty) return;
+            histSnap.forEach(doc => { if (doc.id <= todayIso) pendingMasters.push(doc.data()); });
+        }
         if (pendingMasters.length === 0) return;
 
         // Get the most recent valid future master
         pendingMasters.sort((a, b) => b.date.localeCompare(a.date));
         const targetMaster = pendingMasters[0];
 
-        const batch = db.batch();
-        
-        // 1. Wipe the old Live Master
-        const liveSnap = await getCollection("timetable").get();
-        liveSnap.forEach(doc => batch.delete(doc.ref));
-
-        // 2. Apply the new Live Master
-        targetMaster.schedule.forEach(slot => {
-            const { sMins, eMins, ...cleanSlot } = slot;
-            batch.set(getCollection("timetable").doc(), cleanSlot);
-        });
+        // 1 + 2. Make the Live Master equal to the future master, writing only changed rows
+        //        (was ONE batch of ~3,400 operations, over Firestore's 500 limit, so it failed)
+        const saved = await writeLiveMasterDiff(targetMaster.schedule || []);
+        liveMasterTimetable = [];
 
         // 3. Mark it as APPLIED so it never runs again
-        batch.update(getCollection("timetable_history").doc(targetMaster.date), { type: "APPLIED_MASTER" });
-
-        await batch.commit();
+        await getCollection("timetable_history").doc(targetMaster.date).update({ type: "APPLIED_MASTER" });
         sessionStorage.removeItem('minerva_timetable'); // Force fresh fetch
         console.log("✅ Auto-Promoted Future Master to Live Schedule!");
     } catch (e) {
@@ -1076,6 +1086,59 @@ async function checkAndApplyFutureMaster() {
             });
         }
 
+        // ============================================================
+        // SAVE THE LIVE MASTER AS EXACTLY `slots`, WRITING ONLY WHAT CHANGED
+        // Before: every save deleted all ~1,700 rows and wrote them all again (and every open
+        // page listening to the timetable re-read them). Now rows that are already identical are
+        // left alone; only removed rows are deleted and only new/changed rows are added.
+        // Commits in chunks of 400 (Firestore allows max 500 operations per batch).
+        // Returns { rows: the live master after saving (with ids), added, deleted }.
+        // ============================================================
+        const LIVE_ROW_FIELDS = ["day", "className", "section", "start24", "end24", "timeRange", "duration",
+                                 "subject", "teacher", "teacherName", "teacherEmail", "room", "remark"];
+        function liveRowKey(row) {
+            // missing, null and "" count as the same (older rows may lack room / remark / email)
+            return JSON.stringify(LIVE_ROW_FIELDS.map(f => (row[f] === undefined || row[f] === null || row[f] === "") ? "" : String(row[f])));
+        }
+        async function writeLiveMasterDiff(slots, stamp) {
+            const snap = await getCollection("timetable").get();   // fresh copy: another admin may have saved meanwhile
+            const existingByKey = new Map();
+            snap.docs.forEach(d => {
+                const k = liveRowKey(d.data());
+                if (!existingByKey.has(k)) existingByKey.set(k, []);
+                existingByKey.get(k).push(d);
+            });
+            const keptDocs = [], toAdd = [];
+            slots.forEach(slot => {
+                const { sMins, eMins, id, ...clean } = slot;
+                const same = existingByKey.get(liveRowKey(clean));
+                if (same && same.length > 0) keptDocs.push(same.shift());
+                else toAdd.push({ ...clean, ...(stamp || {}) });
+            });
+            const toDelete = [];
+            existingByKey.forEach(list => list.forEach(d => toDelete.push(d)));
+
+            const CHUNK_SIZE = 400;
+            let batch = db.batch(), ops = 0;
+            const commits = [];
+            const flush = () => { if (ops > 0) { commits.push(batch.commit()); batch = db.batch(); ops = 0; } };
+            toDelete.forEach(d => { batch.delete(d.ref); if (++ops >= CHUNK_SIZE) flush(); });
+            const addedRows = toAdd.map(row => {
+                const ref = getCollection("timetable").doc();
+                batch.set(ref, row);
+                if (++ops >= CHUNK_SIZE) flush();
+                return { id: ref.id, ...row };
+            });
+            flush();
+            await Promise.all(commits);
+
+            return {
+                rows: [...keptDocs.map(d => ({ id: d.id, ...d.data() })), ...addedRows],
+                added: toAdd.length,
+                deleted: toDelete.length
+            };
+        }
+
      async function fetchTimetable() {
             const draftKey = `draft_${activeCenter}_LIVE`;
             const draftSnap = await db.collection("timetable_drafts").doc(draftKey).get();
@@ -1105,10 +1168,12 @@ async function checkAndApplyFutureMaster() {
 
         async function fetchHolidaysForDate(targetDateIso) {
             try {
-                const snap = await getCollection("school_holidays").where("startDate", "<=", targetDateIso).get();
+                // READ OPTIMIZATION: "endDate >= date" instead of "startDate <= date" (which grew all session).
+                // Every holiday is saved with an endDate (single-day holidays use endDate = startDate).
+                const snap = await getCollection("school_holidays").where("endDate", ">=", targetDateIso).get();
                 holidaysData = snap.docs
                     .map(d => ({ id: d.id, ...d.data() }))
-                    .filter(h => (h.endDate || h.startDate) >= targetDateIso);
+                    .filter(h => h.startDate && h.startDate <= targetDateIso);
             } catch (e) {
                 console.error("Date Holiday Fetch Error:", e);
             }
@@ -1150,13 +1215,18 @@ async function checkAndApplyFutureMaster() {
                     document.getElementById('view-label').innerHTML = `<span class="text-amber-600 font-bold">🎯 SAVED OVERRIDE:</span> ${dayName}, ${prettyDate}`;
                 } else {
                     if (dateVal >= todayISO) {
-                        const futureSnap = await getCollection("timetable_history")
-                            .where("type", "==", "FUTURE_MASTER")
-                            .where("date", "<=", dateVal)
-                            .get();
-                        let futureMasters = futureSnap.docs
-                            .map(doc => doc.data())
-                            .filter(d => d.status !== "CANCELLED" && d.date > todayISO);
+                        // READ OPTIMIZATION: only masters dated after today and up to dateVal can apply,
+                        // so for today itself there is nothing to look up (each one is a full school copy).
+                        let futureMasters = [];
+                        if (dateVal > todayISO) {
+                            const futureSnap = await getCollection("timetable_history")
+                                .where("type", "==", "FUTURE_MASTER")
+                                .where("date", "<=", dateVal)
+                                .get();
+                            futureMasters = futureSnap.docs
+                                .map(doc => doc.data())
+                                .filter(d => d.status !== "CANCELLED" && d.date > todayISO);
+                        }
 
                         if (futureMasters.length > 0) {
                             futureMasters.sort((a, b) => b.date.localeCompare(a.date));
@@ -1189,12 +1259,17 @@ async function checkAndApplyFutureMaster() {
                 }
             }
 
+            // Classes / teachers / holidays must be loaded before substitutions are merged and drawn
+            await ttBaseDataReady;
+
             // Apply accepted leave substitutions only for this selected date
             const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
             let leaveDocs = [];
             try {
-                const leaveSnap = await db.collection(prefix + "leave_requests").where("status", "in", ["PENDING", "APPROVED"]).get();
-                leaveDocs = leaveSnap.docs;
+                // READ OPTIMIZATION: substitutions for dateVal belong to leaves that have not ended before
+                // dateVal (was: every PENDING/APPROVED leave of the whole session).
+                const leaveSnap = await db.collection(prefix + "leave_requests").where("endDate", ">=", dateVal).get();
+                leaveDocs = leaveSnap.docs.filter(d => ["PENDING", "APPROVED"].includes(d.data().status));
             } catch (e) {
                 console.warn("Leave lookup skipped:", e);
             }
@@ -1781,6 +1856,8 @@ async function saveHoliday() {
             }
 
          // 4. Fill the grids with the actual Time Blocks
+            clashChecksSuspended = true; // one clash check at the end instead of one per entry
+            try {
             Object.keys(renderGroups).forEach(className => {
                 Object.keys(renderGroups[className]).forEach(sectionName => {
                     const secId = `sec_${className.replace(/\s+/g, '')}_${sectionName.replace(/\s+/g, '')}`;
@@ -1847,6 +1924,7 @@ async function saveHoliday() {
                     }
                 });
             });
+            } finally { clashChecksSuspended = false; }
             
            checkGlobalClash();
             applyVisualFilters();
@@ -3012,21 +3090,22 @@ function handleEntrySubject(blockId, entId) {
                 tSel.value = "NONE";
             } else {
                 tWrap.classList.remove('hidden'); 
-                tSel.innerHTML = '<option value="NONE">- Teacher -</option>';
+               let teacherOptionsHtml = '<option value="NONE">- Teacher -</option>';
                let foundPrev = false;
                 allTeachers.forEach(t => {
                     const deptStr = Array.isArray(t.dept) ? t.dept.join(',').toLowerCase() : t.dept.toLowerCase();
                     if (showAll || deptStr.includes(sub.toLowerCase())) {
                         const isSelected = (t.name === prevSel) ? 'selected' : '';
                         if (isSelected) foundPrev = true;
-                        tSel.innerHTML += `<option value="${t.name}" ${isSelected}>${t.name}</option>`;
+                        teacherOptionsHtml += `<option value="${t.name}" ${isSelected}>${t.name}</option>`;
                     }
                 });
                 
                 // Force substitute teacher into the dropdown even if their department doesn't match
                 if (prevSel && prevSel !== "NONE" && !foundPrev) {
-                    tSel.innerHTML += `<option value="${prevSel}" selected>${prevSel}</option>`;
+                    teacherOptionsHtml += `<option value="${prevSel}" selected>${prevSel}</option>`;
                 }
+                tSel.innerHTML = teacherOptionsHtml; // set once (was re-parsed for every teacher)
                 
                 tSel.setAttribute('data-selected', ''); 
             }
@@ -3046,7 +3125,7 @@ function handleEntrySubject(blockId, entId) {
                 tSel.style.color = getDynamicColor(tSel.value);
             }
 
-            checkGlobalClash();
+            checkGlobalClashUnlessSuspended();
         }
 
         function toggleEditMode(blockId, isEditing) {
@@ -3369,6 +3448,11 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
             return false;
         }
 
+        // While a whole timetable is being drawn, individual entries skip the clash check;
+        // the drawing code runs it ONCE at the end (was: once per entry -> very slow first load).
+        let clashChecksSuspended = false;
+        function checkGlobalClashUnlessSuspended() { if (!clashChecksSuspended) checkGlobalClash(); }
+
         function checkGlobalClash() {
             const allBlocks = Array.from(document.querySelectorAll('.time-block'));
             const virtualDb = [];
@@ -3399,6 +3483,17 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                         });
                     }
                 });
+            });
+
+            // PERFORMANCE: group once instead of scanning the whole list for every entry.
+            // Same comparisons, same order (groups keep the original list order).
+            const virtualByEnt = new Map(), virtualByTeacherDay = new Map();
+            virtualDb.forEach(v => {
+                if (!virtualByEnt.has(v.entId)) virtualByEnt.set(v.entId, []);
+                virtualByEnt.get(v.entId).push(v);
+                const k = v.day + '|' + v.teacher;
+                if (!virtualByTeacherDay.has(k)) virtualByTeacherDay.set(k, []);
+                virtualByTeacherDay.get(k).push(v);
             });
 
             allBlocks.forEach(b => {
@@ -3436,12 +3531,12 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                     const tea = ent.querySelector('.ent-tea').value;
                     if(tea === "NONE" || tea === "") return; 
                     
-                    const myVirtuals = virtualDb.filter(v => v.entId === ent.id);
+                    const myVirtuals = virtualByEnt.get(ent.id) || [];
                     if(myVirtuals.length === 0) return;
                     
                     let clashes = [];
                     myVirtuals.forEach(myV => {
-                        const overlaps = virtualDb.filter(otherV => {
+                        const overlaps = (virtualByTeacherDay.get(myV.day + '|' + myV.teacher) || []).filter(otherV => {
                            if(otherV.entId === myV.entId) return false;
                             if(otherV.day !== myV.day) return false; 
                             if(otherV.teacher !== myV.teacher) return false; 
@@ -3743,57 +3838,19 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
 
            try {
                 const teachersToNotify = detectTeacherChanges(oldTimetableState, newSlots);
-                const snap = await getCollection("timetable").get();
-                
-                // HIGH-SPEED CHUNKED BATCHING
-                const CHUNK_SIZE = 400;
-                let currentBatch = db.batch();
-                let operationCount = 0;
-                const batchPromises = [];
-
-                function commitAndResetIfNeeded() {
-                    if (operationCount >= CHUNK_SIZE) {
-                        batchPromises.push(currentBatch.commit());
-                        currentBatch = db.batch(); // Create a fresh batch
-                        operationCount = 0;
-                    }
-                }
-
-                // 1. Pack Deletions
-                snap.docs.forEach(doc => {
-                    currentBatch.delete(doc.ref);
-                    operationCount++;
-                    commitAndResetIfNeeded();
-                });
-                
                 const todayIso = new Date().toISOString().split('T')[0];
                 const versionId = "v_master_" + Date.now(); // Creates a unique version stamp
 
-                // 2. Pack New Additions (Now tagged with Temporal Versioning)
-                newSlots.forEach(slot => {
-                    const { sMins, eMins, ...cleanSlot } = slot;
-                    cleanSlot.version_id = versionId;
-                    cleanSlot.effective_from = todayIso;
-                    
-                    currentBatch.set(getCollection("timetable").doc(), cleanSlot);
-                    operationCount++;
-                    commitAndResetIfNeeded();
-                });
-
-                // 3. Ship any remaining items in the final box
-                if (operationCount > 0) {
-                    batchPromises.push(currentBatch.commit());
+                // Only changed rows are written (new/changed rows get the version stamp)
+                const saved = await writeLiveMasterDiff(newSlots, { version_id: versionId, effective_from: todayIso });
+                if (saved.added === 0 && saved.deleted === 0) {
+                    liveMasterTimetable = saved.rows;
+                    alert("ℹ️ No changes found compared to the saved Live Master. Nothing was saved.");
+                    return;
                 }
 
-               await Promise.all(batchPromises);
-
-                if (teachersToNotify.length > 0) {
-                    await db.collection("instant_alerts").add({
-                        timestamp: Date.now(),
-                        type: "TIMETABLE_UPDATE",
-                        teachers: teachersToNotify
-                    });
-                }
+                // (Push alert for changed teachers is sent once, by sendEmailNotification below.
+                //  It used to be added here too, so teachers got every alert twice.)
 
                 // 4. --- TEMPORAL VERSION REGISTRY ---
                 // We log this version permanently. It will NEVER be overwritten.
@@ -3833,6 +3890,9 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                 sessionStorage.removeItem('minerva_timetable');
                 globalTimetable = [];
                 oldTimetableState = [];
+                // Remember what was just saved (the in-memory copy used to stay the one from BEFORE the
+                // save, so the next save compared against stale data and re-alerted unchanged teachers)
+                liveMasterTimetable = saved.rows;
                 await fetchTimetable();
 
               if (teachersToNotify.length > 0) {
@@ -4161,8 +4221,11 @@ async function confirmDateContext() {
         document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Loading Schedule for ${dateVal}...</div>`;
 
         try {
+            const holidaysForDate = fetchHolidaysForDate(dateVal);
+            // draw only after this date's holidays (and the first-load classes/teachers) are known
+            ttBaseDataReady = Promise.all([ttInitialBaseData, holidaysForDate]);
             await Promise.all([
-                fetchHolidaysForDate(dateVal),
+                holidaysForDate,
                 loadScheduleForDate(dateVal, dayName)
             ]);
         } catch (error) {
@@ -4826,6 +4889,8 @@ const batch = db.batch();
             const targetSection = targetSelectText.split(' - Section ')[1];
             
             // 3. Copy each block perfectly
+            clashChecksSuspended = true;
+            try {
             sourceGrid.querySelectorAll('.time-block').forEach(b => {
                 const s24 = b.getAttribute('data-s24');
                 const e24 = b.querySelector('.tb-e24').value;
@@ -4845,6 +4910,7 @@ const batch = db.batch();
                 injectSmartBlock(targetClass, targetSection, targetId, { start24: s24, end24: e24, entries: entries });
             });
             
+            } finally { clashChecksSuspended = false; }
             sortSectionBlocks(targetId);
             checkGlobalClash();
             
