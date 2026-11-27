@@ -7,7 +7,7 @@
   <script src="tailwind-engine.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-    <script src="leave-schedule.js?v=3"></script>
+    <script src="leave-schedule.js?v=4"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
     <style>
         /* Clean Details Dropdown Arrow */
@@ -149,6 +149,7 @@
             </div>
         </div>
 
+        <div id="unplaced-subs-banner" class="hidden"></div>
         <div id="timetable-container" class="space-y-1">
             <div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Loading Smart Containers...</div>
         </div>
@@ -1276,72 +1277,35 @@ async function checkAndApplyFutureMaster() {
             }
             const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
+            // SUBSTITUTES FOLLOW THEIR CLASS: a substitution belongs to the absent teacher's class
+            // (class + section + subject) on this date, wherever that class is now. The substitute is
+            // shown in place of the absent teacher at the class's current time (clashes then show in red).
+            // Extra duties are not shown in the timetable. Anything that can't be placed is listed in a banner.
+            const dayRows = globalTimetable.filter(slot => slot.day === dayName);
+            const unplaced = [];
             leaveDocs.forEach(doc => {
                 const leaveData = doc.data();
                 if (!leaveData.adjustments) return;
-                leaveData.adjustments.forEach(adj => {
-                    if (adj.date === dateVal && adj.substituteResponse === "ACCEPTED") {
-                        const parts = (adj.sub || "").split('|');
-                        const cName = parts[0] ? parts[0].trim() : "";
-                        const sName = parts[1] ? parts[1].replace(/sec/gi, '').trim() : "";
+                MinervaLeaveSchedule.placeLeaveSubs(dayRows, dateVal, leaveData).forEach(({ adj, slot }) => {
+                    if (adj.substituteResponse !== "ACCEPTED") return;
+                    if (!slot) { unplaced.push({ adj, leave: leaveData }); return; }
+                    const targetSlot = slot;
+                    targetSlot.origTeacher = targetSlot.teacher;
+                    targetSlot.origTeacherName = targetSlot.teacherName;
+                    targetSlot.origTeacherEmail = targetSlot.teacherEmail;
+                    targetSlot.origRemark = targetSlot.remark;
+                    targetSlot.isTemporarySub = true;
 
-                        const targetSlot = globalTimetable.find(slot => {
-                            if (slot.day !== dayName) return false;
-                            if (norm(slot.className) !== norm(cName) || norm(slot.section) !== norm(sName) || norm(slot.subject) !== norm(adj.title)) return false;
-                            if (slot.start24 && slot.end24) {
-                                const [sh, sm] = slot.start24.split(':').map(Number);
-                                const [eh, em] = slot.end24.split(':').map(Number);
-                                const slotStartMins = sh * 60 + sm;
-                                const slotEndMins = eh * 60 + em;
-                                if (adj.end <= slotStartMins - 15 || adj.start >= slotEndMins + 15) return false;
-                            }
-                            return true;
-                        });
+                    targetSlot.teacher = adj.adjustedTo;
+                    targetSlot.teacherName = adj.adjustedTo;
+                    targetSlot.teacherEmail = adj.adjustedEmail;
 
-                        if (targetSlot) {
-                            targetSlot.origTeacher = targetSlot.teacher;
-                            targetSlot.origTeacherName = targetSlot.teacherName;
-                            targetSlot.origTeacherEmail = targetSlot.teacherEmail;
-                            targetSlot.origRemark = targetSlot.remark;
-                            targetSlot.isTemporarySub = true;
-
-                            targetSlot.teacher = adj.adjustedTo;
-                            targetSlot.teacherName = adj.adjustedTo;
-                            targetSlot.teacherEmail = adj.adjustedEmail;
-
-                            let subNote = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
-                            if (adj.assignedTimeWindow) subNote += ` [${adj.assignedTimeWindow}]`;
-                            targetSlot.remark = subNote;
-                        } else {
-                            const existingDuty = globalTimetable.find(slot =>
-                                norm(slot.className) === "extraduty" &&
-                                norm(slot.subject) === norm(adj.title) &&
-                                norm(slot.teacher) === norm(adj.adjustedTo) &&
-                                slot.start24 === minsTo24(adj.start)
-                            );
-                            if (!existingDuty) {
-                                globalTimetable.push({
-                                    day: dayName,
-                                    className: "Extra Duty",
-                                    section: "Task",
-                                    subject: adj.title || "Substitution",
-                                    teacher: adj.adjustedTo,
-                                    teacherName: adj.adjustedTo,
-                                    teacherEmail: adj.adjustedEmail,
-                                    start24: minsTo24(adj.start),
-                                    end24: minsTo24(adj.end),
-                                    remark: adj.sub || "(Assigned to " + adj.adjustedTo.split(' ')[0] + ")",
-                                    room: "TBD",
-                                    isTemporaryDuty: true
-                                });
-                                if (!structureData.some(s => s.className === "Extra Duty")) {
-                                    structureData.push({ className: "Extra Duty", sectionName: "Task", subjects: [adj.title || "Substitution"] });
-                                }
-                            }
-                        }
-                    }
+                    let subNote = "(Sub for " + (leaveData.teacherName || "Leave").split(' ')[0] + ")";
+                    if (adj.assignedTimeWindow) subNote += ` [${adj.assignedTimeWindow}]`;
+                    targetSlot.remark = subNote;
                 });
             });
+            showUnplacedSubstitutions(unplaced, dateVal);
 
             renderDirectDashboard(true);
             applyVisualFilters();
@@ -3745,71 +3709,158 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
         // === SAVE ENGINE & EMAIL NOTIFICATION                                     ===
         // ============================================================================
         
+        // Red banner: accepted substitutions whose class is no longer in this date's timetable
+        function showUnplacedSubstitutions(list, dateIso) {
+            const el = document.getElementById('unplaced-subs-banner');
+            if (!el) return;
+            if (!list || list.length === 0) { el.className = 'hidden'; el.innerHTML = ''; return; }
+            const hm = (m) => format12Hour(`${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`);
+            el.className = 'mb-4 bg-rose-50 border-2 border-rose-300 rounded-2xl p-4 shadow-sm';
+            el.innerHTML = `<div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                    <p class="text-xs font-black text-rose-700 uppercase tracking-widest">⚠️ ${list.length} substitution(s) on ${dateIso} could not be placed</p>
+                    <p class="text-[10px] font-bold text-rose-600 mt-1">The class was removed or given to another teacher. Check them in Leave Command → Manage Substitutions.</p>
+                    <ul class="mt-2 space-y-0.5">${list.map(({ adj, leave }) => `<li class="text-[11px] font-bold text-slate-700">• ${adj.sub} ${adj.title || ''} ${hm(adj.start)}: <b>${adj.adjustedTo}</b> (for ${leave.teacherName})</li>`).join('')}</ul>
+                </div>
+                <a href="admin-staff-leaves.html" class="shrink-0 text-[10px] font-black uppercase tracking-widest bg-rose-600 text-white px-4 py-2 rounded-xl text-center">Open Leave Command</a>
+            </div>`;
+        }
+
         // ============================================================
-        // WARN BEFORE SAVING if the change breaks a leave substitution.
-        // A substitution is "affected" when its class (class + section + time, taught by the teacher
-        // on leave) is in the timetable that applies now, but not in the timetable being saved.
-        // Nothing is changed automatically: the admin is told what to reassign in Leave Command.
+        // SUBSTITUTES FOLLOW THEIR CLASS WHEN THE TIMETABLE IS SAVED
+        // For every substitution from today on, on the dates this save changes:
+        //   - class moved (same class + section + subject, same absent teacher) -> the substitute moves
+        //     with it (time updated in the leave record, "moved from" noted);
+        //   - substitute busy at the new time -> kept, but marked "⚠️ Clash – reassign";
+        //   - class removed / given to another teacher -> kept, marked "⚠️ Class changed – check".
+        // The admin sees a summary first (OK / Cancel). Changes are written only after the timetable save.
         //   newRowsForDate(dateIso, info) -> rows that will apply on that date after this save,
         //                                    or null if this save does not change that date.
-        // Returns true to continue saving, false to cancel.
+        // Returns { proceed, apply }  (apply() updates the leave records)
         // ============================================================
-        async function confirmSubstitutionsStillValid(newRowsForDate) {
-            let affected = [];
+        async function planSubstitutionUpdates(newRowsForDate) {
+            const noop = { proceed: true, changes: [], apply: async () => {} };
+            const changes = [];
             try {
                 const LS = MinervaLeaveSchedule;
                 const fromIso = LS.localIso(new Date());
                 const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
                 const nrm = (x) => String(x || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                const toM = (t) => { const [h, m] = String(t || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
 
                 const snap = await db.collection(prefix + "leave_requests").where("endDate", ">=", fromIso).get();
-                const items = [];
-                snap.docs.forEach(d => {
-                    const l = d.data();
-                    if (l.status !== "PENDING" && l.status !== "APPROVED") return;
-                    (l.adjustments || []).forEach(a => {
-                        if (!LS.isClassAdj(a) || !a.date || a.date < fromIso) return;
-                        if (a.substituteResponse === "DECLINED") return;
-                        items.push({ l, a });
-                    });
-                });
-                if (items.length === 0) return true;
+                const leaves = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+                    .filter(l => (l.status === "PENDING" || l.status === "APPROVED") &&
+                                 (l.adjustments || []).some(a => LS.isClassAdj(a) && a.date >= fromIso));
+                if (leaves.length === 0) return noop;
 
+                const dates = [...new Set(leaves.flatMap(l => (l.adjustments || []).filter(a => LS.isClassAdj(a) && a.date >= fromIso).map(a => a.date)))];
                 const sched = LS.create({ db, prefix });
-                await sched.ensureDates([...new Set(items.map(i => i.a.date))], { rosters: false });
+                await sched.ensureDates(dates, { rosters: false });
 
-                const hasClass = (rows, dateIso, l, a) => {
-                    const day = LS.dayNameOf(dateIso), c = LS.adjClass(a);
-                    return (rows || []).some(r => (!r.day || String(r.day).trim() === day) &&
-                        nrm(r.className) === nrm(c.cls) && nrm(r.section) === nrm(c.sec) &&
-                        toM(r.start24) < a.end && toM(r.end24) > a.start &&
-                        (nrm(r.teacherName || r.teacher) === nrm(l.teacherName) ||
-                         (r.teacherEmail && l.teacherEmail && String(r.teacherEmail).toLowerCase() === String(l.teacherEmail).toLowerCase())));
-                };
-                items.forEach(({ l, a }) => {
-                    const newRows = newRowsForDate(a.date, sched.dayInfo(a.date));
-                    if (!newRows) return;                                        // this save doesn't touch that date
-                    if (!hasClass(sched.dayRows(a.date), a.date, l, a)) return;  // was already out of date before
-                    if (!hasClass(newRows, a.date, l, a)) affected.push({ l, a });
-                });
+                // Place every substitution first; substitutions whose class is gone don't make anyone busy
+                const placements = [];
+                leaves.forEach(l => dates.forEach(dateIso => {
+                    const rows = newRowsForDate(dateIso, sched.dayInfo(dateIso));
+                    if (!rows) return;
+                    LS.placeLeaveSubs(rows, dateIso, l).forEach(p => placements.push({ ...p, l, rows, dateIso }));
+                }));
+                const unplacedAdjs = new Set(placements.filter(p => !p.slot).map(p => p.adj));
+                // every substitute's other (still valid) substitutions, to spot double bookings
+                const allSubs = leaves.flatMap(l => (l.adjustments || []).map(a => ({ l, a })))
+                    .filter(o => !unplacedAdjs.has(o.a) && o.a.subFlag !== "CLASS_CHANGED");
+
+                {
+                    {
+                        placements.forEach(({ adj, slot, l, rows, dateIso }) => {
+                            if (adj.substituteResponse === "DECLINED") return;
+                            if (!slot) {
+                                if (adj.subFlag !== "CLASS_CHANGED") changes.push({ leave: l, adj, kind: "CLASS_CHANGED" });
+                                return;
+                            }
+                            const ns = LS.slotMins(slot.start24), ne = LS.slotMins(slot.end24);
+                            const moved = !(adj.start < ne && adj.end > ns);
+                            const newStart = moved ? ns : adj.start, newEnd = moved ? ne : adj.end;
+                            // is the substitute busy at that time? (own class, or another substitution)
+                            let clashNote = "";
+                            const subN = nrm(adj.adjustedTo), subE = String(adj.adjustedEmail || "").toLowerCase();
+                            if (adj.adjustedTo && adj.adjustedTo !== "INCHARGE") {
+                                const own = rows.find(r => r !== slot && (!r.day || String(r.day).trim() === LS.dayNameOf(dateIso)) &&
+                                    (nrm(r.teacherName || r.teacher) === subN || (subE && String(r.teacherEmail || "").toLowerCase() === subE)) &&
+                                    LS.slotMins(r.start24) < newEnd && LS.slotMins(r.end24) > newStart);
+                                if (own) clashNote = `has ${own.className} ${own.section} ${own.subject} at ${format12Hour(own.start24)}`;
+                                if (!clashNote) {
+                                    const other = allSubs.find(o => o.a !== adj && o.a.date === dateIso && nrm(o.a.adjustedTo) === subN &&
+                                        o.a.substituteResponse !== "DECLINED" && o.a.start < newEnd && o.a.end > newStart);
+                                    if (other) clashNote = `also substituting ${other.a.sub} for ${other.l.teacherName}`;
+                                }
+                            }
+                            const clash = !!clashNote;
+                            const flagChanged = (adj.subFlag === "CLASH") !== clash || adj.subFlag === "CLASS_CHANGED";
+                            if (moved || flagChanged) changes.push({ leave: l, adj, kind: moved ? "MOVED" : "FLAG", newStart, newEnd, clash, clashNote });
+                        });
+                    }
+                }
             } catch (e) {
                 console.warn("Substitution check skipped:", e);
-                return true; // never block a save because the check itself failed
+                return noop; // never block a save because the check itself failed
             }
-            if (affected.length === 0) return true;
+            if (changes.length === 0) return noop;
 
             const hm = (m) => format12Hour(`${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`);
-            let msg = `⚠️ THIS CHANGE AFFECTS ${affected.length} LEAVE SUBSTITUTION(S):\n\n`;
-            affected.slice(0, 12).forEach(({ l, a }) => {
-                const who = MinervaLeaveSchedule.isWaitingForIncharge(a) ? "no substitute yet" : a.adjustedTo;
-                msg += `• ${a.date} | ${a.sub} ${a.title || ""} ${hm(a.start)}: ${who} (for ${l.teacherName}'s leave)\n`;
+            const who = (a) => MinervaLeaveSchedule.isWaitingForIncharge(a) ? "(no substitute yet)" : a.adjustedTo;
+            let msg = `📋 THIS SAVE UPDATES ${changes.length} LEAVE SUBSTITUTION(S):\n\n`;
+            changes.slice(0, 15).forEach(c => {
+                const head = `${c.adj.date} | ${c.adj.sub} ${c.adj.title || ""}: ${who(c.adj)} (for ${c.leave.teacherName})`;
+                if (c.kind === "CLASS_CHANGED") msg += `⚠️ ${head}\n     class removed or given to another teacher → check in Leave Command\n`;
+                else if (c.clash) msg += `⚠️ ${head}\n     ${c.kind === "MOVED" ? `${hm(c.adj.start)} → ${hm(c.newStart)}, ` : ""}CLASH: ${c.clashNote} → reassign in Leave Command\n`;
+                else if (c.kind === "MOVED") msg += `✅ ${head}\n     moves with the class: ${hm(c.adj.start)} → ${hm(c.newStart)}\n`;
+                else msg += `✅ ${head}\n     clash resolved\n`;
             });
-            if (affected.length > 12) msg += `...and ${affected.length - 12} more\n`;
-            msg += `\nThese classes move or change teacher with this save, so the substitute will no longer be in the right place.` +
-                   `\nAfter saving, reassign them in Leave Command → Manage Substitutions (they will show as "Outdated").` +
-                   `\n\nPress OK to save anyway, or Cancel to go back.`;
-            return confirm(msg);
+            if (changes.length > 15) msg += `...and ${changes.length - 15} more\n`;
+            msg += `\nOK = save and update the substitutions, Cancel = go back.`;
+            if (!confirm(msg)) return { proceed: false, changes, apply: async () => {} };
+
+            const apply = async () => {
+                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+                const byLeave = new Map();
+                changes.forEach(c => { if (!byLeave.has(c.leave.id)) byLeave.set(c.leave.id, []); byLeave.get(c.leave.id).push(c); });
+                const failed = [];
+                for (const [leaveId, list] of byLeave) {
+                    const ref = db.collection(prefix + "leave_requests").doc(leaveId);
+                    try {
+                        await db.runTransaction(async (tx) => {
+                            const snap = await tx.get(ref);
+                            if (!snap.exists) return;
+                            const data = snap.data();
+                            const adjs = [...(data.adjustments || [])];
+                            const history = [...(data.adjustmentHistory || [])];
+                            list.forEach(c => {
+                                const o = c.adj;
+                                const i = adjs.findIndex(a => (o.id ? a.id === o.id : true) && a.date === o.date && a.sub === o.sub &&
+                                                              a.title === o.title && a.start === o.start && a.adjustedTo === o.adjustedTo);
+                                if (i < 0) return; // changed by someone else meanwhile: leave it alone
+                                const a = { ...adjs[i] };
+                                history.push({ ...adjs[i], change: "TIMETABLE_UPDATE", changedAt: Date.now(), changedBy: "Timetable editor" });
+                                if (c.kind === "CLASS_CHANGED") {
+                                    a.subFlag = "CLASS_CHANGED"; a.subFlagNote = "";
+                                } else {
+                                    if (c.kind === "MOVED") {
+                                        a.movedFrom = hm(o.start);
+                                        a.start = c.newStart; a.end = c.newEnd;
+                                        if (a.assignedTimeWindow) a.assignedTimeWindow = `${hm(c.newStart)} - ${hm(c.newEnd)}`;
+                                    }
+                                    a.subFlag = c.clash ? "CLASH" : null;
+                                    a.subFlagNote = c.clash ? c.clashNote : "";
+                                }
+                                adjs[i] = a;
+                            });
+                            tx.update(ref, { adjustments: adjs, adjustmentHistory: history });
+                        });
+                    } catch (e) { failed.push(leaveId); console.error("Substitution update failed", leaveId, e); }
+                }
+                if (failed.length) alert(`⚠️ The timetable was saved, but ${failed.length} leave record(s) could not be updated. Please check them in Leave Command.`);
+            };
+            return { proceed: true, changes, apply };
         }
 
  async function auditBrokenLeaves(targetDateStr, newSchedule) {
@@ -3895,8 +3946,9 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
 
           if (conflictMsg) return alert(conflictMsg);
 
-            // Warn if this breaks a leave substitution on a day that follows the live master
-            if (!(await confirmSubstitutionsStillValid((dateIso, info) => (info && info.source === "LIVE") ? newSlots : null))) return;
+            // Substitutes follow their class on days that follow the live master (summary + OK/Cancel)
+            const subPlan = await planSubstitutionUpdates((dateIso, info) => (info && info.source === "LIVE") ? newSlots : null);
+            if (!subPlan.proceed) return;
 
             // --- HARD STOP: Branch Specific Confirmation ---
             const masterCheck = confirm(`🚨 LIVE MASTER SAVE: You are about to PERMANENTLY rewrite the Master Schedule for the ${activeCenter} branch.\n\nThis affects the default weekly routine. Proceed?`);
@@ -3916,9 +3968,12 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
                 const saved = await writeLiveMasterDiff(newSlots, { version_id: versionId, effective_from: todayIso });
                 if (saved.added === 0 && saved.deleted === 0) {
                     liveMasterTimetable = saved.rows;
-                    alert("ℹ️ No changes found compared to the saved Live Master. Nothing was saved.");
+                    await subPlan.apply();
+                    alert("ℹ️ No changes found compared to the saved Live Master. Nothing was saved." +
+                          (subPlan.changes.length ? `\n\n${subPlan.changes.length} substitution(s) were updated.` : ""));
                     return;
                 }
+                await subPlan.apply(); // timetable is saved: now move / flag the substitutions
 
                 // (Push alert for changed teachers is sent once, by sendEmailNotification below.
                 //  It used to be added here too, so teachers got every alert twice.)
@@ -4237,6 +4292,7 @@ function forceSync() {
                 currentContextMode = 'LIVE';
                 currentContextDate = null;
                 liveMasterTimetable = [];
+                showUnplacedSubstitutions([]);
                 document.getElementById('view-label').innerHTML = `Showing: Live Master Schedule`;
                 
                 document.getElementById('timetable-container').innerHTML = `<div class="text-center py-20 font-black text-slate-400 animate-pulse uppercase tracking-widest text-xs">Loading Live Master...</div>`;
@@ -4773,9 +4829,10 @@ const batch = db.batch();
             dates_affected: selectedDates
         });
 
-        // Warn if this breaks a leave substitution on the dates being saved
+        // Substitutes follow their class on the dates being saved (summary + OK/Cancel)
         const payloadByDate = new Map(auditPayloads.map(p => [p.date, p.schedule]));
-        if (!(await confirmSubstitutionsStillValid((dateIso) => payloadByDate.get(dateIso) || null))) {
+        const subPlan = await planSubstitutionUpdates((dateIso) => payloadByDate.get(dateIso) || null);
+        if (!subPlan.proceed) {
             btn.disabled = false; btn.innerText = "🚀 Execute Replication";
             return;
         }
@@ -4797,6 +4854,7 @@ const batch = db.batch();
         }
 
         await batch.commit();
+        await subPlan.apply(); // timetable is saved: now move / flag the substitutions
         await getCollection("system_metadata").doc("timetable").set({ lastUpdated: Date.now() }, { merge: true });
         
         let allAffectedTeachersMap = new Map();

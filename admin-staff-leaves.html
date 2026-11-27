@@ -7,7 +7,7 @@
     <script src="tailwind-engine.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-    <script src="leave-schedule.js?v=3"></script>
+    <script src="leave-schedule.js?v=4"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
@@ -1897,6 +1897,13 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
 
                 // Same timetable choice as the teacher's leave page (override/exam day, future master, live, past master)
                 let activeSchedule = leaveSched.dayRows(tDate);
+                // Which class each substitution belongs to (class + section + subject; follows the class if it moved)
+                const placedBySlot = new Map();
+                LS.placeLeaveSubs(activeSchedule, tDate, req).forEach(p => {
+                    if (!p.slot) return;
+                    if (!placedBySlot.has(p.slot)) placedBySlot.set(p.slot, []);
+                    placedBySlot.get(p.slot).push({ adj: p.adj, idx: p.idx });
+                });
 
                 let userConflicts = [];
                 activeSchedule.forEach(slot => {
@@ -1912,10 +1919,12 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
                    // ONLY generate conflicts if the class time physically overlaps with the leave time!
                         if (leaveStart < e && leaveEnd > s) {
                             // Every substitution entry for THIS class + section at this time (any status)
-                            const related = [];
-                            reqAdjs.forEach((a, i) => { if (LS.adjMatchesClass(a, tDate, slot.className, slot.section, s, e)) { related.push({ adj: a, idx: i }); matchedAdjIdx.add(i); } });
-                            // Accepted or still-pending substitutes cover the class; declined / "asked incharge" do not
-                            const covering = related.filter(r => LS.adjCovers(r.adj)).map(r => r.adj);
+                            const related = placedBySlot.get(slot) || [];
+                            related.forEach(r => matchedAdjIdx.add(r.idx));
+                            // Accepted or still-pending substitutes cover the class; declined / "asked incharge" /
+                            // flagged (clash, class changed) do not. A substitution saved for the class's old time covers the class.
+                            const covering = related.filter(r => LS.adjCovers(r.adj))
+                                .map(r => (r.adj.start < e && r.adj.end > s) ? r.adj : { ...r.adj, start: s, end: e });
 
                             let uncoveredSpans = [{ s: s, e: e }];
                             covering.forEach(adj => {
@@ -2209,8 +2218,8 @@ let accordionHtml = `
             let outdatedHtml = '';
             if (outdated.length > 0) {
                 outdatedHtml = `<div class="mb-6 bg-amber-50 border-2 border-amber-200 rounded-2xl p-4">
-                    <p class="text-[10px] font-black text-amber-800 uppercase tracking-widest mb-1">⚠️ Outdated substitutions (${outdated.length})</p>
-                    <p class="text-[10px] font-bold text-amber-700 mb-3">The timetable changed after this leave was applied: these entries no longer match a class of ${req.teacherName}. Remove them, and assign the classes shown below if needed.</p>
+                    <p class="text-[10px] font-black text-amber-800 uppercase tracking-widest mb-1">⚠️ Class changed – check (${outdated.length})</p>
+                    <p class="text-[10px] font-bold text-amber-700 mb-3">The timetable changed: ${req.teacherName} no longer has these classes (removed, or given to another teacher). If nothing needs covering, remove them.</p>
                     <div class="space-y-1.5">${outdated.map(o => `
                         <div class="flex items-center justify-between gap-2 p-2 rounded-lg bg-white border border-amber-200">
                             <div class="text-[10px] font-bold text-slate-700">${o.adj.date} · ${o.adj.title || ''} (${o.adj.sub || ''}) · ${minsTo12H(o.adj.start)} - ${minsTo12H(o.adj.end)}<br>
