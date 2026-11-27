@@ -220,6 +220,7 @@
 
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="minerva-context.js?v=1"></script>
     <script>
         const firebaseConfig = {
             apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
@@ -333,8 +334,36 @@
                 address: raw.address || '',
                 contacts: Array.isArray(raw.contacts) ? raw.contacts : [],
                 sessions: Array.isArray(raw.sessions) ? raw.sessions : [],
+                // Permanent data prefix (set once, never changed; see minerva-context.js)
+                ...(typeof raw.dataPrefix === 'string' ? { dataPrefix: raw.dataPrefix } : {}),
                 updatedAt: raw.updatedAt || Date.now()
             };
+        }
+
+        // Give every branch and session its permanent data prefix if it doesn't have one yet.
+        // Ghumarwin / Dharamshala 2026-27 -> today's data ("" / "dharamshala_"); new sessions -> e.g. ghumarwin_2027_28_
+        // Existing prefixes are never changed. Returns true if anything was added.
+        function ensureDataPrefixes(list) {
+            let changed = false;
+            list.forEach(b => {
+                // Ghumarwin / Dharamshala: all existing data is session 2026-27 (1 Apr 2026 - 31 Mar 2027).
+                // Add that session if it isn't saved yet.
+                if (MinervaContext.isLegacyBranch(b) && !(b.sessions || []).some(sess => MinervaContext.isLegacySession(b, sess))) {
+                    const L = MinervaContext.LEGACY_SESSION;
+                    b.sessions = [{ id: `sess_${MinervaContext.branchCode(b).toLowerCase()}_2026_27`, name: L.name, startDate: L.startDate,
+                                    endDate: L.endDate, status: 'ACTIVE', dataPrefix: MinervaContext.LEGACY_PREFIX[MinervaContext.branchCode(b)] },
+                                  ...(b.sessions || [])];
+                    changed = true;
+                }
+                if (typeof b.dataPrefix !== 'string') { b.dataPrefix = MinervaContext.branchDataPrefix(b); changed = true; }
+                (b.sessions || []).forEach(sess => {
+                    if (typeof sess.dataPrefix !== 'string') {
+                        sess.dataPrefix = MinervaContext.proposeSessionPrefix(b, sess, b.sessions);
+                        changed = true;
+                    }
+                });
+            });
+            return changed;
         }
 
         function loadLocalCache() {
@@ -402,7 +431,8 @@
             try {
                 const snap = await db.collection('branches').get();
                 if (snap.empty) {
-                    const seed = cached && cached.length > 0 ? cached : DEFAULT_BRANCHES;
+                    const seed = (cached && cached.length > 0 ? cached : DEFAULT_BRANCHES).map(normalizeBranch);
+                    ensureDataPrefixes(seed);
                     await persistAllBranches(seed, 'Initialized');
                 } else {
                     const loaded = snap.docs.map(d => normalizeBranch({ id: d.id, ...d.data() }));
@@ -413,9 +443,13 @@
                     if (!hasDhm) loaded.splice(1, 0, DEFAULT_BRANCHES[1]);
 
                     branches = loaded;
-                    saveLocalCache(branches);
-                    renderBranches();
-                    setSavePill('Synced', 'ok');
+                    if (ensureDataPrefixes(branches)) {
+                        await persistAllBranches(branches, 'Synced');
+                    } else {
+                        saveLocalCache(branches);
+                        renderBranches();
+                        setSavePill('Synced', 'ok');
+                    }
                 }
             } catch (err) {
                 console.error('Error loading branches:', err);
@@ -482,9 +516,12 @@
                     `).join('')
                     : `<p class="text-xs font-semibold text-slate-400 italic">No contact numbers added yet.</p>`;
 
+                const currentSess = MinervaContext.currentSession(b).session;
                 const sessionsHtml = (b.sessions && b.sessions.length > 0)
                     ? b.sessions.map(s => {
                         const sActive = s.status === 'ACTIVE';
+                        const isCurrentSess = currentSess && currentSess.id === s.id;
+                        const prefix = MinervaContext.sessionDataPrefix(b, s);
                         return `
                             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-2xl border ${sActive ? 'bg-indigo-50/40 border-indigo-200' : 'bg-slate-50 border-slate-200 opacity-80'}">
                                 <div>
@@ -493,9 +530,13 @@
                                         <span class="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest ${sActive ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}">
                                             ${s.status}
                                         </span>
+                                        ${isCurrentSess ? '<span class="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-indigo-600 text-white">Current (today)</span>' : ''}
                                     </div>
                                     <p class="text-[11px] font-bold text-slate-500 mt-1">
                                         ${escapeHtml(s.startDate || '—')} <span class="mx-1">to</span> ${escapeHtml(s.endDate || '—')}
+                                    </p>
+                                    <p class="text-[10px] font-bold text-slate-400 mt-0.5" title="Where this session's data is stored. Fixed, never changes.">
+                                        🗂 Data: ${prefix === '' ? 'existing data (no prefix)' : escapeHtml(prefix) + '…'}
                                     </p>
                                 </div>
 
@@ -749,16 +790,17 @@
             const currentSessions = Array.isArray(b.sessions) ? [...b.sessions] : [];
             const existingIdx = sessionId ? currentSessions.findIndex(s => s.id === sessionId) : -1;
             if (existingIdx >= 0) {
+                // the data prefix stays as it is (renaming / changing dates never moves the data)
                 currentSessions[existingIdx] = { ...currentSessions[existingIdx], name, startDate, endDate, status };
             } else {
-                currentSessions.push({
-                    id: sessionId || uid('sess'),
-                    name,
-                    startDate,
-                    endDate,
-                    status: 'INACTIVE'
-                });
+                const newSession = { id: sessionId || uid('sess'), name, startDate, endDate, status: 'INACTIVE' };
+                newSession.dataPrefix = MinervaContext.proposeSessionPrefix(b, newSession, currentSessions);
+                currentSessions.push(newSession);
             }
+            const thisId = existingIdx >= 0 ? currentSessions[existingIdx].id : currentSessions[currentSessions.length - 1].id;
+            const overlap = currentSessions.find(o => o.id !== thisId && o.status !== 'INACTIVE' && o.startDate && o.endDate &&
+                o.startDate <= endDate && o.endDate >= startDate);
+            if (overlap && status !== 'INACTIVE' && !confirm(`⚠️ These dates overlap with session ${overlap.name} (${overlap.startDate} to ${overlap.endDate}).\nOn overlapping days the session that started later is used.\n\nSave anyway?`)) return;
 
             await persistSingleBranch({ ...b, sessions: currentSessions }, 'Session Saved');
             closeSessionModal();
