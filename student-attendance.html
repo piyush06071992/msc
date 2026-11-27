@@ -3999,10 +3999,12 @@ async function loadDailyAttendance() {
             const badgeColor = isDuty ? 'text-purple-700 bg-purple-50 border-purple-200' : 'text-sky-700 bg-sky-50 border-sky-200';
             const iconText = isDuty ? '🏛️ School Duty' : '🏃 Auth. Leave';
             
+            const canMarkReturned = !isDuty && canModify && !isAdmin && !activeStudent && dateStr === todayISO && specialLeave.id;
             attControls = `
                 <div class="px-3 py-1.5 rounded-lg border text-[9px] font-black uppercase tracking-widest ${badgeColor} flex flex-col justify-center items-end text-right shrink-0">
                     <span class="flex items-center gap-1">${iconText}: ${specialLeave.type==='FULL'?'Full Day':specialLeave.startTime+' onwards'}</span>
                     <span class="text-[8px] font-bold ${isDuty?'text-purple-600':'text-sky-600'} mt-0.5">By: ${specialLeave.authorizerName} (${specialLeave.authorizerDept})</span>
+                    ${canMarkReturned ? `<button type="button" onclick="markReturnedFromLeave('${specialLeave.id}', '${stu.id}', '${classStartTimeStr || ''}')" class="mt-1 px-2 py-1 rounded-md bg-emerald-600 text-white text-[9px] font-black uppercase tracking-widest shadow-sm">↩ Returned</button>` : ''}
                 </div>
                 <input type="radio" name="att_${stu.id}" value="${effectiveVal}" class="att-radio hidden" checked>
             `;
@@ -7413,7 +7415,8 @@ async function printLedgerPDF() {
             filtered.forEach(leave => {
                const stu = studentsData.find(s => s.id === leave.studentId) || { name: 'Unknown', rollNo: 'N/A' };
                 const dPretty = new Date(leave.date).toLocaleDateString('en-GB', {day:'numeric', month:'short'});
-                const timeStr = leave.type === 'FULL' ? 'Full Day' : `${leave.startTime} to${leave.endTime || 'End of Day'}`;
+                const timeStr = (leave.type === 'FULL' ? 'Full Day' : `${leave.startTime} to${leave.endTime || 'End of Day'}`) +
+                    (leave.returnedAt ? ` · ↩ Returned at ${leave.returnedAt}${leave.returnedMarkedByName ? ' (marked by ' + leave.returnedMarkedByName + ')' : ''}` : '');
                 const isDuty = leave.category === 'DUTY';
                 const badgeColor = isDuty ? 'bg-purple-100 text-purple-700 border border-purple-200' : 'bg-sky-100 text-sky-700 border border-sky-200';
                 const typeIcon = isDuty ? '🏛️ School Duty' : '🏃 Auth. Leave';
@@ -7485,6 +7488,43 @@ async function printLedgerPDF() {
                 }
             }
             return false;
+        }
+
+        // Teacher: the student on reception leave is actually in class. Record the return time; the leave then
+        // ends at that time (or at this class's start, if the student walked in after it started), so this class
+        // and later ones can be marked. Unsaved marks on the register are kept.
+        async function markReturnedFromLeave(leaveId, stuId, classStart) {
+            const leave = specialLeavesData.find(x => x.id === leaveId);
+            if (!leave) return;
+            const now = new Date();
+            const nowStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+            const entered = prompt("The student returned at (HH:MM):", nowStr);
+            if (!entered) return;
+            if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(entered.trim())) return alert("Please enter the time as HH:MM, e.g. 10:35");
+            const returnedAt = entered.trim().padStart(5, '0');
+            const effectiveEnd = (classStart && classStart < returnedAt) ? classStart : returnedAt;
+            const stu = (studentsData || []).find(x => x.id === stuId) || {};
+            if (!confirm(`Mark #${stu.rollNo || ''} ${stu.name || ''} as RETURNED at ${returnedAt}?\n\nThe reception leave ends then, and the student can be marked Present in this class.`)) return;
+            // keep the teacher's unsaved marks
+            const keep = {};
+            document.querySelectorAll('#daily-students-list .att-radio:checked').forEach(r => { keep[r.name] = r.value; });
+            const patch = {
+                type: 'PARTIAL', startTime: leave.type === 'FULL' ? '00:00' : (leave.startTime || '00:00'), endTime: effectiveEnd,
+                returnedAt, originalType: leave.originalType || leave.type,
+                returnedMarkedBy: activeStaff ? activeStaff.email : '', returnedMarkedByName: getActiveTeacherName(), returnedLoggedAt: Date.now()
+            };
+            try {
+                await getCollection("special_leaves").doc(leaveId).update(patch);
+                Object.assign(leave, patch);
+                await loadDailyAttendance();
+                Object.entries(keep).forEach(([name, val]) => {
+                    const r = document.querySelector(`#daily-students-list input.att-radio[name="${name}"][value="${val}"]`);
+                    if (r && !r.disabled) r.checked = true;
+                });
+                const p = document.querySelector(`#daily-students-list input.att-radio[name="att_${stuId}"][value="P"]`);
+                if (p) p.checked = true;
+                if (typeof updateDailyStats === 'function') updateDailyStats();
+            } catch (e) { alert("Could not update the leave: " + e.message); }
         }
 
         async function endSpecialLeaveNow(id) {
