@@ -27,6 +27,8 @@
     // Data of the two original branches before the first new session (2026-27)
     const LEGACY_PREFIX = { GHUMARWIN: "", DHARAMSHALA: "dharamshala_" };
     const LEGACY_SESSION_STARTS_BEFORE = "2027-01-01";
+    // All existing data (no session prefix) belongs to this session
+    const LEGACY_SESSION = { name: "2026-27", startDate: "2026-04-01", endDate: "2027-03-31" };
 
     const SHARED_COLLECTIONS = ["staff_applications", "configs", "system_metadata", "branches",
         "instant_alerts", "timetable_drafts", "staff_registration_form"];
@@ -87,8 +89,8 @@
         return { session: null, warning: "No session is set up for this branch yet." };
     }
     function legacySessionStub(b) {
-        return { id: `legacy_${branchCode(b).toLowerCase()}`, name: "2026-27 (current data)", startDate: "", endDate: "",
-                 status: "ACTIVE", dataPrefix: LEGACY_PREFIX[branchCode(b)], isStub: true };
+        return { id: `legacy_${branchCode(b).toLowerCase()}`, name: LEGACY_SESSION.name, startDate: LEGACY_SESSION.startDate,
+                 endDate: LEGACY_SESSION.endDate, status: "ACTIVE", dataPrefix: LEGACY_PREFIX[branchCode(b)], isStub: true };
     }
     // Sessions an admin can switch between (all of them, newest first; plus today's data if not listed)
     function sessionsForSwitcher(b) {
@@ -161,7 +163,7 @@
     }
 
     global.MinervaContext = {
-        LEGACY_PREFIX, SHARED_COLLECTIONS, BRANCH_COLLECTIONS,
+        LEGACY_PREFIX, LEGACY_SESSION, SHARED_COLLECTIONS, BRANCH_COLLECTIONS,
         todayIso, branchCode, isLegacyBranch, isLegacySession,
         branchDataPrefix, sessionDataPrefix, proposeSessionPrefix,
         currentSession, sessionsForSwitcher, scopeOf, collectionName,
