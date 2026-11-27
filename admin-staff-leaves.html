@@ -7,7 +7,7 @@
     <script src="tailwind-engine.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-    <script src="leave-schedule.js?v=1"></script>
+    <script src="leave-schedule.js?v=2"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #0f172a; }
@@ -1342,6 +1342,7 @@
             upd[adjIdx].adjustedTo = name;
             upd[adjIdx].adjustedEmail = email;
             upd[adjIdx].substituteResponse = "ACCEPTED";
+            Object.assign(upd[adjIdx], currentAssigner());
             await getCollection("leave_requests").doc(reqId).update({ adjustments: upd });
             alert("Substitute force-assigned!");
         }
@@ -1884,6 +1885,9 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
 
             let analysisHtml = "";
             let totalUncovered = 0;
+            const LS = MinervaLeaveSchedule;
+            const reqAdjs = req.adjustments || [];
+            const matchedAdjIdx = new Set();   // entries that still match a class in today's timetable
 
             allDates.forEach(tDate => {
                 const dParts = tDate.split('-');
@@ -1907,10 +1911,14 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
                         
                    // ONLY generate conflicts if the class time physically overlaps with the leave time!
                         if (leaveStart < e && leaveEnd > s) {
+                            // Every substitution entry for THIS class + section at this time (any status)
+                            const related = [];
+                            reqAdjs.forEach((a, i) => { if (LS.adjMatchesClass(a, tDate, slot.className, slot.section, s, e)) { related.push({ adj: a, idx: i }); matchedAdjIdx.add(i); } });
+                            // Accepted or still-pending substitutes cover the class; declined / "asked incharge" do not
+                            const covering = related.filter(r => LS.adjCovers(r.adj)).map(r => r.adj);
+
                             let uncoveredSpans = [{ s: s, e: e }];
-                            const adjs = (req.adjustments || []).filter(a => a.date === tDate && norm((a.sub||"").split('|')[0]) === norm(slot.className) && a.substituteResponse === 'ACCEPTED');
-                            
-                            adjs.forEach(adj => {
+                            covering.forEach(adj => {
                                 let newSpans = [];
                                 uncoveredSpans.forEach(span => {
                                     if (adj.start < span.e && adj.end > span.s) {
@@ -1923,17 +1931,20 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
                                 uncoveredSpans = newSpans;
                             });
 
+                            const cleanSec = (slot.section || '').replace(/[^a-zA-Z0-9]/g, '');
+                            const base = { title: slot.subject || "Duty", sub: `${slot.className || ''} | Sec ${slot.section || ''}`.trim(),
+                                           cls: slot.className || '', sec: slot.section || '', date: tDate, related, classStart: s, classEnd: e };
+                            let anyUncovered = false;
                             uncoveredSpans.forEach(span => {
                                 if (span.e - span.s > 5) {
-                                    const cleanSec = (slot.section || '').replace(/[^a-zA-Z0-9]/g, '');
-                                    userConflicts.push({ 
-                                        id: `clash_${tDate}_${span.s}_${cleanSec}`, 
-                                        title: slot.subject || "Duty", 
-                                        sub: `${slot.className || ''} | Sec ${slot.section || ''}`.trim(), 
-                                        start: span.s, end: span.e, date: tDate 
-                                    });
+                                    anyUncovered = true;
+                                    userConflicts.push({ ...base, id: `clash_${tDate}_${span.s}_${cleanSec}`, start: span.s, end: span.e, kind: 'UNCOVERED' });
                                 }
                             });
+                            // Fully covered class: still shown (current substitute + option to replace)
+                            if (!anyUncovered) {
+                                userConflicts.push({ ...base, id: `cov_${tDate}_${s}_${cleanSec}`, start: s, end: e, kind: 'COVERED' });
+                            }
                         }
                     }
                 });
@@ -1941,7 +1952,7 @@ async function approveMod(id, newType, finalRefund, newEndDate) {
                 userConflicts = userConflicts.filter((v, i, a) => a.findIndex(t => (t.start === v.start && t.end === v.end && t.sub === v.sub && t.title === v.title)) === i);
 
                 if (userConflicts.length > 0) {
-                    totalUncovered += userConflicts.length;
+                    totalUncovered += userConflicts.filter(c => c.kind === 'UNCOVERED').length;
                     analysisHtml += `<div class="mb-8"><div class="flex items-center gap-3 mb-4"><span class="bg-indigo-600/20 text-indigo-400 border border-indigo-500/50 px-3 py-1 rounded-lg font-black text-[10px] uppercase tracking-widest">${localDateObj.toLocaleDateString('en-GB', {day:'2-digit', month:'short'})}</span><div class="h-px flex-1 bg-slate-700/50"></div></div>`;
                     
         userConflicts.forEach(con => {
@@ -2126,7 +2137,7 @@ let accordionHtml = `
                                             <button onclick="event.stopPropagation(); viewTeacherDay('${s.name.replace(/'/g, "\\'")}', '${tDate}')" class="bg-sky-50 text-sky-600 p-2 rounded-lg hover:bg-sky-100 hover:text-sky-700 transition-colors border border-sky-200 shadow-sm" title="View Full Day Schedule">👁️</button>
                                             <a href="tel:${s.mobile}" onclick="event.stopPropagation()" class="hidden sm:flex bg-slate-50 text-slate-600 p-2 rounded-lg hover:bg-blue-50 hover:text-blue-600 transition-colors border border-slate-200" title="Call">📞</a>
                                             <a href="https://wa.me/91${(s.mobile || '').replace(/[^0-9]/g, '')}" target="_blank" onclick="event.stopPropagation()" class="hidden sm:flex bg-slate-50 text-slate-600 p-2 rounded-lg hover:bg-emerald-50 hover:text-emerald-600 transition-colors border border-slate-200" title="WhatsApp">💬</a>
-                                            <button onclick="adminAssignSub('${reqId}', '${con.id}', '${s.email}', '${s.name.replace(/'/g, "\\'")}', ${span.s}, ${span.e}, '${timeStr}', ${allowSplit})" class="bg-indigo-600 text-white px-5 py-2 rounded-lg font-black uppercase hover:bg-indigo-700 transition-colors shadow-md text-[10px] w-full sm:w-auto">Assign</button>
+                                            <button onclick="adminAssignSub('${reqId}', '${con.id}', '${s.email}', '${s.name.replace(/'/g, "\\'")}', ${span.s}, ${span.e}, '${timeStr}', ${allowSplit})" class="bg-indigo-600 text-white px-5 py-2 rounded-lg font-black uppercase hover:bg-indigo-700 transition-colors shadow-md text-[10px] w-full sm:w-auto">${con.kind === 'COVERED' ? 'Replace' : 'Assign'}</button>
                                         </div>
                                     </div>
                                 `; 
@@ -2147,19 +2158,38 @@ let accordionHtml = `
 
                         const timeStr = `${minsTo12H(con.start).replace(/ (AM|PM)/i,"")} - ${minsTo12H(con.end)}`;
 
+                        // Current substitution entries for this class (status + who chose them)
+                        const activeCount = con.related.filter(r => LS.adjCovers(r.adj)).length;
+                        const currentHtml = con.related.length === 0 ? '' : `
+                            <div class="space-y-1.5">
+                                ${activeCount > 1 ? `<p class="text-[9px] font-black text-rose-600 uppercase tracking-widest bg-rose-50 border border-rose-200 rounded-lg p-2">⚠️ ${activeCount} substitutes saved for this one class. Remove the extra one(s).</p>` : ''}
+                                ${con.related.map(r => `
+                                    <div class="flex items-center justify-between gap-2 p-2 rounded-lg border ${LS.adjCovers(r.adj) ? 'bg-emerald-50 border-emerald-200' : 'bg-amber-50 border-amber-200'}">
+                                        <div class="text-[10px] font-bold text-slate-700 leading-snug">
+                                            <span class="font-black uppercase">${LS.isWaitingForIncharge(r.adj) ? 'No substitute yet' : r.adj.adjustedTo}</span>
+                                            <span class="text-slate-500"> · ${minsTo12H(r.adj.start)} - ${minsTo12H(r.adj.end)}</span><br>
+                                            <span>${LS.adjStatusText(r.adj)} · ${LS.assignedByText(r.adj)}${r.adj.replacedFrom ? ' · 🔁 replaced ' + r.adj.replacedFrom : ''}</span>
+                                        </div>
+                                        <button onclick="adminRemoveAdjustment('${reqId}', ${r.idx})" class="shrink-0 text-[9px] font-black uppercase bg-white text-rose-600 border border-rose-200 px-2.5 py-1.5 rounded-lg hover:bg-rose-50">Remove</button>
+                                    </div>`).join('')}
+                            </div>`;
+                        const isCovered = con.kind === 'COVERED';
+                        const tone = isCovered ? (con.related.some(r => LS.adjCovers(r.adj) && r.adj.substituteResponse !== 'ACCEPTED') ? 'amber' : 'emerald') : 'rose';
+
                         analysisHtml += `
-                            <div id="admin-clash-box-${con.id}" class="bg-white rounded-[1.5rem] overflow-hidden shadow-md border-2 border-rose-100 mb-4">
-                                <div class="p-3 flex justify-between items-center bg-rose-50 border-b border-rose-100">
+                            <div id="admin-clash-box-${con.id}" data-date="${con.date}" data-cls="${String(con.cls).replace(/"/g, '&quot;')}" data-sec="${String(con.sec).replace(/"/g, '&quot;')}" class="bg-white rounded-[1.5rem] overflow-hidden shadow-md border-2 border-${tone}-100 mb-4">
+                                <div class="p-3 flex justify-between items-center bg-${tone}-50 border-b border-${tone}-100">
                                     <div>
                                         <p class="clash-title font-black text-slate-800 text-xs uppercase">${con.title}</p>
                                         <p class="clash-sub text-[9px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">${con.sub}</p>
                                     </div>
                                     <div class="text-right">
-                                        <p class="clash-time font-black text-rose-600 text-[11px] bg-rose-100 px-2 py-0.5 rounded-md inline-block">${timeStr}</p>
-                                        <p class="text-[8px] font-bold text-slate-400 uppercase mt-1"><span class="clash-dur">${con.end - con.start}</span> mins</p>
+                                        <p class="clash-time font-black text-${tone}-600 text-[11px] bg-${tone}-100 px-2 py-0.5 rounded-md inline-block">${timeStr}</p>
+                                        <p class="text-[8px] font-bold text-slate-400 uppercase mt-1"><span class="clash-dur">${con.end - con.start}</span> mins · ${isCovered ? (tone === 'emerald' ? '✅ Covered' : '⏳ Waiting for reply') : '❗ Not covered'}</p>
                                     </div>
                                 </div>
                                 <div class="p-3 bg-white flex flex-col gap-2 transition-opacity duration-300">
+                                    ${currentHtml}
                                     ${accordionHtml}
                                 </div>
                             </div>
@@ -2169,11 +2199,65 @@ let accordionHtml = `
                 }
             });
 
-            if (totalUncovered === 0) {
-                analysisHtml = `<div class="bg-emerald-500/10 text-emerald-400 p-6 rounded-2xl font-black text-center text-sm uppercase border border-emerald-500/20 tracking-widest mt-10 shadow-inner">✅ All classes covered for this leave request!</div>`;
+            // Entries that no longer match any class of this teacher (timetable changed after applying)
+            const outdated = [];
+            reqAdjs.forEach((a, i) => {
+                if (matchedAdjIdx.has(i) || !LS.isClassAdj(a) || !allDates.includes(a.date)) return;
+                if (MinervaLeaveSchedule.dayNameOf(a.date) === 'Sunday') return;
+                outdated.push({ adj: a, idx: i });
+            });
+            let outdatedHtml = '';
+            if (outdated.length > 0) {
+                outdatedHtml = `<div class="mb-6 bg-amber-50 border-2 border-amber-200 rounded-2xl p-4">
+                    <p class="text-[10px] font-black text-amber-800 uppercase tracking-widest mb-1">⚠️ Outdated substitutions (${outdated.length})</p>
+                    <p class="text-[10px] font-bold text-amber-700 mb-3">The timetable changed after this leave was applied: these entries no longer match a class of ${req.teacherName}. Remove them, and assign the classes shown below if needed.</p>
+                    <div class="space-y-1.5">${outdated.map(o => `
+                        <div class="flex items-center justify-between gap-2 p-2 rounded-lg bg-white border border-amber-200">
+                            <div class="text-[10px] font-bold text-slate-700">${o.adj.date} · ${o.adj.title || ''} (${o.adj.sub || ''}) · ${minsTo12H(o.adj.start)} - ${minsTo12H(o.adj.end)}<br>
+                                <span class="font-black uppercase">${LS.isWaitingForIncharge(o.adj) ? 'No substitute yet' : o.adj.adjustedTo}</span> · ${LS.adjStatusText(o.adj)} · ${LS.assignedByText(o.adj)}</div>
+                            <button onclick="adminRemoveAdjustment('${reqId}', ${o.idx})" class="shrink-0 text-[9px] font-black uppercase bg-white text-rose-600 border border-rose-200 px-2.5 py-1.5 rounded-lg hover:bg-rose-50">Remove</button>
+                        </div>`).join('')}</div></div>`;
             }
 
-            feed.innerHTML = analysisHtml;
+            if (totalUncovered === 0) {
+                analysisHtml = `<div class="bg-emerald-500/10 text-emerald-400 p-6 rounded-2xl font-black text-center text-sm uppercase border border-emerald-500/20 tracking-widest mt-10 mb-6 shadow-inner">✅ All classes covered for this leave request!</div>` + analysisHtml;
+            }
+
+            feed.innerHTML = outdatedHtml + analysisHtml;
+        }
+
+        // Who is using this page: an admin, or a teacher who is the Leave Incharge
+        function currentAssigner() {
+            const isAdmin = sessionStorage.getItem('minervaAdminAuth') === 'true';
+            return { assignedBy: isAdmin ? 'ADMIN' : 'INCHARGE', assignedByName: activeAdminName,
+                     substituteMessage: isAdmin ? 'Force Assigned by Admin' : 'Force Assigned by Leave Incharge' };
+        }
+
+        // Remove one substitution entry (kept in adjustmentHistory)
+        async function adminRemoveAdjustment(reqId, idx) {
+            const req = allLeaves.find(l => l.id === reqId);
+            const target = req && (req.adjustments || [])[idx];
+            if (!target) return;
+            if (!confirm(`Remove substitute "${target.adjustedTo}" for ${target.title} (${target.sub}) on ${target.date}?`)) return;
+            const ref = getCollection("leave_requests").doc(reqId);
+            const sameEntry = (a) => a && a.id === target.id && a.date === target.date && a.start === target.start && a.adjustedTo === target.adjustedTo;
+            try {
+                let finalAdjs = null;
+                await db.runTransaction(async (tx) => {
+                    const snap = await tx.get(ref);
+                    if (!snap.exists) throw new Error("Leave request not found.");
+                    const data = snap.data();
+                    const adjs = [...(data.adjustments || [])];
+                    const i = adjs.findIndex(sameEntry);
+                    if (i < 0) throw new Error("This entry was already changed by someone else. Please reopen.");
+                    const [removed] = adjs.splice(i, 1);
+                    const history = [...(data.adjustmentHistory || []), { ...removed, change: 'REMOVED', changedAt: Date.now(), changedBy: activeAdminName }];
+                    tx.update(ref, { adjustments: adjs, adjustmentHistory: history });
+                    finalAdjs = adjs;
+                });
+                req.adjustments = finalAdjs;
+                runAdminAnalysis();
+            } catch (e) { alert("Error: " + e.message); }
         }
 
      async function adminAssignSub(reqId, clashId, subEmail, subName, calcSMins, calcEMins, calcTimeStr, isCustomMode) {
@@ -2210,29 +2294,47 @@ let accordionHtml = `
             const btn = event.target; const orig = btn.innerText;
             btn.innerText = "Saving..."; btn.disabled = true;
 
+            const clsName = container.getAttribute('data-cls') || '';
+            const secName = container.getAttribute('data-sec') || '';
+            // Incharge / admin assignments are orders: saved as ACCEPTED
             const newAdj = {
                 id: 'adj_' + Math.random().toString(36).substr(2,9),
-                date: dateVal,
+                type: 'CLASS',
+                date: container.getAttribute('data-date') || dateVal,
                 title: title,
-                sub: sub,
+                sub: `${clsName} | ${secName}`,
                 start: startMins,
                 end: endMins,
                 adjustedTo: subName,
                 adjustedEmail: subEmail,
                 substituteResponse: 'ACCEPTED',
-                substituteMessage: 'Force Assigned by Admin',
                 assignedTimeWindow: finalTimeStr,
-                isEmergency: true
+                isEmergency: true,
+                ...currentAssigner()
             };
 
             try {
                 const req = allLeaves.find(l => l.id === reqId);
-                const currentAdj = req.adjustments || [];
-                currentAdj.push(newAdj);
+                const ref = getCollection("leave_requests").doc(reqId);
+                let finalAdjs = null;
+                // REPLACE any existing entry for the same class + section + time (never two substitutes for one class)
+                await db.runTransaction(async (tx) => {
+                    const snap = await tx.get(ref);
+                    if (!snap.exists) throw new Error("Leave request not found.");
+                    const data = snap.data();
+                    const adjs = data.adjustments || [];
+                    const replaced = adjs.filter(a => MinervaLeaveSchedule.adjMatchesClass(a, newAdj.date, clsName, secName, startMins, endMins));
+                    const kept = adjs.filter(a => !replaced.includes(a));
+                    const replacedNames = [...new Set(replaced.map(a => a.adjustedTo).filter(n => n && n !== 'INCHARGE' && n !== subName))];
+                    if (replacedNames.length > 0) newAdj.replacedFrom = replacedNames.join(', ');
+                    kept.push(newAdj);
+                    const history = [...(data.adjustmentHistory || []),
+                        ...replaced.map(a => ({ ...a, change: 'REPLACED', replacedBy: subName, changedAt: Date.now(), changedBy: activeAdminName }))];
+                    tx.update(ref, { adjustments: kept, adjustmentHistory: history });
+                    finalAdjs = kept;
+                });
                 
-                await getCollection("leave_requests").doc(reqId).update({ adjustments: currentAdj });
-                
-                req.adjustments = currentAdj; 
+                req.adjustments = finalAdjs; 
                 runAdminAnalysis();
                 
             } catch(e) { alert("Error: " + e.message); btn.innerText = orig; btn.disabled = false; }
@@ -2270,9 +2372,9 @@ let accordionHtml = `
                 adjustedTo: subName,
                 adjustedEmail: subEmail,
                 substituteResponse: 'ACCEPTED',
-                substituteMessage: 'Force Assigned by Admin',
                 isEmergency: true,
-                type: 'OTHER'
+                type: 'OTHER',
+                ...currentAssigner()
             };
 
             try {
@@ -2357,6 +2459,11 @@ async function viewTeacherDay(teacherName, dateIso) {
             openModal('teacher-schedule-modal');
         }
 
+        function adminDeptOf(email) {
+            const st = allStaff.find(s => (s.email || '').toLowerCase() === String(email || '').toLowerCase());
+            return st ? st.dept : '';
+        }
+
         function shareLeaveToWhatsApp(reqId) {
             const req = allLeaves.find(l => l.id === reqId);
             if (!req) return alert("Request not found.");
@@ -2375,12 +2482,10 @@ async function viewTeacherDay(teacherName, dateIso) {
 
             if (req.adjustments && req.adjustments.length > 0) {
                 msg += `*📋 SUBSTITUTION DETAILS:*\n`;
-                req.adjustments.forEach((adj, idx) => {
+                [...req.adjustments].sort((a, b) => String(a.date).localeCompare(String(b.date)) || (a.start || 0) - (b.start || 0)).forEach((adj, idx) => {
                     let adjDate = new Date(adj.date).toLocaleDateString('en-GB', {day:'2-digit', month:'short'});
-                    let status = adj.substituteResponse === 'ACCEPTED' ? '✅ Accepted' : '⏳ Pending';
-                    let assignBy = (adj.substituteMessage && adj.substituteMessage.includes("Force Assigned")) ? "⚡ Force Assigned" : "By Teacher";
                     let timeWin = adj.assignedTimeWindow || `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`;
-                    msg += `${idx + 1}. *${adj.title}* (${adj.sub})\n   Date: ${adjDate} | Time: ${timeWin}\n   *Sub:* ${adj.adjustedTo} [${status} | ${assignBy}]\n\n`;
+                    msg += `${idx + 1}. *${adj.title}* (${adj.sub})\n   Date: ${adjDate} | Time: ${timeWin}\n   *Sub:* ${MinervaLeaveSchedule.subLine(adj, adminDeptOf)}\n\n`;
                 });
             } else {
                 msg += `*📋 SUBSTITUTION DETAILS:*\nNo substitutions required.\n\n`;
@@ -2426,24 +2531,9 @@ async function viewTeacherDay(teacherName, dateIso) {
                     msg += `   *📋 Adjustments (${todayAdjs.length}):*\n`;
                     todayAdjs.sort((a,b) => (a.start || 0) - (b.start || 0)).forEach((adj) => {
                         let timeWin = adj.assignedTimeWindow || `${minsTo12H(adj.start)} - ${minsTo12H(adj.end)}`;
-                        const subObj = allStaff.find(s => s.email === adj.adjustedEmail);
-                        let subDept = subObj ? ` (${subObj.dept})` : '';
-                        
-                        let assignTag = "By Teacher";
-                        if (adj.substituteMessage && adj.substituteMessage.includes("Force Assigned")) {
-                            assignTag = "⚡ Force Assigned";
-                        } else if (adj.isEmergency && adj.adjustedTo === "INCHARGE") {
-                            assignTag = "🚨 Needs Incharge Assign";
-                        }
-
-                        let subResp = "⏳ Pending";
-                        if (adj.substituteResponse === "ACCEPTED") subResp = "✅ Accepted";
-                        else if (adj.substituteResponse === "BROKEN_BY_ADMIN") subResp = "⚠️ Needs Re-Assign";
-                        else if (adj.substituteResponse === "DECLINED") subResp = "❌ Declined";
-
                         msg += `     • *${adj.title}* (${adj.sub})\n`;
                         msg += `       🕒 ${timeWin}\n`;
-                        msg += `       👉 *Sub:* ${adj.adjustedTo}${subDept} [${subResp} | ${assignTag}]\n`;
+                        msg += `       👉 *Sub:* ${MinervaLeaveSchedule.subLine(adj, adminDeptOf)}\n`;
                     });
                 } else {
                     msg += `   *📋 Adjustments:* None for today\n`;

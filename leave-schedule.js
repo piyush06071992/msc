@@ -235,5 +235,75 @@
         return { ensureDates, isLoaded, dayRows, dutyRosters, dutyDateOf };
     }
 
-    global.MinervaLeaveSchedule = { create, localIso, dayNameOf, mondayOf, addDays, VERSION: 1 };
+    // ------------------------------------------------------------------------
+    // SUBSTITUTION ENTRIES (leave_requests.adjustments) — shared rules
+    //   assignedBy: "APPLICANT" | "INCHARGE" | "ADMIN"  (+ assignedByName)
+    //   Incharge / admin assignments are orders: saved as ACCEPTED.
+    //   Assigning again for the same class REPLACES the old entry (kept in adjustmentHistory).
+    // ------------------------------------------------------------------------
+    const normTxt = (s) => String(s || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+
+    // "10 | A", "10 | Sec A" -> { cls: "10", sec: "A" }
+    function adjClass(adj) {
+        const parts = String((adj && adj.sub) || "").split("|");
+        return { cls: (parts[0] || "").trim(), sec: (parts[1] || "").trim().replace(/^sec(tion)?\s*/i, "") };
+    }
+    // A class substitution (not an exam/lunch duty or an extra responsibility)
+    function isClassAdj(adj) {
+        if (!adj) return false;
+        if (adj.type === "CLASS") return true;
+        if (adj.type) return false;
+        return String(adj.sub || "").includes("|") && adj.title !== "Extra Duty";
+    }
+    // Same date, same class + section, overlapping time
+    function adjMatchesClass(adj, dateIso, className, section, startMins, endMins) {
+        if (!isClassAdj(adj) || adj.date !== dateIso) return false;
+        const c = adjClass(adj);
+        if (normTxt(c.cls) !== normTxt(className) || normTxt(c.sec) !== normTxt(section)) return false;
+        return adj.start < endMins && adj.end > startMins;
+    }
+    function isWaitingForIncharge(adj) {
+        return adj.adjustedTo === "INCHARGE" && adj.substituteResponse !== "ACCEPTED";
+    }
+    // Does this entry cover the class? Accepted or still waiting for the substitute's answer.
+    function adjCovers(adj) {
+        if (isWaitingForIncharge(adj)) return false;
+        const r = adj.substituteResponse;
+        return r === "ACCEPTED" || !r || r === "PENDING";
+    }
+    function adjStatusText(adj) {
+        if (isWaitingForIncharge(adj)) return "🚨 Waiting for Incharge";
+        const r = adj.substituteResponse;
+        if (r === "ACCEPTED") return "✅ Accepted";
+        if (r === "DECLINED") return "❌ Declined";
+        if (r === "BROKEN_BY_ADMIN") return "⚠️ Needs Re-Assign";
+        return "⏳ Pending";
+    }
+    function assignedByOf(adj) {
+        if (adj.assignedBy) return adj.assignedBy;
+        const m = String(adj.substituteMessage || "");
+        if (/Force Assigned by Leave Incharge/i.test(m)) return "INCHARGE";
+        if (/Force Assigned/i.test(m)) return "ADMIN";
+        return "APPLICANT";
+    }
+    function assignedByText(adj) {
+        if (isWaitingForIncharge(adj)) return "🙋 Applicant asked Incharge";
+        const who = assignedByOf(adj);
+        const name = adj.assignedByName ? ` (${adj.assignedByName})` : "";
+        if (who === "INCHARGE") return `👤 By Leave Incharge${name}`;
+        if (who === "ADMIN") return `🛡️ By Admin${name}`;
+        return "🙋 By Applicant";
+    }
+    // One line for WhatsApp:  Rohit Sharma (Maths) [✅ Accepted | 👤 By Leave Incharge (Name) | 🔁 replaced X]
+    function subLine(adj, deptOf) {
+        const dept = (adj.adjustedEmail && adj.adjustedEmail !== "ADMIN" && deptOf) ? deptOf(adj.adjustedEmail) : "";
+        const name = isWaitingForIncharge(adj) ? "Not assigned yet" : (adj.adjustedTo || "-");
+        const parts = [adjStatusText(adj), assignedByText(adj)];
+        if (adj.replacedFrom) parts.push(`🔁 replaced ${adj.replacedFrom}`);
+        return `${name}${dept ? ` (${dept})` : ""} [${parts.join(" | ")}]`;
+    }
+
+    global.MinervaLeaveSchedule = { create, localIso, dayNameOf, mondayOf, addDays,
+        adjClass, isClassAdj, adjMatchesClass, adjCovers, isWaitingForIncharge, adjStatusText, assignedByOf, assignedByText, subLine,
+        VERSION: 2 };
 })(typeof window !== "undefined" ? window : globalThis);
