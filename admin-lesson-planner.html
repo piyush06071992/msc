@@ -9,6 +9,7 @@
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
     <script src="planner-date-rules.js?v=1"></script>
+    <script src="minerva-context.js?v=1"></script>
    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -53,6 +54,10 @@
                     <option value="GHUMARWIN">📍 Ghumarwin</option>
                     <option value="DHARAMSHALA">📍 Dharamshala</option>
                 </select>
+                <select id="session-switch" onchange="switchSession(this.value)" title="Academic session" class="text-[10px] font-black text-indigo-700 bg-indigo-50 border border-indigo-200 outline-none rounded px-2 py-0.5 mt-1 ml-1 cursor-pointer uppercase tracking-widest shadow-sm">
+                    <option value="">📅 Session…</option>
+                </select>
+                <p id="session-note" class="hidden text-[10px] font-black text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-2 py-0.5 mt-1"></p>
             </div>
             <button id="auth-btn" onclick="window.location.href='admin-lesson-auth.html'" class="hidden ml-4 bg-indigo-600 text-white px-5 py-2.5 rounded-xl font-black text-xs uppercase tracking-widest shadow-md hover:bg-indigo-500 transition-all items-center gap-2">
                 🔐 Delegation
@@ -434,11 +439,29 @@
             }
         };
 
+        // ---------------- BRANCH + SESSION (minerva-context.js) ----------------
+        // Today's session (2026-27) uses exactly the same collections as before.
+        // Another session (e.g. 2027-28) uses its own: ghumarwin_2027_28_lesson_planners, ..._institute_structure, ...
+        let ctxBranches = [], activeBranchObj = null, activeSession = null, activeSessionWarning = "";
+        function isNewSession() {
+            return !!(activeBranchObj && activeSession && !activeSession.isStub &&
+                      !MinervaContext.isLegacySession(activeBranchObj, activeSession) &&
+                      MinervaContext.sessionDataPrefix(activeBranchObj, activeSession) !== MinervaContext.LEGACY_PREFIX[activeCenter]);
+        }
+        function sessionPrefix() { return MinervaContext.sessionDataPrefix(activeBranchObj, activeSession); }
+        function isViewingCurrentSession() {
+            if (!activeBranchObj || !activeSession) return true;
+            const cur = MinervaContext.currentSession(activeBranchObj).session;
+            return !cur || cur.id === activeSession.id || (!isNewSession() && MinervaContext.isLegacySession(activeBranchObj, cur));
+        }
+        // Key for caches / version stamps: "GHUMARWIN" (today) or "GHUMARWIN~ghumarwin_2027_28" (another session)
+        function ctxKey() { return isNewSession() ? `${activeCenter}~${sessionPrefix().replace(/_$/, '')}` : activeCenter; }
+
         async function bumpPlannerVersion() {
             if (!navigator.onLine) return;
             try {
-                // Per-branch version stamp, so a save in one branch no longer invalidates every branch's cache
-                await db.collection("system_metadata").doc("planners_version").set({ [`lastUpdated_${activeCenter}`]: Date.now() }, { merge: true });
+                // Per-branch (and per-session) version stamp, so a save in one place doesn't invalidate the others' caches
+                await db.collection("system_metadata").doc("planners_version").set({ [`lastUpdated_${ctxKey()}`]: Date.now() }, { merge: true });
             } catch(e) { console.warn("Failed to bump version", e); }
         }
 
@@ -446,6 +469,9 @@
             // Global tables that are shared across all centers
             const globalCollections = ['configs', 'staff_applications'];
             if (globalCollections.includes(name)) return db.collection(name);
+
+            // Another session: its own collections
+            if (isNewSession()) return db.collection(sessionPrefix() + name);
             
             // Isolated tables
             if (activeCenter === "GHUMARWIN") return db.collection(name);
@@ -456,7 +482,72 @@
             sessionStorage.setItem('minervaAdminCenter', centerName);
             sessionStorage.removeItem('minerva_struct');
             sessionStorage.removeItem('minerva_teachers');
+            MinervaContext.setAdminSelectedSession(null); // open the other branch on its current session
             window.location.reload();
+        }
+        function switchSession(sessionId) {
+            if (!sessionId) return;
+            MinervaContext.setAdminSelectedSession(sessionId);
+            sessionStorage.removeItem('minerva_struct');
+            sessionStorage.removeItem('minerva_teachers');
+            window.location.reload();
+        }
+
+        async function setupPlannerContext() {
+            try { ctxBranches = await MinervaContext.loadBranches(db); } catch (e) { console.warn("Branches not loaded; using today's data", e); ctxBranches = []; }
+            activeBranchObj = MinervaContext.findBranch(ctxBranches, activeCenter);
+            const sel = activeBranchObj ? MinervaContext.adminSelectedSession(activeBranchObj) : { session: null, warning: "" };
+            activeSession = sel.session;
+            activeSessionWarning = sel.warning || "";
+
+            const bSel = document.getElementById('global-center-switch');
+            if (bSel && ctxBranches.length) {
+                const codes = new Map([["GHUMARWIN", "Ghumarwin"], ["DHARAMSHALA", "Dharamshala"]]);
+                ctxBranches.filter(b => b.status !== 'INACTIVE' || MinervaContext.branchCode(b) === activeCenter)
+                    .forEach(b => codes.set(MinervaContext.branchCode(b), b.name || MinervaContext.branchCode(b)));
+                const wasDisabled = bSel.disabled;
+                bSel.innerHTML = [...codes].map(([code, name]) => `<option value="${code}">📍 ${name}</option>`).join('');
+                bSel.value = activeCenter;
+                bSel.disabled = wasDisabled;
+            }
+            const renderSessions = () => {
+                const sSel = document.getElementById('session-switch');
+                if (!sSel || !activeBranchObj) return;
+                const current = MinervaContext.currentSession(activeBranchObj).session;
+                sSel.innerHTML = MinervaContext.sessionsForSwitcher(activeBranchObj).map(se => {
+                    const tags = [];
+                    if (current && current.id === se.id) tags.push('current');
+                    if (se.status === 'INACTIVE') tags.push('inactive');
+                    return `<option value="${se.id}">📅 ${se.name}${tags.length ? ' • ' + tags.join(', ') : ''}</option>`;
+                }).join('');
+                if (activeSession) sSel.value = activeSession.id;
+            };
+            renderSessions();
+            const note = document.getElementById('session-note');
+            if (note) {
+                const msgs = [];
+                if (!isViewingCurrentSession() && activeSession) msgs.push(`📅 Session ${activeSession.name}${activeSession.startDate ? ` (${activeSession.startDate} to ${activeSession.endDate})` : ''}: not today's session. Changes here do not affect the running planners.`);
+                if (activeSessionWarning) msgs.push('⚠️ ' + activeSessionWarning);
+                note.textContent = msgs.join('  ');
+                note.classList.toggle('hidden', msgs.length === 0);
+            }
+            // The one-off "Migrate" tool (copy ticks made before 2 June 2026) only applies to today's data
+            if (isNewSession()) {
+                const migBtn = document.querySelector('button[onclick="openMigrationModal()"]');
+                if (migBtn) migBtn.style.display = 'none';
+            }
+            // live: sessions added / renamed on the branches page
+            MinervaContext.listenBranches(db, list => {
+                const before = isNewSession() ? sessionPrefix() : '(today)';
+                ctxBranches = list;
+                const b = MinervaContext.findBranch(ctxBranches, activeCenter);
+                if (!b) return;
+                activeBranchObj = b;
+                const sel2 = MinervaContext.adminSelectedSession(b);
+                if (sel2.session) activeSession = sel2.session;
+                renderSessions();
+                if ((isNewSession() ? sessionPrefix() : '(today)') !== before) window.location.reload();
+            });
         }
         // --------------------------------------
 
@@ -588,12 +679,12 @@
                 ]);
                 const meta = metaDoc.exists ? metaDoc.data() : {};
                 // Old-style global stamp + this branch's stamp
-                const serverVersion = `${meta.lastUpdated || 0}|${meta[`lastUpdated_${activeCenter}`] || 0}`;
+                const serverVersion = `${meta.lastUpdated || 0}|${meta[`lastUpdated_${ctxKey()}`] || 0}`;
                 const slimStatus = slimStatusDoc && slimStatusDoc.exists ? slimStatusDoc.data() : null;
                 const useSlim = !!(slimStatus && slimStatus.ready === true && (slimStatus.format || 1) >= 2);
                 const historyKind = useSlim ? "slim2" : "full";
 
-                const cachePrefix = `admin_planner_v2_${activeCenter}_`;
+                const cachePrefix = `admin_planner_v2_${ctxKey()}_`;
                 const cached = isFirstLoad ? await IDB.get(cachePrefix + "bundle") : null;
                 if (isFirstLoad) {
                     // Free the old cache format (it stored the full ~150 MB history on this device)
@@ -2616,7 +2707,7 @@ let actDays = 0;
 
                 const buffer = await workbook.xlsx.writeBuffer();
                 const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-                saveAs(blob, `Minerva_Analytics_${activeCenter}_${new Date().toISOString().split('T')[0]}.xlsx`);
+                saveAs(blob, `Minerva_Analytics_${activeCenter}${isNewSession() ? "_" + activeSession.name : ""}_${new Date().toISOString().split('T')[0]}.xlsx`);
 
             } catch (err) {
                 console.error("Export failed", err);
@@ -2958,6 +3049,7 @@ let actDays = 0;
                 };
             }
 
+            await setupPlannerContext(); // which academic session (today's by default) - before any data is loaded
             await loadAllData(); 
             resolveAdminInitialLoad();
             // Only show the menu if the user has not already opened Summary / Setup meanwhile
