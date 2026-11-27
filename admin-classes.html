@@ -277,12 +277,12 @@
                     html += `<div class="mb-6 p-4 rounded-2xl bg-white border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center gap-3">
                         <div class="flex-1">
                             <p class="text-[11px] font-black text-slate-800 uppercase tracking-widest">📋 Copy classes from another session</p>
-                            <p class="text-[10px] font-bold text-slate-500 mt-0.5">Copies classes, sections and subjects with new ids. Class / section incharges are left empty. Sections that already exist here are skipped.</p>
+                            <p class="text-[10px] font-bold text-slate-500 mt-0.5">Choose a session, then tick the classes / sections to copy (with their subjects, new ids). Class / section incharges are left empty.</p>
                         </div>
                         <select id="copy-source-session" class="p-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold">
                             ${sources.map(se => `<option value="${se.id}">${se.name}</option>`).join('')}
                         </select>
-                        <button onclick="copyClassesFromSession()" class="bg-indigo-600 text-white px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-md">Copy</button>
+                        <button onclick="openCopyPicker()" class="bg-indigo-600 text-white px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-md">Choose &amp; Copy</button>
                     </div>`;
                 }
             }
@@ -311,26 +311,116 @@
 
         function newId(prefix) { return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`; }
 
-        // Copy classes / sections / subjects from another session of this branch into the selected (new) session
-        async function copyClassesFromSession() {
+        // ---------------- SELECTIVE COPY FROM ANOTHER SESSION ----------------
+        let copySource = null;   // { session, sections: [{ key, data }] }
+
+        function sourceStructureCollection(srcSession) {
+            return (MinervaContext.isLegacySession(activeBranchObj, srcSession) || srcSession.isStub)
+                ? (activeCenter === "GHUMARWIN" ? "institute_structure" : `${activeCenter.toLowerCase()}_institute_structure`)
+                : MinervaContext.collectionName("institute_structure", activeBranchObj, srcSession);
+        }
+        const escHtml = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+        // Step 1: show the source session's classes / sections as a checklist (nothing is ticked)
+        async function openCopyPicker() {
             if (!isNewSession()) return;
             const srcId = document.getElementById('copy-source-session').value;
             const srcSession = MinervaContext.sessionsForSwitcher(activeBranchObj).find(se => se.id === srcId);
             if (!srcSession) return;
-            const srcCol = (MinervaContext.isLegacySession(activeBranchObj, srcSession) || srcSession.isStub)
-                ? (activeCenter === "GHUMARWIN" ? "institute_structure" : `${activeCenter.toLowerCase()}_institute_structure`)
-                : MinervaContext.collectionName("institute_structure", activeBranchObj, srcSession);
+            let srcSnap;
+            try { srcSnap = await db.collection(sourceStructureCollection(srcSession)).get(); }
+            catch (e) { return alert("Could not load that session's classes: " + e.message); }
+            if (srcSnap.empty) return alert(`Session ${srcSession.name} has no classes to copy.`);
+
+            const existingKeys = new Set(allSectionsData.map(x => `${x.className}|${x.sectionName}`));
+            const sections = srcSnap.docs.map(d => d.data()).filter(d => d.className && d.sectionName)
+                .map(d => ({ key: `${d.className}|${d.sectionName}`, data: d, already: existingKeys.has(`${d.className}|${d.sectionName}`) }));
+            copySource = { session: srcSession, sections };
+
+            const byClass = new Map();
+            sections.forEach((x, i) => { if (!byClass.has(x.data.className)) byClass.set(x.data.className, []); byClass.get(x.data.className).push({ ...x, i }); });
+            const classNames = [...byClass.keys()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+            let modal = document.getElementById('copy-picker-modal');
+            if (!modal) {
+                modal = document.createElement('div');
+                modal.id = 'copy-picker-modal';
+                modal.className = 'fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4';
+                document.body.appendChild(modal);
+            }
+            modal.innerHTML = `
+                <div class="bg-white w-full max-w-2xl rounded-3xl shadow-2xl flex flex-col max-h-[90vh]">
+                    <div class="p-5 border-b border-slate-100 flex justify-between items-start gap-3">
+                        <div>
+                            <h3 class="font-black text-slate-800 uppercase tracking-tight">Copy classes into ${escHtml(activeSession.name)}</h3>
+                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">From ${escHtml(srcSession.name)} · tick what you need</p>
+                        </div>
+                        <button onclick="closeCopyPicker()" class="w-8 h-8 rounded-full bg-slate-100 text-slate-500 font-black">✕</button>
+                    </div>
+                    <div class="px-5 pt-3 flex gap-2">
+                        <button onclick="copyPickerSelectAll(true)" class="text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600">Select all</button>
+                        <button onclick="copyPickerSelectAll(false)" class="text-[10px] font-black uppercase tracking-widest px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600">Clear</button>
+                    </div>
+                    <div class="p-5 overflow-y-auto space-y-3">
+                        ${classNames.map((cn, ci) => {
+                            const secs = byClass.get(cn).sort((a, b) => String(a.data.sectionName).localeCompare(String(b.data.sectionName), undefined, { numeric: true }));
+                            const allAlready = secs.every(x => x.already);
+                            return `<div class="border border-slate-200 rounded-2xl p-3 bg-slate-50">
+                                <label class="flex items-center gap-2 ${allAlready ? 'opacity-50' : 'cursor-pointer'}">
+                                    <input type="checkbox" class="copy-class-cb w-4 h-4 accent-indigo-600" data-class-index="${ci}" ${allAlready ? 'disabled' : ''} onchange="copyPickerToggleClass(${ci}, this.checked)">
+                                    <span class="text-xs font-black text-slate-800 uppercase">Class ${escHtml(cn)}</span>
+                                    <span class="text-[9px] font-bold text-slate-400 uppercase">(${secs.length} section${secs.length > 1 ? 's' : ''})</span>
+                                </label>
+                                <div class="mt-2 pl-6 flex flex-wrap gap-2">
+                                    ${secs.map(x => `<label class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border ${x.already ? 'bg-slate-100 border-slate-200 opacity-60' : 'bg-white border-slate-200 cursor-pointer'}" title="${x.already ? 'Already in this session' : escHtml((x.data.subjects || []).join(', '))}">
+                                        <input type="checkbox" class="copy-sec-cb copy-sec-of-${ci} w-3.5 h-3.5 accent-indigo-600" value="${x.i}" ${x.already ? 'disabled' : ''} onchange="copyPickerSync(${ci})">
+                                        <span class="text-[11px] font-bold text-slate-700">${escHtml(x.data.sectionName)}</span>
+                                        ${x.already ? '<span class="text-[8px] font-black text-emerald-600 uppercase">already here</span>' : ''}
+                                    </label>`).join('')}
+                                </div>
+                            </div>`;
+                        }).join('')}
+                    </div>
+                    <div class="p-5 border-t border-slate-100 flex items-center justify-between gap-3">
+                        <p id="copy-picker-count" class="text-[11px] font-bold text-slate-500">0 sections selected</p>
+                        <button id="copy-picker-go" onclick="copySelectedSections()" disabled class="bg-indigo-600 disabled:opacity-40 text-white px-5 py-2.5 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-md">Copy selected</button>
+                    </div>
+                </div>`;
+            modal.classList.remove('hidden');
+        }
+        function closeCopyPicker() { const m = document.getElementById('copy-picker-modal'); if (m) m.classList.add('hidden'); }
+        function copyPickerCount() {
+            const n = document.querySelectorAll('.copy-sec-cb:checked').length;
+            document.getElementById('copy-picker-count').textContent = `${n} section${n === 1 ? '' : 's'} selected`;
+            document.getElementById('copy-picker-go').disabled = n === 0;
+        }
+        function copyPickerToggleClass(ci, on) {
+            document.querySelectorAll(`.copy-sec-of-${ci}:not(:disabled)`).forEach(cb => cb.checked = on);
+            copyPickerCount();
+        }
+        function copyPickerSync(ci) {
+            const all = [...document.querySelectorAll(`.copy-sec-of-${ci}:not(:disabled)`)];
+            const cls = document.querySelector(`.copy-class-cb[data-class-index="${ci}"]`);
+            if (cls) { cls.checked = all.length > 0 && all.every(cb => cb.checked); cls.indeterminate = !cls.checked && all.some(cb => cb.checked); }
+            copyPickerCount();
+        }
+        function copyPickerSelectAll(on) {
+            document.querySelectorAll('.copy-sec-cb:not(:disabled), .copy-class-cb:not(:disabled)').forEach(cb => { cb.checked = on; cb.indeterminate = false; });
+            copyPickerCount();
+        }
+
+        // Step 2: copy only the ticked sections (subjects included; new ids; incharges empty)
+        async function copySelectedSections() {
+            if (!isNewSession() || !copySource) return;
+            const picked = [...document.querySelectorAll('.copy-sec-cb:checked')].map(cb => copySource.sections[Number(cb.value)]).filter(x => x && !x.already);
+            if (picked.length === 0) return;
+            const btn = document.getElementById('copy-picker-go');
+            btn.disabled = true; btn.textContent = 'Copying...';
             try {
-                const srcSnap = await db.collection(srcCol).get();
-                if (srcSnap.empty) return alert(`Session ${srcSession.name} has no classes to copy.`);
-                const existingKeys = new Set(allSectionsData.map(x => `${x.className}|${x.sectionName}`));
                 const classIds = new Map(allSectionsData.filter(x => x.classId).map(x => [x.className, x.classId]));
-                const toCopy = srcSnap.docs.map(d => d.data()).filter(d => d.className && d.sectionName && !existingKeys.has(`${d.className}|${d.sectionName}`));
-                if (toCopy.length === 0) return alert("All sections of that session already exist here. Nothing to copy.");
-                if (!confirm(`Copy ${toCopy.length} section(s) from ${srcSession.name} into ${activeSession.name}?\n\nClass and section incharges will be left empty.`)) return;
                 let batch = db.batch(), ops = 0;
                 const commits = [];
-                toCopy.forEach(d => {
+                picked.forEach(({ data: d }) => {
                     if (!classIds.has(d.className)) classIds.set(d.className, newId('cls'));
                     const sectionId = newId('sec');
                     const doc = {
@@ -338,7 +428,7 @@
                         shortCode: d.shortCode || "", registerName: d.registerName || "",
                         subjects: d.subjects || [], optionalSubjects: d.optionalSubjects || [],
                         classId: classIds.get(d.className), sectionId,
-                        copiedFromSession: srcSession.id,
+                        copiedFromSession: copySource.session.id,
                         createdAt: firebase.firestore.FieldValue.serverTimestamp()
                     };
                     if (d.registerHeader) doc.registerHeader = d.registerHeader;
@@ -347,11 +437,13 @@
                 });
                 if (ops > 0) commits.push(batch.commit());
                 await Promise.all(commits);
-                alert(`✅ Copied ${toCopy.length} section(s) into ${activeSession.name}.`);
+                closeCopyPicker();
+                alert(`✅ Copied ${picked.length} section(s) from ${copySource.session.name} into ${activeSession.name}.`);
                 loadStructure();
             } catch (e) {
                 console.error(e);
                 alert("Copy failed: " + e.message);
+                btn.disabled = false; btn.textContent = 'Copy selected';
             }
         }
 
