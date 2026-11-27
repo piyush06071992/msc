@@ -982,6 +982,46 @@
         // Tracking starts from the first day this list was written; earlier days are not checked.
         // ============================================================================
         const markKey = (c, s, sub) => `${normMatch(c)}_${normMatch(s)}_${normMatch(sub)}`;
+
+        // ============================================================================
+        // MARKING HOURS (teacher's shift) + MISSED REGISTERS
+        //   A register can be marked / corrected only within the teacher's shift on that day,
+        //   extended to 15 min after the class ends if the class ends later than the shift.
+        //   After that it is "missed": the admin's page lists it as an automatic request; once the
+        //   admin presses Allow, the teacher can mark it (no time limit) — the existing approval token.
+        // ============================================================================
+        const HOURS_MSG = "🚫 Attendance can be marked or corrected only within institute hours.\n\nPlease contact admin.";
+        const hhmmToMins = (t) => { const [h, m] = String(t || "0:0").split(':').map(Number); return (h || 0) * 60 + (m || 0); };
+        const nowMins = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); };
+        function classEndFor(reg, dateStr) {
+            try {
+                const snap = getScheduleSnapshotForDate(dateStr);
+                const dayName = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][new Date(dateStr + "T00:00:00").getDay()];
+                const ends = (snap.schedule || []).filter(t => (!t.day || t.day === dayName) &&
+                    normMatch(t.className) === normMatch(reg.c) && normMatch(t.section || t.sectionName) === normMatch(reg.s) &&
+                    normMatch(t.subject || t.title) === normMatch(reg.sub) && t.end24).map(t => hhmmToMins(t.end24));
+                return ends.length ? Math.max(...ends) : null;
+            } catch (e) { return null; }
+        }
+        function markingWindow(reg, dateStr) {
+            const start = hhmmToMins(window.myDutyStart || "08:00");
+            let end = hhmmToMins(window.myDutyEnd || "17:00");
+            const classEnd = reg ? classEndFor(reg, dateStr) : null;
+            if (classEnd !== null) end = Math.max(end, classEnd + 15);
+            return { start, end };
+        }
+        // today, outside the teacher's marking hours?
+        function isOutsideMarkingHours(reg, dateStr) {
+            if (isAdmin || activeStudent || !activeStaff || dateStr !== todayISO) return false;
+            const w = markingWindow(reg, dateStr), n = nowMins();
+            return n < w.start || n > w.end;
+        }
+        // correction requests: only during the teacher's shift
+        function isOutsideShiftNow() {
+            if (isAdmin || activeStudent || !activeStaff) return false;
+            const n = nowMins();
+            return n < hhmmToMins(window.myDutyStart || "08:00") || n > hhmmToMins(window.myDutyEnd || "17:00");
+        }
         const MinervaDateIso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         const dailyMarksCache = {};   // date -> marks map (this page session)
         function addDailyMarkToBatch(batch, dateStr, c, s, sub, recs) {
@@ -1350,6 +1390,8 @@ if (isAdmin) {
                 const staffSnap = await db.collection("staff_applications").where("email", "==", activeStaff.email).get();
                 if (!staffSnap.empty) {
                     const data = staffSnap.docs[0].data();
+                    window.myDutyStart = data.dutyStartTime || "08:00";   // shift set in Admin Staff Leaves -> Staff Config
+                    window.myDutyEnd = data.dutyEndTime || "17:00";
                     const centerKey = Object.keys(data.details || {}).find(k => k.toLowerCase().includes('cent'));
                     if (centerKey) activeCenter = String(data.details[centerKey]).toUpperCase().includes('DHARAMSHALA') ? 'DHARAMSHALA' : 'GHUMARWIN';
                 }
@@ -3711,8 +3753,14 @@ async function loadDailyAttendance() {
                 let editUnlocked = !isPastDate || isAdmin;
                 if (isFutureDate) editUnlocked = false;
 
-                // Check if an approved/pending request exists SPECIFICALLY for this past date
-                if (isPastDate && !isAdmin && activeStaff) {
+                // Today, outside the teacher's marking hours (and not yet saved): locked unless the admin allowed it
+                const outsideHoursToday = !isPastDate && !isFutureDate && !hasAttendanceMarked && isOutsideMarkingHours(currentReg, dateStr);
+                let outsideHoursLocked = false;
+                let waitingForAdmin = false;
+                if (outsideHoursToday) { editUnlocked = false; outsideHoursLocked = true; }
+
+                // Check if an approved/pending request exists SPECIFICALLY for this past date (or a missed register today)
+                if ((isPastDate || outsideHoursToday) && !isAdmin && activeStaff) {
                     const reqSnap = await getCollection("attendance_edit_requests")
                         .where("date", "==", dateStr)
                         .where("className", "==", currentReg.c)
@@ -3727,9 +3775,10 @@ async function loadDailyAttendance() {
                             window.activeEditTokenId = approvedDoc.id;
                             window.approvedEditUnlocked = true;
                             editUnlocked = true;
+                            outsideHoursLocked = false;
                         } else {
                             const pendingDoc = reqSnap.docs.find(d => d.data().status === "PENDING");
-                            if (pendingDoc) editUnlocked = false; 
+                            if (pendingDoc) { editUnlocked = false; waitingForAdmin = true; }
                         }
                     }
                 }
@@ -3751,6 +3800,20 @@ async function loadDailyAttendance() {
            if(btn) { 
                     if (isFutureDate) {
                         btn.innerHTML = "🚫 Future Date Locked";
+                        btn.disabled = true;
+                        btn.classList.add('opacity-50', 'cursor-not-allowed');
+                        if (document.getElementById('bulk-present-btn')) document.getElementById('bulk-present-btn').style.display = 'none';
+                        if (document.getElementById('bulk-leave-btn')) document.getElementById('bulk-leave-btn').style.display = 'none';
+                        if (document.getElementById('mobile-bulk-btns')) document.getElementById('mobile-bulk-btns').style.display = 'none';
+                    } else if (waitingForAdmin && !hasAttendanceMarked) {
+                        btn.innerHTML = "⏳ Request sent — waiting for admin to allow";
+                        btn.disabled = true;
+                        btn.classList.add('opacity-50', 'cursor-not-allowed');
+                        if (document.getElementById('bulk-present-btn')) document.getElementById('bulk-present-btn').style.display = 'none';
+                        if (document.getElementById('bulk-leave-btn')) document.getElementById('bulk-leave-btn').style.display = 'none';
+                        if (document.getElementById('mobile-bulk-btns')) document.getElementById('mobile-bulk-btns').style.display = 'none';
+                    } else if (outsideHoursLocked) {
+                        btn.innerHTML = "🔒 Outside institute hours — contact admin";
                         btn.disabled = true;
                         btn.classList.add('opacity-50', 'cursor-not-allowed');
                         if (document.getElementById('bulk-present-btn')) document.getElementById('bulk-present-btn').style.display = 'none';
@@ -4048,6 +4111,7 @@ function getActiveTeacherName() {
         }
 
    async function openCorrectionModal() {
+            if (isOutsideShiftNow()) return alert(HOURS_MSG);
             // --- NEW: UNSAVED CHANGES WARNING ---
             const saveBtn = document.getElementById('save-daily-btn');
             if (saveBtn && !saveBtn.disabled && saveBtn.innerText.includes('Save Attendance')) {
@@ -4929,6 +4993,9 @@ const mySafeName = normMatch(activeStaff ? (activeStaff.name || activeStaff.emai
     }
 
     // --- STANDARD SAVE FLOW ---
+    if (window.approvedEditUnlocked !== true && isOutsideMarkingHours(currentReg, dateStr)) {
+        return alert(HOURS_MSG);
+    }
     const isPastDateSave = dateStr < todayISO;
     if (isPastDateSave && window.approvedEditUnlocked !== true) {
         const reason = prompt("This is a past date. Please enter a reason to request edit access from Admin:");
@@ -6283,6 +6350,10 @@ schedule.forEach(slot => {
                         const secKey = `${norm(slot.className)}|${norm(slot.section)}`;
                         if (!sectionCounts[secKey] || sectionCounts[secKey] === 0) return;
 
+                        // Subjects without subject-wise attendance (Class Structure: "📵 No subject attendance")
+                        const secStruct = (window.instituteStructures || []).find(x => norm(x.className) === norm(slot.className) && norm(x.sectionName || x.section) === norm(slot.section));
+                        if (secStruct && (secStruct.attendanceExempt || []).some(e => norm(e) === norm(sub))) return;
+
                 // Time / Grace Period Check
                         if (!slot.end24) return;
                         const [eh, em] = slot.end24.split(':').map(Number);
@@ -6382,11 +6453,17 @@ schedule.forEach(slot => {
                                 section: slot.section,
                                 subject: sub,
                                 teacher: displayTeacher,
-                                end24: slot.end24
+                                end24: slot.end24,
+                                teacherName: slot.teacherName || slot.teacher,
+                                teacherEmail: slot.teacherEmail || ""
                             });
                         }
                     });
                 });
+
+             // 4b. Missed registers become automatic requests on the admin's Requests tab
+                //     (past days; today only after the teacher's shift end, or class end + 15 min if later)
+                await createMissedRequests(missingLogs, todayIso, currentMins);
 
              // 5. Render Banner
                 if (missingLogs.length > 0) {
@@ -6423,6 +6500,44 @@ schedule.forEach(slot => {
             } catch (e) { console.error("Error scanning missing attendance:", e); }
         }
 
+        // One automatic request per missed register (fixed id, so it is created only once; a rejected one is not re-created)
+        async function createMissedRequests(missingLogs, todayIso, currentMins) {
+            try {
+                if (!missingLogs.length) return;
+                const nrm = (x) => String(x || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const staffName = (st) => { const d = st.details || {}; const k = Object.keys(d).find(x => x.toLowerCase().includes('name')); return k ? d[k] : st.email; };
+                const findStaff = (log) => (staffList || []).find(st => (log.teacherEmail && String(st.email || '').toLowerCase() === String(log.teacherEmail).toLowerCase()) || nrm(staffName(st)) === nrm(log.teacherName));
+                const due = missingLogs.filter(log => {
+                    if (log.date < todayIso) return true;
+                    const st = findStaff(log);
+                    const shiftEnd = hhmmToMins((st && st.dutyEndTime) || "17:00");
+                    return currentMins > Math.max(shiftEnd, hhmmToMins(log.end24) + 15);
+                });
+                if (!due.length) return;
+                const idOf = (log) => `missed_${activeCenter}_${log.date}_${markKey(log.className, log.section, log.subject)}`;
+                const first = due.map(l => l.date).sort()[0];
+                const existing = await db.collection("attendance_edit_requests")
+                    .where(firebase.firestore.FieldPath.documentId(), ">=", `missed_${activeCenter}_${first}`)
+                    .where(firebase.firestore.FieldPath.documentId(), "<=", `missed_${activeCenter}_${todayIso}\uf8ff`).get();
+                const have = new Set(existing.docs.map(d => d.id));
+                const batch = db.batch(); let n = 0;
+                due.forEach(log => {
+                    const id = idOf(log);
+                    if (have.has(id) || n >= 400) return;
+                    have.add(id);
+                    const st = findStaff(log);
+                    batch.set(db.collection("attendance_edit_requests").doc(id), {
+                        center: activeCenter, className: log.className, section: log.section, subject: log.subject, date: log.date,
+                        teacherEmail: (st && st.email) || log.teacherEmail || "", teacherName: (st && staffName(st)) || log.teacherName || "",
+                        reason: `Missed: not marked by the end of ${log.date < todayIso ? 'that day' : 'the shift'} (automatic)`,
+                        status: "PENDING", requestType: "MISSED", auto: true, timestamp: Date.now()
+                    });
+                    n++;
+                });
+                if (n) await batch.commit();
+            } catch (e) { console.warn("Missed-register requests skipped:", e); }
+        }
+
         async function loadAttendanceEditRequests() {
             const container = document.getElementById('edit-requests-container');
             container.innerHTML = `<div class="text-center py-10"><span class="loader"></span></div>`;
@@ -6454,13 +6569,13 @@ schedule.forEach(slot => {
 
      const actionButtons = data.requestType === 'UNMARK' 
                         ? `<button onclick="adminInitiateUnmark('${data.id}', '${data.date}', '${String(data.className).replace(/'/g, "\\'")}', '${String(data.section).replace(/'/g, "\\'")}', '${String(data.subject).replace(/'/g, "\\'")}')" class="flex-1 sm:flex-none bg-rose-600 text-white hover:bg-rose-500 px-4 py-2.5 rounded-lg font-black text-xs uppercase tracking-widest shadow-md transition-colors">Approve & Unmark</button>`
-                        : `<button onclick="approveEditRequest('${data.id}')" class="flex-1 sm:flex-none bg-emerald-600 text-white hover:bg-emerald-500 px-4 py-2.5 rounded-lg font-black text-xs uppercase tracking-widest shadow-md transition-colors">Approve Unlock</button>`;
+                        : `<button onclick="approveEditRequest('${data.id}')" class="flex-1 sm:flex-none bg-emerald-600 text-white hover:bg-emerald-500 px-4 py-2.5 rounded-lg font-black text-xs uppercase tracking-widest shadow-md transition-colors">${data.requestType === 'MISSED' ? 'Allow' : 'Approve Unlock'}</button>`;
 
                     html += `
                     <div class="bg-slate-50 border border-slate-200 rounded-xl p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                         <div>
                             <div class="flex items-center gap-2 mb-1">
-                                <span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest">${data.requestType === 'UNMARK' ? 'Unmark Request' : 'Pending Request'}</span>
+                                <span class="${data.requestType === 'MISSED' ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'} px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest">${data.requestType === 'MISSED' ? '⏰ Missed (auto)' : data.requestType === 'UNMARK' ? 'Unmark Request' : 'Pending Request'}</span>
                                 <span class="text-[10px] font-bold text-slate-400">${reqDate}</span>
                             </div>
                             <h4 class="font-black text-slate-800 text-sm uppercase">${data.className} | Sec ${data.section} <span class="text-purple-600">(${data.subject})</span></h4>
