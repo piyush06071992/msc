@@ -7,6 +7,7 @@
   <script src="tailwind-engine.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="leave-schedule.js?v=3"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@latest/Sortable.min.js"></script>
     <style>
         /* Clean Details Dropdown Arrow */
@@ -3744,6 +3745,73 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
         // === SAVE ENGINE & EMAIL NOTIFICATION                                     ===
         // ============================================================================
         
+        // ============================================================
+        // WARN BEFORE SAVING if the change breaks a leave substitution.
+        // A substitution is "affected" when its class (class + section + time, taught by the teacher
+        // on leave) is in the timetable that applies now, but not in the timetable being saved.
+        // Nothing is changed automatically: the admin is told what to reassign in Leave Command.
+        //   newRowsForDate(dateIso, info) -> rows that will apply on that date after this save,
+        //                                    or null if this save does not change that date.
+        // Returns true to continue saving, false to cancel.
+        // ============================================================
+        async function confirmSubstitutionsStillValid(newRowsForDate) {
+            let affected = [];
+            try {
+                const LS = MinervaLeaveSchedule;
+                const fromIso = LS.localIso(new Date());
+                const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
+                const nrm = (x) => String(x || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                const toM = (t) => { const [h, m] = String(t || "0:0").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
+
+                const snap = await db.collection(prefix + "leave_requests").where("endDate", ">=", fromIso).get();
+                const items = [];
+                snap.docs.forEach(d => {
+                    const l = d.data();
+                    if (l.status !== "PENDING" && l.status !== "APPROVED") return;
+                    (l.adjustments || []).forEach(a => {
+                        if (!LS.isClassAdj(a) || !a.date || a.date < fromIso) return;
+                        if (a.substituteResponse === "DECLINED") return;
+                        items.push({ l, a });
+                    });
+                });
+                if (items.length === 0) return true;
+
+                const sched = LS.create({ db, prefix });
+                await sched.ensureDates([...new Set(items.map(i => i.a.date))], { rosters: false });
+
+                const hasClass = (rows, dateIso, l, a) => {
+                    const day = LS.dayNameOf(dateIso), c = LS.adjClass(a);
+                    return (rows || []).some(r => (!r.day || String(r.day).trim() === day) &&
+                        nrm(r.className) === nrm(c.cls) && nrm(r.section) === nrm(c.sec) &&
+                        toM(r.start24) < a.end && toM(r.end24) > a.start &&
+                        (nrm(r.teacherName || r.teacher) === nrm(l.teacherName) ||
+                         (r.teacherEmail && l.teacherEmail && String(r.teacherEmail).toLowerCase() === String(l.teacherEmail).toLowerCase())));
+                };
+                items.forEach(({ l, a }) => {
+                    const newRows = newRowsForDate(a.date, sched.dayInfo(a.date));
+                    if (!newRows) return;                                        // this save doesn't touch that date
+                    if (!hasClass(sched.dayRows(a.date), a.date, l, a)) return;  // was already out of date before
+                    if (!hasClass(newRows, a.date, l, a)) affected.push({ l, a });
+                });
+            } catch (e) {
+                console.warn("Substitution check skipped:", e);
+                return true; // never block a save because the check itself failed
+            }
+            if (affected.length === 0) return true;
+
+            const hm = (m) => format12Hour(`${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`);
+            let msg = `⚠️ THIS CHANGE AFFECTS ${affected.length} LEAVE SUBSTITUTION(S):\n\n`;
+            affected.slice(0, 12).forEach(({ l, a }) => {
+                const who = MinervaLeaveSchedule.isWaitingForIncharge(a) ? "no substitute yet" : a.adjustedTo;
+                msg += `• ${a.date} | ${a.sub} ${a.title || ""} ${hm(a.start)}: ${who} (for ${l.teacherName}'s leave)\n`;
+            });
+            if (affected.length > 12) msg += `...and ${affected.length - 12} more\n`;
+            msg += `\nThese classes move or change teacher with this save, so the substitute will no longer be in the right place.` +
+                   `\nAfter saving, reassign them in Leave Command → Manage Substitutions (they will show as "Outdated").` +
+                   `\n\nPress OK to save anyway, or Cancel to go back.`;
+            return confirm(msg);
+        }
+
  async function auditBrokenLeaves(targetDateStr, newSchedule) {
             // Disabled: Substitutions persist through time shifts; conflicts are handled via visual grid clashes.
             return;
@@ -3826,6 +3894,9 @@ function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
             // -------------------------
 
           if (conflictMsg) return alert(conflictMsg);
+
+            // Warn if this breaks a leave substitution on a day that follows the live master
+            if (!(await confirmSubstitutionsStillValid((dateIso, info) => (info && info.source === "LIVE") ? newSlots : null))) return;
 
             // --- HARD STOP: Branch Specific Confirmation ---
             const masterCheck = confirm(`🚨 LIVE MASTER SAVE: You are about to PERMANENTLY rewrite the Master Schedule for the ${activeCenter} branch.\n\nThis affects the default weekly routine. Proceed?`);
@@ -4702,6 +4773,13 @@ const batch = db.batch();
             dates_affected: selectedDates
         });
 
+        // Warn if this breaks a leave substitution on the dates being saved
+        const payloadByDate = new Map(auditPayloads.map(p => [p.date, p.schedule]));
+        if (!(await confirmSubstitutionsStillValid((dateIso) => payloadByDate.get(dateIso) || null))) {
+            btn.disabled = false; btn.innerText = "🚀 Execute Replication";
+            return;
+        }
+
         if (allMismatches.length > 0) {
             let warningText = "⚠️ Master Schedule Discrepancies Detected:\nThe following slots differ from the Live Master Schedule:\n\n";
             allMismatches.slice(0, 10).forEach(m => {
@@ -4739,12 +4817,7 @@ const batch = db.batch();
         if (combinedAffected.length > 0) {
             const dateList = auditPayloads.map(p => p.date).join(', ');
             openWhatsAppAlert(combinedAffected, `Specific Dates / Exam Override (${dateList})`);
-
-            await db.collection("instant_alerts").add({
-                timestamp: Date.now(),
-                type: "TIMETABLE_UPDATE",
-                teachers: combinedAffected
-            });
+            // (push alerts were already sent by sendEmailNotification above; adding another here sent them twice)
         }
 
         alert(`✅ Successfully Replicated and notified affected teachers!`);

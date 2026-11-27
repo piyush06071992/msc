@@ -74,6 +74,7 @@
         const docIdField = () => global.firebase.firestore.FieldPath.documentId();
 
         const dayRowsByDate = new Map();      // dateIso -> rows for that weekday
+        const sourceByDate = new Map();       // dateIso -> "OVERRIDE" | "FUTURE_MASTER" | "LIVE" | "PAST_MASTER"
         const datePromises = new Map();       // dateIso -> loading promise
         const liveByDay = new Map();          // dayName -> promise of live rows
         const rosterById = new Map();         // roster doc id -> { id, ...data }
@@ -150,20 +151,20 @@
             const sameDay = await src.col.where("date", "==", dateIso).get();
             const override = sameDay.docs.map(src.toHistory)
                 .find(h => h && h.status !== "CANCELLED" && OVERRIDE_TYPES.includes(h.type) && h.schedule);
-            if (override) return forDay(override.schedule, dayName);
+            if (override) return { rows: forDay(override.schedule, dayName), source: "OVERRIDE" };
 
             if (dateIso >= todayIso) {
                 // 2. Future master starting after today and by this date, else the live timetable
                 const fm = (await futureMasters())
                     .filter(h => h.date > todayIso && h.date <= dateIso)
                     .sort((a, b) => b.date.localeCompare(a.date))[0];
-                if (fm) return forDay(fm.schedule, dayName);
-                return liveRows(dayName);
+                if (fm) return { rows: forDay(fm.schedule, dayName), source: "FUTURE_MASTER", fromDate: fm.date };
+                return { rows: await liveRows(dayName), source: "LIVE" };
             }
             // 3. Past date: the master that applied then
             const master = await pastMaster(dateIso);
-            if (master) return forDay(master.schedule, dayName);
-            return liveRows(dayName);
+            if (master) return { rows: forDay(master.schedule, dayName), source: "PAST_MASTER" };
+            return { rows: await liveRows(dayName), source: "LIVE" };
         }
 
         function loadRosters(dateIso) {
@@ -191,7 +192,7 @@
             const unique = [...new Set((dates || []).filter(Boolean))];
             await Promise.all(unique.map(dateIso => {
                 if (!datePromises.has(dateIso)) {
-                    const p = loadDate(dateIso).then(rows => { dayRowsByDate.set(dateIso, rows); });
+                    const p = loadDate(dateIso).then(r => { dayRowsByDate.set(dateIso, r.rows); sourceByDate.set(dateIso, r); });
                     p.catch(() => datePromises.delete(dateIso)); // allow a retry after a failure
                     datePromises.set(dateIso, p);
                 }
@@ -232,7 +233,13 @@
             return "";
         }
 
-        return { ensureDates, isLoaded, dayRows, dutyRosters, dutyDateOf };
+        // Which timetable applies on a loaded date: { source, fromDate? }
+        function dayInfo(dateIso) {
+            const r = sourceByDate.get(dateIso);
+            return r ? { source: r.source, fromDate: r.fromDate } : null;
+        }
+
+        return { ensureDates, isLoaded, dayRows, dayInfo, dutyRosters, dutyDateOf };
     }
 
     // ------------------------------------------------------------------------
@@ -305,5 +312,5 @@
 
     global.MinervaLeaveSchedule = { create, localIso, dayNameOf, mondayOf, addDays,
         adjClass, isClassAdj, adjMatchesClass, adjCovers, isWaitingForIncharge, adjStatusText, assignedByOf, assignedByText, subLine,
-        VERSION: 2 };
+        VERSION: 3 };
 })(typeof window !== "undefined" ? window : globalThis);
