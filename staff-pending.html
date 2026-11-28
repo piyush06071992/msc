@@ -507,6 +507,7 @@
                         <h4 class="text-xs sm:text-sm font-black text-emerald-900 uppercase tracking-wider">Step C: HR Decision, Offer & Joining</h4>
                         <span id="hr-offer-pill" class="text-[10px] font-black uppercase tracking-widest px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800">Final Step</span>
                     </div>
+                    <div id="hr-skip-note" class="hidden bg-amber-50 border border-amber-300 text-amber-900 rounded-xl p-3 text-[11px] font-bold">⚠️ This applicant has not been interviewed yet (no scores). You can still send an offer or approve, but you will be asked for a reason and it is recorded in the history.</div>
 
                     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                         <div>
@@ -2147,6 +2148,9 @@
                 if (!pkg || !joiningDate) {
                     return alert('Please enter the Monthly Salary and Date of Joining before adding to the staff list.');
                 }
+                const skipReason = askSkipRoundsReason(app, 'add them to the staff list');
+                if (skipReason === null) return;
+                const skip = skipRoundsFields(skipReason);
                 if (!confirm(`Approve ${getApplicantName(app)} and add to Faculty Hub (${allottedBranch})?`)) return;
 
                 const updatedDetails = { ...(app.details || {}) };
@@ -2174,7 +2178,9 @@
                     post: document.getElementById('hr-post').value.trim() || (app.offer && app.offer.post) || '',
                     approvedOn: firebase.firestore.FieldValue.serverTimestamp(),
                     approvedBy: currentActor.email,
+                    ...(skip.roundsSkipped ? { roundsSkipped: skip.roundsSkipped } : {}),
                     history: firebase.firestore.FieldValue.arrayUnion(
+                        ...(skip.skipHistory ? [skip.skipHistory] : []),
                         buildDelegationAuditEntry(
                             'Final Approved → Added to Staff List',
                             `Branch: ${allottedBranch} | Package: ${pkg} | Joining: ${joiningDate}${hrRemarks ? ' | ' + hrRemarks : ''}`
@@ -2189,6 +2195,9 @@
             }
 
             if (decision === 'ON_HOLD') {
+                const skipReason = askSkipRoundsReason(app, 'put them on HR hold');
+                if (skipReason === null) return;
+                const skip = skipRoundsFields(skipReason);
                 await db.collection('staff_applications').doc(activeModalAppId).update({
                     stage: 'HR',
                     status: 'on_hold',
@@ -2196,7 +2205,9 @@
                     package: pkg,
                     joiningDate,
                     hrRemarks,
+                    ...(skip.roundsSkipped ? { roundsSkipped: skip.roundsSkipped } : {}),
                     history: firebase.firestore.FieldValue.arrayUnion(
+                        ...(skip.skipHistory ? [skip.skipHistory] : []),
                         buildDelegationAuditEntry('HR Round → On Hold', hrRemarks || 'Placed on hold by HR')
                     )
                 });
@@ -2274,7 +2285,34 @@
             return '';
         }
 
+        // Has the applicant gone through the interview rounds (or been skipped on purpose already)?
+        function roundsNotDone(app) {
+            if (!app || app.offer || app.roundsSkipped) return false;
+            if (getStructuredScoreEntries(app).length > 0) return false;
+            const st = String(app.status || '').toLowerCase();
+            if (st === 'sent_to_admin' || st === 'hr_round' || st.indexOf('offer_') === 0) return false;
+            if (app.stage === 'HR' || app.stage === 'Admin_Review') return false;
+            return true;
+        }
+        // Asks the admin to confirm skipping the rounds. Returns null if cancelled, '' if not needed,
+        // otherwise the reason (recorded in the history).
+        function askSkipRoundsReason(app, action) {
+            if (!roundsNotDone(app)) return '';
+            if (!confirm(`⚠️ ${getApplicantName(app)} has not been interviewed yet (no scores).\n\nSkip the interview rounds and ${action} directly?`)) return null;
+            const reason = (prompt('Reason for skipping the interview rounds (saved in the history):', '') || '').trim();
+            if (!reason) { alert('Please give a reason to skip the interview rounds.'); return null; }
+            return reason;
+        }
+        function skipRoundsFields(reason) {
+            if (!reason) return {};
+            return {
+                roundsSkipped: { by: currentActor.name, byEmail: currentActor.email, reason, at: new Date().toISOString() },
+                skipHistory: buildDelegationAuditEntry('Interview rounds skipped', `Skipped by ${currentActor.name} — reason: ${reason}`)
+            };
+        }
+
         async function fillOfferSection(app) {
+            document.getElementById('hr-skip-note').classList.toggle('hidden', !roundsNotDone(app));
             const set = await loadOfferSettings();
             const o = app.offer || {};
             document.getElementById('hr-post').value = o.post || app.post || '';
@@ -2421,6 +2459,9 @@
             if (!o.joiningDate) return alert('Please choose the Date of Joining.');
             if (!app.email) return alert('This applicant has no email address, so the offer cannot be emailed.');
             const resend = Boolean(app.offer && app.offer.status);
+            const skipReason = askSkipRoundsReason(app, 'send the offer');
+            if (skipReason === null) return;
+            const skip = skipRoundsFields(skipReason);
             if (!confirm(`${resend ? 'Update and re-send' : 'Send'} the offer to ${o.name} (${app.email})?\n\n${o.post} · ${o.branch}\n₹${MinervaOffer.formatINR(o.monthlySalary)} per month (₹${MinervaOffer.formatINR(o.annualPackage)} per year)\nJoining: ${MinervaOffer.prettyDate(o.joiningDate)}`)) return;
             const btn = document.getElementById('btn-send-offer'); const btnText = btn.textContent; btn.disabled = true; btn.textContent = 'Preparing letter…';
             try {
@@ -2434,7 +2475,8 @@
                     joiningDate: o.joiningDate, allottedBranch: o.branch, post: o.post,
                     hrRemarks: document.getElementById('hr-final-remarks').value.trim(),
                     offerTimeline: firebase.firestore.FieldValue.arrayUnion(offerTimelineEntry(`${resend ? 'Offer updated & re-sent' : 'Offer sent'} by email — ${o.post}, ₹${MinervaOffer.formatINR(o.monthlySalary)}/month, joining ${MinervaOffer.prettyDate(o.joiningDate)}${o.pdfUrl ? '' : ' (PDF could not be attached)'}`, 'SENT')),
-                    history: firebase.firestore.FieldValue.arrayUnion(buildDelegationAuditEntry(resend ? 'Offer Updated & Re-sent' : 'Offer Sent', `${o.post} | ${o.branch} | ₹${MinervaOffer.formatINR(o.monthlySalary)}/month | Joining ${o.joiningDate}`))
+                    ...(skip.roundsSkipped ? { roundsSkipped: skip.roundsSkipped } : {}),
+                    history: firebase.firestore.FieldValue.arrayUnion(...(skip.skipHistory ? [skip.skipHistory] : []), buildDelegationAuditEntry(resend ? 'Offer Updated & Re-sent' : 'Offer Sent', `${o.post} | ${o.branch} | ₹${MinervaOffer.formatINR(o.monthlySalary)}/month | Joining ${o.joiningDate}`))
                 });
                 emailOffer(app, offer);
                 alert(`✅ Offer ${resend ? 're-sent' : 'sent'} to ${app.email}.${o.pdfUrl ? '' : '\n\n⚠️ The PDF could not be made, so the email has no attachment (the details are in the email).'}`);
@@ -2741,7 +2783,7 @@
                     return { name: getApplicantName(a), cvId: a.cvId || a.id, post: o.post || a.post || '', branch: o.branch || a.allottedBranch || '',
                         monthly: o.monthlySalary || a.monthlySalary || '', annual: o.annualPackage || a.annualPackage || '', sent: o.sentAt ? o.sentAt.slice(0, 10) : '',
                         response: o.response ? `${o.response.kind}${o.response.via === 'CANDIDATE' ? ' (by candidate' + (o.signature ? ', signed' : '') + (o.signedCopyUrl ? ', copy uploaded' : '') + ')' : ' (recorded by HR)'}${o.response.comment ? ': ' + o.response.comment : ''}` : (o.viewedAt ? 'Opened, no answer yet' : ''), doj: o.joiningDate || a.joiningDate || '',
-                        status: outcome, lastNote: tl[0] ? `${tl[0].at.slice(0, 10)} ${tl[0].text}` : '', raw: a, sortKey: o.sentAt || '' };
+                        status: outcome, rounds: a.roundsSkipped ? `Skipped by ${a.roundsSkipped.by || ''}: ${a.roundsSkipped.reason || ''}` : 'Done', lastNote: tl[0] ? `${tl[0].at.slice(0, 10)} ${tl[0].text}` : '', raw: a, sortKey: o.sentAt || '' };
                 }).sort((x, y) => String(y.sortKey).localeCompare(String(x.sortKey)));
                 const reminders = offerReportRows.filter(r => ['Offer sent', 'Accepted'].includes(r.status)).map(r => {
                     if (r.status === 'Offer sent' && r.sent && offerDaysBetween(r.sent, today) >= 2) return `📧 ${r.name}: no reply for ${offerDaysBetween(r.sent, today)} days`;
@@ -2752,8 +2794,8 @@
                 if (!offerReportRows.length) { body.innerHTML = '<p class="text-center py-10 text-slate-400 font-black uppercase tracking-widest text-xs">No offers yet.</p>'; return; }
                 const th = (t) => `<th class="p-2 text-left text-[10px] font-black uppercase tracking-widest text-slate-500 border-b border-slate-200 whitespace-nowrap">${t}</th>`;
                 const td = (t) => `<td class="p-2 border-b border-slate-100 text-[11px] font-bold text-slate-700 align-top">${escapeHtml(t)}</td>`;
-                body.innerHTML = `<table class="w-full border-collapse"><thead><tr>${['Candidate', 'CV ID', 'Post', 'Branch', 'Monthly ₹', 'Annual ₹', 'Offer sent', 'Status', 'Response', 'Joining', 'Last follow-up'].map(th).join('')}</tr></thead><tbody>` +
-                    offerReportRows.map(r => `<tr class="hover:bg-sky-50 cursor-pointer" onclick="document.getElementById('offer-report-modal').classList.replace('flex','hidden'); openOfferFromReport('${escapeHtml(r.raw.id)}')">${[r.name, r.cvId, r.post, r.branch, r.monthly ? MinervaOffer.formatINR(r.monthly) : '', r.annual ? MinervaOffer.formatINR(r.annual) : '', r.sent, r.status, r.response, r.doj, r.lastNote].map(td).join('')}</tr>`).join('') + '</tbody></table>';
+                body.innerHTML = `<table class="w-full border-collapse"><thead><tr>${['Candidate', 'CV ID', 'Post', 'Branch', 'Monthly ₹', 'Annual ₹', 'Offer sent', 'Status', 'Interview', 'Response', 'Joining', 'Last follow-up'].map(th).join('')}</tr></thead><tbody>` +
+                    offerReportRows.map(r => `<tr class="hover:bg-sky-50 cursor-pointer" onclick="document.getElementById('offer-report-modal').classList.replace('flex','hidden'); openOfferFromReport('${escapeHtml(r.raw.id)}')">${[r.name, r.cvId, r.post, r.branch, r.monthly ? MinervaOffer.formatINR(r.monthly) : '', r.annual ? MinervaOffer.formatINR(r.annual) : '', r.sent, r.status, r.rounds, r.response, r.doj, r.lastNote].map(td).join('')}</tr>`).join('') + '</tbody></table>';
             } catch (e) { body.textContent = 'Could not load the report: ' + e.message; }
         }
         async function openOfferFromReport(id) {
@@ -2762,7 +2804,7 @@
         }
         function downloadOfferReport() {
             if (!offerReportRows.length) return alert('Nothing to download.');
-            const cols = [['Candidate', 'name'], ['CV ID', 'cvId'], ['Post', 'post'], ['Branch', 'branch'], ['Monthly salary', 'monthly'], ['Annual package', 'annual'], ['Offer sent', 'sent'], ['Status', 'status'], ['Candidate response', 'response'], ['Date of joining', 'doj'], ['Last follow-up', 'lastNote']];
+            const cols = [['Candidate', 'name'], ['CV ID', 'cvId'], ['Post', 'post'], ['Branch', 'branch'], ['Monthly salary', 'monthly'], ['Annual package', 'annual'], ['Offer sent', 'sent'], ['Status', 'status'], ['Interview rounds', 'rounds'], ['Candidate response', 'response'], ['Date of joining', 'doj'], ['Last follow-up', 'lastNote']];
             const q = (v) => `"${String(v === undefined || v === null ? '' : v).replace(/"/g, '""')}"`;
             const csv = '﻿' + cols.map(c => q(c[0])).join(',') + '\n' + offerReportRows.map(r => cols.map(c => q(r[c[1]])).join(',')).join('\n');
             const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
