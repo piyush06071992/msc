@@ -4,85 +4,141 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Minerva Live Demo & Interview Room</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="style.css">
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-storage-compat.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap');
         body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #0f172a; color: #f8fafc; }
-        #whiteboard-canvas { touch-action: none; cursor: crosshair; }
+        .ink { touch-action: none; cursor: crosshair; position: absolute; inset: 0; width: 100%; height: 100%; }
+        .tile { position: relative; background: #020617; border: 1px solid #1e293b; border-radius: 1rem; overflow: hidden; aspect-ratio: 16 / 9; }
+        .tile video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+        .tile:fullscreen video, .tile:-webkit-full-screen video { object-fit: contain; }
+        .tile:fullscreen { border-radius: 0; }
+        .hidden { display: none !important; }
+        #video-grid.grid-1 { grid-template-columns: 1fr; }
+        #video-grid.grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        #video-grid.grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        body.board-open #video-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        @media (min-width: 1024px) { body.board-open #video-grid { grid-template-columns: 1fr; } body.board-open #video-grid[data-n="3"], body.board-open #video-grid[data-n="4"] { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        .pen { width: 1.5rem; height: 1.5rem; border-radius: 9999px; border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+        .pen.on { outline: 3px solid #6366f1; outline-offset: 1px; }
     </style>
 </head>
 <body class="min-h-screen flex flex-col overflow-x-hidden">
 
-    <!-- Top Control Bar -->
-    <header class="bg-slate-900 border-b border-slate-800 px-4 py-3 flex flex-wrap items-center justify-between gap-3 shrink-0">
-        <div class="flex items-center gap-3">
-            <span class="w-3 h-3 rounded-full bg-emerald-400 animate-pulse"></span>
-            <div>
+    <!-- Top bar -->
+    <header class="bg-slate-900 border-b border-slate-800 px-3 sm:px-4 py-3 flex flex-wrap items-center justify-between gap-3 shrink-0">
+        <div class="flex items-center gap-3 min-w-0">
+            <span class="w-3 h-3 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+            <div class="min-w-0">
                 <h1 class="text-sm sm:text-base font-black uppercase tracking-wider text-white leading-none">
                     Minerva Live Demo Room <span id="room-cvid-badge" class="ml-1.5 px-2.5 py-0.5 rounded-full bg-indigo-600 text-[11px]">---</span>
+                    <span id="people-badge" class="ml-1 px-2.5 py-0.5 rounded-full bg-slate-700 text-[11px]">👥 0/4</span>
                 </h1>
-                <p id="room-status-text" class="text-[11px] font-bold text-slate-400 mt-1">Initializing camera & room...</p>
+                <p id="room-status-text" class="text-[11px] font-bold text-slate-400 mt-1 truncate">Starting camera…</p>
             </div>
         </div>
-
         <div class="flex flex-wrap items-center gap-2">
             <button id="btn-toggle-mic" onclick="toggleMic()" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-black uppercase tracking-wider">🎤 Mic On</button>
             <button id="btn-toggle-cam" onclick="toggleCam()" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-black uppercase tracking-wider">📷 Cam On</button>
-            <button id="btn-share-screen" onclick="toggleScreenShare()" class="px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-xs font-black uppercase tracking-wider">🖥️ Share Screen</button>
-            <button id="btn-copy-invite" onclick="copyCandidateInvite()" class="hidden px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-black uppercase tracking-wider">🔗 Copy Applicant Link</button>
-            <button onclick="leaveOrEndRoom()" class="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-xs font-black uppercase tracking-wider">End / Leave</button>
+            <button id="btn-share-screen" onclick="toggleScreenShare()" class="px-3 py-2 rounded-xl bg-sky-700 hover:bg-sky-600 text-xs font-black uppercase tracking-wider">🖥️ Share Screen</button>
+            <button id="btn-board" onclick="toggleBoardForAll()" class="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black uppercase tracking-wider">🖊 Board</button>
+            <button id="btn-invite-teacher" onclick="inviteTeacher()" class="hidden px-3 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-xs font-black uppercase tracking-wider">👥 Invite Teacher</button>
+            <button id="btn-copy-invite" onclick="copyCandidateInvite()" class="hidden px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-black uppercase tracking-wider">🔗 Applicant Link</button>
+            <button id="btn-relay" onclick="openRelaySettings()" class="hidden px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-black uppercase tracking-wider" title="Relay server settings">⚙️</button>
+            <button id="btn-leave" onclick="leaveOrEndRoom()" class="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-xs font-black uppercase tracking-wider">Leave</button>
         </div>
     </header>
 
-    <!-- Main Split Workspace: Video Feeds + Synchronized Handwriting Board -->
-    <main class="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4">
-
-        <!-- Left Column: Video & Screen Share -->
-        <section class="lg:col-span-5 flex flex-col gap-4">
-            <div class="relative bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden aspect-video shadow-xl">
-                <video id="remote-video" autoplay playsinline class="w-full h-full object-contain bg-black"></video>
-                <span id="remote-label" class="absolute bottom-3 left-3 px-3 py-1 rounded-lg bg-slate-900/80 text-[11px] font-black uppercase tracking-wider">Waiting for participant...</span>
-            </div>
-
-            <div class="relative bg-slate-950 rounded-2xl border border-slate-800 overflow-hidden aspect-video shadow-xl">
-                <video id="local-video" autoplay muted playsinline class="w-full h-full object-cover"></video>
-                <span id="local-label" class="absolute bottom-3 left-3 px-3 py-1 rounded-lg bg-indigo-900/85 text-[11px] font-black uppercase tracking-wider">You</span>
-            </div>
+    <!-- Workspace: videos (+ board when opened) -->
+    <main id="workspace" class="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-3 sm:p-4">
+        <section id="video-col" class="lg:col-span-12 flex flex-col gap-3">
+            <div id="video-grid" class="grid gap-3 grid-1"></div>
+            <p class="text-[10px] font-bold text-slate-500 text-center">Tip: double-tap a video or press ⛶ for full screen.</p>
         </section>
 
-        <!-- Right Column: Live Synchronized Handwriting Whiteboard (Mouse / Touch / Stylus) -->
-        <section class="lg:col-span-7 bg-white rounded-2xl border border-slate-300 shadow-xl flex flex-col overflow-hidden min-h-[420px]">
-            <div class="bg-slate-100 border-b border-slate-200 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-slate-900">
-                <div class="flex items-center gap-2">
-                    <span class="text-xs font-black uppercase tracking-wider text-slate-700">✍️ Live Demo Board</span>
-                    <button onclick="setPenTool('#0f172a', 3)" class="w-6 h-6 rounded-full bg-slate-900 border-2 border-white shadow" title="Black Pen"></button>
-                    <button onclick="setPenTool('#2563eb', 3)" class="w-6 h-6 rounded-full bg-blue-600 border-2 border-white shadow" title="Blue Pen"></button>
-                    <button onclick="setPenTool('#dc2626', 3)" class="w-6 h-6 rounded-full bg-red-600 border-2 border-white shadow" title="Red Pen"></button>
-                    <button onclick="setPenTool('#16a34a', 3)" class="w-6 h-6 rounded-full bg-green-600 border-2 border-white shadow" title="Green Pen"></button>
-                    <button onclick="setPenTool('#ffffff', 22)" class="px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-[10px] font-black uppercase">Eraser</button>
+        <!-- Board (hidden until someone taps 🖊 Board) -->
+        <section id="board-col" class="hidden lg:col-span-8 bg-white rounded-2xl border border-slate-300 shadow-xl flex flex-col overflow-hidden text-slate-900 min-h-[460px]">
+            <div class="bg-slate-100 border-b border-slate-200 px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-xs font-black uppercase tracking-wider text-slate-700">✍️ Board</span>
+                    <button class="pen on" data-c="#0f172a" style="background:#0f172a" onclick="setPen(this)" title="Black"></button>
+                    <button class="pen" data-c="#2563eb" style="background:#2563eb" onclick="setPen(this)" title="Blue"></button>
+                    <button class="pen" data-c="#dc2626" style="background:#dc2626" onclick="setPen(this)" title="Red"></button>
+                    <button class="pen" data-c="#16a34a" style="background:#16a34a" onclick="setPen(this)" title="Green"></button>
+                    <button id="eraser-btn" onclick="setEraser()" class="px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-[10px] font-black uppercase">Eraser</button>
                 </div>
-
-                <div class="flex items-center gap-2">
-                    <button onclick="clearBoardAll()" class="px-3 py-1 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-800 text-[10px] font-black uppercase tracking-wider">Clear Board</button>
+                <div class="flex flex-wrap items-center gap-2">
+                    <label class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-black uppercase tracking-wider cursor-pointer">
+                        📎 Share image / PDF <input id="doc-file" type="file" accept="image/*,application/pdf" class="hidden" onchange="shareDocument(this)">
+                    </label>
+                    <button id="btn-close-doc" onclick="closeDocument()" class="hidden px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-800 text-[10px] font-black uppercase tracking-wider">Close document</button>
                 </div>
             </div>
-
-            <div class="relative flex-1 bg-white">
-                <canvas id="whiteboard-canvas" class="w-full h-full block"></canvas>
+            <div id="board-panels" class="flex-1 grid grid-cols-1 gap-3 p-3 bg-slate-200/60">
+                <!-- shared document + its pen layer -->
+                <div id="doc-panel" class="hidden flex flex-col gap-2 min-w-0">
+                    <div class="flex items-center justify-between gap-2">
+                        <span id="doc-name" class="text-[10px] font-black uppercase tracking-wider text-slate-600 truncate"></span>
+                        <div class="flex items-center gap-1.5">
+                            <button onclick="docPage(-1)" class="px-2 py-1 rounded bg-white border border-slate-300 text-xs font-black">‹</button>
+                            <span id="doc-page" class="text-[11px] font-black text-slate-700">1/1</span>
+                            <button onclick="docPage(1)" class="px-2 py-1 rounded bg-white border border-slate-300 text-xs font-black">›</button>
+                            <button onclick="clearLayer('doc')" class="px-2 py-1 rounded bg-rose-100 text-rose-800 text-[10px] font-black uppercase">Clear marks</button>
+                        </div>
+                    </div>
+                    <div id="doc-stage" class="relative bg-white rounded-xl shadow overflow-hidden">
+                        <img id="doc-img" alt="" class="block w-full h-auto select-none pointer-events-none">
+                        <canvas id="ink-doc" class="ink"></canvas>
+                    </div>
+                </div>
+                <!-- blank board -->
+                <div class="flex flex-col gap-2 min-w-0">
+                    <div class="flex items-center justify-between">
+                        <span class="text-[10px] font-black uppercase tracking-wider text-slate-600">Blank board</span>
+                        <button onclick="clearLayer('board')" class="px-2 py-1 rounded bg-rose-100 text-rose-800 text-[10px] font-black uppercase">Clear board</button>
+                    </div>
+                    <div id="board-stage" class="relative bg-white rounded-xl shadow overflow-hidden" style="aspect-ratio: 4 / 3;">
+                        <canvas id="ink-board" class="ink"></canvas>
+                    </div>
+                </div>
             </div>
+            <p id="doc-progress" class="hidden px-3 py-2 text-[11px] font-black text-indigo-700 bg-indigo-50 border-t border-indigo-100"></p>
         </section>
     </main>
 
+    <!-- Relay settings (host) -->
+    <div id="relay-modal" class="fixed inset-0 z-50 hidden bg-slate-950/80 items-center justify-center p-3">
+        <div class="bg-white text-slate-900 rounded-3xl w-full max-w-lg p-6 space-y-3">
+            <h3 class="text-sm font-black uppercase tracking-widest">⚙️ Relay server (TURN)</h3>
+            <p class="text-xs font-bold text-slate-500">Helps calls connect on strict mobile / office networks. Paste the details from your TURN provider. Leave empty to use direct connections only.</p>
+            <input id="relay-urls" class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold" placeholder="TURN address(es), comma separated, e.g. turn:global.relay.example.com:80?transport=tcp">
+            <input id="relay-user" class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold" placeholder="Username">
+            <input id="relay-pass" class="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold" placeholder="Credential / password">
+            <div class="flex justify-end gap-2 pt-2">
+                <button onclick="document.getElementById('relay-modal').classList.replace('flex','hidden')" class="px-4 py-2.5 rounded-xl bg-slate-100 text-slate-700 font-black text-xs uppercase">Cancel</button>
+                <button onclick="saveRelaySettings()" class="px-4 py-2.5 rounded-xl bg-indigo-600 text-white font-black text-xs uppercase">Save</button>
+            </div>
+        </div>
+    </div>
+
     <script>
+        // ===================================================================================
+        // MINERVA INTERVIEW ROOM (up to 4 people)
+        // - Everyone connects to everyone (WebRTC); Firestore carries the connection messages:
+        //   interview_rooms/{room}                         room state (board open, shared document)
+        //   interview_rooms/{room}/participants/{pid}      who is in the room (heartbeat)
+        //   interview_rooms/{room}/connections/{from_to}   offer/answer per pair (+ /ice)
+        //   interview_rooms/{room}/strokes                 pen strokes (board or document page)
+        // - Links: applicant  ?cvId&key          host  ?cvId&key&role=host&hostName
+        //          teacher    ?cvId&key&role=teacher&name   (host / teachers copy it with 👥 Invite Teacher)
+        // - Relay (TURN) servers are read from configs/interview_relay when present.
+        // ===================================================================================
         const firebaseConfig = {
-            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ",
-            authDomain: "shop-portal-bbbbb.firebaseapp.com",
-            projectId: "shop-portal-bbbbb",
-            storageBucket: "shop-portal-bbbbb.firebasestorage.app",
-            messagingSenderId: "701377739976",
-            appId: "1:701377739976:web:99998220272090e56e79fd"
+            apiKey: "AIzaSyCSXjpko1RN6D4a3yYqFYdsZOfdxord-MQ", authDomain: "shop-portal-bbbbb.firebaseapp.com", projectId: "shop-portal-bbbbb",
+            storageBucket: "shop-portal-bbbbb.firebasestorage.app", messagingSenderId: "701377739976", appId: "1:701377739976:web:99998220272090e56e79fd"
         };
         if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
@@ -90,306 +146,393 @@
         const params = new URLSearchParams(window.location.search);
         const cvId = (params.get('cvId') || '').trim();
         const roomKey = (params.get('key') || '').trim();
-        const isHost = params.get('role') === 'host';
+        const role = params.get('role') === 'host' ? 'host' : params.get('role') === 'teacher' ? 'teacher' : 'applicant';
+        const isHost = role === 'host';
         const hostName = params.get('hostName') || 'Interviewer';
+        if (!cvId || !roomKey) { alert('Invalid or missing room link.'); window.location.replace('index.html'); }
 
-        if (!cvId || !roomKey) {
-            alert('Invalid or missing room link parameters.');
-            window.location.replace('index.html');
-        }
+        let myName = isHost ? hostName : role === 'teacher' ? (params.get('name') || '') : `Applicant (${cvId})`;
+        if (role === 'teacher' && !myName) myName = (prompt('Your name (shown to others in the room):', '') || 'Teacher').trim() || 'Teacher';
 
+        const MAX_PEOPLE = 4;
         const roomId = `${cvId}_${roomKey}`;
         const roomRef = db.collection('interview_rooms').doc(roomId);
+        const partsRef = roomRef.collection('participants');
+        const connRef = roomRef.collection('connections');
+        const strokesRef = roomRef.collection('strokes');
+        const me = { pid: 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7), name: myName, role };
+        const esc = (v) => String(v === undefined || v === null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        const status = (t) => { document.getElementById('room-status-text').textContent = t; };
+
         document.getElementById('room-cvid-badge').textContent = cvId;
-        document.getElementById('local-label').textContent = isHost ? `${hostName} (Host)` : `Applicant (${cvId})`;
-        if (isHost) document.getElementById('btn-copy-invite').classList.remove('hidden');
+        if (role !== 'applicant') document.getElementById('btn-invite-teacher').classList.remove('hidden');
+        if (isHost) { document.getElementById('btn-copy-invite').classList.remove('hidden'); document.getElementById('btn-relay').classList.remove('hidden'); document.getElementById('btn-leave').textContent = 'End for all'; }
 
-        // WebRTC Setup (1-on-1 isolated per roomId)
-        const rtcConfig = {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
-            ]
-        };
-        let pc = new RTCPeerConnection(rtcConfig);
-        let localStream = null;
-        let screenStream = null;
-        let isMicEnabled = true;
-        let isCamEnabled = true;
-        let isScreenSharing = false;
+        let rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] };
+        let localStream = null, screenStream = null, isMicEnabled = true, isCamEnabled = true, isScreenSharing = false;
+        const peers = {};          // pid -> { pc, name, role, stream, unsub: [] }
+        const unsubs = [];
+        let left = false;
 
-        async function initMediaAndSignaling() {
-            try {
-                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-            } catch (e) {
-                localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true }).catch(() => new MediaStream());
+        // ---------------- video tiles ----------------
+        function tileFor(id, label, isLocal) {
+            let t = document.getElementById('tile-' + id);
+            if (!t) {
+                t = document.createElement('div');
+                t.className = 'tile'; t.id = 'tile-' + id;
+                t.innerHTML = `<video autoplay playsinline ${isLocal ? 'muted' : ''}></video>
+                    <span class="lbl absolute bottom-2 left-2 px-2.5 py-1 rounded-lg ${isLocal ? 'bg-indigo-900/85' : 'bg-slate-900/80'} text-[11px] font-black uppercase tracking-wider"></span>
+                    <button type="button" class="fs absolute top-2 right-2 w-8 h-8 rounded-lg bg-slate-900/70 hover:bg-slate-900 text-white text-sm font-black" title="Full screen">⛶</button>`;
+                t.querySelector('.fs').onclick = (e) => { e.stopPropagation(); toggleFull(t); };
+                t.ondblclick = () => toggleFull(t);
+                document.getElementById('video-grid').appendChild(t);
+                layoutGrid();
             }
+            t.querySelector('.lbl').textContent = label;
+            return t;
+        }
+        function removeTile(id) { const t = document.getElementById('tile-' + id); if (t) t.remove(); layoutGrid(); }
+        function toggleFull(el) {
+            const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+            if (fsEl) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
+            (el.requestFullscreen || el.webkitRequestFullscreen || (() => {})).call(el);
+        }
+        function layoutGrid() {
+            const g = document.getElementById('video-grid'); const n = g.children.length;
+            g.className = 'grid gap-3 ' + (n <= 1 ? 'grid-1' : n === 2 ? 'grid-2' : 'grid-4');
+            g.dataset.n = String(n);
+            document.getElementById('people-badge').textContent = `👥 ${n}/${MAX_PEOPLE}`;
+        }
 
-            document.getElementById('local-video').srcObject = localStream;
-            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-            const remoteStream = new MediaStream();
-            document.getElementById('remote-video').srcObject = remoteStream;
-            pc.ontrack = event => {
-                event.streams[0].getTracks().forEach(track => remoteStream.addTrack(track));
-                document.getElementById('remote-label').textContent = isHost ? `Applicant (${cvId})` : hostName;
-                document.getElementById('room-status-text').textContent = 'Connected Live';
+        // ---------------- connections ----------------
+        function currentVideoTrack() {
+            if (isScreenSharing && screenStream) return screenStream.getVideoTracks()[0];
+            return localStream ? localStream.getVideoTracks()[0] : null;
+        }
+        function newPeer(pid, name, prole) {
+            closePeer(pid);
+            const pc = new RTCPeerConnection(rtcConfig);
+            const audio = localStream && localStream.getAudioTracks()[0];
+            const video = currentVideoTrack();
+            if (audio) pc.addTrack(audio, localStream);
+            if (video) pc.addTrack(video, localStream);
+            const stream = new MediaStream();
+            const p = peers[pid] = { pc, name, role: prole, stream, unsub: [] };
+            const tile = tileFor(pid, name + ' · connecting…', false);
+            tile.querySelector('video').srcObject = stream;
+            pc.ontrack = (ev) => { ev.track && !stream.getTracks().includes(ev.track) && stream.addTrack(ev.track); tile.querySelector('.lbl').textContent = name; tile.querySelector('video').play && tile.querySelector('video').play().catch(() => {}); updateStatus(); };
+            pc.onconnectionstatechange = () => {
+                if (pc.connectionState === 'failed') { tile.querySelector('.lbl').textContent = name + ' · connection failed'; status('Could not connect to ' + name + '. A relay server (⚙️) helps on strict networks.'); }
+                if (pc.connectionState === 'connected') { tile.querySelector('.lbl').textContent = name; updateStatus(); }
             };
+            return p;
+        }
+        function closePeer(pid) {
+            const p = peers[pid]; if (!p) return;
+            p.unsub.forEach(u => { try { u(); } catch (e) {} });
+            try { p.pc.close(); } catch (e) {}
+            delete peers[pid];
+            removeTile(pid);
+        }
+        // I joined later -> I call everyone who is already in the room
+        async function callPeer(other) {
+            const p = newPeer(other.pid, other.name, other.role);
+            const ref = connRef.doc(`${me.pid}_${other.pid}`);
+            p.pc.onicecandidate = (e) => { if (e.candidate) ref.collection('ice').add({ side: 'from', c: e.candidate.toJSON() }).catch(() => {}); };
+            const offer = await p.pc.createOffer();
+            await p.pc.setLocalDescription(offer);
+            await ref.set({ from: me.pid, to: other.pid, fromName: me.name, fromRole: me.role, offer: { type: offer.type, sdp: offer.sdp }, at: Date.now() });
+            p.unsub.push(ref.onSnapshot(s => { const d = s.data(); if (d && d.answer && !p.pc.currentRemoteDescription) p.pc.setRemoteDescription(new RTCSessionDescription(d.answer)).catch(() => {}); }));
+            p.unsub.push(ref.collection('ice').where('side', '==', 'to').onSnapshot(s => s.docChanges().forEach(ch => { if (ch.type === 'added') p.pc.addIceCandidate(new RTCIceCandidate(ch.doc.data().c)).catch(() => {}); })));
+            // nobody answered (their window was closed without leaving) -> remove the empty tile
+            setTimeout(() => { if (peers[other.pid] === p && !p.pc.currentRemoteDescription) closePeer(other.pid); }, 25000);
+        }
+        // Someone newer calls me -> I answer
+        async function answerPeer(doc) {
+            const d = doc.data();
+            if (!d || !d.offer || d.answer || peers[d.from]) return;
+            const p = newPeer(d.from, d.fromName || 'Participant', d.fromRole);
+            const ref = connRef.doc(doc.id);
+            p.pc.onicecandidate = (e) => { if (e.candidate) ref.collection('ice').add({ side: 'to', c: e.candidate.toJSON() }).catch(() => {}); };
+            await p.pc.setRemoteDescription(new RTCSessionDescription(d.offer));
+            const ans = await p.pc.createAnswer();
+            await p.pc.setLocalDescription(ans);
+            await ref.update({ answer: { type: ans.type, sdp: ans.sdp } });
+            p.unsub.push(ref.collection('ice').where('side', '==', 'from').onSnapshot(s => s.docChanges().forEach(ch => { if (ch.type === 'added') p.pc.addIceCandidate(new RTCIceCandidate(ch.doc.data().c)).catch(() => {}); })));
+        }
+        function updateStatus() {
+            const n = Object.keys(peers).length;
+            status(n ? `Live with ${Object.values(peers).map(p => p.name).join(', ')}` : (isHost ? 'Waiting for others to join…' : 'Waiting for the interviewer…'));
+        }
+
+        const fresh = (p) => (Date.now() - (p.lastSeen || 0)) < 70000;
+        let heartbeat = null;
+        async function start() {
+            try { localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true }); }
+            catch (e) { localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true }).catch(() => new MediaStream()); }
+            const lt = tileFor('me', myName + (isHost ? ' (Host)' : '') + ' · You', true);
+            lt.querySelector('video').srcObject = localStream;
+            try { const r = await db.collection('configs').doc('interview_relay').get(); const s = r.exists ? (r.data().iceServers || []) : []; if (s.length) rtcConfig = { iceServers: [...rtcConfig.iceServers, ...s] }; } catch (e) {}
 
             if (isHost) {
-                await setupHostSignaling();
+                const snap = await roomRef.get();
+                if (!snap.exists || snap.data().active === false) await roomRef.set({ cvId, roomKey, hostName, createdAt: Date.now(), active: true, boardOpen: false, sharedDoc: null });
+                else await roomRef.update({ active: true });
             } else {
-                await setupGuestSignaling();
+                status('Waiting for the interviewer to open the room…');
+                await new Promise(res => { const u = roomRef.onSnapshot(s => { if (s.exists && s.data().active !== false) { u(); res(); } }); });
             }
-        }
-
-        async function setupHostSignaling() {
-            document.getElementById('room-status-text').textContent = 'Waiting for applicant to open their link...';
-            const offerCandidates = roomRef.collection('offerCandidates');
-            const answerCandidates = roomRef.collection('answerCandidates');
-
-            pc.onicecandidate = event => {
-                if (event.candidate) offerCandidates.add(event.candidate.toJSON());
-            };
-
-            const offerDesc = await pc.createOffer();
-            await pc.setLocalDescription(offerDesc);
-
-            await roomRef.set({
-                cvId,
-                roomKey,
-                hostName,
-                offer: { sdp: offerDesc.sdp, type: offerDesc.type },
-                createdAt: Date.now()
-            });
-
-            roomRef.onSnapshot(snap => {
-                const data = snap.data();
-                if (!pc.currentRemoteDescription && data && data.answer) {
-                    pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+            const present = (await partsRef.get()).docs.map(d => d.data()).filter(fresh).filter(p => p.pid !== me.pid);
+            if (present.length >= MAX_PEOPLE) { status('This room is full (4 people).'); alert('This room is full — at most 4 people can join.'); return; }
+            await partsRef.doc(me.pid).set({ ...me, joinedAt: Date.now(), lastSeen: Date.now() });
+            heartbeat = setInterval(() => partsRef.doc(me.pid).update({ lastSeen: Date.now() }).catch(() => {}), 25000);
+            unsubs.push(connRef.where('to', '==', me.pid).onSnapshot(s => s.docChanges().forEach(ch => { if (ch.type === 'added') answerPeer(ch.doc); })));
+            unsubs.push(partsRef.onSnapshot(s => s.docChanges().forEach(ch => {
+                if (ch.type === 'removed') closePeer(ch.doc.id);
+                // two people joined at the same moment and neither called the other -> the larger id calls
+                if (ch.type === 'added' && ch.doc.id !== me.pid) {
+                    const other = ch.doc.data();
+                    setTimeout(() => { if (!left && !peers[other.pid] && me.pid > other.pid && fresh(other)) callPeer(other); }, 4000);
                 }
-            });
-
-            answerCandidates.onSnapshot(snap => {
-                snap.docChanges().forEach(change => {
-                    if (change.type === 'added') {
-                        pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(() => {});
-                    }
-                });
-            });
+            })));
+            for (const p of present) await callPeer(p);
+            unsubs.push(roomRef.onSnapshot(s => {
+                const d = s.data() || {};
+                if (s.exists && d.active === false && !isHost && !left) { alert('The interviewer has ended this room.'); leaveOrEndRoom(true); return; }
+                applyRoomState(d);
+            }));
+            updateStatus();
         }
 
-        async function setupGuestSignaling() {
-            document.getElementById('room-status-text').textContent = 'Connecting to interviewer...';
-            const roomSnap = await roomRef.get();
-            if (!roomSnap.exists || !roomSnap.data().offer) {
-                document.getElementById('room-status-text').textContent = 'Waiting for interviewer to start room...';
-                roomRef.onSnapshot(async snap => {
-                    if (snap.exists && snap.data().offer && !pc.currentRemoteDescription) {
-                        await completeGuestAnswer(snap.data().offer);
-                    }
-                });
-                return;
-            }
-            await completeGuestAnswer(roomSnap.data().offer);
-        }
-
-        async function completeGuestAnswer(offer) {
-            const offerCandidates = roomRef.collection('offerCandidates');
-            const answerCandidates = roomRef.collection('answerCandidates');
-
-            pc.onicecandidate = event => {
-                if (event.candidate) answerCandidates.add(event.candidate.toJSON());
-            };
-
-            await pc.setRemoteDescription(new RTCSessionDescription(offer));
-            const answerDesc = await pc.createAnswer();
-            await pc.setLocalDescription(answerDesc);
-
-            await roomRef.update({
-                answer: { type: answerDesc.type, sdp: answerDesc.sdp }
-            });
-
-            offerCandidates.onSnapshot(snap => {
-                snap.docChanges().forEach(change => {
-                    if (change.type === 'added') {
-                        pc.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(() => {});
-                    }
-                });
-            });
-        }
-
+        // ---------------- controls ----------------
         function toggleMic() {
             isMicEnabled = !isMicEnabled;
             localStream.getAudioTracks().forEach(t => t.enabled = isMicEnabled);
             document.getElementById('btn-toggle-mic').textContent = isMicEnabled ? '🎤 Mic On' : '🔇 Mic Muted';
         }
-
         function toggleCam() {
             isCamEnabled = !isCamEnabled;
             localStream.getVideoTracks().forEach(t => t.enabled = isCamEnabled);
             document.getElementById('btn-toggle-cam').textContent = isCamEnabled ? '📷 Cam On' : '🚫 Cam Off';
         }
-
+        async function swapVideoTrack(track) {
+            for (const p of Object.values(peers)) {
+                const sender = p.pc.getSenders().find(s => s.track && s.track.kind === 'video') || p.pc.getSenders().find(s => !s.track);
+                if (sender) await sender.replaceTrack(track).catch(() => {});
+            }
+        }
         async function toggleScreenShare() {
-            const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+            const lv = document.querySelector('#tile-me video');
             if (!isScreenSharing) {
                 try {
                     screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-                    const screenTrack = screenStream.getVideoTracks()[0];
-                    if (videoSender) await videoSender.replaceTrack(screenTrack);
-                    document.getElementById('local-video').srcObject = screenStream;
+                    const tr = screenStream.getVideoTracks()[0];
                     isScreenSharing = true;
+                    await swapVideoTrack(tr);
+                    lv.srcObject = screenStream;
                     document.getElementById('btn-share-screen').textContent = '🛑 Stop Share';
-                    screenTrack.onended = () => { if (isScreenSharing) toggleScreenShare(); };
-                } catch (e) { console.error(e); }
+                    tr.onended = () => { if (isScreenSharing) toggleScreenShare(); };
+                } catch (e) { console.warn(e); }
             } else {
-                const camTrack = localStream.getVideoTracks()[0];
-                if (videoSender && camTrack) await videoSender.replaceTrack(camTrack);
-                document.getElementById('local-video').srcObject = localStream;
-                if (screenStream) screenStream.getTracks().forEach(t => t.stop());
                 isScreenSharing = false;
+                await swapVideoTrack(localStream.getVideoTracks()[0] || null);
+                lv.srcObject = localStream;
+                if (screenStream) screenStream.getTracks().forEach(t => t.stop());
                 document.getElementById('btn-share-screen').textContent = '🖥️ Share Screen';
             }
         }
-
-        function copyCandidateInvite() {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('role');
-            url.searchParams.delete('hostName');
-            navigator.clipboard.writeText(url.toString());
-            alert('✅ Applicant link copied to clipboard.');
+        function baseLink() { const u = new URL(window.location.href); ['role', 'hostName', 'name'].forEach(k => u.searchParams.delete(k)); return u; }
+        function copyCandidateInvite() { navigator.clipboard.writeText(baseLink().toString()); alert('✅ Applicant link copied.'); }
+        function inviteTeacher() {
+            const u = baseLink(); u.searchParams.set('role', 'teacher');
+            const link = u.toString();
+            navigator.clipboard && navigator.clipboard.writeText(link).catch(() => {});
+            if (confirm('✅ Teacher invite link copied.\n\nAnyone with this link joins as a teacher (at most 4 people in the room).\n\nShare it on WhatsApp now?')) {
+                window.open('https://wa.me/?text=' + encodeURIComponent(`Please join the Minerva interview room for ${cvId}: ${link}`), '_blank');
+            }
         }
-
-        async function leaveOrEndRoom() {
+        async function leaveOrEndRoom(silent) {
+            if (left) return;
+            if (isHost && !silent && !confirm('End the room for everyone?')) return;
+            left = true;
+            clearInterval(heartbeat);
+            unsubs.forEach(u => { try { u(); } catch (e) {} });
+            Object.keys(peers).forEach(closePeer);
             if (localStream) localStream.getTracks().forEach(t => t.stop());
             if (screenStream) screenStream.getTracks().forEach(t => t.stop());
-            pc.close();
-
-            if (isHost) {
-                // Clean up temporary signaling & whiteboard strokes for this room
-                const strokesSnap = await roomRef.collection('strokes').get();
-                const batch = db.batch();
-                strokesSnap.forEach(d => batch.delete(d.ref));
-                batch.delete(roomRef);
-                await batch.commit().catch(() => {});
+            await partsRef.doc(me.pid).delete().catch(() => {});
+            if (isHost && !silent) {
+                await roomRef.update({ active: false }).catch(() => {});
+                // clean up connection messages, strokes and participants of this room
+                const wipe = async (q) => { const s = await q.get().catch(() => null); if (!s) return; for (const d of s.docs) await d.ref.delete().catch(() => {}); };
+                const conns = await connRef.get().catch(() => null);
+                if (conns) for (const c of conns.docs) { await wipe(c.ref.collection('ice')); await c.ref.delete().catch(() => {}); }
+                await wipe(strokesRef); await wipe(partsRef);
                 await db.collection('staff_applications').doc(cvId).update({ roomActive: false }).catch(() => {});
             }
-            window.close();
+            status('You have left the room.');
+            setTimeout(() => window.close(), 300);
+        }
+        window.addEventListener('pagehide', () => { if (!left) partsRef.doc(me.pid).delete().catch(() => {}); });
+
+        // ---------------- relay settings (host) ----------------
+        async function openRelaySettings() {
+            try {
+                const r = await db.collection('configs').doc('interview_relay').get();
+                const s = r.exists && (r.data().iceServers || [])[0];
+                document.getElementById('relay-urls').value = s ? [].concat(s.urls).join(', ') : '';
+                document.getElementById('relay-user').value = s ? s.username || '' : '';
+                document.getElementById('relay-pass').value = s ? s.credential || '' : '';
+            } catch (e) {}
+            document.getElementById('relay-modal').classList.replace('hidden', 'flex');
+        }
+        async function saveRelaySettings() {
+            const urls = document.getElementById('relay-urls').value.split(',').map(x => x.trim()).filter(Boolean);
+            if (urls.some(u => !/^turns?:/i.test(u))) return alert('Each address must start with turn: or turns:');
+            const iceServers = urls.length ? [{ urls, username: document.getElementById('relay-user').value.trim(), credential: document.getElementById('relay-pass').value.trim() }] : [];
+            await db.collection('configs').doc('interview_relay').set({ iceServers, updatedAt: new Date().toISOString() });
+            document.getElementById('relay-modal').classList.replace('flex', 'hidden');
+            alert('✅ Saved. It is used from the next room started.');
         }
 
-        // Synchronized Handwriting Whiteboard (Normalized 0..1 coordinates so mobile & laptop align)
-        const canvas = document.getElementById('whiteboard-canvas');
-        const ctx = canvas.getContext('2d');
-        let penColor = '#0f172a';
-        let penSize = 3;
-        let drawing = false;
-        let currentStroke = [];
-        let flushTimer = null;
-
-        function resizeCanvas() {
-            const rect = canvas.parentElement.getBoundingClientRect();
-            const imgData = canvas.width > 0 ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
-            canvas.width = rect.width;
-            canvas.height = rect.height;
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            if (imgData) ctx.putImageData(imgData, 0, 0);
+        // ---------------- board + shared document ----------------
+        let roomState = {};
+        let pen = { color: '#0f172a', size: 3, erase: false };
+        let strokes = [];              // all strokes of the room
+        function toggleBoardForAll() { roomRef.update({ boardOpen: !roomState.boardOpen }).catch(() => {}); }
+        function applyRoomState(d) {
+            roomState = d;
+            const open = !!d.boardOpen;
+            document.body.classList.toggle('board-open', open);
+            document.getElementById('board-col').classList.toggle('hidden', !open);
+            document.getElementById('video-col').className = (open ? 'lg:col-span-4' : 'lg:col-span-12') + ' flex flex-col gap-3';
+            document.getElementById('btn-board').textContent = open ? '✖ Close Board' : '🖊 Board';
+            const doc = d.sharedDoc;
+            document.getElementById('doc-panel').classList.toggle('hidden', !doc);
+            document.getElementById('btn-close-doc').classList.toggle('hidden', !doc);
+            document.getElementById('board-panels').className = 'flex-1 grid gap-3 p-3 bg-slate-200/60 ' + (doc ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1');
+            if (doc) {
+                const page = Math.min(Math.max(1, doc.page || 1), doc.pages.length);
+                document.getElementById('doc-name').textContent = doc.name || 'Document';
+                document.getElementById('doc-page').textContent = `${page}/${doc.pages.length}`;
+                const img = document.getElementById('doc-img');
+                if (img.dataset.src !== doc.pages[page - 1]) { img.dataset.src = doc.pages[page - 1]; img.onload = () => { sizeInk(); redraw('doc'); }; img.src = doc.pages[page - 1]; }
+            }
+            setTimeout(() => { sizeInk(); redraw('board'); redraw('doc'); }, 50);
         }
-        window.addEventListener('resize', resizeCanvas);
-        resizeCanvas();
-
-        function setPenTool(color, size) {
-            penColor = color;
-            penSize = size;
+        function docKey() { const d = roomState.sharedDoc; return d ? `${d.id}:${d.page || 1}` : ''; }
+        function setPen(btn) { document.querySelectorAll('.pen').forEach(b => b.classList.remove('on')); btn.classList.add('on'); pen = { color: btn.dataset.c, size: 3, erase: false }; document.getElementById('eraser-btn').classList.remove('bg-amber-200'); }
+        function setEraser() { document.querySelectorAll('.pen').forEach(b => b.classList.remove('on')); pen = { color: '#000', size: 24, erase: true }; document.getElementById('eraser-btn').classList.add('bg-amber-200'); }
+        const canvases = { board: document.getElementById('ink-board'), doc: document.getElementById('ink-doc') };
+        function sizeInk() {
+            Object.values(canvases).forEach(c => { const r = c.getBoundingClientRect(); if (r.width && (c.width !== Math.round(r.width) || c.height !== Math.round(r.height))) { c.width = Math.round(r.width); c.height = Math.round(r.height); } });
         }
-
-        function getNormCoords(e) {
-            const rect = canvas.getBoundingClientRect();
-            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-            return {
-                x: Number(((clientX - rect.left) / rect.width).toFixed(4)),
-                y: Number(((clientY - rect.top) / rect.height).toFixed(4))
+        window.addEventListener('resize', () => { sizeInk(); redraw('board'); redraw('doc'); });
+        function drawStroke(layer, s) {
+            const c = canvases[layer], g = c.getContext('2d');
+            if (!s.pts || s.pts.length < 2) return;
+            g.save();
+            g.globalCompositeOperation = s.erase ? 'destination-out' : 'source-over';
+            g.strokeStyle = s.color || '#0f172a'; g.lineWidth = (s.size || 3) * (c.width / 800 + 0.5); g.lineCap = 'round'; g.lineJoin = 'round';
+            g.beginPath(); g.moveTo(s.pts[0].x * c.width, s.pts[0].y * c.height);
+            for (let i = 1; i < s.pts.length; i++) g.lineTo(s.pts[i].x * c.width, s.pts[i].y * c.height);
+            g.stroke(); g.restore();
+        }
+        function redraw(layer) {
+            const c = canvases[layer]; c.getContext('2d').clearRect(0, 0, c.width, c.height);
+            const key = docKey();
+            strokes.filter(s => s.layer === layer && (layer === 'board' || s.docKey === key)).forEach(s => drawStroke(layer, s));
+        }
+        // drawing (normalized 0..1 so phones and laptops line up)
+        Object.entries(canvases).forEach(([layer, c]) => {
+            let cur = null, timer = null;
+            const pt = (e) => { const r = c.getBoundingClientRect(); return { x: +((e.clientX - r.left) / r.width).toFixed(4), y: +((e.clientY - r.top) / r.height).toFixed(4) }; };
+            const flush = () => {
+                if (!cur || cur.pts.length < 2) return;
+                const send = { ...cur, pts: cur.pts.slice() };
+                cur.pts = [cur.pts[cur.pts.length - 1]];
+                strokesRef.add({ ...send, ts: Date.now(), by: me.pid }).catch(() => {});
             };
-        }
-
-        function drawSegment(pts, color, size) {
-            if (!pts || pts.length < 2) return;
-            ctx.strokeStyle = color;
-            ctx.lineWidth = size;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            ctx.beginPath();
-            ctx.moveTo(pts[0].x * canvas.width, pts[0].y * canvas.height);
-            for (let i = 1; i < pts.length; i++) {
-                ctx.lineTo(pts[i].x * canvas.width, pts[i].y * canvas.height);
-            }
-            ctx.stroke();
-        }
-
-        function flushStrokeBatch() {
-            if (currentStroke.length < 2) return;
-            const ptsToSend = [...currentStroke];
-            currentStroke = [ptsToSend[ptsToSend.length - 1]];
-            roomRef.collection('strokes').add({
-                pts: ptsToSend,
-                color: penColor,
-                size: penSize,
-                ts: Date.now()
-            }).catch(() => {});
-        }
-
-        canvas.addEventListener('pointerdown', e => {
-            drawing = true;
-            currentStroke = [getNormCoords(e)];
-        });
-
-        canvas.addEventListener('pointermove', e => {
-            if (!drawing) return;
-            const pt = getNormCoords(e);
-            currentStroke.push(pt);
-            drawSegment(currentStroke.slice(-2), penColor, penSize);
-            if (!flushTimer) {
-                flushTimer = setTimeout(() => {
-                    flushTimer = null;
-                    flushStrokeBatch();
-                }, 90);
-            }
-        });
-
-        window.addEventListener('pointerup', () => {
-            if (!drawing) return;
-            drawing = false;
-            flushStrokeBatch();
-            currentStroke = [];
-        });
-
-        async function clearBoardAll() {
-            ctx.fillStyle = '#ffffff';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            const snap = await roomRef.collection('strokes').get();
-            const batch = db.batch();
-            snap.forEach(d => batch.delete(d.ref));
-            await batch.commit().catch(() => {});
-        }
-
-        // Listen for incoming handwriting strokes from the other participant
-        roomRef.collection('strokes').orderBy('ts').onSnapshot(snap => {
-            if (snap.empty) {
-                ctx.fillStyle = '#ffffff';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                return;
-            }
-            snap.docChanges().forEach(change => {
-                if (change.type === 'added') {
-                    const d = change.doc.data();
-                    drawSegment(d.pts, d.color || '#0f172a', d.size || 3);
-                }
+            c.addEventListener('pointerdown', e => { sizeInk(); c.setPointerCapture(e.pointerId); cur = { layer, docKey: layer === 'doc' ? docKey() : '', color: pen.color, size: pen.size, erase: pen.erase, pts: [pt(e)] }; });
+            c.addEventListener('pointermove', e => {
+                if (!cur) return;
+                cur.pts.push(pt(e));
+                drawStroke(layer, { ...cur, pts: cur.pts.slice(-2) });
+                if (!timer) timer = setTimeout(() => { timer = null; flush(); }, 120);
             });
+            const end = () => { if (!cur) return; clearTimeout(timer); timer = null; flush(); cur = null; };
+            c.addEventListener('pointerup', end); c.addEventListener('pointercancel', end);
         });
+        unsubs.push(strokesRef.orderBy('ts').onSnapshot(s => {
+            let needRedraw = false;
+            s.docChanges().forEach(ch => {
+                const d = { id: ch.doc.id, ...ch.doc.data() };
+                if (ch.type === 'added') { strokes.push(d); if (d.by !== me.pid) drawStroke(d.layer, d); else if (d.layer === 'doc' && d.docKey !== docKey()) needRedraw = true; }
+                if (ch.type === 'removed') { strokes = strokes.filter(x => x.id !== d.id); needRedraw = true; }
+            });
+            if (needRedraw) { redraw('board'); redraw('doc'); }
+        }));
+        async function clearLayer(layer) {
+            const key = docKey();
+            const mine = strokes.filter(s => s.layer === layer && (layer === 'board' || s.docKey === key));
+            if (!mine.length) return;
+            for (const s of mine) await strokesRef.doc(s.id).delete().catch(() => {});
+        }
 
-        initMediaAndSignaling();
+        // Share: images go up as they are; PDFs are turned into one image per page on this device
+        // (so every participant sees them without any special server settings).
+        async function loadScriptOnce(src) {
+            window.__ls = window.__ls || {};
+            if (!window.__ls[src]) window.__ls[src] = new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Could not load ' + src)); document.head.appendChild(s); });
+            return window.__ls[src];
+        }
+        async function uploadBlob(blob, ext) {
+            const ref = firebase.storage().ref().child(`staff_documents/interview_${roomId.replace(/[^A-Za-z0-9_-]/g, '_')}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`);
+            await ref.put(blob, { contentType: blob.type || (ext === 'png' ? 'image/png' : 'image/jpeg') });
+            return await ref.getDownloadURL();
+        }
+        async function shareDocument(input) {
+            const f = input.files && input.files[0]; input.value = '';
+            if (!f) return;
+            const prog = document.getElementById('doc-progress');
+            const say = (t) => { prog.textContent = t; prog.classList.toggle('hidden', !t); };
+            try {
+                let pages = [];
+                if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) {
+                    say('Preparing PDF…');
+                    await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
+                    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                    const pdf = await pdfjsLib.getDocument({ data: await f.arrayBuffer() }).promise;
+                    const n = Math.min(pdf.numPages, 30);
+                    for (let i = 1; i <= n; i++) {
+                        say(`Sharing page ${i} of ${n}…`);
+                        const page = await pdf.getPage(i);
+                        const vp0 = page.getViewport({ scale: 1 });
+                        const vp = page.getViewport({ scale: Math.min(2, 1400 / vp0.width) });
+                        const cv = document.createElement('canvas'); cv.width = Math.round(vp.width); cv.height = Math.round(vp.height);
+                        const g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height);
+                        await page.render({ canvasContext: g, viewport: vp }).promise;
+                        const blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.85));
+                        pages.push(await uploadBlob(blob, 'jpg'));
+                    }
+                    if (pdf.numPages > 30) alert('Only the first 30 pages were shared.');
+                } else if (/^image\//.test(f.type)) {
+                    if (f.size > 10 * 1024 * 1024) throw new Error('The image is bigger than 10 MB.');
+                    say('Sharing image…');
+                    pages.push(await uploadBlob(f, (f.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '')));
+                } else throw new Error('Please choose an image or a PDF.');
+                await roomRef.update({ boardOpen: true, sharedDoc: { id: Date.now().toString(36), name: f.name, pages, page: 1, by: me.name } });
+                say('');
+            } catch (e) { say(''); alert('Could not share: ' + (e.message || e)); }
+        }
+        function docPage(step) {
+            const d = roomState.sharedDoc; if (!d) return;
+            const page = Math.min(Math.max(1, (d.page || 1) + step), d.pages.length);
+            if (page !== d.page) roomRef.update({ 'sharedDoc.page': page }).catch(() => {});
+        }
+        function closeDocument() { if (confirm('Close the shared document for everyone?')) roomRef.update({ sharedDoc: null }).catch(() => {}); }
+
+        start();
     </script>
 </body>
 </html>
