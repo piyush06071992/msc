@@ -275,6 +275,7 @@
                     const isWide = f.label.toUpperCase().includes('ADDRESS');
                     const card = document.createElement('div');
                     card.className = `p-4 sm:p-5 rounded-2xl border ${theme.wrap} ${isWide ? 'md:col-span-2' : ''}`;
+                    card.dataset.fieldLabel = f.label;
 
                     const label = `<label class="flex items-center gap-2 text-[10px] font-black ${theme.label} uppercase tracking-widest mb-2"><span class="w-2 h-2 rounded-full ${theme.dot}"></span>${f.label}${f.required ? ' *' : ''}</label>`;
                     const style = `w-full p-3.5 ${theme.input} border-2 rounded-xl font-bold text-sm text-slate-800 outline-none transition-all`;
@@ -307,6 +308,7 @@
                 const theme = CARD_THEMES[(idx + 2) % CARD_THEMES.length];
                 const container = document.createElement('div');
                 container.className = `p-4 sm:p-6 rounded-2xl border ${theme.wrap}`;
+                container.dataset.fieldLabel = f.label;
 
                 const label = `<div class="flex items-center justify-between gap-2 mb-3"><label class="flex items-center gap-2 text-[11px] font-black ${theme.label} uppercase tracking-widest"><span class="w-2.5 h-2.5 rounded-full ${theme.dot}"></span>${f.label}${f.required ? ' *' : ''}</label>${f.type === 'checkbox' ? '<span class="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Multi-select</span>' : ''}</div>`;
 
@@ -383,6 +385,7 @@
                 const elements = e.target.querySelectorAll('[name]');
                 elements.forEach(el => {
                     if (el.type === 'file') return;
+                    if (el.closest('[data-cond-hidden="true"]')) return;   // question not shown (its condition is not met)
                     if (el.type === 'checkbox') {
                         if (!staffData.details[el.name]) staffData.details[el.name] = [];
                         if (el.checked) staffData.details[el.name].push(el.value);
@@ -393,6 +396,7 @@
 
                 const rowContainers = e.target.querySelectorAll('[data-rows-field-label]');
                 rowContainers.forEach(rc => {
+                    if (rc.closest('[data-cond-hidden="true"]') || rc.dataset.condHidden === "true") return;
                     const fLabel = rc.dataset.rowsFieldLabel;
                     const vals = Array.from(rc.querySelectorAll('.row-value')).map(i => i.value.trim()).filter(Boolean);
                     if (rc.dataset.rowsRequired === "true" && vals.length === 0) {
@@ -403,6 +407,7 @@
 
                 const fileInputs = e.target.querySelectorAll('input[type="file"][data-file-field="true"]');
                 for (const fileEl of fileInputs) {
+                    if (fileEl.closest('[data-cond-hidden="true"]')) continue;
                     const selectedFile = fileEl.files && fileEl.files[0];
                     if (selectedFile) {
                         const cfgMatch = (STATIC_FORM_CONFIG.fields || []).find(item => item.label === fileEl.name) || {};
@@ -448,7 +453,51 @@
             }
         };
 
+        // DEPENDENT QUESTIONS: a field with "showWhen" { fieldId, value } is shown only when the answer of
+        // that other field is (drop-down) or includes (multi-tick) the value. While hidden it is not
+        // compulsory and its answer is not saved. Chains work too (a hidden field counts as unanswered).
+        function applyConditionalFields(fields) {
+            const area = document.getElementById('dynamic-fields-area');
+            const byId = {};
+            (fields || []).forEach(f => { if (f.id) byId[f.id] = f; });
+            const wrapOf = (f) => [...area.querySelectorAll('[data-field-label]')].find(w => w.dataset.fieldLabel === f.label);
+            const dependents = (fields || []).filter(f => f.showWhen && f.showWhen.fieldId && byId[f.showWhen.fieldId]);
+            if (!dependents.length) return;
+            const answerOf = (f) => {
+                const w = wrapOf(f);
+                if (!w || w.dataset.condHidden === "true") return [];
+                return [...w.querySelectorAll('[name]')].filter(el => el.type === 'checkbox' ? el.checked : true)
+                    .map(el => String(el.value || '').trim()).filter(Boolean);
+            };
+            const setShown = (w, show) => {
+                w.dataset.condHidden = show ? "false" : "true";
+                w.classList.toggle('hidden', !show);
+                w.querySelectorAll('input, select, textarea').forEach(el => {
+                    if (el.required) el.dataset.wasRequired = "true";
+                    if (el.dataset.wasRequired === "true") el.required = show;
+                    el.disabled = !show;
+                });
+            };
+            const evaluate = () => {
+                // repeat so that chains (A shows B, B shows C) settle
+                for (let pass = 0; pass < dependents.length + 1; pass++) {
+                    let changed = false;
+                    dependents.forEach(f => {
+                        const w = wrapOf(f); if (!w) return;
+                        const want = String(f.showWhen.value || '').trim().toLowerCase();
+                        const show = answerOf(byId[f.showWhen.fieldId]).some(v => v.toLowerCase() === want);
+                        if ((w.dataset.condHidden !== "true") !== show || w.dataset.condHidden === undefined) { setShown(w, show); changed = true; }
+                    });
+                    if (!changed) break;
+                }
+            };
+            area.addEventListener('change', evaluate);
+            area.addEventListener('input', evaluate);
+            evaluate();
+        }
+
         renderDynamicFields(STATIC_FORM_CONFIG.fields || []);
+        applyConditionalFields(STATIC_FORM_CONFIG.fields || []);
     </script>
 </body>
 </html>
