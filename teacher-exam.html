@@ -436,8 +436,15 @@ window.onload = async () => {
             
             try {
                 const prefix = activeCenter === "GHUMARWIN" ? "" : activeCenter.toLowerCase() + "_";
-                const ttSnap = await db.collection(prefix + "timetable").get();
-                window.liveTimetable = ttSnap.docs.map(d => d.data());
+                // Only this teacher's own slots are needed (used to find "my" subjects). If the name is
+                // stored differently in the timetable and nothing matches, fall back to the full timetable.
+                const ttColl = db.collection(prefix + "timetable");
+                const myName = activeStaff ? (activeStaff.name || activeStaff.email) : "";
+                const [byName, byTeacher] = myName ? await Promise.all([ttColl.where("teacherName", "==", myName).get(), ttColl.where("teacher", "==", myName).get()]) : [null, null];
+                const mine = new Map();
+                [byName, byTeacher].forEach(sn => sn && sn.forEach(d => mine.set(d.id, d.data())));
+                if (mine.size) window.liveTimetable = [...mine.values()];
+                else { const ttSnap = await ttColl.get(); window.liveTimetable = ttSnap.docs.map(d => d.data()); }
             } catch(e) { console.error("Timetable fetch failed", e); window.liveTimetable = []; }
 
                      Papa.parse(MASTER_SHEET_CSV_URL, {
@@ -531,11 +538,20 @@ window.onload = async () => {
             return found;
         }
 
+        // Students of both branches and full exam-schedule lists are needed by several sections of this
+        // page: read them once per visit (in memory only) instead of again in every section.
+        const __onceReads = {};
+        function readOnce(name) {
+            if (!__onceReads[name]) __onceReads[name] = db.collection(name).get().catch(e => { delete __onceReads[name]; throw e; });
+            return __onceReads[name];
+        }
+        let examListenerUnsub = null;
         function listenForExams() {
             const offset = (new Date()).getTimezoneOffset() * 60000;
             const todayIso = (new Date(Date.now() - offset)).toISOString().split('T')[0];
 
-            getCollection("exam_schedules")
+            if (examListenerUnsub) { examListenerUnsub(); examListenerUnsub = null; }
+            examListenerUnsub = getCollection("exam_schedules")
                 .orderBy("date", "desc")
                .onSnapshot(snap => {
                     const upcomingContainer = document.getElementById('upcoming-exams-list');
@@ -1570,8 +1586,8 @@ window.onload = async () => {
             if (!select) return;
             try {
                 const [gSnap, dSnap] = await Promise.all([
-                    db.collection("exam_schedules").get().catch(() => ({ forEach: () => {} })),
-                    db.collection("dharamshala_exam_schedules").get().catch(() => ({ forEach: () => {} }))
+                    readOnce("exam_schedules").catch(() => ({ forEach: () => {} })),
+                    readOnce("dharamshala_exam_schedules").catch(() => ({ forEach: () => {} }))
                 ]);
                 let datesSet = new Set();
                 gSnap.forEach(d => { if (d.data().date) datesSet.add(d.data().date); });
@@ -1923,8 +1939,8 @@ function renderAssignedPaperCard(r, index, totalCards) {
                 allPaperGroups.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
                 const [stuSnap, dStuSnap] = await Promise.all([
-                    db.collection("students").get(),
-                    db.collection("dharamshala_students").get()
+                    readOnce("students"),
+                    readOnce("dharamshala_students")
                 ]);
                 let studentsMap = { GHUMARWIN: [], DHARAMSHALA: [] };
                 stuSnap.forEach(d => { const s = d.data(); if(s.isActive !== false) studentsMap.GHUMARWIN.push(s); });
@@ -2037,8 +2053,8 @@ function renderAssignedPaperCard(r, index, totalCards) {
                 // Fetching by date only to bypass Firebase Composite Index restrictions, then filtering by name
                 const [snap, gStuSnap, dStuSnap, validSchedSnap, validDSchedSnap] = await Promise.all([
                     db.collection('admin_paper_groups').where('date', '>=', todayIso).get(),
-                    db.collection("students").get(),
-                    db.collection("dharamshala_students").get(),
+                    readOnce("students"),
+                    readOnce("dharamshala_students"),
                     db.collection("exam_schedules").where("date", ">=", todayIso).get().catch(()=>({forEach:()=>{}})),
                     db.collection("dharamshala_exam_schedules").where("date", ">=", todayIso).get().catch(()=>({forEach:()=>{}}))
                 ]);
@@ -2265,8 +2281,8 @@ async function loadExamMappingData() {
                const [gSnap, dSnap, gStuSnap, dStuSnap, staffSnap, gMapSnap, dMapSnap, gStructSnap, dStructSnap] = await Promise.all([
                     branchFilter === "ALL" || branchFilter === "GHUMARWIN" ? db.collection("exam_schedules").where("date", "==", date).get() : Promise.resolve({ empty: true, forEach: () => {} }),
                     branchFilter === "ALL" || branchFilter === "DHARAMSHALA" ? db.collection("dharamshala_exam_schedules").where("date", "==", date).get() : Promise.resolve({ empty: true, forEach: () => {} }),
-                    db.collection("students").get(),
-                    db.collection("dharamshala_students").get(),
+                    readOnce("students"),
+                    readOnce("dharamshala_students"),
                     db.collection("staff_applications").where("status", "==", "approved").get(),
                     branchFilter === "ALL" || branchFilter === "GHUMARWIN" ? db.collection("exam_mappings").where("date", "==", date).get() : Promise.resolve({ empty: true, forEach: () => {} }),
                     branchFilter === "ALL" || branchFilter === "DHARAMSHALA" ? db.collection("dharamshala_exam_mappings").where("date", "==", date).get() : Promise.resolve({ empty: true, forEach: () => {} }),
@@ -3153,7 +3169,7 @@ let secCodes = r.packets.map(p => {
 
         async function fetchTeacherExamDates() {
             try {
-                const snap = await db.collection("exam_schedules").get();
+                const snap = await readOnce("exam_schedules");
                 let datesSet = new Set();
                 snap.forEach(doc => {
                     const data = doc.data();
@@ -3351,8 +3367,8 @@ let secCodes = r.packets.map(p => {
 
             try {
                 const [gSnap, dSnap] = await Promise.all([
-                    db.collection("exam_schedules").get().catch(() => ({ forEach: () => {} })),
-                    db.collection("dharamshala_exam_schedules").get().catch(() => ({ forEach: () => {} }))
+                    readOnce("exam_schedules").catch(() => ({ forEach: () => {} })),
+                    readOnce("dharamshala_exam_schedules").catch(() => ({ forEach: () => {} }))
                 ]);
 
                 const norm = str => (str || "").toLowerCase().replace(/[^a-z0-9]/g, "");
