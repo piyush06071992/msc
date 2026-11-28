@@ -12,7 +12,7 @@
 // =====================================================================================
 (function (global) {
     const KEY = "minervaStaffCacheV1";
-    const DROP = ["password", "currentSessionId"];   // never kept in the browser copy
+    const DROP = ["password", "currentSessionId", "fcmTokens"];   // never kept in the browser copy
 
     function enc(v) {
         if (v === null || typeof v !== "object") return v;

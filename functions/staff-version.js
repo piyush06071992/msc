@@ -1,6 +1,7 @@
 // Does this change to a staff_applications document change the approved staff list that pages use?
-// Logins (currentSessionId) and password changes alone do not count: pages never use them.
-const STAFF_IGNORED_FIELDS = new Set(["currentSessionId", "password"]);
+// Logins (currentSessionId), password changes and phone notification tokens alone do not count:
+// pages never read them from the staff list.
+const STAFF_IGNORED_FIELDS = new Set(["currentSessionId", "password", "fcmTokens", "tokenUpdatedAt", "platform", "lastSeenAt"]);
 
 function staffChangeMatters(before, after) {
     const wasApproved = !!before && String(before.status || "").toLowerCase() === "approved";
