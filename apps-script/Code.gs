@@ -19,9 +19,12 @@ const BOT_MARK = "mscerpbot";
 // Applicants check their application here (button in the "application received" email)
 const STATUS_PAGE = "https://minervaacademy.web.app/application-status.html";
 
-// THIS FILE IS DEPLOYED AUTOMATICALLY from the GitHub repository (apps-script/ folder,
-// workflow "Deploy Email Bot (Apps Script)"). Edit it there, not in the Apps Script editor —
-// changes made only in the editor are overwritten by the next deploy.
+// A copy of this file is kept in the GitHub repository (apps-script/Code.gs) for history.
+// After pasting a new version: Save -> Deploy -> Manage deployments -> edit -> New version -> Deploy.
+
+// To check that applicant emails arrive: put your address below, choose "testApplicantEmails"
+// at the top of the editor and press Run. Three emails should arrive (CV ID, reset code, welcome).
+const TEST_EMAIL = "msccoaching20251@gmail.com";
 
 function doPost(e) {
   try {
@@ -587,6 +590,16 @@ function cleanupOldBotMailOnce() {
     }));
   });
   Logger.log("Old bot emails removed: " + removed);
+}
+
+// TEST: sends the CV ID reminder, a password reset code and an "application received" email
+// to TEST_EMAIL. Run it from the editor; the log shows what was sent.
+function testApplicantEmails() {
+  const post = (data) => JSON.parse(doPost({ postData: { contents: JSON.stringify(data) } }).getContent());
+  Logger.log("CV ID reminder: " + JSON.stringify(post({ type: "APPLICANT_CVID_REMINDER", email: TEST_EMAIL, applicantName: "Test Applicant", cvId: "CV-000000", portalLink: STATUS_PAGE })));
+  Logger.log("Reset code: " + JSON.stringify(post({ type: "APPLICANT_OTP", email: TEST_EMAIL, applicantName: "Test Applicant", code: "123456", minutes: 10 })));
+  Logger.log("Application received: " + JSON.stringify(post({ type: "STAFF_APPLICATION_SUBMITTED", email: TEST_EMAIL, cvId: "CV-000000", branch: "Ghumarwin", details: { "Full Name": "Test Applicant" } })));
+  Logger.log("Done. Check the inbox (and Spam) of " + TEST_EMAIL);
 }
 
 // Run ONCE from the editor to switch on the hourly clean-up.
