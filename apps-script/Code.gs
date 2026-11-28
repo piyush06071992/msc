@@ -2,18 +2,21 @@
 // MINERVA ERP — EMAIL BOT (Google Apps Script)
 // - All earlier emails unchanged (application received, interview room, leave, adjustment,
 //   attendance edit request, attendance discrepancy, timetable / duty chart).
-// - New: offer letter, offer response alert, password reset code, CV ID reminder.
+// - New: offer letter, offer response alert, password reset code, CV ID reminder,
+//   new job application alert. Recruitment alerts go ONLY to this bot's own inbox.
 // - NO COPIES ARE KEPT: every email is sent from a draft and the sent copy is deleted at once
 //   (permanently if the Gmail advanced service is on, otherwise moved to Trash, which Gmail
 //   empties after 30 days). An hourly clean-up catches anything missed (run setupCleanupTrigger once).
 // =====================================================================================
 
-// Who gets offer responses (accepted / declined / change requested)
-const OFFER_NOTIFY_EMAILS = [
-  "rana.rpiyush.piyush826@gmail.com",
-  "rakeshchandel1@gmail.com",
-  "chandel_14@rediffmail.com"
-];
+// RECRUITMENT ALERTS (new job application, offer accepted / declined / change asked) go ONLY to
+// this bot's own Gmail account (the account the script runs as and sends from). Nobody else gets them.
+// These alerts stay in that inbox (emails to itself are never deleted by the clean-up).
+function recruitmentInbox() {
+  return String(Session.getEffectiveUser().getEmail() || "").trim();
+}
+// Recruitment page link used in the alerts
+const PENDING_PAGE = "https://minervaacademy.web.app/staff-pending.html";
 // Word placed in every bot email so the clean-up finds only bot emails (never your own mail)
 const BOT_MARK = "mscerpbot";
 // Applicants check their application here (button in the "application received" email)
@@ -71,6 +74,9 @@ function doPost(e) {
           { htmlBody: htmlBody }
         );
       }
+
+      // Alert for management: only to the bot's own inbox
+      sendNewApplicationAlert(data);
 
       return ok({ cvId: data.cvId || "" });
     }
@@ -400,7 +406,7 @@ function doPost(e) {
     }
 
     // =================================================================
-    // NEW: CANDIDATE ANSWERED THE OFFER -> tell management
+    // NEW: CANDIDATE ANSWERED THE OFFER -> alert ONLY to the bot's own inbox
     // data: applicantName, cvId, response (ACCEPTED / DECLINED / CHANGE_REQUESTED), comment, joiningDate, branch
     // =================================================================
     if (type === "OFFER_RESPONSE") {
@@ -418,15 +424,13 @@ function doPost(e) {
               <strong>Date of Joining:</strong> ${formatCustomDate(data.joiningDate || "") || "—"}<br>
               ${data.comment ? `<strong>Comment:</strong> ${esc(data.comment)}` : ""}
             </div>
-            <p>Please open Recruitment &amp; Pending Staff in the Minerva portal for details.</p>
+            <p style="text-align:center; margin:18px 0;"><a href="${PENDING_PAGE}" target="_blank" style="background-color:#1e1b4b; color:#ffffff; text-decoration:none; padding:10px 20px; border-radius:8px; font-weight:bold; display:inline-block;">Open Recruitment &amp; Pending Staff</a></p>
             <p style="margin-top:20px; font-size:12px; color:#64748b; text-align:center;">This is an automated notification from the Minerva ERP System.</p>
           </div>
         </div>
       `;
-      OFFER_NOTIFY_EMAILS.forEach(adminEmail => {
-        sendBotEmailNoSentClutter(adminEmail, `Minerva ERP: Offer ${String(data.response || "").replace(/_/g, " ").toLowerCase()} — ${data.applicantName || ""} (${data.cvId || ""})`,
-          "Please open this email in an HTML compatible client.", { htmlBody: htmlBody });
-      });
+      sendBotEmailNoSentClutter(recruitmentInbox(), `Minerva ERP: Offer ${String(data.response || "").replace(/_/g, " ").toLowerCase()} — ${data.applicantName || ""} (${data.cvId || ""})`,
+        "Please open this email in an HTML compatible client.", { htmlBody: htmlBody });
       return ok();
     }
 
@@ -524,6 +528,45 @@ function doPost(e) {
 }
 
 // =====================================================================================
+// NEW JOB APPLICATION ALERT (management) — sent ONLY to the bot's own inbox
+// =====================================================================================
+function sendNewApplicationAlert(data) {
+  const inbox = recruitmentInbox();
+  if (!inbox.includes("@")) return;
+  const details = data.details || {};
+  const name = details["Full Name"] || details["Name"] || "Applicant";
+  // the applicant's answers (uploaded files are skipped), at most 40 rows
+  const rows = Object.keys(details).filter(k => {
+    const v = details[k];
+    return v !== null && v !== undefined && v !== "" && (typeof v !== "object" || Array.isArray(v));
+  }).slice(0, 40).map(k => {
+    const v = Array.isArray(details[k]) ? details[k].join(", ") : details[k];
+    return `<tr><td style="padding:5px 8px;border-bottom:1px solid #e2e8f0;color:#475569;width:40%;">${esc(k)}</td><td style="padding:5px 8px;border-bottom:1px solid #e2e8f0;font-weight:bold;">${esc(v)}</td></tr>`;
+  }).join("");
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; color: #0f172a; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden;">
+      <div style="background-color: #1e1b4b; color: #ffffff; padding: 20px; text-align: center;">
+        <h2 style="margin: 0; text-transform: uppercase; letter-spacing: 1px;">New Job Application</h2>
+      </div>
+      <div style="padding: 20px;">
+        <div style="background:#f8fafc; border-left:4px solid #2563eb; padding:12px; margin-bottom:15px;">
+          <strong>Applicant:</strong> ${esc(name)}<br>
+          <strong>CV ID:</strong> ${esc(data.cvId || "")}<br>
+          <strong>Preferred Branch:</strong> ${esc(data.branch || "—")}<br>
+          <strong>Email:</strong> ${esc(data.email || "—")}<br>
+          <strong>Mobile:</strong> ${esc(data.mobile || "—")}
+        </div>
+        ${rows ? `<table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:16px;">${rows}</table>` : ""}
+        <p style="text-align:center; margin:18px 0;"><a href="${PENDING_PAGE}" target="_blank" style="background-color:#2563eb; color:#ffffff; text-decoration:none; padding:10px 20px; border-radius:8px; font-weight:bold; display:inline-block;">Open Recruitment &amp; Pending Staff</a></p>
+        <p style="margin-top:20px; font-size:12px; color:#64748b; text-align:center;">This is an automated notification from the Minerva ERP System.</p>
+      </div>
+    </div>
+  `;
+  sendBotEmailNoSentClutter(inbox, `Minerva ERP: New Job Application — ${name} (${data.cvId || ""})`,
+    `New job application from ${name} (${data.cvId || ""}), branch ${data.branch || "-"}, mobile ${data.mobile || "-"}. Open ${PENDING_PAGE}`, { htmlBody: htmlBody });
+}
+
+// =====================================================================================
 // SENDING WITHOUT KEEPING COPIES
 // The email is sent from a draft, so we get the exact sent message back and delete it at once:
 //  - permanently, if the Gmail advanced service is added (Services -> Gmail API), or
@@ -599,7 +642,14 @@ function testApplicantEmails() {
   Logger.log("CV ID reminder: " + JSON.stringify(post({ type: "APPLICANT_CVID_REMINDER", email: TEST_EMAIL, applicantName: "Test Applicant", cvId: "CV-000000", portalLink: STATUS_PAGE })));
   Logger.log("Reset code: " + JSON.stringify(post({ type: "APPLICANT_OTP", email: TEST_EMAIL, applicantName: "Test Applicant", code: "123456", minutes: 10 })));
   Logger.log("Application received: " + JSON.stringify(post({ type: "STAFF_APPLICATION_SUBMITTED", email: TEST_EMAIL, cvId: "CV-000000", branch: "Ghumarwin", details: { "Full Name": "Test Applicant" } })));
-  Logger.log("Done. Check the inbox (and Spam) of " + TEST_EMAIL);
+  Logger.log("Done. Check the inbox (and Spam) of " + TEST_EMAIL + ". The 'New Job Application' alert went to " + recruitmentInbox());
+}
+
+// TEST: sends a sample "offer accepted" alert to the bot's own inbox.
+function testRecruitmentAlerts() {
+  const post = (data) => JSON.parse(doPost({ postData: { contents: JSON.stringify(data) } }).getContent());
+  Logger.log("Offer response: " + JSON.stringify(post({ type: "OFFER_RESPONSE", applicantName: "Test Applicant", cvId: "CV-000000", response: "ACCEPTED", comment: "Test only", joiningDate: "2026-12-01", branch: "Ghumarwin" })));
+  Logger.log("Alert sent to " + recruitmentInbox() + " only.");
 }
 
 // Run ONCE from the editor to switch on the hourly clean-up.
