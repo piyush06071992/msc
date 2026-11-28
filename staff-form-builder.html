@@ -116,7 +116,7 @@
     </div>
 
     <div id="settings-modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[100] hidden items-center justify-center p-4">
-        <div class="bg-white rounded-[2.5rem] p-8 max-w-md w-full shadow-2xl">
+        <div class="bg-white rounded-[2.5rem] p-8 max-w-md w-full shadow-2xl max-h-[92vh] overflow-y-auto">
             <h3 class="text-2xl font-bold text-slate-900 mb-6 tracking-tight">Field Settings</h3>
             
             <div class="space-y-5">
@@ -144,6 +144,18 @@
                 <div id="options-container" class="hidden">
                     <label class="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Options (Comma separated)</label>
                     <textarea id="edit-options" placeholder="Maths, Physics, Chemistry" class="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl h-24 resize-none font-bold"></textarea>
+                </div>
+
+                <div id="showwhen-container" class="space-y-2 bg-amber-50/60 p-4 rounded-2xl border-2 border-amber-100">
+                    <label class="block text-[10px] font-black text-amber-800 uppercase tracking-widest">Show this question only when (optional)</label>
+                    <select id="edit-sw-field" onchange="fillShowWhenValues()" class="w-full p-3 bg-white border-2 border-amber-100 rounded-xl font-bold text-sm outline-none focus:border-amber-500">
+                        <option value="">— Always show —</option>
+                    </select>
+                    <div id="edit-sw-value-wrap" class="hidden">
+                        <p id="edit-sw-op" class="text-[10px] font-black text-amber-700 uppercase tracking-widest mb-1">is</p>
+                        <select id="edit-sw-value" class="w-full p-3 bg-white border-2 border-amber-100 rounded-xl font-bold text-sm outline-none focus:border-amber-500"></select>
+                    </div>
+                    <p class="text-[9px] font-bold text-amber-700/80">e.g. "Other Qualification" shown only when QUALIFICATIONS includes Others. While hidden it is not compulsory and not saved.</p>
                 </div>
 
                 <div id="file-settings-container" class="hidden space-y-4 bg-cyan-50/50 p-4 rounded-2xl border-2 border-cyan-100">
@@ -209,6 +221,33 @@
         const toolbox = document.getElementById('toolbox');
         const preferredBranchCard = document.getElementById('preferred-branch-card');
         let activeField = null;
+
+        // PERMANENT FIELD IDs: every field keeps the same id even when its label is renamed, so the
+        // builder knows a rename from a delete + add, and existing staff records can follow the rename.
+        // Answers are still saved under the label (details["Full Name"]) because ~28 pages read them that way.
+        const originalLabels = {};   // id -> label when the form was loaded / last saved
+        function newFieldId() { return 'f_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+        // Other pages find these by a word in the label: staff name ("name"), department ("depart"/"dept"),
+        // subjects ("subject"), branch ("cent"/"branch"). A rename must keep the word.
+        const PROTECTED_WORDS = ['name', 'depart', 'dept', 'subject', 'cent', 'branch'];
+        function canvasFields() {
+            const list = [];
+            if (preferredBranchCard) list.push({ id: 'f_branch', label: 'Preferred Branch', type: 'select', options: preferredBranchCard.getAttribute('data-options') || (typeof dynamicBranchesList !== 'undefined' ? dynamicBranchesList.join(', ') : '') });
+            dragZone.querySelectorAll('.form-field-item').forEach(f => list.push({
+                id: f.getAttribute('data-field-id'), label: f.getAttribute('data-label') || f.querySelector('.field-label').innerText,
+                type: f.getAttribute('data-field-type'), options: f.getAttribute('data-options') || '', el: f }));
+            return list;
+        }
+        function splitOptions(str) { return String(str || '').split(',').map(o => o.trim()).filter(Boolean); }
+        window.fillShowWhenValues = (selected) => {
+            const fid = document.getElementById('edit-sw-field').value;
+            const wrap = document.getElementById('edit-sw-value-wrap');
+            const f = canvasFields().find(x => x.id === fid);
+            if (!f) { wrap.classList.add('hidden'); return; }
+            wrap.classList.remove('hidden');
+            document.getElementById('edit-sw-op').innerText = f.type === 'checkbox' ? 'includes (ticked)' : 'is';
+            document.getElementById('edit-sw-value').innerHTML = splitOptions(f.options).map(o => `<option value="${o.replace(/"/g, '&quot;')}" ${o === selected ? 'selected' : ''}>${o}</option>`).join('');
+        };
         let dynamicBranchesList = [];
 
         function renderBranchPreviewOptions(query = "") {
@@ -320,6 +359,9 @@
 
                         const el = document.createElement('div');
                         setupField(el, f.type);
+                        el.setAttribute('data-field-id', f.id || newFieldId());   // old fields get an id on next save
+                        originalLabels[el.getAttribute('data-field-id')] = f.label;
+                        if (f.showWhen && f.showWhen.fieldId) el.setAttribute('data-show-when', JSON.stringify(f.showWhen));
                         
                         // Map Cloud Data to Visual Element
                         el.querySelector('.field-label').innerText = f.label;
@@ -355,6 +397,7 @@
                         updateUI(el);
                         dragZone.appendChild(el);
                     });
+                    dragZone.querySelectorAll('.form-field-item').forEach(updateUI);   // condition notes need all labels
                 }
             } catch (e) { console.error("Load Error:", e); }
         }
@@ -448,6 +491,7 @@
 
         // --- FIELD BUILDER ---
         function setupField(el, type) {
+            if (!el.getAttribute('data-field-id')) el.setAttribute('data-field-id', newFieldId());
             el.className = "form-field-item group relative p-6 border-2 border-slate-100 rounded-3xl bg-white hover:border-blue-400 transition-all cursor-move mb-4 shadow-sm";
             el.setAttribute('data-field-type', type);
             if (type === 'file') {
@@ -484,6 +528,7 @@
                     <span class="badge-req text-[8px] font-bold px-2 py-0.5 bg-slate-100 text-slate-400 rounded uppercase tracking-tighter">Optional</span>
                     <span class="badge-search text-[8px] font-bold px-2 py-0.5 bg-indigo-50 text-indigo-400 rounded uppercase tracking-tighter hidden">Searchable</span>
                     <span class="badge-filter text-[8px] font-bold px-2 py-0.5 bg-purple-50 text-purple-400 rounded uppercase tracking-tighter hidden">Filter</span>
+                    <span class="badge-cond text-[8px] font-bold px-2 py-0.5 bg-amber-50 text-amber-700 rounded uppercase tracking-tighter hidden"></span>
                 </div>
             `;
             
@@ -518,6 +563,14 @@
                 document.getElementById('edit-max-rows').value = el.getAttribute('data-max-rows') || '0';
             }
             
+            // "show only when": any other drop-down / multi-tick field that has options
+            const ownId = el.getAttribute('data-field-id');
+            let sw = null; try { sw = JSON.parse(el.getAttribute('data-show-when') || 'null'); } catch (e) {}
+            const ctrls = canvasFields().filter(x => x.id !== ownId && ['select', 'checkbox'].includes(x.type) && splitOptions(x.options).length);
+            document.getElementById('edit-sw-field').innerHTML = '<option value="">— Always show —</option>' +
+                ctrls.map(x => `<option value="${x.id}" ${sw && sw.fieldId === x.id ? 'selected' : ''}>${x.label}</option>`).join('');
+            fillShowWhenValues(sw ? sw.value : undefined);
+
             document.getElementById('settings-modal').classList.replace('hidden', 'flex');
         }
 
@@ -555,7 +608,12 @@
                     hintEl.innerText = `Repeatable single-input rows • ${maxRows > 0 ? `Max ${maxRows} rows` : 'Unlimited rows'}`;
                 }
             }
-            updateUI(activeField);
+            const swField = document.getElementById('edit-sw-field').value;
+            const swValue = document.getElementById('edit-sw-value').value;
+            if (swField && swValue) activeField.setAttribute('data-show-when', JSON.stringify({ fieldId: swField, value: swValue }));
+            else activeField.removeAttribute('data-show-when');
+
+            dragZone.querySelectorAll('.form-field-item').forEach(updateUI);
             closeSettings();
         };
 
@@ -565,6 +623,13 @@
             el.querySelector('.badge-req').classList.toggle('text-red-500', req);
             el.querySelector('.badge-search').classList.toggle('hidden', el.getAttribute('data-searchable') !== "true");
             el.querySelector('.badge-filter').classList.toggle('hidden', el.getAttribute('data-filterable') !== "true");
+            const condEl = el.querySelector('.badge-cond');
+            if (condEl) {
+                let sw = null; try { sw = JSON.parse(el.getAttribute('data-show-when') || 'null'); } catch (e) {}
+                const ctrl = sw && canvasFields().find(x => x.id === sw.fieldId);
+                condEl.classList.toggle('hidden', !sw);
+                condEl.innerText = sw ? `↳ shown when ${ctrl ? ctrl.label : '(missing field!)'} ${ctrl && ctrl.type === 'checkbox' ? 'includes' : 'is'} ${sw.value}` : '';
+            }
         }
 
         // --- CLOUD OVERWRITE ---
@@ -581,7 +646,8 @@
                 required: true,
                 searchable: true,
                 filterable: true,
-                dynamicSource: "branches"
+                dynamicSource: "branches",
+                id: "f_branch"
             }];
 
             dragZone.querySelectorAll('.form-field-item').forEach(f => {
@@ -593,8 +659,10 @@
                     options: f.getAttribute('data-options') || "",
                     required: f.getAttribute('data-required') === "true",
                     searchable: f.getAttribute('data-searchable') === "true",
-                    filterable: f.getAttribute('data-filterable') === "true"
+                    filterable: f.getAttribute('data-filterable') === "true",
+                    id: f.getAttribute('data-field-id') || newFieldId()
                 };
+                try { const sw = JSON.parse(f.getAttribute('data-show-when') || 'null'); if (sw && sw.fieldId) fieldObj.showWhen = sw; } catch (e) {}
                 if (fieldType === 'file') {
                     fieldObj.fileTypes = f.getAttribute('data-file-types') || 'jpg,pdf';
                     fieldObj.jpgMaxPx = Number(f.getAttribute('data-jpg-max-px') || 1280);
@@ -940,6 +1008,7 @@
                     const isWide = f.label.toUpperCase().includes('ADDRESS');
                     const card = document.createElement('div');
                     card.className = \`p-4 sm:p-5 rounded-2xl border \${theme.wrap} \${isWide ? 'md:col-span-2' : ''}\`;
+                    card.dataset.fieldLabel = f.label;
 
                     const label = \`<label class="flex items-center gap-2 text-[10px] font-black \${theme.label} uppercase tracking-widest mb-2"><span class="w-2 h-2 rounded-full \${theme.dot}"></span>\${f.label}\${f.required ? ' *' : ''}</label>\`;
                     const style = \`w-full p-3.5 \${theme.input} border-2 rounded-xl font-bold text-sm text-slate-800 outline-none transition-all\`;
@@ -972,6 +1041,7 @@
                 const theme = CARD_THEMES[(idx + 2) % CARD_THEMES.length];
                 const container = document.createElement('div');
                 container.className = \`p-4 sm:p-6 rounded-2xl border \${theme.wrap}\`;
+                container.dataset.fieldLabel = f.label;
 
                 const label = \`<div class="flex items-center justify-between gap-2 mb-3"><label class="flex items-center gap-2 text-[11px] font-black \${theme.label} uppercase tracking-widest"><span class="w-2.5 h-2.5 rounded-full \${theme.dot}"></span>\${f.label}\${f.required ? ' *' : ''}</label>\${f.type === 'checkbox' ? '<span class="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Multi-select</span>' : ''}</div>\`;
 
@@ -1048,6 +1118,7 @@
                 const elements = e.target.querySelectorAll('[name]');
                 elements.forEach(el => {
                     if (el.type === 'file') return;
+                    if (el.closest('[data-cond-hidden="true"]')) return;   // question not shown (its condition is not met)
                     if (el.type === 'checkbox') {
                         if (!staffData.details[el.name]) staffData.details[el.name] = [];
                         if (el.checked) staffData.details[el.name].push(el.value);
@@ -1058,6 +1129,7 @@
 
                 const rowContainers = e.target.querySelectorAll('[data-rows-field-label]');
                 rowContainers.forEach(rc => {
+                    if (rc.closest('[data-cond-hidden="true"]') || rc.dataset.condHidden === "true") return;
                     const fLabel = rc.dataset.rowsFieldLabel;
                     const vals = Array.from(rc.querySelectorAll('.row-value')).map(i => i.value.trim()).filter(Boolean);
                     if (rc.dataset.rowsRequired === "true" && vals.length === 0) {
@@ -1068,6 +1140,7 @@
 
                 const fileInputs = e.target.querySelectorAll('input[type="file"][data-file-field="true"]');
                 for (const fileEl of fileInputs) {
+                    if (fileEl.closest('[data-cond-hidden="true"]')) continue;
                     const selectedFile = fileEl.files && fileEl.files[0];
                     if (selectedFile) {
                         const cfgMatch = (STATIC_FORM_CONFIG.fields || []).find(item => item.label === fileEl.name) || {};
@@ -1113,7 +1186,51 @@
             }
         };
 
+        // DEPENDENT QUESTIONS: a field with "showWhen" { fieldId, value } is shown only when the answer of
+        // that other field is (drop-down) or includes (multi-tick) the value. While hidden it is not
+        // compulsory and its answer is not saved. Chains work too (a hidden field counts as unanswered).
+        function applyConditionalFields(fields) {
+            const area = document.getElementById('dynamic-fields-area');
+            const byId = {};
+            (fields || []).forEach(f => { if (f.id) byId[f.id] = f; });
+            const wrapOf = (f) => [...area.querySelectorAll('[data-field-label]')].find(w => w.dataset.fieldLabel === f.label);
+            const dependents = (fields || []).filter(f => f.showWhen && f.showWhen.fieldId && byId[f.showWhen.fieldId]);
+            if (!dependents.length) return;
+            const answerOf = (f) => {
+                const w = wrapOf(f);
+                if (!w || w.dataset.condHidden === "true") return [];
+                return [...w.querySelectorAll('[name]')].filter(el => el.type === 'checkbox' ? el.checked : true)
+                    .map(el => String(el.value || '').trim()).filter(Boolean);
+            };
+            const setShown = (w, show) => {
+                w.dataset.condHidden = show ? "false" : "true";
+                w.classList.toggle('hidden', !show);
+                w.querySelectorAll('input, select, textarea').forEach(el => {
+                    if (el.required) el.dataset.wasRequired = "true";
+                    if (el.dataset.wasRequired === "true") el.required = show;
+                    el.disabled = !show;
+                });
+            };
+            const evaluate = () => {
+                // repeat so that chains (A shows B, B shows C) settle
+                for (let pass = 0; pass < dependents.length + 1; pass++) {
+                    let changed = false;
+                    dependents.forEach(f => {
+                        const w = wrapOf(f); if (!w) return;
+                        const want = String(f.showWhen.value || '').trim().toLowerCase();
+                        const show = answerOf(byId[f.showWhen.fieldId]).some(v => v.toLowerCase() === want);
+                        if ((w.dataset.condHidden !== "true") !== show || w.dataset.condHidden === undefined) { setShown(w, show); changed = true; }
+                    });
+                    if (!changed) break;
+                }
+            };
+            area.addEventListener('change', evaluate);
+            area.addEventListener('input', evaluate);
+            evaluate();
+        }
+
         renderDynamicFields(STATIC_FORM_CONFIG.fields || []);
+        applyConditionalFields(STATIC_FORM_CONFIG.fields || []);
     <\/script>
 </body>
 </html>`;
@@ -1181,12 +1298,33 @@
                 return `${owner}/${repo}@${branch}:${filePath}`;
             }
 
+            // ---- checks before saving --------------------------------------------------------------
+            const check = checkFormBeforeSave(fieldsArr);
+            if (check.errors.length) {
+                alert("⛔ Cannot save yet:\n\n• " + check.errors.join("\n• "));
+                btn.innerText = "Save Config"; btn.disabled = false; return;
+            }
+            if (check.warnings.length && !confirm("⚠️ Please check:\n\n• " + check.warnings.join("\n• ") + "\n\nSave anyway?")) {
+                btn.innerText = "Save Config"; btn.disabled = false; return;
+            }
+            if (check.renames.length && !confirm("✏️ These fields were renamed:\n\n• " + check.renames.map(r => `${r.from}  →  ${r.to}`).join("\n• ") +
+                    "\n\nAll existing staff records will be updated to the new names too, so their answers keep showing.\n\nContinue?")) {
+                btn.innerText = "Save Config"; btn.disabled = false; return;
+            }
+
             try {
                 setDeployBanner('working', 'Step 1/3: Saving form configuration to Firestore...');
                 await db.collection("configs").doc("staff_registration_form").set({
                     fields: fieldsArr,
                     lastSync: firebase.firestore.FieldValue.serverTimestamp()
                 });
+                let renameNote = '';
+                if (check.renames.length) {
+                    setDeployBanner('working', 'Step 1/3: Updating existing staff records to the new field names...');
+                    const r = await moveRenamedAnswers(check.renames);
+                    renameNote = `\n\nRenamed fields: ${r.updated} staff record(s) updated.` + (r.skipped.length ? `\n⚠️ Not moved (the new name already had an answer): ${r.skipped.join(', ')}` : '');
+                }
+                fieldsArr.forEach(f => { if (f.id) originalLabels[f.id] = f.label; });
 
                 setDeployBanner('working', 'Step 2/3: Building static staff-registration.html...');
                 const staticHtml = buildStaticStaffRegistrationHtml({ fields: fieldsArr });
@@ -1195,7 +1333,7 @@
                 const deployedTarget = await deployStaticFormToGitHub(staticHtml);
 
                 setDeployBanner('success', `Deployed successfully to ${deployedTarget}.`);
-                alert(`✅ Success! Config saved and static form pushed to ${deployedTarget}.`);
+                alert(`✅ Success! Config saved and static form pushed to ${deployedTarget}.` + renameNote);
             } catch (e) {
                 setDeployBanner('error', `Deployment failed: ${e.message}`);
                 alert('Save / Deploy Failed: ' + e.message);
@@ -1204,6 +1342,65 @@
             btn.innerText = "Save Config";
             btn.disabled = false;
         };
+
+        // Problems that must be fixed (errors), things to double-check (warnings), and renamed fields
+        function checkFormBeforeSave(fieldsArr) {
+            const errors = [], warnings = [], renames = [];
+            const lower = (x) => String(x || '').toLowerCase();
+            const byId = {}; fieldsArr.forEach(f => byId[f.id] = f);
+            // same label twice -> both answers would be saved in one place
+            const seen = {};
+            fieldsArr.forEach(f => { const k = lower(f.label).trim(); if (seen[k]) errors.push(`Two fields are named "${f.label}". Each question needs its own name.`); seen[k] = true; });
+            // renamed / removed fields
+            fieldsArr.forEach(f => {
+                const old = originalLabels[f.id];
+                if (old === undefined || old === f.label) return;
+                const lost = PROTECTED_WORDS.filter(w => lower(old).includes(w) && !lower(f.label).includes(w));
+                if (lost.length) errors.push(`"${old}" → "${f.label}": other pages find this field by the word "${lost[0]}". Keep it in the new name.`);
+                else if (old === 'Aadhaar Number') errors.push(`"Aadhaar Number" is used for the duplicate-Aadhaar check; please keep this exact name.`);
+                else renames.push({ id: f.id, from: old, to: f.label });
+            });
+            Object.entries(originalLabels).forEach(([id, label]) => {
+                if (!byId[id] && PROTECTED_WORDS.some(w => lower(label).includes(w))) warnings.push(`"${label}" was removed, but other pages use it (staff name / department / subjects / branch).`);
+            });
+            // more than one field with the same key word: pages take the first one they find
+            [['name', 'staff name'], ['subject', 'subjects'], ['depart', 'department']].forEach(([w, what]) => {
+                const hits = fieldsArr.filter(f => lower(f.label).includes(w)).map(f => f.label);
+                if (hits.length > 1) warnings.push(`${hits.map(h => `"${h}"`).join(' and ')} all contain "${w}". Other pages may pick the wrong one as the ${what}.`);
+            });
+            // conditions
+            fieldsArr.forEach(f => {
+                if (!f.showWhen) return;
+                const c = byId[f.showWhen.fieldId];
+                if (!c) errors.push(`"${f.label}" depends on a field that no longer exists. Open its settings and choose again.`);
+                else if (!splitOptions(c.options).includes(f.showWhen.value)) errors.push(`"${f.label}" is shown when ${c.label} is "${f.showWhen.value}", but that option no longer exists in ${c.label}.`);
+                // loops: A shown by B, B shown by A
+                let cur = f, steps = 0;
+                while (cur && cur.showWhen && steps <= fieldsArr.length) { cur = byId[cur.showWhen.fieldId]; steps++; if (cur === f) { errors.push(`"${f.label}" depends on itself through other questions. Remove one of the conditions.`); break; } }
+            });
+            return { errors, warnings, renames };
+        }
+
+        // Rename existing answers in every staff record: details[old] -> details[new]
+        async function moveRenamedAnswers(renames) {
+            const snap = await db.collection("staff_applications").get();
+            const FP = firebase.firestore.FieldPath, del = firebase.firestore.FieldValue.delete();
+            let batch = db.batch(), ops = 0, updated = 0; const skipped = [];
+            for (const doc of snap.docs) {
+                const det = (doc.data() || {}).details || {};
+                const args = [];
+                renames.forEach(r => {
+                    if (!Object.prototype.hasOwnProperty.call(det, r.from)) return;
+                    if (Object.prototype.hasOwnProperty.call(det, r.to)) { skipped.push(`${doc.id} (${r.to})`); return; }
+                    args.push(new FP('details', r.to), det[r.from], new FP('details', r.from), del);
+                });
+                if (!args.length) continue;
+                batch.update(doc.ref, ...args); ops++; updated++;
+                if (ops >= 400) { await batch.commit(); batch = db.batch(); ops = 0; }
+            }
+            if (ops) await batch.commit();
+            return { updated, skipped };
+        }
 
         window.closeSettings = () => document.getElementById('settings-modal').classList.replace('flex', 'hidden');
         
