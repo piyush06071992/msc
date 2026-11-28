@@ -506,14 +506,25 @@ let html = "";
                 const SPECIAL_EXAMS = ['EXAM', 'UT', 'OT', 'TERMINAL EXAMS', 'PREBOARD', 'BOARD EXAM'];
                 const norm = str => (str||"").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
 
-                // 2. Cross-reference each date with the Timetable History
+                // 2. Cross-reference each date with the Timetable History.
+                //    One query for the whole date range (saved days are stored under their date),
+                //    instead of one read per exam date.
+                const examDates = Object.keys(examsByDate).sort();
+                let historyById = null;
+                try {
+                    const hs = await db.collection(prefix + "timetable_history")
+                        .where("date", ">=", examDates[0]).where("date", "<=", examDates[examDates.length - 1]).get();
+                    historyById = {};
+                    hs.forEach(d => { historyById[d.id] = d.data(); });
+                } catch (e) { historyById = null; }   // fall back to one read per date
                 for (const date of Object.keys(examsByDate)) {
                     try {
-                        const historyDoc = await db.collection(prefix + "timetable_history").doc(date).get();
                         let historySchedule = [];
-                        
-                        if (historyDoc.exists) {
-                            historySchedule = historyDoc.data().schedule || [];
+                        if (historyById) {
+                            if (historyById[date]) historySchedule = historyById[date].schedule || [];
+                        } else {
+                            const historyDoc = await db.collection(prefix + "timetable_history").doc(date).get();
+                            if (historyDoc.exists) historySchedule = historyDoc.data().schedule || [];
                         }
 
                         // Check if the specific sections scheduled for the exam actually have "EXAM" or "UT/OT" slots on that day
@@ -591,6 +602,21 @@ listenForUnconfiguredExams();
       listenForGlobalClashes();
         // --------------------------------
 
+        // The two warning banners on this page (7-days-absent students, timetable clashes) need many
+        // documents. Their RESULT is kept for 15 minutes in this browser tab, so coming back to this
+        // page shows it at once instead of reading everything again. After 15 minutes it is checked again.
+        function bannerCacheGet(key) {
+            const maxAgeMs = 15 * 60 * 1000;
+            try { const c = JSON.parse(sessionStorage.getItem(key) || 'null'); return c && (Date.now() - c.at) < maxAgeMs ? c : null; } catch (e) { return null; }
+        }
+        function bannerCacheSet(key, html) {
+            try { sessionStorage.setItem(key, JSON.stringify({ at: Date.now(), html: html || '' })); } catch (e) {}
+        }
+        function showBanner(banner, listEl, html) {
+            if (html) { listEl.innerHTML = html; banner.classList.remove('hidden'); banner.classList.add('flex'); }
+            else { banner.classList.add('hidden'); banner.classList.remove('flex'); }
+        }
+
         async function listenForCriticalAbsentees() {
             const center = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
@@ -598,18 +624,11 @@ listenForUnconfiguredExams();
             const banner = document.getElementById('critical-absentees-banner');
             const listEl = document.getElementById('critical-absentees-list');
             if(!banner || !listEl) return;
+            const cacheKey = 'minervaBannerAbsentees_' + center;
+            const cached = bannerCacheGet(cacheKey);
+            if (cached) { showBanner(banner, listEl, cached.html); return; }
 
             try {
-                // 1. Fetch active students
-                const allStuSnap = await db.collection(prefix + "students").get();
-                let studentsData = [];
-                allStuSnap.forEach(doc => {
-                    if (doc.data().isActive !== false && doc.data().admissionStatus !== 'PENDING') {
-                        studentsData.push({ id: doc.id, ...doc.data() });
-                    }
-                });
-
-                if(studentsData.length === 0) return;
 
                 // 2. Fetch attendance for current and previous month
                 const today = new Date();
@@ -672,12 +691,20 @@ listenForUnconfiguredExams();
                     }
 
                     if (consecutiveAbsences >= 7) {
-                        const stu = studentsData.find(s => s.id === stuId);
-                        if (stu) {
-                            flaggedStudents.push({ stu: stu, absentCount: consecutiveAbsences });
-                        }
+                        flaggedStudents.push({ id: stuId, absentCount: consecutiveAbsences });
                     }
                 });
+
+                // Only the flagged students are read (not every student); same rule as before:
+                // active and not a pending admission.
+                const flaggedDocs = await Promise.all(flaggedStudents.map(f => db.collection(prefix + "students").doc(f.id).get().catch(() => null)));
+                flaggedStudents = flaggedStudents.map((f, i) => {
+                    const d = flaggedDocs[i];
+                    if (!d || !d.exists) return null;
+                    const data = d.data();
+                    if (data.isActive === false || data.admissionStatus === 'PENDING') return null;
+                    return { stu: { id: d.id, ...data }, absentCount: f.absentCount };
+                }).filter(Boolean);
 
                 // 4. Render Banner
                 if (flaggedStudents.length > 0) {
@@ -694,12 +721,11 @@ listenForUnconfiguredExams();
                             </div>
                         `;
                     });
-                    listEl.innerHTML = html;
-                    banner.classList.remove('hidden');
-                    banner.classList.add('flex');
+                    showBanner(banner, listEl, html);
+                    bannerCacheSet(cacheKey, html);
                 } else {
-                    banner.classList.add('hidden');
-                    banner.classList.remove('flex');
+                    showBanner(banner, listEl, '');
+                    bannerCacheSet(cacheKey, '');
                 }
 
             } catch (e) {
@@ -734,7 +760,14 @@ listenForUnconfiguredExams();
             const center = sessionStorage.getItem('minervaAdminCenter') || "GHUMARWIN";
             const prefix = center === "GHUMARWIN" ? "" : center.toLowerCase() + "_";
             const todayIso = new Date().toISOString().split('T')[0];
-            
+            const clashCacheKey = 'minervaBannerClashes_' + center;
+            const clashCached = bannerCacheGet(clashCacheKey);
+            if (clashCached) {
+                const b = document.getElementById('global-clash-banner'), l = document.getElementById('global-clash-list');
+                if (b && l) showBanner(b, l, clashCached.html);
+                return;
+            }
+            const loaded = { live: false, history: false, holidays: false };
             let liveSchedule = [];
             let historySchedules = [];
             let holidaysData = []; // NEW: Cache holidays
@@ -839,29 +872,24 @@ listenForUnconfiguredExams();
                 const banner = document.getElementById('global-clash-banner');
                 const list = document.getElementById('global-clash-list');
                 if (banner && list) {
-                    if (clashMessages.size > 0) {
-                        list.innerHTML = Array.from(clashMessages).join('');
-                        banner.classList.remove('hidden');
-                        banner.classList.add('flex');
-                    } else {
-                        banner.classList.add('hidden');
-                        banner.classList.remove('flex');
-                    }
+                    const html = clashMessages.size > 0 ? Array.from(clashMessages).join('') : '';
+                    showBanner(banner, list, html);
+                    if (loaded.live && loaded.history && loaded.holidays) bannerCacheSet(clashCacheKey, html);
                 }
             };
 
             db.collection(prefix + "timetable").onSnapshot(snap => {
-                liveSchedule = snap.docs.map(d => d.data());
+                liveSchedule = snap.docs.map(d => d.data()); loaded.live = true;
                 checkClashes();
             });
 
             db.collection(prefix + "timetable_history").where("date", ">=", todayIso).onSnapshot(snap => {
-                historySchedules = snap.docs.map(d => d.data());
+                historySchedules = snap.docs.map(d => d.data()); loaded.history = true;
                 checkClashes();
             });
 
             db.collection(prefix + "school_holidays").onSnapshot(snap => {
-                holidaysData = snap.docs.map(d => d.data());
+                holidaysData = snap.docs.map(d => d.data()); loaded.holidays = true;
                 checkClashes();
             });
         }
