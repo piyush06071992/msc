@@ -322,6 +322,31 @@
     </div>
 
 <!-- HOD SYLLABUS OVERVIEW MODAL -->
+    <!-- PAPER SYLLABUS: one syllabus for every section of a paper (all branches) -->
+    <div id="paper-syllabus-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[310] hidden items-center justify-center p-4 no-print">
+        <div class="bg-white rounded-3xl w-full max-w-2xl max-h-[92vh] overflow-hidden flex flex-col shadow-2xl">
+            <div class="p-5 bg-teal-700 text-white flex items-start justify-between gap-3">
+                <div class="min-w-0">
+                    <h3 class="text-sm font-black uppercase tracking-widest">📝 Paper Syllabus</h3>
+                    <p id="ps-sub" class="text-[10px] font-bold text-teal-100 uppercase tracking-widest mt-1 break-all"></p>
+                </div>
+                <button type="button" onclick="closePaperSyllabus()" class="w-9 h-9 rounded-full bg-white/15 hover:bg-rose-500 font-black shrink-0">✕</button>
+            </div>
+            <div class="p-5 overflow-y-auto custom-scroll space-y-4">
+                <p class="text-[11px] font-bold text-slate-500">One syllabus for this paper. Saving puts it in <b>every section below, in all branches</b> (teachers can still edit their own section later).</p>
+                <textarea id="ps-text" rows="7" placeholder="Type the syllabus for this paper, e.g. Ch 1 Algebra, Ch 2 Sequences and Series…" class="w-full p-4 bg-slate-50 border-2 border-slate-200 focus:border-teal-400 rounded-xl text-sm font-bold text-slate-800 outline-none"></textarea>
+                <div>
+                    <p class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Sections in this paper</p>
+                    <div id="ps-sections" class="space-y-1.5"></div>
+                </div>
+            </div>
+            <div class="p-4 border-t border-slate-200 flex justify-end gap-2">
+                <button type="button" onclick="closePaperSyllabus()" class="px-4 py-2.5 rounded-xl bg-slate-100 text-slate-700 font-black text-xs uppercase tracking-widest">Cancel</button>
+                <button type="button" id="ps-save" onclick="savePaperSyllabus()" class="px-5 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white font-black text-xs uppercase tracking-widest shadow-md">💾 Save to all sections</button>
+            </div>
+        </div>
+    </div>
+
     <div id="hod-syllabus-modal" class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-[300] hidden items-center justify-center p-4">
         <div class="bg-white rounded-[2.5rem] w-full max-w-4xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
             <div class="p-6 bg-teal-600 border-b border-teal-700 flex justify-between items-center shrink-0">
@@ -1266,6 +1291,133 @@ window.onload = async () => {
             closeSheetModal();
         }
 
+        // ======================================================================
+        // PAPER SYLLABUS — one syllabus for a whole paper (date + subject + paper code).
+        // Saved into syllabi.<subject> of every exam schedule that covers one of the paper's
+        // sections, in every branch. Sections that already have a different syllabus are
+        // listed and overwritten after confirmation. Used by the paper maker (My assigned
+        // papers) and by the HOD / admin (mapping table).
+        // ======================================================================
+        function paperSyllabusArg(o) { return JSON.stringify(o).replace(/&/g, '&amp;').replace(/'/g, '&#39;').replace(/</g, '&lt;'); }
+        const psNorm = (v) => String(v || '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+        const psBranchColl = (branch) => (String(branch || '').toUpperCase() === 'GHUMARWIN' ? '' : String(branch || '').toLowerCase() + '_') + 'exam_schedules';
+        let psState = null;
+
+        function openPaperSyllabusFromRow(btn) {
+            const tr = btn.closest('tr');
+            const rowCode = (el) => String(((el.querySelector('.code-input') || {}).value) || '').trim().toUpperCase();
+            const code = (tr.querySelector('.code-input') || {}).value || '';
+            const subj = tr.getAttribute('data-subject') || '';
+            // every row of the table with the same paper code and subject is part of this paper
+            const sameRows = code.trim() ? [...document.querySelectorAll('tr.mapping-row-item')].filter(r => rowCode(r) === rowCode(tr) && (r.getAttribute('data-subject') || '') === subj) : [tr];
+            let packets = [];
+            sameRows.forEach(r => { try { packets = packets.concat(JSON.parse(r.getAttribute('data-packets') || '[]')); } catch (e) {} });
+            const seen = new Set();
+            packets = packets.filter(p => { const k = `${p.branch}|${p.className}|${p.section}`; if (seen.has(k)) return false; seen.add(k); return true; });
+            const date = (document.getElementById('map-view-date') || {}).value || (packets[0] && packets[0].date) || '';
+            openPaperSyllabus({ date, subject: tr.getAttribute('data-subject') || (packets[0] && packets[0].subject) || '', code,
+                sections: packets.map(p => ({ branch: p.branch, className: p.className, section: p.section })) });
+        }
+
+        async function openPaperSyllabus(paper) {
+            if (!paper || !paper.date || !paper.subject || !(paper.sections || []).length) return alert('This paper has no date, subject or sections yet.');
+            const modal = document.getElementById('paper-syllabus-modal');
+            document.getElementById('ps-sub').textContent = `${paper.subject} • ${paper.date}${paper.code ? ' • ' + paper.code : ''}`;
+            document.getElementById('ps-text').value = '';
+            document.getElementById('ps-sections').innerHTML = '<p class="text-xs font-bold text-slate-400">Loading sections…</p>';
+            document.getElementById('ps-save').disabled = true;
+            modal.classList.replace('hidden', 'flex');
+            try {
+                // exam schedules of that date, per branch involved
+                const branches = [...new Set(paper.sections.map(s => String(s.branch || 'GHUMARWIN').toUpperCase()))];
+                const snaps = {};
+                await Promise.all(branches.map(async b => { snaps[b] = await db.collection(psBranchColl(b)).where('date', '==', paper.date).get(); }));
+                const subjN = psNorm(paper.subject);
+                const targets = {};   // ref path -> { ref, key, existing, sections[] }
+                const rows = paper.sections.map(sec => {
+                    const b = String(sec.branch || 'GHUMARWIN').toUpperCase();
+                    const hits = [];
+                    (snaps[b] ? snaps[b].docs : []).forEach(doc => {
+                        const d = doc.data() || {};
+                        const pairs = [];   // [className, section, subjects[]]
+                        if (Array.isArray(d.targets) && d.targets.length) {
+                            d.targets.forEach(t => (t.sections || []).forEach(x => {
+                                const sn = typeof x === 'object' ? x.section : x;
+                                pairs.push([t.className, sn, (typeof x === 'object' && x.subjects) ? x.subjects : (t.subjects || d.subjects || [])]);
+                            }));
+                        } else pairs.push([d.className, d.section, d.subjects || (d.subject ? [d.subject] : [])]);
+                        const match = pairs.find(p => psNorm(p[0]) === psNorm(sec.className) && psNorm(p[1]) === psNorm(sec.section) &&
+                            (Array.isArray(p[2]) ? p[2] : [p[2]]).some(x => psNorm(x) === subjN));
+                        if (!match) return;
+                        const subjList = Array.isArray(match[2]) ? match[2] : [match[2]];
+                        const key = subjList.find(x => psNorm(x) === subjN) || paper.subject;   // the schedule's own spelling
+                        const syl = d.syllabi || {};
+                        const sameKeys = Object.keys(syl).filter(k => psNorm(k) === subjN);
+                        const existing = sameKeys.map(k => String(syl[k] || '').trim()).find(Boolean) || '';
+                        if (!targets[doc.ref.path]) targets[doc.ref.path] = { ref: doc.ref, key, otherKeys: sameKeys.filter(k => k !== key), existing, sections: [] };
+                        targets[doc.ref.path].sections.push(`${b} ${sec.className}-${sec.section}`);
+                        hits.push(existing);
+                    });
+                    return { label: `${b} • Class ${sec.className} • Sec ${sec.section}`, found: hits.length > 0, existing: hits.find(Boolean) || '' };
+                });
+                psState = { paper, targets: Object.values(targets), rows };
+                const texts = [...new Set(rows.filter(r => r.existing).map(r => r.existing))];
+                if (texts.length === 1) document.getElementById('ps-text').value = texts[0];   // everyone already has the same syllabus
+                renderPaperSyllabusRows();
+                document.getElementById('ps-save').disabled = !psState.targets.length;
+            } catch (e) {
+                console.error(e);
+                document.getElementById('ps-sections').innerHTML = `<p class="text-xs font-bold text-rose-600">Could not load the sections: ${e.message}</p>`;
+            }
+        }
+        function renderPaperSyllabusRows() {
+            const text = document.getElementById('ps-text').value.trim();
+            document.getElementById('ps-sections').innerHTML = psState.rows.map(r => {
+                let badge;
+                if (!r.found) badge = '<span class="text-[9px] font-black uppercase tracking-widest text-slate-400">not in exam schedule — skipped</span>';
+                else if (!r.existing) badge = '<span class="text-[9px] font-black uppercase tracking-widest text-sky-700 bg-sky-50 border border-sky-200 px-2 py-0.5 rounded">empty</span>';
+                else if (text && r.existing === text) badge = '<span class="text-[9px] font-black uppercase tracking-widest text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">same</span>';
+                else badge = `<span class="text-[9px] font-black uppercase tracking-widest text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">has a different syllabus</span>`;
+                const prev = r.existing && (!text || r.existing !== text) ? `<div class="text-[10px] font-bold text-slate-500 mt-1 line-clamp-2">Now: ${escapeHtmlPs(r.existing)}</div>` : '';
+                return `<div class="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2"><div class="flex items-center justify-between gap-2"><span class="text-[11px] font-black text-slate-700 uppercase">${escapeHtmlPs(r.label)}</span>${badge}</div>${prev}</div>`;
+            }).join('');
+        }
+        function escapeHtmlPs(v) { return String(v || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+        function closePaperSyllabus() { document.getElementById('paper-syllabus-modal').classList.replace('flex', 'hidden'); psState = null; }
+        document.addEventListener('input', (e) => { if (e.target && e.target.id === 'ps-text' && psState) renderPaperSyllabusRows(); });
+
+        async function savePaperSyllabus() {
+            if (!psState) return;
+            const text = document.getElementById('ps-text').value.trim();
+            if (!text) return alert('Please type the syllabus first.');
+            const replaced = psState.rows.filter(r => r.found && r.existing && r.existing !== text).map(r => r.label);
+            const skipped = psState.rows.filter(r => !r.found).map(r => r.label);
+            let msg = `Save this syllabus to ${psState.rows.filter(r => r.found).length} section(s) of ${psState.paper.subject} (${psState.paper.date})?`;
+            if (replaced.length) msg += `\n\n⚠️ These sections already have a different syllabus and it will be REPLACED:\n• ${replaced.join('\n• ')}`;
+            if (skipped.length) msg += `\n\nNot in the exam schedule (skipped):\n• ${skipped.join('\n• ')}`;
+            if (!confirm(msg)) return;
+            const btn = document.getElementById('ps-save'); const orig = btn.innerHTML; btn.disabled = true; btn.innerHTML = 'Saving…';
+            try {
+                const who = (activeStaff && (activeStaff.name || activeStaff.email)) || 'Admin';
+                for (let i = 0; i < psState.targets.length; i += 400) {
+                    const batch = db.batch();
+                    psState.targets.slice(i, i + 400).forEach(t => {
+                        const args = [new firebase.firestore.FieldPath('syllabi', t.key), text,
+                                      new firebase.firestore.FieldPath('syllabiMeta', t.key), { by: who, at: new Date().toISOString(), paperCode: psState.paper.code || '' }];
+                        t.otherKeys.forEach(k => args.push(new firebase.firestore.FieldPath('syllabi', k), text));   // same subject saved under another spelling
+                        batch.update(t.ref, ...args);
+                    });
+                    await batch.commit();
+                }
+                alert(`✅ Syllabus saved to ${psState.rows.filter(r => r.found).length} section(s).`);
+                closePaperSyllabus();
+            } catch (e) {
+                console.error(e);
+                alert('Could not save the syllabus: ' + e.message);
+                btn.disabled = false; btn.innerHTML = orig;
+            }
+        }
+
        async function saveSyllabus(docId, subject, textAreaId) {
             const syllabusText = document.getElementById(textAreaId).value.trim();
             const btn = event.target;
@@ -1849,6 +2001,10 @@ function renderAssignedPaperCard(r, index, totalCards) {
                         <div class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">Total Section(s) Included in this Paper</div>
                         <div class="flex flex-wrap gap-2">${sectionChips || '<span class="text-xs font-bold text-slate-400">—</span>'}</div>
                     </div>
+
+                    <button type="button" onclick='openPaperSyllabus(${paperSyllabusArg({ date: r.date, subject: r.subject, code: r.shortCode, sections: sortedPairs.map(p => ({ branch: p.branch, className: p.className, section: p.section })) })})' class="w-full mb-4 bg-white hover:bg-teal-50 text-teal-800 border-2 border-teal-300 px-4 py-3 rounded-xl font-black text-xs uppercase tracking-widest shadow-sm flex items-center justify-center gap-2">
+                        📝 Paper Syllabus <span class="text-[9px] font-bold text-teal-600 normal-case tracking-normal">(saved to all ${sortedPairs.length} section${sortedPairs.length === 1 ? '' : 's'})</span>
+                    </button>
 
                     ${dispatchHtml}
                 </div>
@@ -2603,6 +2759,7 @@ async function loadExamMappingData() {
                                 <div class="flex items-center gap-1.5">
                                     <input type="text" maxlength="99" class="w-full p-2 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold uppercase tracking-wider text-teal-800 code-input" value="${r.shortCode}">
                                     <button type="button" onclick="copyShortCode(this)" title="Copy Short Code" class="shrink-0 bg-teal-600 hover:bg-teal-500 text-white w-9 h-9 rounded-lg font-black text-sm shadow-sm transition-colors flex items-center justify-center active:scale-90">📋</button>
+                                    <button type="button" onclick="openPaperSyllabusFromRow(this)" title="Paper syllabus (all sections of this paper)" class="shrink-0 bg-white hover:bg-teal-50 text-teal-700 border border-teal-300 w-9 h-9 rounded-lg font-black text-sm shadow-sm transition-colors flex items-center justify-center active:scale-90">📝</button>
                                 </div>
                             </td>
                             <td class="p-4">
