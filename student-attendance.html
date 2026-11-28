@@ -6846,6 +6846,25 @@ schedule.forEach(slot => {
                 }
 
                 let requests = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+                // Automatic "missed" requests for a subject that is now exempt from subject attendance
+                // (Manage Classes → 📵) are not needed any more: close them and leave them out.
+                const exemptNow = (r) => {
+                    const st = (window.instituteStructures || []).find(x => normMatch(x.className) === normMatch(r.className) && normMatch(x.sectionName || x.section) === normMatch(r.section));
+                    return !!st && (st.attendanceExempt || []).some(e => normMatch(e) === normMatch(r.subject));
+                };
+                const closeable = requests.filter(r => r.requestType === 'MISSED' && exemptNow(r));
+                if (closeable.length) {
+                    for (let i = 0; i < closeable.length; i += 400) {
+                        const b = db.batch();
+                        closeable.slice(i, i + 400).forEach(r => b.update(db.collection("attendance_edit_requests").doc(r.id), { status: "CLOSED_EXEMPT", closedAt: Date.now() }));
+                        await b.commit();
+                    }
+                    requests = requests.filter(r => !closeable.includes(r));
+                    if (!requests.length) {
+                        container.innerHTML = `<div class="text-center py-20 text-slate-400 font-bold uppercase tracking-widest text-xs border-2 border-dashed border-slate-200 rounded-2xl">No pending edit requests. (${closeable.length} missed-register alert${closeable.length === 1 ? '' : 's'} for exempt subjects closed.)</div>`;
+                        return;
+                    }
+                }
                 requests.sort((a,b) => b.timestamp - a.timestamp); // Safely sort latest first locally
                 window.pendingEditRequests = requests;
 
