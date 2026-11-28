@@ -80,7 +80,8 @@ function viewOf(id, app) {
         pdfUrl: o.pdfUrl || "", sentAt: o.sentAt || "", letterDate: o.letterDate || "",
         response: o.response ? { kind: o.response.kind, comment: o.response.comment || "", at: o.response.at || "", via: o.response.via || "" } : null,
         signature: o.signature ? { name: o.signature.name, image: o.signature.image, at: o.signature.at } : null,
-        signedCopyUrl: o.signedCopyUrl || ""
+        signedCopyUrl: o.signedCopyUrl || "",
+        logoImage: /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(String(o.logoImage || "")) ? o.logoImage : ""
     } : null;
     return {
         id, cvId: app.cvId || id, name: nameOf(app), email: app.email || "", mobile: app.mobile || "",

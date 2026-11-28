@@ -251,15 +251,22 @@ Authorised Signatory`
         </div>`;
     }
 
+    // Top of the letter: logo (uploaded in Offer Settings) + institute name + branch line
+    function letterHeaderHtml(title, sub, logo) {
+        const img = safeImg(logo);
+        return `<div style="display:flex;align-items:center;justify-content:center;gap:14px;border-bottom:2px solid #1e1b4b;padding-bottom:8px;margin-bottom:18px;">
+                ${img ? `<img src="${img}" alt="Logo" style="height:64px;max-width:120px;object-fit:contain;">` : ""}
+                <div style="text-align:center;">
+                    <div style="font-size:20px;font-weight:bold;letter-spacing:1px;color:#1e1b4b;">${esc(title || "MINERVA STUDY CIRCLE")}</div>
+                    ${sub ? `<div style="font-size:11px;color:#475569;">${esc(sub)}</div>` : ""}
+                </div>
+            </div>`;
+    }
+
     function renderLetterPage(templateBody, offer, opts) {
         const o = opts || {};
-        const head = esc(o.schoolTitle || "MINERVA STUDY CIRCLE");
-        const sub = esc(o.schoolSub || "");
         return `<div style="font-family:Georgia,'Times New Roman',serif;color:#0f172a;width:210mm;box-sizing:border-box;padding:14mm 18mm;font-size:13.5px;line-height:1.55;background:#fff;">
-            <div style="text-align:center;border-bottom:2px solid #1e1b4b;padding-bottom:8px;margin-bottom:18px;">
-                <div style="font-size:20px;font-weight:bold;letter-spacing:1px;color:#1e1b4b;">${head}</div>
-                ${sub ? `<div style="font-size:11px;color:#475569;">${sub}</div>` : ""}
-            </div>
+            ${letterHeaderHtml(o.schoolTitle, o.schoolSub, o.logo)}
             ${(templateBody && typeof templateBody === "object") ? renderTemplateHtml(templateBody, offer) : renderLetterHtml(templateBody, offer)}
             ${o.authority ? authorityBlockHtml(o.authority) : ""}
             ${o.signatureHtml || ""}
@@ -271,7 +278,7 @@ Authorised Signatory`
         esc, formatINR, annualFromMonthly, calcBreakup, breakupTotalPercent, prettyDate,
         breakupTableHtml, renderLetterHtml, renderLetterPage,
         OFFER_FIELDS, chipHtml, legacyBodyToHtml, sanitizeLetterHtml, fieldValue, renderTemplateHtml, templateHasField,
-        DEFAULT_DESIGNATION, authorityBlockHtml,
-        VERSION: 3
+        DEFAULT_DESIGNATION, authorityBlockHtml, letterHeaderHtml, safeImg,
+        VERSION: 4
     };
 })(typeof window !== "undefined" ? window : globalThis);
