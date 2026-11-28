@@ -1,0 +1,56 @@
+name: Deploy Email Bot (Apps Script)
+
+# Uploads apps-script/ to the "Minerva Email Bot" Apps Script project and updates the
+# existing web app deployment (same URL), whenever that folder changes on main.
+# Needs the secret CLASPRC_JSON (login key of the account that owns the script).
+# Can also be started by hand: Actions -> Deploy Email Bot (Apps Script) -> Run workflow.
+
+on:
+  push:
+    branches: [ main ]
+    paths: [ 'apps-script/**' ]
+  workflow_dispatch:
+
+concurrency:
+  group: apps-script-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      DEPLOYMENT_ID: AKfycbyWUqGV1jd73NK_3zOU2Sy6wXCwcrjCG0ErqyRHM41f7qzcsNwxwjXfUlk2ZjFVeUmcdQ
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Check login key
+        id: key
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          if [ -z "$CLASPRC_JSON" ]; then
+            echo "::warning::Secret CLASPRC_JSON is not set yet, so the email bot was not deployed. See apps-script/README.md."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s' "$CLASPRC_JSON" > ~/.clasprc.json
+            chmod 600 ~/.clasprc.json
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload the script
+        if: steps.key.outputs.ok == 'true'
+        working-directory: apps-script
+        run: npx -y @google/clasp@2.4.2 push --force
+
+      - name: Update the live web app (same URL)
+        if: steps.key.outputs.ok == 'true'
+        working-directory: apps-script
+        run: npx -y @google/clasp@2.4.2 deploy --deploymentId "$DEPLOYMENT_ID" --description "GitHub ${GITHUB_SHA::7}"
+
+      - name: Remove the login key
+        if: always()
+        run: rm -f ~/.clasprc.json
