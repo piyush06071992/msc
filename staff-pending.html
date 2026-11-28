@@ -784,11 +784,11 @@
             approved.sort((a, b) => a.name.localeCompare(b.name));
             registeredStaffList = approved;
 
-            // Sort pending applications serially by appliedOn ascending (oldest first = S.No. 1)
+            // Newest applications first (inside each section of the list)
             pending.sort((a, b) => {
                 const ta = a.appliedOn && a.appliedOn.toMillis ? a.appliedOn.toMillis() : (Number(a.createdAtMs) || 0);
                 const tb = b.appliedOn && b.appliedOn.toMillis ? b.appliedOn.toMillis() : (Number(b.createdAtMs) || 0);
-                return ta - tb;
+                return tb - ta;
             });
             pendingApplications = pending;
 
@@ -983,10 +983,30 @@
             });
         }
 
+        // Which part of the recruitment pipeline an application is in (sections of the list)
+        const APP_SECTIONS = [
+            { key: 'NEW', title: '🆕 New / awaiting interview', cls: 'bg-sky-50 text-sky-800 border-sky-200' },
+            { key: 'SCORED', title: '📋 Interview done — scorecard ready', cls: 'bg-indigo-50 text-indigo-800 border-indigo-200' },
+            { key: 'HR', title: '🤝 In HR round', cls: 'bg-amber-50 text-amber-800 border-amber-200' },
+            { key: 'HR_DONE', title: '✅ HR round done (on hold / offer & joining)', cls: 'bg-emerald-50 text-emerald-800 border-emerald-200' },
+            { key: 'REJECTED', title: '✖ Rejected', cls: 'bg-rose-50 text-rose-700 border-rose-200' }
+        ];
+        function appSection(app) {
+            const st = String(app.status || '').toLowerCase();
+            const stage = String(app.stage || '');
+            if (st === 'rejected' || stage === 'Rejected') return 'REJECTED';
+            if (stage === 'HR' && (st === 'on_hold' || st === 'on hold')) return 'HR_DONE';
+            if (stage === 'HR' || st === 'hr_round') return 'HR';
+            if ((Array.isArray(app.scoreHistory) && app.scoreHistory.length) || stage === 'Admin_Review' || st === 'sent_to_admin') return 'SCORED';
+            return 'NEW';
+        }
+        let showRejectedSection = false;
+        function toggleRejectedSection() { showRejectedSection = !showRejectedSection; renderSerialTable(); }
+
         function renderSerialTable() {
             const tbody = document.getElementById('serial-table-body');
             const filtered = getFilteredApplications();
-            document.getElementById('visible-count').textContent = filtered.length;
+            document.getElementById('visible-count').textContent = filtered.filter(a => appSection(a) !== 'REJECTED').length;
             updateSelectedPill();
 
             if (filtered.length === 0) {
@@ -994,7 +1014,21 @@
                 return;
             }
 
-            tbody.innerHTML = filtered.map((app, index) => {
+            tbody.innerHTML = APP_SECTIONS.map(sec => {
+                const list = filtered.filter(a => appSection(a) === sec.key);
+                if (!list.length) return '';
+                const folded = sec.key === 'REJECTED' && !showRejectedSection;
+                const head = `<tr${sec.key === 'REJECTED' ? ' onclick="toggleRejectedSection()" class="cursor-pointer"' : ''}><td colspan="5" class="px-4 py-2.5 border-y ${sec.cls}">
+                        <span class="text-[11px] font-black uppercase tracking-widest">${sec.title}</span>
+                        <span class="ml-2 px-2 py-0.5 rounded-full bg-white/80 text-[10px] font-black">${list.length}</span>
+                        ${sec.key === 'REJECTED' ? `<span class="ml-2 text-[10px] font-bold">${folded ? '▸ show' : '▾ hide'}</span>` : ''}
+                    </td></tr>`;
+                return head + (folded ? '' : renderAppRows(list));
+            }).join('');
+        }
+
+        function renderAppRows(list) {
+            return list.map((app, index) => {
                 const serialNo = index + 1;
                 const name = getApplicantName(app);
                 const cvId = app.cvId || app.id;
@@ -1029,7 +1063,7 @@
         }
 
         function toggleSelectAllVisible(checked) {
-            const visible = getFilteredApplications();
+            const visible = getFilteredApplications().filter(a => showRejectedSection || appSection(a) !== 'REJECTED');
             visible.forEach(app => {
                 if (checked) selectedAppIds.add(app.id);
                 else selectedAppIds.delete(app.id);
