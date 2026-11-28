@@ -660,7 +660,7 @@
                 </div>
 
                 <div class="bg-slate-50 p-6 rounded-[2rem] border border-slate-200">
-                    <h4 class="font-black text-slate-800 uppercase text-xs mb-4">Active & Upcoming Holidays</h4>
+                    <h4 class="font-black text-slate-800 uppercase text-xs mb-4">Holidays & Events</h4>
                     <div id="active-holidays-list" class="space-y-3">
                         <p class="text-xs text-slate-400 font-bold italic">Loading...</p>
                     </div>
@@ -1478,8 +1478,11 @@ async function checkAndApplyFutureMaster() {
                     </div>
                 </div>`;
             }).join('');
-                
-            renderActiveHolidays();
+
+            // The editor keeps only the open date's holidays (fewer reads); the manager lists all of them
+            const listEl = document.getElementById('active-holidays-list');
+            if (listEl) listEl.innerHTML = '<p class="text-xs text-slate-400 font-bold italic">Loading...</p>';
+            fetchHolidays().then(renderActiveHolidays);
         }
 
         function toggleWholeClass(className, isChecked) {
@@ -1677,9 +1680,13 @@ async function saveHoliday() {
                 return;
             }
 
-            const sorted = [...activeHolidays].sort((a,b) => new Date(b.startDate) - new Date(a.startDate));
-            
-            list.innerHTML = sorted.map(h => {
+            const todayIsoH = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().split('T')[0];
+            const upcoming = activeHolidays.filter(h => (h.endDate || h.startDate || '') >= todayIsoH)
+                .sort((a, b) => String(a.startDate).localeCompare(String(b.startDate)));   // soonest first
+            const past = activeHolidays.filter(h => (h.endDate || h.startDate || '') < todayIsoH)
+                .sort((a, b) => String(b.startDate).localeCompare(String(a.startDate)));   // latest first
+
+            const card = (h) => {
                 const dateStr = h.startDate === h.endDate ? new Date(h.startDate).toLocaleDateString('en-GB') : `${new Date(h.startDate).toLocaleDateString('en-GB')} to ${new Date(h.endDate).toLocaleDateString('en-GB')}`;
                 const timeStr = h.isFullDay ? "Full Day" : `${format12Hour(h.startTime)} - ${format12Hour(h.endTime)}`;
                 const classStr = h.targetClasses.includes('ALL') ? "Entire Institute" : `${h.targetClasses.length} Sections`;
@@ -1707,7 +1714,12 @@ async function saveHoliday() {
                         <button onclick="deleteHoliday('${h.id}')" class="text-rose-400 hover:text-rose-600 font-black p-3 hover:bg-rose-50 rounded-xl transition-colors text-lg" title="Remove Exception">✕</button>
                     </div>
                 </div>`;
-            }).join('');
+            };
+
+            list.innerHTML =
+                `<p class="text-[10px] font-black text-emerald-700 uppercase tracking-widest">Today & upcoming (${upcoming.length})</p>` +
+                (upcoming.length ? upcoming.map(card).join('') : '<p class="text-xs text-slate-400 font-bold italic">None.</p>') +
+                (past.length ? `<details class="mt-4"><summary class="cursor-pointer text-[10px] font-black text-slate-500 uppercase tracking-widest py-2">Past holidays & events (${past.length}) ▾</summary><div class="space-y-3 mt-2">${past.map(card).join('')}</div></details>` : '');
         }
 
     async function deleteHoliday(id) {
@@ -2825,8 +2837,7 @@ async function saveHoliday() {
                     const hStart = new Date(h.startDate);
                     const hEnd = new Date(h.endDate || h.startDate);
                     if (ctxDate >= hStart && ctxDate <= hEnd) {
-                        const targetCls = `${className}|${sectionName}`;
-                     if (h.targetClasses.includes('ALL') || h.targetClasses.includes(targetCls)) {
+                        if (holidayCoversSection(h, className, sectionName)) {
                             if (h.isFullDay) {
                                 isHoliday = true; 
                                 holidayReason = (h.type === 'EVENT' ? 'Event: ' : 'Holiday: ') + h.reason; 
@@ -2920,8 +2931,7 @@ function generateReadHTML(blockData, className, sectionName) {
                     const hStart = new Date(h.startDate);
                     const hEnd = new Date(h.endDate || h.startDate);
                     if (ctxDate >= hStart && ctxDate <= hEnd) {
-                        const targetCls = `${className}|${sectionName}`;
-                       if (h.targetClasses.includes('ALL') || h.targetClasses.includes(targetCls)) {
+                       if (holidayCoversSection(h, className, sectionName)) {
                             if (h.isFullDay) {
                                 isHoliday = true; 
                                 holidayReason = (h.type === 'EVENT' ? 'Event: ' : 'Holiday: ') + h.reason; 
@@ -3483,6 +3493,18 @@ function peekTeacher(teacherName) {
        // ============================================================================
         // === GLOBAL VIRTUAL CLASH DETECTOR                                        ===
         // ============================================================================
+// Does a holiday apply to this class + section? Names are compared ignoring capitals, spaces and
+// dashes, so "+2-JEE Adv | S-27" in Class Structure matches "+2 JEE ADV | S27" in the timetable.
+function holidayCoversSection(h, className, sectionName) {
+            const norm = (str) => (str || "").replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+            const targetCls = `${norm(className)}|${norm(sectionName)}`;
+            return (h.targetClasses || []).some(tc => {
+                if (tc === 'ALL') return true;
+                const parts = String(tc).split('|');
+                return `${norm(parts[0])}|${norm(parts[1])}` === targetCls;
+            });
+        }
+
 function isBlockSuspendedByHoliday(className, sectionName, sMins, eMins) {
             if (!currentContextDate || !holidaysData || holidaysData.length === 0) return false;
             const [cy, cm, cd] = currentContextDate.split('-').map(Number);
