@@ -96,6 +96,9 @@
             </span>
         </div>
 
+        <!-- STAGE TABS: only the open tab's applications are loaded -->
+        <div id="stage-tabs" class="flex flex-wrap gap-2 -mt-2"></div>
+
         <!-- DELEGATION CONTROL PANEL (Hidden Until At Least 1 Applicant Is Selected) -->
         <section id="delegation-panel" class="hidden glass rounded-3xl p-5 sm:p-6 border border-slate-200 shadow-sm">
             <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 mb-4 border-b border-slate-100">
@@ -720,12 +723,34 @@
         }
 
         // 4. Load Registered Staff (Approved staff in Firestore) & Pending Applications
-        async function loadApplicationsAndStaff() {
-            const snap = await db.collection('staff_applications').get();
+        let approvedStaffDocsCache = null;   // approved staff (for delegation lists), read once per visit
+        async function loadApplicationsAndStaff(opts = {}) {
+            const isAdminView = isAdminSession;
+            let docs;
+            if (!isAdminView) {
+                // Interviewers / delegated staff: their list depends on what they handled -> read as before
+                docs = (await db.collection('staff_applications').get()).docs;
+            } else {
+                if (!approvedStaffDocsCache || opts.refreshStaff) {
+                    approvedStaffDocsCache = (await db.collection('staff_applications').where('status', '==', 'approved').get()).docs;
+                }
+                let tabDocs;
+                if (activeStageTab === 'ALL') {
+                    tabDocs = (await db.collection('staff_applications').get()).docs.filter(d => String((d.data() || {}).status || '').toLowerCase() !== 'approved');
+                } else {
+                    tabDocs = (await db.collection('staff_applications').where('status', 'in', STAGE_STATUSES[activeStageTab]).get()).docs;
+                }
+                docs = [...approvedStaffDocsCache, ...tabDocs];
+                // the candidate window that is open may belong to another tab now (e.g. just moved to HR)
+                if (activeModalAppId && !tabDocs.some(d => d.id === activeModalAppId) && !approvedStaffDocsCache.some(d => d.id === activeModalAppId)) {
+                    try { const one = await db.collection('staff_applications').doc(activeModalAppId).get(); if (one.exists) docs.push({ id: one.id, data: () => ({ ...one.data(), _offTab: true }) }); } catch (e) {}
+                }
+                if (!opts.skipCounts) refreshStageCounts();
+            }
             const approved = [];
             const pending = [];
 
-            snap.forEach(doc => {
+            docs.forEach(doc => {
                 const raw = doc.data() || {};
                 const app = { id: doc.id, ...raw };
                 if (String(app.status || '').toLowerCase() === 'approved') {
@@ -791,6 +816,11 @@
                 return tb - ta;
             });
             pendingApplications = pending;
+            if (isAdminSession && activeStageTab !== 'ALL') stageTabCounts[activeStageTab] = pending.filter(a => !a._offTab && appSection(a) === activeStageTab).length;
+            if (!isAdminSession) {
+                APP_SECTIONS.forEach(sct => { stageTabCounts[sct.key] = pending.filter(a => appSection(a) === sct.key && (staffAccessFlags.activeRole !== 'INTERVIEWER' || isAppRelatedToInterviewer(a, currentActor.email))).length; });
+            }
+            renderStageTabs();
 
             populateAllDepartmentSelects();
             onDelegationBranchChange();
@@ -899,7 +929,7 @@
             });
 
             alert('✅ Staff page & interview access updated.');
-            await loadApplicationsAndStaff();
+            await loadApplicationsAndStaff({ refreshStaff: true });
             renderAuthorizedStaffList();
         }
 
@@ -932,7 +962,7 @@
                 canAccessPendingPage: false,
                 canConductInterview: false
             });
-            await loadApplicationsAndStaff();
+            await loadApplicationsAndStaff({ refreshStaff: true });
             renderAuthorizedStaffList();
         }
 
@@ -943,6 +973,8 @@
             const searchableFields = formSchemaFields.filter(f => f.searchable).map(f => f.label);
 
             return pendingApplications.filter(app => {
+                if (app._offTab) return false;   // loaded only for the open candidate window
+                if (activeStageTab !== 'ALL' && appSection(app) !== activeStageTab) return false;
                 // INTERVIEWER: See candidates currently assigned to them OR previously evaluated/delegated by them
                 if (staffAccessFlags.activeRole === 'INTERVIEWER') {
                     if (!isAppRelatedToInterviewer(app, currentActor.email)) return false;
@@ -985,28 +1017,68 @@
 
         // Which part of the recruitment pipeline an application is in (sections of the list)
         const APP_SECTIONS = [
-            { key: 'NEW', title: '🆕 New / awaiting interview', cls: 'bg-sky-50 text-sky-800 border-sky-200' },
-            { key: 'SCORED', title: '📋 Interview done — scorecard ready', cls: 'bg-indigo-50 text-indigo-800 border-indigo-200' },
+            { key: 'NEW', title: '🆕 New', cls: 'bg-sky-50 text-sky-800 border-sky-200' },
+            { key: 'SCORED', title: '📋 Scorecard ready', cls: 'bg-indigo-50 text-indigo-800 border-indigo-200' },
             { key: 'HR', title: '🤝 In HR round', cls: 'bg-amber-50 text-amber-800 border-amber-200' },
-            { key: 'HR_DONE', title: '✅ HR round done (on hold / offer & joining)', cls: 'bg-emerald-50 text-emerald-800 border-emerald-200' },
+            { key: 'HR_DONE', title: '✅ HR done / offer', cls: 'bg-emerald-50 text-emerald-800 border-emerald-200' },
             { key: 'REJECTED', title: '✖ Rejected', cls: 'bg-rose-50 text-rose-700 border-rose-200' }
         ];
+        // Tab of an application, from its status (the same rule the database queries use)
+        const STAGE_STATUSES = {
+            NEW: ['pending', 'interview_assigned', 'reassigned', 'demo_scheduled'],
+            SCORED: ['sent_to_admin', 'on_hold'],      // on_hold of the interview round
+            HR: ['hr_round'],
+            HR_DONE: ['on_hold'],                       // on_hold of the HR round (offer stages will join here)
+            REJECTED: ['rejected']
+        };
         function appSection(app) {
             const st = String(app.status || '').toLowerCase();
             const stage = String(app.stage || '');
-            if (st === 'rejected' || stage === 'Rejected') return 'REJECTED';
-            if (stage === 'HR' && (st === 'on_hold' || st === 'on hold')) return 'HR_DONE';
-            if (stage === 'HR' || st === 'hr_round') return 'HR';
-            if ((Array.isArray(app.scoreHistory) && app.scoreHistory.length) || stage === 'Admin_Review' || st === 'sent_to_admin') return 'SCORED';
-            return 'NEW';
+            if (st === 'rejected') return 'REJECTED';
+            if (st === 'on_hold' || st === 'on hold') return stage === 'HR' ? 'HR_DONE' : 'SCORED';
+            if (st === 'hr_round') return 'HR';
+            if (st === 'sent_to_admin') return 'SCORED';
+            if (STAGE_STATUSES.NEW.includes(st)) return 'NEW';
+            return 'OTHER';                              // unknown / old status: shown under "All"
         }
-        let showRejectedSection = false;
-        function toggleRejectedSection() { showRejectedSection = !showRejectedSection; renderSerialTable(); }
+        let activeStageTab = 'NEW';
+        async function refreshStageCounts() {
+            try {
+                const base = db.collection('staff_applications');
+                if (typeof base.where('status', '==', 'x').count !== 'function') return;   // older Firebase: no counts
+                const n = async (statuses) => (await base.where('status', 'in', statuses).count().get()).data().count;
+                const onHoldHr = async () => (await base.where('status', '==', 'on_hold').where('stage', '==', 'HR').count().get()).data().count;
+                const [nNew, nSentHold, nHr, nHrDone, nRej] = await Promise.all([n(STAGE_STATUSES.NEW), n(STAGE_STATUSES.SCORED), n(STAGE_STATUSES.HR), onHoldHr(), n(STAGE_STATUSES.REJECTED)]);
+                Object.assign(stageTabCounts, { NEW: nNew, SCORED: nSentHold - nHrDone, HR: nHr, HR_DONE: nHrDone, REJECTED: nRej });
+                renderStageTabs();
+            } catch (e) { console.warn('Tab counts skipped:', e); }
+        }
+        const stageTabCounts = {};
+        function renderStageTabs() {
+            const el = document.getElementById('stage-tabs');
+            if (!el) return;
+            const tabs = [...APP_SECTIONS, { key: 'ALL', title: '🗂 All', cls: 'bg-slate-100 text-slate-700 border-slate-300' }];
+            el.innerHTML = tabs.map(t => {
+                const on = t.key === activeStageTab;
+                const n = stageTabCounts[t.key];
+                return `<button type="button" onclick="switchStageTab('${t.key}')" class="shrink-0 px-3.5 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all ${on ? 'bg-slate-900 text-white border-slate-900 shadow-md' : t.cls + ' hover:brightness-95'}">
+                    ${t.title}${n !== undefined ? ` <span class="ml-1 px-1.5 py-0.5 rounded-full ${on ? 'bg-white/20' : 'bg-white/80'}">${n}</span>` : ''}</button>`;
+            }).join('');
+        }
+        async function switchStageTab(key) {
+            if (key === activeStageTab) return;
+            activeStageTab = key;
+            selectedAppIds.clear();
+            const mc = document.getElementById('master-checkbox'); if (mc) mc.checked = false;
+            renderStageTabs();
+            document.getElementById('serial-table-body').innerHTML = `<tr><td colspan="5" class="p-12 text-center text-slate-400 font-black uppercase text-xs tracking-widest">Loading…</td></tr>`;
+            await loadApplicationsAndStaff({ skipCounts: true });
+        }
 
         function renderSerialTable() {
             const tbody = document.getElementById('serial-table-body');
             const filtered = getFilteredApplications();
-            document.getElementById('visible-count').textContent = filtered.filter(a => appSection(a) !== 'REJECTED').length;
+            document.getElementById('visible-count').textContent = filtered.length;
             updateSelectedPill();
 
             if (filtered.length === 0) {
@@ -1014,17 +1086,7 @@
                 return;
             }
 
-            tbody.innerHTML = APP_SECTIONS.map(sec => {
-                const list = filtered.filter(a => appSection(a) === sec.key);
-                if (!list.length) return '';
-                const folded = sec.key === 'REJECTED' && !showRejectedSection;
-                const head = `<tr${sec.key === 'REJECTED' ? ' onclick="toggleRejectedSection()" class="cursor-pointer"' : ''}><td colspan="5" class="px-4 py-2.5 border-y ${sec.cls}">
-                        <span class="text-[11px] font-black uppercase tracking-widest">${sec.title}</span>
-                        <span class="ml-2 px-2 py-0.5 rounded-full bg-white/80 text-[10px] font-black">${list.length}</span>
-                        ${sec.key === 'REJECTED' ? `<span class="ml-2 text-[10px] font-bold">${folded ? '▸ show' : '▾ hide'}</span>` : ''}
-                    </td></tr>`;
-                return head + (folded ? '' : renderAppRows(list));
-            }).join('');
+            tbody.innerHTML = renderAppRows(filtered);
         }
 
         function renderAppRows(list) {
@@ -1063,7 +1125,7 @@
         }
 
         function toggleSelectAllVisible(checked) {
-            const visible = getFilteredApplications().filter(a => showRejectedSection || appSection(a) !== 'REJECTED');
+            const visible = getFilteredApplications();
             visible.forEach(app => {
                 if (checked) selectedAppIds.add(app.id);
                 else selectedAppIds.delete(app.id);
