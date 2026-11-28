@@ -228,6 +228,29 @@ Authorised Signatory`
     }
 
     // Full printable page (A4) with letterhead
+    // Authorised signatory block printed at the end of every letter (set once in Offer Settings):
+    // stamp on the left, signature with name and designation on the right.
+    // auth = { enabled, signImage, stampImage, signName, designation }  (images are data: URLs)
+    const DEFAULT_DESIGNATION = "Chief Managing Partners (CMP)";
+    function safeImg(src) { src = String(src || ""); return /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+\/=]+$/.test(src) ? src : ""; }
+    function authorityBlockHtml(auth) {
+        const a = auth || {};
+        if (a.enabled === false) return "";
+        const sign = safeImg(a.signImage), stamp = safeImg(a.stampImage);
+        const name = esc(a.signName || ""), desig = esc(a.designation || DEFAULT_DESIGNATION);
+        if (!sign && !stamp && !name) return "";
+        return `<div class="mo-authority" style="margin-top:26px;display:flex;justify-content:flex-end;align-items:flex-end;gap:14px;page-break-inside:avoid;">
+            ${stamp ? `<img src="${stamp}" alt="Stamp" style="width:105px;height:105px;object-fit:contain;opacity:.92;">` : ""}
+            <div style="text-align:center;min-width:190px;">
+                ${sign ? `<img src="${sign}" alt="Signature" style="height:60px;max-width:220px;object-fit:contain;margin:4px auto 0;display:block;">` : `<div style="height:48px;"></div>`}
+                <div style="border-top:1px solid #334155;margin-top:2px;padding-top:3px;">
+                    ${name ? `<div style="font-weight:bold;">${name}</div>` : ""}
+                    <div style="font-size:12px;color:#334155;">${desig}</div>
+                </div>
+            </div>
+        </div>`;
+    }
+
     function renderLetterPage(templateBody, offer, opts) {
         const o = opts || {};
         const head = esc(o.schoolTitle || "MINERVA STUDY CIRCLE");
@@ -238,6 +261,7 @@ Authorised Signatory`
                 ${sub ? `<div style="font-size:11px;color:#475569;">${sub}</div>` : ""}
             </div>
             ${(templateBody && typeof templateBody === "object") ? renderTemplateHtml(templateBody, offer) : renderLetterHtml(templateBody, offer)}
+            ${o.authority ? authorityBlockHtml(o.authority) : ""}
             ${o.signatureHtml || ""}
         </div>`;
     }
@@ -247,6 +271,7 @@ Authorised Signatory`
         esc, formatINR, annualFromMonthly, calcBreakup, breakupTotalPercent, prettyDate,
         breakupTableHtml, renderLetterHtml, renderLetterPage,
         OFFER_FIELDS, chipHtml, legacyBodyToHtml, sanitizeLetterHtml, fieldValue, renderTemplateHtml, templateHasField,
-        VERSION: 2
+        DEFAULT_DESIGNATION, authorityBlockHtml,
+        VERSION: 3
     };
 })(typeof window !== "undefined" ? window : globalThis);
