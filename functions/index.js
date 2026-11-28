@@ -581,3 +581,20 @@ HISTORY_COLLECTIONS.forEach(collectionName => {
         }
     });
 });
+
+// ============================================================================
+// APPLICANT STATUS PORTAL (application-status.html) — login, reset codes, offer answers.
+// All checks run here so applicants only receive their own safe information.
+// ============================================================================
+const { createPortal, sendEmailViaBot } = require("./applicant-portal");
+exports.applicantPortal = onRequest({
+    region: "asia-south1",
+    memory: "256MiB",
+    maxInstances: 5,
+    cors: true
+}, async (req, res) => {
+    if (req.method !== "POST") { res.status(405).send({ ok: false, message: "Use POST" }); return; }
+    const portal = createPortal({ db: admin.firestore(), FieldValue: admin.firestore.FieldValue, sendEmail: sendEmailViaBot });
+    const r = await portal(req.body || {});
+    res.status(r.status).send(r.json);
+});
