@@ -215,7 +215,7 @@
                     </div>
                     <div>
                         <label class="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">Registered Staff</label>
-                        <select id="acc-staff" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold"></select>
+                        <select id="acc-staff" onchange="loadStaffAccessTicks()" class="w-full p-2.5 bg-white border border-slate-300 rounded-xl text-xs font-bold"></select>
                     </div>
                 </div>
 
@@ -227,6 +227,10 @@
                     <label class="flex items-center gap-2 cursor-pointer">
                         <input type="checkbox" id="acc-interview-mode" checked class="w-4 h-4 accent-blue-600">
                         <span>Interview Scorecard & Remarks View</span>
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" id="acc-offer-mode" class="w-4 h-4 accent-emerald-600">
+                        <span>Offer &amp; Joining (salary, offer letters, re-offer, acceptance, add to staff list, report)</span>
                     </label>
                 </div>
 
@@ -747,7 +751,8 @@
             activeRole: isAdminSession ? 'ADMIN' : 'NONE',
             isAdmin: Boolean(isAdminSession),
             canAccessPendingPage: Boolean(isAdminSession),
-            canConductInterview: Boolean(isAdminSession)
+            canConductInterview: Boolean(isAdminSession),
+            canHandleOffers: Boolean(isAdminSession)
         };
 
         if (isAdminSession) {
@@ -943,7 +948,8 @@
                         isHOD: Boolean(app.isHOD),
                         isLeaveIncharge: Boolean(app.isLeaveIncharge),
                         canAccessPendingPage: Boolean(app.canAccessPendingPage),
-                        canConductInterview: Boolean(app.canConductInterview)
+                        canConductInterview: Boolean(app.canConductInterview),
+                        canHandleOffers: Boolean(app.canHandleOffers)
                     });
                 } else {
                     pending.push(app);
@@ -957,10 +963,14 @@
                 staffAccessFlags.isAdmin = true;
                 staffAccessFlags.canAccessPendingPage = true;
                 staffAccessFlags.canConductInterview = true;
+                staffAccessFlags.canHandleOffers = true;
             } else if (currentActor.email) {
                 const me = approved.find(s => s.email === currentActor.email);
                 const hasAssignedOrPastApps = pending.some(p => isAppRelatedToInterviewer(p, currentActor.email));
-                staffAccessFlags.canAccessPendingPage = Boolean(me && me.canAccessPendingPage);
+                staffAccessFlags.canHandleOffers = Boolean(me && me.canHandleOffers);
+                staffAccessFlags.canAccessPendingPage = Boolean(me && (me.canAccessPendingPage || me.canHandleOffers));
+                // Offer & Joining staff (e.g. accountant): offer report button, all applications in the list
+                document.getElementById('btn-offer-report').classList.toggle('hidden', !staffAccessFlags.canHandleOffers);
                 staffAccessFlags.canConductInterview = Boolean((me && me.canConductInterview) || hasAssignedOrPastApps);
 
                 if (staffAccessFlags.canAccessPendingPage && !staffAccessFlags.canConductInterview) {
@@ -979,7 +989,7 @@
                 PAGE_DELEGATED: 'Page-Delegated Coordinator (Basic Details & Routing Only)',
                 INTERVIEWER: 'Interviewer View (Assigned & Past Evaluations)'
             };
-            document.getElementById('active-user-badge').textContent = `${currentActor.name} • ${roleBadgeMap[staffAccessFlags.activeRole] || ''}`;
+            document.getElementById('active-user-badge').textContent = `${currentActor.name} • ${staffAccessFlags.canHandleOffers && staffAccessFlags.activeRole === 'PAGE_DELEGATED' ? 'Offer & Joining (Routing, Salary, Offers & Joining)' : (roleBadgeMap[staffAccessFlags.activeRole] || '') + (staffAccessFlags.canHandleOffers && staffAccessFlags.activeRole !== 'ADMIN' ? ' + Offer & Joining' : '')}`;
 
             // Hide bulk delete button from non-admins
             const bulkDelBtn = document.querySelector('button[onclick="bulkDeleteSelected()"]');
@@ -1085,6 +1095,14 @@
             document.getElementById('staff-access-modal').classList.add('hidden');
         }
 
+        // Show the chosen staff member's current permissions in the tick boxes
+        function loadStaffAccessTicks() {
+            const s = registeredStaffList.find(x => x.id === document.getElementById('acc-staff').value);
+            if (!s) return;
+            document.getElementById('acc-pending-page').checked = s.canAccessPendingPage;
+            document.getElementById('acc-interview-mode').checked = s.canConductInterview;
+            document.getElementById('acc-offer-mode').checked = s.canHandleOffers;
+        }
         function populateAccessStaffSelect() {
             const bVal = document.getElementById('acc-branch').value;
             const dVal = document.getElementById('acc-dept').value;
@@ -1099,10 +1117,12 @@
             if (!staffDocId) return alert('Please select a registered staff member.');
             const canPage = document.getElementById('acc-pending-page').checked;
             const canInt = document.getElementById('acc-interview-mode').checked;
+            const canOffer = document.getElementById('acc-offer-mode').checked;
 
             await db.collection('staff_applications').doc(staffDocId).update({
                 canAccessPendingPage: canPage,
                 canConductInterview: canInt,
+                canHandleOffers: canOffer,
                 accessDelegatedBy: currentActor.email,
                 accessDelegatedAt: new Date().toISOString()
             });
@@ -1113,7 +1133,7 @@
         }
 
         function renderAuthorizedStaffList() {
-            const authorized = registeredStaffList.filter(s => s.canAccessPendingPage || s.canConductInterview);
+            const authorized = registeredStaffList.filter(s => s.canAccessPendingPage || s.canConductInterview || s.canHandleOffers);
             const el = document.getElementById('authorized-staff-list');
             if (authorized.length === 0) {
                 el.innerHTML = `<p class="text-xs font-bold text-slate-400 text-center py-4">No staff delegated for Pending Page or Interview view yet.</p>`;
@@ -1126,6 +1146,7 @@
                         <div class="flex gap-1.5 mt-1">
                             ${s.canAccessPendingPage ? '<span class="px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 text-[10px] font-black uppercase">Pending Page (Delegate Only)</span>' : ''}
                             ${s.canConductInterview ? '<span class="px-2 py-0.5 rounded bg-blue-100 text-blue-800 text-[10px] font-black uppercase">Interview Scorecard</span>' : ''}
+                            ${s.canHandleOffers ? '<span class="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-black uppercase">Offer &amp; Joining</span>' : ''}
                         </div>
                     </div>
                     <button type="button" onclick="revokeStaffPageAccess('${escapeHtml(s.id)}')" class="px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[10px] font-black uppercase">
@@ -1136,10 +1157,11 @@
         }
 
         async function revokeStaffPageAccess(staffDocId) {
-            if (!confirm('Revoke Pending Page & Interview access for this staff member?')) return;
+            if (!confirm('Revoke Pending Page, Interview and Offer & Joining access for this staff member?')) return;
             await db.collection('staff_applications').doc(staffDocId).update({
                 canAccessPendingPage: false,
-                canConductInterview: false
+                canConductInterview: false,
+                canHandleOffers: false
             });
             await loadApplicationsAndStaff({ refreshStaff: true });
             renderAuthorizedStaffList();
@@ -1155,7 +1177,7 @@
                 if (app._offTab) return false;   // loaded only for the open candidate window
                 if (activeStageTab !== 'ALL' && appSection(app) !== activeStageTab) return false;
                 // INTERVIEWER: See candidates currently assigned to them OR previously evaluated/delegated by them
-                if (staffAccessFlags.activeRole === 'INTERVIEWER') {
+                if (staffAccessFlags.activeRole === 'INTERVIEWER' && !staffAccessFlags.canHandleOffers) {
                     if (!isAppRelatedToInterviewer(app, currentActor.email)) return false;
                 }
 
@@ -1422,7 +1444,8 @@
             const isInterviewerRole = staffAccessFlags.activeRole === 'INTERVIEWER';
             const isAdminUser = staffAccessFlags.activeRole === 'ADMIN';
             const isAssignedToMe = String(app.assignedToEmail || '').trim().toLowerCase() === currentActor.email;
-            const applyInterviewerPerms = !isAdminUser && !isDelegationOnlyStaff && (isInterviewerRole || isAssignedToMe);
+            const canOffers = isAdminUser || staffAccessFlags.canHandleOffers;
+            const applyInterviewerPerms = !canOffers && !isDelegationOnlyStaff && (isInterviewerRole || isAssignedToMe);
             const perms = Array.isArray(app.interviewerPerms)
                 ? app.interviewerPerms.map(p => String(p).trim().toLowerCase())
                 : ['contact', 'address', 'experience'];
@@ -1516,7 +1539,7 @@
             // 3. ADMIN: Sees all steps (A, B, C)
             document.getElementById('step-a-delegation').classList.toggle('hidden', isInterviewerRole);
             document.getElementById('step-b-academic').classList.toggle('hidden', isDelegationOnlyStaff);
-            document.getElementById('step-c-hr').classList.toggle('hidden', !isAdminUser);
+            document.getElementById('step-c-hr').classList.toggle('hidden', !canOffers);
             document.getElementById('btn-demo-hold').classList.toggle('hidden', !isAdminUser);
             document.getElementById('btn-demo-reject').classList.toggle('hidden', !isAdminUser);
             document.getElementById('interviewer-reassign-box').classList.add('hidden');
@@ -2575,7 +2598,7 @@
         }
 
         async function sendOffer() {
-            if (!staffAccessFlags.isAdmin) return alert('Only admin can send offers.');
+            if (!staffAccessFlags.isAdmin && !staffAccessFlags.canHandleOffers) return alert('You do not have Offer & Joining access.');
             const app = pendingApplications.find(a => a.id === activeModalAppId); if (!app) return;
             await loadOfferSettings();
             const o = offerFromForm(app);
