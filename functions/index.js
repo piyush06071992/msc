@@ -583,6 +583,28 @@ HISTORY_COLLECTIONS.forEach(collectionName => {
 });
 
 // ============================================================================
+// SHARED STAFF LIST MARKER (staff-cache.js)
+// Pages keep a copy of the approved staff list in the browser tab and re-read it only when
+// system_metadata/staff_version changes. This trigger changes that marker whenever an approved
+// staff record is created, changed or deleted, or a record becomes / stops being approved.
+// Logins (currentSessionId) and password changes alone do not count: pages never use them.
+// ============================================================================
+const { staffChangeMatters } = require("./staff-version");
+exports.staffListVersion = onDocumentWritten({
+    document: "staff_applications/{docId}",
+    region: "asia-south1",
+    memory: "256MiB",
+    timeoutSeconds: 30,
+    retry: true
+}, async (event) => {
+    const before = event.data && event.data.before && event.data.before.exists ? event.data.before.data() : null;
+    const after = event.data && event.data.after && event.data.after.exists ? event.data.after.data() : null;
+    if (!staffChangeMatters(before, after)) return;
+    await admin.firestore().collection("system_metadata").doc("staff_version")
+        .set({ v: Date.now() + "_" + event.params.docId, at: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+});
+
+// ============================================================================
 // APPLICANT STATUS PORTAL (application-status.html) — login, reset codes, offer answers.
 // All checks run here so applicants only receive their own safe information.
 // ============================================================================
